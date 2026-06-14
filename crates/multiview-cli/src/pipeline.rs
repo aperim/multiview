@@ -8460,6 +8460,152 @@ mod ndi_tests {
     }
 }
 
+/// Tests for the RIST ingest+egress wiring (RIST-3, ADR-0095 Tier-0): under the
+/// `rist` feature a `rist` source plans as a live network ingest location whose
+/// URL carries the lowered `librist` options, and a `rist` push output builds a
+/// `PushProtocol::Rist` runnable fed the same encoded packets (invariant #7).
+/// The PSK is resolved from a `secret_ref` (`env:VAR`) and never logged. No
+/// network/peer is touched here (offline like the SRT tests).
+#[cfg(test)]
+#[cfg(feature = "rist")]
+mod rist_tests {
+    #![allow(
+        // reason: a unit test module; the strict workspace lints are relaxed for
+        // test code per CLAUDE.md (these mirror the surrounding `tests` modules).
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
+    )]
+    use std::sync::Arc;
+
+    use multiview_compositor::pipeline::CanvasColor;
+    use multiview_config::{MultiviewConfig, Source};
+    use multiview_core::time::Rational;
+    use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
+
+    use super::{build_outputs, ingest_plan_for, rist_resolved_url, RunnableOutput, SourceLocation};
+
+    fn rist_source(json: serde_json::Value) -> Source {
+        serde_json::from_value(json).expect("rist source deserializes")
+    }
+
+    #[test]
+    fn rist_source_plans_as_a_live_network_url_with_lowered_options() {
+        let source = rist_source(serde_json::json!({
+            "id": "rist-in",
+            "kind": "rist",
+            "url": "rist://[::1]:5000",
+            "rist": { "profile": "main", "buffer_ms": 1000 },
+        }));
+        let store = Arc::new(TileStore::new(
+            source.id.clone(),
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let plan = ingest_plan_for(
+            &source,
+            320,
+            180,
+            Arc::clone(&store),
+            CanvasColor::default(),
+            Rational::new(30, 1),
+        )
+        .expect("rist source plans without failing the build");
+
+        let SourceLocation::Url(url) = &plan.location else {
+            panic!("expected a Url location for a rist source");
+        };
+        assert!(url.starts_with("rist://[::1]:5000?"), "base preserved: {url}");
+        assert!(url.contains("rist_profile=1"), "main ⇒ 1: {url}");
+        assert!(url.contains("buffer_size=1000"), "{url}");
+        assert!(plan.live, "a rist source must be live (reconnects)");
+    }
+
+    #[test]
+    fn rist_psk_is_resolved_from_env_and_redacted_in_logs() {
+        // Set a unique env var so the resolution is deterministic in CI.
+        let var = "RIST_TEST_PSK_RESOLVE";
+        std::env::set_var(var, "the-pre-shared-key");
+        let opts = serde_json::from_value(serde_json::json!({
+            "profile": "main",
+            "encryption": { "aes_bits": "aes256", "secret_ref": format!("env:{var}") },
+        }))
+        .expect("opts");
+
+        let live = rist_resolved_url("rist://[::1]:5000", &Some(opts), false)
+            .expect("the resolved secret lowers into the url");
+        assert!(live.contains("secret=the-pre-shared-key"), "{live}");
+
+        // The redacted (loggable) form hides the plaintext PSK.
+        let opts2 = serde_json::from_value(serde_json::json!({
+            "profile": "main",
+            "encryption": { "aes_bits": "aes256", "secret_ref": format!("env:{var}") },
+        }))
+        .expect("opts");
+        let logged = rist_resolved_url("rist://[::1]:5000", &Some(opts2), true)
+            .expect("redacted url");
+        assert!(logged.contains("secret=***"), "{logged}");
+        assert!(!logged.contains("the-pre-shared-key"), "{logged}");
+        std::env::remove_var(var);
+    }
+
+    #[test]
+    fn a_rist_push_output_builds_as_a_runnable_push() {
+        // A push-only RIST config must BUILD (the keystone — `build_outputs`
+        // produces a Push runnable, not a skip). A live handshake is the
+        // `#[ignore]`d hardware test; here we only prove the wiring exists.
+        let toml = r##"
+schema_version = 1
+[canvas]
+width = 320
+height = 240
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "in_a"
+kind = "bars"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[outputs]]
+kind = "rist"
+url = "rist://[::1]:6000"
+codec = "mpeg2video"
+[outputs.rist]
+profile = "main"
+buffer_ms = 700
+"##;
+        let config = MultiviewConfig::load_from_toml(toml).expect("parse");
+        config.validate().expect("validates");
+        let epoch = multiview_output::SharedEpoch::default();
+        #[cfg(feature = "webrtc-native")]
+        let egress_sinks = std::collections::HashMap::new();
+        let built = build_outputs(
+            &config.outputs,
+            &epoch,
+            #[cfg(feature = "webrtc-native")]
+            &egress_sinks,
+        )
+        .expect("rist push output builds");
+        let push_count = built
+            .packet
+            .iter()
+            .filter(|r| matches!(r, RunnableOutput::Push { label, .. } if *label == "rist"))
+            .count();
+        assert_eq!(push_count, 1, "exactly one rist push runnable is built");
+    }
+}
+
 #[cfg(test)]
 mod eng2_timeline_tests {
     //! ENG-2: the ingest publish timeline must be the *normalized* one — raw
