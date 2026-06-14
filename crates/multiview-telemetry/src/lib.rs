@@ -22,6 +22,12 @@
 //! * [`availability`] — [`availability::AvailabilityCounters`]: pure G.826-style
 //!   uptime / alarm-second / error-second / severely-errored-second accounting
 //!   with a derived availability ratio.
+//! * [`clock`] — clock-layer servo telemetry (DEV-C4, ADR-M010): the
+//!   disciplined-reference servo offset (ns) / frequency (ppb) gauges
+//!   ([`clock::ClockServoGauges`]) labelled by `source`, the display-audio
+//!   buffer servo gauges ([`clock::AudioServoGauges`]), and the documented soak
+//!   pass thresholds ([`clock::PTP_OFFSET_P99_MAX_NS`] /
+//!   [`clock::CHRONY_OFFSET_P99_MAX_NS`]).
 //! * [`health`] — [`health::HealthState`] with readiness gates for the probes.
 //! * [`metrics`] — [`metrics::MetricsRegistry`] with counters, gauges,
 //!   histograms, and bounded-cardinality [`metrics::Labels`].
@@ -46,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod availability;
+pub mod clock;
 pub mod error;
 pub mod gpu;
 pub mod health;
@@ -53,10 +60,15 @@ pub mod metrics;
 pub mod placement;
 #[cfg(feature = "snmp")]
 pub mod snmp;
+pub mod soak;
 pub mod syslog;
 pub mod tracing_init;
 
 pub use availability::{AvailabilityCounters, AvailabilitySnapshot};
+pub use clock::{
+    AudioServoGauges, ClockServoGauges, ClockSourceLabel, CHRONY_OFFSET_P99_MAX_NS,
+    PTP_OFFSET_P99_MAX_NS, SOAK_WINDOW_SECS,
+};
 pub use error::{Result, TelemetryError};
 pub use gpu::{CpuGauge, CpuSampler, GpuGauges, GpuLabels, VendorExposes};
 pub use health::{GateId, HealthState, Liveness, Readiness};

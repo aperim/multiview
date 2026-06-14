@@ -6408,6 +6408,7 @@ version = "0.1.0"
 dependencies = [
  "multiview-control",
  "multiview-events",
+ "multiview-telemetry",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
