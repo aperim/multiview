@@ -358,6 +358,10 @@ fn seed_working_layout(
     Ok(id)
 }
 
+/// Default capacity of the bounded log-tail ring (ADR-0060 §4.4): the last
+/// ~2000 structured records are retained for `GET /api/v1/logs`, drop-oldest.
+const DEFAULT_LOG_RING_CAPACITY: usize = 2000;
+
 /// The shared application state.
 ///
 /// Cloned cheaply (`Arc`) into every handler via axum's `State` extractor. It
@@ -636,6 +640,13 @@ pub struct AppState {
     /// declare `X-Multiview-Apply` honestly per build + run path. The default
     /// carries no capability (everything is `restart`).
     pub live_apply: crate::live_apply::LiveApplyCaps,
+    /// The bounded, drop-oldest structured **log-tail ring** (ADR-0060 §4.4):
+    /// recent attributed [`LogRecord`](multiview_telemetry::LogRecord)s the
+    /// `GET /api/v1/logs` read route serves. The binary installs the telemetry
+    /// `LogCaptureLayer` feeding the same `Arc<LogRing>`; the default is an empty
+    /// ring (no capture installed → the endpoint honestly returns nothing).
+    /// Bounded and read-only — it can never back-pressure the engine (inv #10).
+    pub logs: Arc<multiview_telemetry::LogRing>,
 }
 
 /// The default [`AckClock`]: system time as nanoseconds since the Unix epoch.
@@ -737,7 +748,23 @@ impl AppState {
             // Honest default: nothing applies live until the binary declares
             // what the running engine can take (ADR-W022).
             live_apply: crate::live_apply::LiveApplyCaps::default(),
+            // An empty bounded log ring by default (ADR-0060 §4.4). The binary
+            // installs the telemetry capture layer feeding the same Arc; with no
+            // capture installed the endpoint honestly returns nothing. Drop-oldest
+            // beyond the cap; read-only (inv #10).
+            logs: Arc::new(multiview_telemetry::LogRing::new(DEFAULT_LOG_RING_CAPACITY)),
         }
+    }
+
+    /// Install a shared bounded [`LogRing`](multiview_telemetry::LogRing) for the
+    /// `GET /api/v1/logs` tail (ADR-0060). The binary passes the same `Arc` the
+    /// telemetry `LogCaptureLayer` feeds, so the endpoint serves live captured
+    /// records; tests seed a ring directly. Read-only; cannot back-pressure the
+    /// engine (invariant #10).
+    #[must_use]
+    pub fn with_log_ring(mut self, logs: Arc<multiview_telemetry::LogRing>) -> Self {
+        self.logs = logs;
+        self
     }
 
     /// Wire the local entitlement plane (Conspect): the verified-lease store the

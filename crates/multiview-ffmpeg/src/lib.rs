@@ -164,9 +164,9 @@ pub use bsf_select::{
 pub use error::{FfmpegError, Result};
 
 pub use log_bridge::{
-    map_av_level, sanitize_line, BridgeLevel, SuppressOutcome, Suppressor, AV_LOG_DEBUG,
-    AV_LOG_ERROR, AV_LOG_FATAL, AV_LOG_INFO, AV_LOG_PANIC, AV_LOG_TRACE, AV_LOG_VERBOSE,
-    AV_LOG_WARNING, MAX_LINE_LEN,
+    current_resource, map_av_level, sanitize_line, BridgeLevel, ResourceContext, ResourceGuard,
+    ResourceKind, SuppressOutcome, Suppressor, AV_LOG_DEBUG, AV_LOG_ERROR, AV_LOG_FATAL,
+    AV_LOG_INFO, AV_LOG_PANIC, AV_LOG_TRACE, AV_LOG_VERBOSE, AV_LOG_WARNING, MAX_LINE_LEN,
 };
 
 #[cfg(feature = "ffmpeg")]
