@@ -195,10 +195,7 @@ fn refusal_is_prompt_and_never_blocks() {
 fn new_requires_a_license_by_construction_and_exposes_audit() {
     // The only producer constructor takes an accepted `NdiLicense` by value — there
     // is no ungated `NdiProducer::new(receiver)` path (mirrors `NdiOutput::new`).
-    let producer = NdiProducer::new(
-        accepted(),
-        Box::new(FakeNdiReceiver::with_frames(vec![])),
-    );
+    let producer = NdiProducer::new(accepted(), Box::new(FakeNdiReceiver::with_frames(vec![])));
     assert_eq!(
         producer.license().acceptance().accepted_by,
         "operator@example"
