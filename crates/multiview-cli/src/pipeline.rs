@@ -95,6 +95,7 @@ use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
 use multiview_output::sink::{
     EncodeConfig, PacketMuxOutcome, PacketMuxSink, PacketSource, ProgramEncoder, PushProtocol,
 };
+use multiview_output::{display_matrix, DisplayMatrix};
 
 /// The per-subscriber drop-oldest depth of the engine's outbound event stream.
 /// The pipeline has no realtime consumers wired here, but the publisher still
@@ -5322,7 +5323,11 @@ fn rist_resolved_url(
 /// [`PipelineError::Output`] when the options cannot be lowered (bonding on the
 /// Tier-0 build, or an unresolved encryption `secret_ref`).
 #[cfg(feature = "rist")]
-fn build_rist_push(url: &str, rist: Option<&RistOptions>) -> Result<RunnableOutput, PipelineError> {
+fn build_rist_push(
+    output: &Output,
+    url: &str,
+    rist: Option<&RistOptions>,
+) -> Result<RunnableOutput, PipelineError> {
     let to_err = |e: multiview_config::RistUrlError| PipelineError::Output {
         kind: "rist",
         reason: e.to_string(),
@@ -5330,11 +5335,111 @@ fn build_rist_push(url: &str, rist: Option<&RistOptions>) -> Result<RunnableOutp
     let lowered = rist_resolved_url(url, rist, false).map_err(to_err)?;
     let redacted = rist_resolved_url(url, rist, true).map_err(to_err)?;
     tracing::info!(transport = "rist", url = %redacted, "wiring rist push output");
+    // OUTMETA: RIST carries MPEG-TS, so the SDT/PMT metadata applies (no
+    // rotation tag — pixels-only orientation is the compositor's concern).
+    let (meta, matrix) = output_mux_meta(output);
     Ok(RunnableOutput::Push {
-        sink: PacketMuxSink::push(PushProtocol::Rist, lowered),
+        id: output.id(),
+        sink: PacketMuxSink::push(PushProtocol::Rist, lowered).with_output_metadata(meta, matrix),
         label: "rist",
         url: redacted,
     })
+}
+
+/// Translate one config [`Output`]'s OUTMETA intent into the output-layer
+/// apply values (ADR-0088 / ADR-0089): the muxer dictionary entries
+/// ([`MuxMetadata`]) for the **`Applied`** metadata fields, and the tag-path
+/// display-rotation [`DisplayMatrix`] when the orientation resolves to the
+/// **tag** mechanism on this transport.
+///
+/// The config [`Output::metadata_plan`] already says which fields land on this
+/// transport (the rest are surfaced as `Dropped`); here we map each `Applied`
+/// field to the concrete libav dict key its carrier uses. A `Dropped` field is
+/// never pushed (it was already reported). Orientation: a `tag`/`auto`-on-a-tag-
+/// transport mechanism emits the display matrix; the **pixels** mechanism is a
+/// compositor concern (a rotated rendition), not a mux tag, so it yields `None`
+/// here. Returns an empty pair when the output carries neither.
+fn output_mux_meta(output: &Output) -> (multiview_output::MuxMetadata, Option<DisplayMatrix>) {
+    use multiview_config::{MetadataField, OrientationMechanism};
+
+    let mut mux = multiview_output::MuxMetadata::new();
+    if let Some(meta) = output.metadata() {
+        let plan = output.metadata_plan();
+        // The libav dict key for each config field is transport-family-specific.
+        // The MPEG-TS family (SRT/RIST) uses the SDT/PMT keys mpegtsenc reads;
+        // every other container uses the generic `title`/`comment`/`language`.
+        let is_mpegts = matches!(output, Output::Srt { .. } | Output::Rist { .. });
+        let title_key = if is_mpegts { "service_name" } else { "title" };
+        let provider_key = if is_mpegts {
+            "service_provider"
+        } else {
+            "author"
+        };
+        let desc_key = if is_mpegts { "service_name" } else { "comment" };
+
+        let applied = |f: &Option<MetadataField>| matches!(f, Some(MetadataField::Applied { .. }));
+        // Push only the fields the plan said landed; a malformed (interior-NUL)
+        // value is surfaced via the log and dropped, never failing the run
+        // (values are already validation-clean at config time). The
+        // `(applied, value, key)` table is collected first so the fallible
+        // pushes borrow `mux` one at a time (no closure capturing `mux`).
+        let format_pushes: [(bool, Option<&String>, &str); 3] = [
+            (applied(&plan.title), meta.title.as_ref(), title_key),
+            (
+                applied(&plan.provider),
+                meta.provider.as_ref(),
+                provider_key,
+            ),
+            (
+                applied(&plan.description),
+                meta.description.as_ref(),
+                desc_key,
+            ),
+        ];
+        for (is_applied, value, key) in format_pushes {
+            if is_applied {
+                if let Some(v) = value {
+                    if let Err(e) = mux.push_format(key, v) {
+                        tracing::warn!(key, error = %e, "skipping unencodable output metadata entry");
+                    }
+                }
+            }
+        }
+        // service_id maps to the mpegts SDT/PMT program number; mpegtsenc reads
+        // it from the format `service_id` key (carried by the TS family only).
+        if applied(&plan.service_id) {
+            if let Some(id) = meta.service_id {
+                if let Err(e) = mux.push_format("service_id", &id.to_string()) {
+                    tracing::warn!(error = %e, "skipping unencodable service_id metadata");
+                }
+            }
+        }
+        // Language is a per-stream tag (the program video stream, index 0).
+        if applied(&plan.language) {
+            if let Some(v) = &meta.language {
+                if let Err(e) = mux.push_stream(0, "language", v) {
+                    tracing::warn!(error = %e, "skipping unencodable language metadata");
+                }
+            }
+        }
+        let _ = meta.timed; // timed-metadata side stream is the cue-injection path (ADR-0088 §4).
+    }
+
+    // Orientation tag path: emit the display matrix only when the resolved
+    // mechanism is `Tag` (auto-on-a-tag-transport or explicit tag). The pixels
+    // mechanism is handled in the compositor as a rotated rendition.
+    let matrix = output.orientation().and_then(|o| {
+        if o.is_identity() {
+            return None;
+        }
+        match o.mechanism(output.orientation_tag_capability()) {
+            OrientationMechanism::Tag => Some(display_matrix(o.turn)),
+            // The pixels mechanism (and any future one) rotates the rendition in
+            // the compositor, not via a mux tag — no display matrix here.
+            _ => None,
+        }
+    });
+    (mux, matrix)
 }
 
 /// Build the runnable sinks from the config outputs.
@@ -5390,6 +5495,7 @@ fn build_outputs(
                 // `.ts` — so a live (infinite) run keeps `multiview.m3u8` current
                 // and disk bounded, instead of 404ing until a finalize that never
                 // comes. A 6-segment window is the rolling DVR depth.
+                let (meta, matrix) = output_mux_meta(output);
                 runnable.push(RunnableOutput::Hls {
                     id: output.id(),
                     // The sink shares the pipeline's epoch cell so each closed
@@ -5401,22 +5507,27 @@ fn build_outputs(
                         playlist_path.clone(),
                         HLS_LIVE_WINDOW,
                         epoch.clone(),
-                    ),
+                    )
+                    .with_output_metadata(meta, matrix),
                     playlist_path,
                 });
             }
             Output::Rtmp { url, .. } => {
+                let (meta, matrix) = output_mux_meta(output);
                 runnable.push(RunnableOutput::Push {
                     id: output.id(),
-                    sink: PacketMuxSink::push(PushProtocol::Rtmp, url.clone()),
+                    sink: PacketMuxSink::push(PushProtocol::Rtmp, url.clone())
+                        .with_output_metadata(meta, matrix),
                     label: "rtmp",
                     url: url.clone(),
                 });
             }
             Output::Srt { url, .. } => {
+                let (meta, matrix) = output_mux_meta(output);
                 runnable.push(RunnableOutput::Push {
                     id: output.id(),
-                    sink: PacketMuxSink::push(PushProtocol::Srt, url.clone()),
+                    sink: PacketMuxSink::push(PushProtocol::Srt, url.clone())
+                        .with_output_metadata(meta, matrix),
                     label: "srt",
                     url: url.clone(),
                 });
@@ -5428,7 +5539,7 @@ fn build_outputs(
             // unredacted URL goes to the sink; only the redacted form is logged.
             #[cfg(feature = "rist")]
             Output::Rist { url, rist, .. } => {
-                runnable.push(build_rist_push(url, rist.as_ref())?);
+                runnable.push(build_rist_push(output, url, rist.as_ref())?);
             }
             // Without the `rist` feature the librist obligation is not built in,
             // so a rist output is an honest skip (never a silent pretend-run),
@@ -9446,5 +9557,107 @@ mod obs_resource_scope_tests {
             current_resource().is_none(),
             "the guard clears the resource on drop (scoped, never stale)"
         );
+    }
+}
+
+/// OUTMETA (ADR-0088/0089) cli-wiring tests: `output_mux_meta` translates a
+/// config `Output`'s metadata plan + orientation into the muxer apply values —
+/// per-transport key mapping (TS SDT vs generic container tags), Dropped fields
+/// never pushed, and the tag-path display matrix only on a tag-capable
+/// transport. Pure (no engine/ffmpeg); proves the minimal cli read is correct.
+#[cfg(test)]
+mod outmeta_wiring_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::output_mux_meta;
+    use multiview_output::{display_matrix_degrees, MetadataScope};
+
+    fn output_from(json: serde_json::Value) -> multiview_config::Output {
+        serde_json::from_value(json).expect("output deserializes")
+    }
+
+    #[test]
+    fn maps_hls_fields_to_generic_keys_and_tags_orientation() {
+        let out = output_from(serde_json::json!({
+            "kind": "hls",
+            "path": "/hls/mv",
+            "codec": "h264",
+            "metadata": {
+                "title": "Studio A",
+                "provider": "Aperim",
+                "description": "Conf feed",
+                "language": "eng",
+            },
+            "orientation": { "turn": "cw90", "mode": "auto" },
+        }));
+        let (meta, matrix) = output_mux_meta(&out);
+        let entries = meta.entries();
+        let has = |scope_is_format: bool, key: &str, value: &str| {
+            entries.iter().any(|e| {
+                let scope_ok = match e.scope {
+                    MetadataScope::Format => scope_is_format,
+                    MetadataScope::Stream { .. } => !scope_is_format,
+                    _ => false,
+                };
+                scope_ok && e.key == key && e.value == value
+            })
+        };
+        assert!(has(true, "title", "Studio A"), "title→title (format)");
+        assert!(has(true, "comment", "Conf feed"), "description→comment");
+        assert!(has(false, "language", "eng"), "language→stream language");
+        // provider is Dropped on HLS ⇒ never pushed.
+        assert!(
+            !entries.iter().any(|e| e.value == "Aperim"),
+            "HLS has no provider carrier — the dropped field is not pushed"
+        );
+        let m = matrix.expect("HLS auto cw90 ⇒ a display-matrix tag");
+        assert_eq!(display_matrix_degrees(m), 90);
+    }
+
+    #[test]
+    fn maps_mpegts_to_sdt_keys_and_never_tags_orientation() {
+        let out = output_from(serde_json::json!({
+            "kind": "srt",
+            "url": "srt://[::1]:9000",
+            "codec": "h264",
+            "metadata": { "title": "Studio A", "provider": "Aperim", "service_id": 7 },
+            "orientation": { "turn": "cw90", "mode": "pixels" },
+        }));
+        let (meta, matrix) = output_mux_meta(&out);
+        let entries = meta.entries();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == "service_name" && e.value == "Studio A"),
+            "TS title → SDT service_name"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == "service_provider" && e.value == "Aperim"),
+            "TS provider → SDT service_provider"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.key == "service_id" && e.value == "7"),
+            "TS service_id carried"
+        );
+        assert!(
+            matrix.is_none(),
+            "the pixels mechanism is a rendition, not a mux tag — no display matrix"
+        );
+    }
+
+    #[test]
+    fn empty_without_metadata_or_orientation() {
+        let out = output_from(serde_json::json!({
+            "kind": "hls",
+            "path": "/hls/mv",
+            "codec": "h264",
+        }));
+        let (meta, matrix) = output_mux_meta(&out);
+        assert!(meta.is_empty());
+        assert!(matrix.is_none());
     }
 }

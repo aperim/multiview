@@ -78,9 +78,11 @@ pub use routing::{
 pub use salvo::{Salvo, SourceRecall, TallyRecall, UmdRecall};
 pub use schema::{
     lower_rist_url, Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig,
-    ColorOverride, DisplayModeSpec, Fps, Layout, Output, Overlay, Rect, RistAesBits,
-    RistEncryption, RistOptions, RistPeer, RistProfile, RistUrlError, RtspOptions, Source,
-    SourceAuth, SourceKind,
+    ColorOverride, DisplayModeSpec, Fps, Layout, MetadataCapability, MetadataField,
+    OrientationMechanism, OrientationMode, OrientationTagCapability, Output, OutputFlip,
+    OutputMetadata, OutputMetadataPlan, OutputOrientation, OutputTimedMetadata, Overlay, Rect,
+    RistAesBits, RistEncryption, RistOptions, RistPeer, RistProfile, RistUrlError, RtspOptions,
+    Source, SourceAuth, SourceKind,
 };
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
@@ -1277,6 +1279,19 @@ impl Output {
         } = self
         {
             validate_rist_options(&self.label(), opts)?;
+        }
+        // Per-output metadata (ADR-0088): reject contradictions only
+        // (service_id range, ISO-639-2 language). An unsupported-but-harmless
+        // field degrades to a visible `Dropped` in `Output::metadata_plan`, not
+        // an error.
+        if let Some(metadata) = self.metadata() {
+            metadata.validate(&self.label())?;
+        }
+        // Per-output orientation (ADR-0089): reject `mode = "tag"` on a
+        // transport that carries no display-rotation tag (MPEG-TS/RTSP/NDI);
+        // `auto`/`pixels`/flip are always valid.
+        if let Some(orientation) = self.orientation() {
+            orientation.validate(&self.label(), self.orientation_tag_capability())?;
         }
         self.validate_webrtc_rules()
     }

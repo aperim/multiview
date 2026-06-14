@@ -63,6 +63,16 @@ pub mod error;
 pub mod fanout;
 pub mod hls;
 
+/// OUTMETA (ADR-0088 / ADR-0089) — the pure-Rust apply model for per-output
+/// container metadata + presentation orientation: the validated muxer
+/// dictionary entries ([`metadata::MuxMetadata`]), the tag-path display-rotation
+/// matrix ([`metadata::display_matrix`]), and the pixels-path rotated rendition
+/// geometry ([`metadata::rotated_geometry`]). Always compiled; the feature-gated
+/// muxer wiring (`sink`) applies them. Reuses core `QuarterTurn` (no fourth
+/// rotation enum); honors inv #8 (tag, never convert) + #7 (fans with the
+/// rendition, no extra encode for the tag path).
+pub mod metadata;
+
 /// DEV-C1 / ADR-M010 — RTCP **Sender Report** building stamped from the same
 /// outbound epoch: exact integer NTP/RTP field math + the 28-byte wire form +
 /// the [`rtcp::SrStamper`] seam the RTSP serving layer consumes. Pure Rust,
@@ -117,6 +127,10 @@ pub mod ndi;
 
 pub use epoch::SharedEpoch;
 pub use error::{Error, Result};
+pub use metadata::{
+    display_matrix, display_matrix_degrees, rotated_geometry, DisplayMatrix, MetadataEntry,
+    MetadataEntryError, MetadataScope, MuxMetadata,
+};
 pub use restamp::RestampAccumulator;
 pub use rtcp::{rtp_timestamp_at, NtpTimestamp, SenderReport, SrStamper};
 pub use rtsp::{RtspPublishError, RtspPublishTarget};
