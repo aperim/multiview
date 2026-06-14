@@ -1,13 +1,14 @@
-//! RIST (Reliable Internet Stream Transport, VSF TR-06) config-schema tests:
+//! RIST (Reliable Internet Stream Transport, VSF `TR-06`) config-schema tests:
 //! the `SourceKind::Rist` ingest variant and the `Output::Rist` push-sink
-//! variant, with the typed `RistOptions` (profile, buffer, pkt_size, PSK
+//! variant, with the typed `RistOptions` (profile, buffer, `pkt_size`, `PSK`
 //! encryption, bonding peers). Pure serde — TOML/JSON round-trip + validation,
 //! no engine, no network.
 //!
 //! Mirrors the SRT seam (ADR-0095 mirrors ADR-0039). Load-bearing properties:
-//! the PSK is a `secret_ref` (never a plaintext key in the config); a non-empty
-//! `bonding` list is rejected at validate time on the Tier-0 build (honest
-//! capability reporting, never a silent single-link); IPv6-first examples lead.
+//! the `PSK` is a `secret_ref` (never a plaintext key in the config); a
+//! non-empty `bonding` list is rejected at validate time on the Tier-0 build
+//! (honest capability reporting, never a silent single-link); IPv6-first
+//! examples lead.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -282,8 +283,22 @@ fn rist_encryption_aes_bits_maps_to_ffmpeg_token() {
     // The FFmpeg `librist` protocol takes `encryption=128|256`.
     assert_eq!(RistAesBits::Aes128.bits(), 128);
     assert_eq!(RistAesBits::Aes256.bits(), 256);
-    let _ = RistEncryption {
-        aes_bits: RistAesBits::Aes256,
-        secret_ref: "env:X".to_owned(),
+    // `RistEncryption` is constructed via the deserialize path (it is
+    // `#[non_exhaustive]`); confirm its fields are readable.
+    let toml_str = r#"
+id = "enc"
+kind = "rist"
+url = "rist://[::1]:5000"
+
+[rist.encryption]
+aes_bits = "aes256"
+secret_ref = "env:X"
+"#;
+    let src: Source = toml::from_str(toml_str).expect("parse");
+    let SourceKind::Rist { rist: Some(opts), .. } = &src.kind else {
+        panic!("expected Rist with options");
     };
+    let enc: &RistEncryption = opts.encryption.as_ref().expect("encryption");
+    assert_eq!(enc.aes_bits, RistAesBits::Aes256);
+    assert_eq!(enc.secret_ref, "env:X");
 }
