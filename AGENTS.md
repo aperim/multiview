@@ -218,40 +218,41 @@ regression even if tests pass. Full statements: [conventions §5](docs/architect
  matching audio), **forever**, independent of any input. Output PTS = `f(tick)`. Inputs are
  *sampled*, never *pacing*. See [ADR-R001](docs/decisions/ADR-R001.md), [ADR-T001](docs/decisions/ADR-T001.md).
 2. **Per-tile last-good-frame + state machine.** Inputs write into lock-free single-slot stores; the
- compositor always reads the latest (or a placeholder card) and **never blocks**. Tiles ride
- LIVE→STALE→RECONNECTING→NO_SIGNAL. ([ADR-T002](docs/decisions/ADR-T002.md))
-3. **Deadline-driven compositor.** Never wait-for-all-inputs; one stalled source must never freeze
- the multiview. ([ADR-0013](docs/decisions/ADR-0013.md))
-4. **Unified timing model.** Per-input PTS is normalized (unwrap 33-bit wrap, genpts fallback,
+ compositor always reads the latest (or a placeholder card) and **never blocks** — it is
+ **deadline-driven** (never wait-for-all-inputs, so one stalled source can never freeze the
+ multiview). Tiles ride LIVE→STALE→RECONNECTING→NO_SIGNAL. ([ADR-T002](docs/decisions/ADR-T002.md), [ADR-0013](docs/decisions/ADR-0013.md))
+3. **Unified timing model.** Per-input PTS is normalized (unwrap 33-bit wrap, genpts fallback,
  monotonic guard, discontinuity re-anchor) onto one internal ns timeline; the output re-stamps all
  PTS/DTS from the tick counter. NTSC `1001` rates are exact rationals/ns — **never float fps**.
  ([ADR-T003](docs/decisions/ADR-T003.md))
-5. **HLS ingest pacing.** Live/VOD-as-live inputs are paced to wall-clock by PTS (custom pacer);
+4. **HLS ingest pacing.** Live/VOD-as-live inputs are paced to wall-clock by PTS (custom pacer);
  `-re` is for files, not live ingest. ([ADR-T004](docs/decisions/ADR-T004.md))
-6. **NV12-throughout.** Frames stay NV12 (1.5 B/px); never materialize RGBA per tile. YUV→RGB
+5. **NV12-throughout.** Frames stay NV12 (1.5 B/px); never materialize RGBA per tile. YUV→RGB
  happens in-shader at tile size. ([ADR-E002](docs/decisions/ADR-E002.md))
-7. **Decode-at-display-resolution.** Decode each source near its displayed size where the backend
+6. **Decode-at-display-resolution.** Decode each source near its displayed size where the backend
  supports it; budget decode in megapixels/sec. ([ADR-E001](docs/decisions/ADR-E001.md))
-8. **Encode-once-mux-many.** Composite once, encode the canvas once per rendition, fan the *same*
+7. **Encode-once-mux-many.** Composite once, encode the canvas once per rendition, fan the *same*
  packets to all transports. Separate encode only when codec/res/bitrate differ.
  ([ADR-E003](docs/decisions/ADR-E003.md), [ADR-E004](docs/decisions/ADR-E004.md), [ADR-0014](docs/decisions/ADR-0014.md))
-9. **Color pipeline order — never reorder.** detect 4 axes (untagged-default policy that matches
+8. **Color pipeline order — never reorder.** detect 4 axes (untagged-default policy that matches
  players, not swscale) → range-expand → YUV→RGB matrix → linearize (EOTF) → primaries convert in
  linear → scale + premultiplied-alpha blend in linear → OETF → RGB→YUV + range compress → **tag
  the output** → verify with ffprobe. ([ADR-C001](docs/decisions/ADR-C001.md)–[ADR-C006](docs/decisions/ADR-C006.md))
-10. **Zero-copy islands per vendor.** Keep decode→composite→encode on one physical device where
- possible. Cross-vendor on-GPU zero-copy **does not exist on desktop** — insert exactly one
- explicit, costed copy at any vendor / NDI / CPU boundary. ([ADR-0004](docs/decisions/ADR-0004.md))
-11. **Resource-adaptive degradation.** A closed control loop (sense→estimate→plan→apply, with
+9. **Resource-adaptive degradation.** A closed control loop (sense→estimate→plan→apply, with
  hysteresis) sheds load **tile-by-tile, cheapest-impact-first, BEFORE** the program output is
  touched. Bounded queues **drop, never grow**. ([ADR-E007](docs/decisions/ADR-E007.md))
-12. **Isolation (no back-pressure into the engine).** The control plane, preview, and realtime
+10. **Isolation (no back-pressure into the engine).** The control plane, preview, and realtime
  layers are best-effort and **physically incapable of back-pressuring the engine**
  (watch/broadcast channels; bounded drop-oldest queues; the engine never awaits a client). A CI
  chaos gate enforces this. ([ADR-R002](docs/decisions/ADR-R002.md), [ADR-P001](docs/decisions/ADR-P001.md), [ADR-RT004](docs/decisions/ADR-RT004.md))
-13. **Live-apply classification.** Every management change is classified **Class-1** (hot/seamless
+11. **Live-apply classification.** Every management change is classified **Class-1** (hot/seamless
  at a frame boundary) vs **Class-2** (controlled reset via make-before-break parallel-output
  migration); the API surfaces which **before** applying. ([ADR-M005](docs/decisions/ADR-M005.md), [ADR-R004](docs/decisions/ADR-R004.md))
+
+> **Design pillar (not a numbered invariant) — zero-copy islands per vendor.** Keep
+> decode→composite→encode on one physical device where possible. Cross-vendor on-GPU zero-copy
+> **does not exist on desktop** — insert exactly one explicit, costed copy at any vendor / NDI / CPU
+> boundary. ([ADR-0004](docs/decisions/ADR-0004.md))
 
 ### Concurrency rules (don't break these)
 
