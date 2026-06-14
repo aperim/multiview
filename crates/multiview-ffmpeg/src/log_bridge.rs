@@ -178,8 +178,11 @@ pub enum SuppressOutcome {
 /// One tracked message key's suppression state.
 #[derive(Debug, Clone)]
 struct Entry {
-    /// `(level, message)` identity of the tracked message.
-    key: (BridgeLevel, String),
+    /// `(level, resource_id, message)` identity of the tracked message. The
+    /// optional `resource_id` (ADR-0060 §3.4) makes two different sources
+    /// emitting the *same* libav text suppress independently — CNN's RPS flood
+    /// must not mask BBC's. An unattributed line (`None`) is its own key.
+    key: (BridgeLevel, Option<String>, String),
     /// When the current window opened (the last time this key was emitted).
     window_start: Duration,
     /// Identical occurrences suppressed since `window_start`.
@@ -237,11 +240,12 @@ impl Suppressor {
         self.entries.is_empty()
     }
 
-    /// Find the index of the entry whose key matches `(level, message)`.
-    fn find(&self, level: BridgeLevel, message: &str) -> Option<usize> {
-        self.entries
-            .iter()
-            .position(|e| e.key.0 == level && e.key.1 == message)
+    /// Find the index of the entry whose key matches
+    /// `(level, resource_id, message)`.
+    fn find(&self, level: BridgeLevel, resource: Option<&str>, message: &str) -> Option<usize> {
+        self.entries.iter().position(|e| {
+            e.key.0 == level && e.key.1.as_deref() == resource && e.key.2 == message
+        })
     }
 
     /// Index of the least-recently-touched entry (smallest `touched`).
@@ -255,8 +259,27 @@ impl Suppressor {
 
     /// Observe one message at `now`, returning the emit/suppress decision and
     /// updating the per-key window state. `message` is the already-rendered,
-    /// sanitised line; identity is `(level, message)`.
+    /// sanitised line; identity is `(level, message)` (no resource dimension).
+    ///
+    /// Equivalent to [`observe_scoped`](Self::observe_scoped) with `resource`
+    /// = `None`; retained so resource-agnostic call sites are unchanged.
     pub fn observe(&mut self, level: BridgeLevel, message: &str, now: Duration) -> SuppressOutcome {
+        self.observe_scoped(level, None, message, now)
+    }
+
+    /// Observe one message attributed to `resource` at `now` (ADR-0060 §3.4).
+    ///
+    /// Identity is `(level, resource, message)`, so two distinct resources
+    /// emitting the same libav text suppress independently and an unattributed
+    /// line (`resource == None`) is its own key. Otherwise identical to the
+    /// resource-agnostic window/LRU behaviour.
+    pub fn observe_scoped(
+        &mut self,
+        level: BridgeLevel,
+        resource: Option<&str>,
+        message: &str,
+        now: Duration,
+    ) -> SuppressOutcome {
         // A zero-capacity suppressor retains nothing and always emits.
         if self.cap == 0 {
             return SuppressOutcome::Emit;
@@ -265,7 +288,7 @@ impl Suppressor {
         let tick = self.clock.wrapping_add(1);
         self.clock = tick;
 
-        if let Some(idx) = self.find(level, message) {
+        if let Some(idx) = self.find(level, resource, message) {
             // Borrow the matched entry mutably for the window check.
             if let Some(entry) = self.entries.get_mut(idx) {
                 entry.touched = tick;
@@ -298,7 +321,7 @@ impl Suppressor {
             }
         }
         self.entries.push(Entry {
-            key: (level, message.to_owned()),
+            key: (level, resource.map(str::to_owned), message.to_owned()),
             window_start: now,
             suppressed: 0,
             touched: tick,
@@ -307,8 +330,162 @@ impl Suppressor {
     }
 }
 
+/// The kind of resource a libav line is attributed to (ADR-0060 §2.2), as a
+/// stable lowercase string. Kept as a small newtype-free enum-of-strings here so
+/// the bridge stays pure (no dependency on `multiview-telemetry`); the control
+/// plane maps these to its richer `LogResourceKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ResourceKind {
+    /// An ingest source (`Source.id`).
+    Source,
+    /// An output sink (`Output.id`).
+    Output,
+    /// A managed device (`Device.id`).
+    Device,
+}
+
+impl ResourceKind {
+    /// The lowercase wire string for this kind (matches the span field).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Output => "output",
+            Self::Device => "device",
+        }
+    }
+}
+
+/// The resource that a thread currently owns, used to attribute libav log lines
+/// emitted synchronously on that thread (ADR-0060 §3.1, mechanism A).
+///
+/// Holds a small, cheap-to-clone `Arc<str>` id (and optional label) plus the
+/// kind. Set via a [`ResourceGuard`] for the duration of an owned demuxer-open /
+/// `av_read_frame` / decode region, and read by the bridge's `route()` as the
+/// **first** attribution source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceContext {
+    kind: ResourceKind,
+    id: std::sync::Arc<str>,
+    label: Option<std::sync::Arc<str>>,
+}
+
+impl ResourceContext {
+    /// A context for an ingest source with the given config id.
+    #[must_use]
+    pub fn source(id: impl AsRef<str>) -> Self {
+        Self::new(ResourceKind::Source, id)
+    }
+
+    /// A context for an output sink with the given config id.
+    #[must_use]
+    pub fn output(id: impl AsRef<str>) -> Self {
+        Self::new(ResourceKind::Output, id)
+    }
+
+    /// A context for a managed device with the given config id.
+    #[must_use]
+    pub fn device(id: impl AsRef<str>) -> Self {
+        Self::new(ResourceKind::Device, id)
+    }
+
+    /// A context with an explicit kind and id.
+    #[must_use]
+    pub fn new(kind: ResourceKind, id: impl AsRef<str>) -> Self {
+        Self {
+            kind,
+            id: std::sync::Arc::from(id.as_ref()),
+            label: None,
+        }
+    }
+
+    /// Attach a human label (the config display name) for the UI.
+    #[must_use]
+    pub fn with_label(mut self, label: impl AsRef<str>) -> Self {
+        self.label = Some(std::sync::Arc::from(label.as_ref()));
+        self
+    }
+
+    /// The resource kind as its lowercase wire string.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        self.kind.as_str()
+    }
+
+    /// The stable config resource id.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The human label, if one was attached.
+    #[must_use]
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+}
+
+thread_local! {
+    /// The current owned-resource context for this thread, if any. `RefCell` so a
+    /// [`ResourceGuard`] can save/restore the previous value for nesting; never
+    /// shared across threads (each thread owns at most one resource at a time).
+    static CURRENT_RESOURCE: std::cell::RefCell<Option<ResourceContext>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The resource the current thread owns, if a [`ResourceGuard`] is active.
+///
+/// Returns [`None`] outside any owned region — the bridge then falls through to
+/// the `AVClass` map / component-only attribution (ADR-0060 §3.2/§3.3), never
+/// guessing a stale id.
+#[must_use]
+pub fn current_resource() -> Option<ResourceContext> {
+    CURRENT_RESOURCE.with(|cell| cell.borrow().clone())
+}
+
+/// A RAII guard that sets the current thread's [`ResourceContext`] on
+/// construction and **restores the previous value on drop** (ADR-0060 §3.1 —
+/// scoped, never stale).
+///
+/// Enter one at the seam where a thread/task takes ownership of a source/output
+/// (the demuxer-open / read / decode region). A libav line emitted while the
+/// guard is live is attributed to its resource; a line emitted after the guard
+/// drops is *not* — so an unrelated or nested-unregistered context falls through
+/// to weaker attribution rather than inheriting whichever resource last ran on
+/// the thread.
+#[derive(Debug)]
+#[must_use = "the resource context is only set while the guard is alive"]
+pub struct ResourceGuard {
+    /// The value to restore on drop (the context active before this guard).
+    previous: Option<ResourceContext>,
+}
+
+impl ResourceGuard {
+    /// Set `context` as the current thread's resource, saving the previous one
+    /// to restore on drop. Nesting is supported: an inner guard shadows the
+    /// outer, and dropping it restores the outer.
+    pub fn enter(context: ResourceContext) -> Self {
+        let previous = CURRENT_RESOURCE.with(|cell| cell.borrow_mut().replace(context));
+        Self { previous }
+    }
+}
+
+impl Drop for ResourceGuard {
+    fn drop(&mut self) {
+        // Restore the previously-active context (or clear to None), so the
+        // thread is never left attributed to a resource it no longer owns.
+        let previous = self.previous.take();
+        CURRENT_RESOURCE.with(|cell| {
+            *cell.borrow_mut() = previous;
+        });
+    }
+}
+
 #[cfg(feature = "ffmpeg")]
 pub use ffi::install;
+#[cfg(feature = "ffmpeg")]
+pub use ffi::{register_av_context, AvContextRegistration};
 
 #[cfg(feature = "ffmpeg")]
 mod ffi {
@@ -352,8 +529,10 @@ mod ffi {
     // block with a `// SAFETY:` note.
     #![allow(unsafe_code)]
 
+    use std::collections::HashMap;
     use std::ffi::CStr;
-    use std::sync::{Mutex, Once, OnceLock};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, Once, OnceLock, RwLock};
     use std::time::{Duration, Instant};
 
     use ffmpeg::ffi;
@@ -361,7 +540,8 @@ mod ffi {
     use libc::{c_char, c_int, c_void};
 
     use super::{
-        map_av_level, sanitize_line, BridgeLevel, SuppressOutcome, Suppressor, MAX_LINE_LEN,
+        current_resource, map_av_level, sanitize_line, BridgeLevel, ResourceContext,
+        SuppressOutcome, Suppressor, MAX_LINE_LEN,
     };
 
     extern "C" {
@@ -436,6 +616,102 @@ mod ffi {
 
     fn origin() -> Instant {
         *ORIGIN.get_or_init(Instant::now)
+    }
+
+    /// One entry in the [`AvClassMap`]: the resource a libav context belongs to,
+    /// plus the registration epoch that defends against pointer reuse.
+    ///
+    /// libav reuses freed context addresses, so a raw `ptr → resource` map could
+    /// mis-attribute a reused pointer to a dead resource (ADR-0060 §3.2). Each
+    /// [`AvContextRegistration`] carries a monotonic `epoch`; the entry records
+    /// the epoch it was inserted with, and the guard removes the entry **only if**
+    /// the live entry still bears its own epoch — so a reopened context at the same
+    /// address (a new, larger epoch) is never torn down by the old guard's `Drop`,
+    /// and a stale lookup never resolves to a freed resource.
+    #[derive(Debug, Clone)]
+    struct AvClassEntry {
+        context: ResourceContext,
+        epoch: u64,
+    }
+
+    /// A bounded `context_ptr → resource` map for attributing libav lines that
+    /// fire on libav-owned worker threads (ADR-0060 §3.2, mechanism B), where the
+    /// thread-local [`current_resource`] is not set. Bounded by the number of open
+    /// libav contexts (tens). A `RwLock<HashMap>`: reads (the hot per-line lookup)
+    /// take the read lock; registration / removal take the write lock.
+    static AV_CLASS_MAP: OnceLock<RwLock<HashMap<usize, AvClassEntry>>> = OnceLock::new();
+    /// Monotonic registration epoch, incremented per registration so a reused
+    /// pointer address always gets a fresh epoch (defeats pointer-reuse aliasing).
+    static AV_CLASS_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+    fn av_class_map() -> &'static RwLock<HashMap<usize, AvClassEntry>> {
+        AV_CLASS_MAP.get_or_init(|| RwLock::new(HashMap::new()))
+    }
+
+    /// A RAII registration of a libav context pointer → resource (ADR-0060 §3.2).
+    ///
+    /// Create one when Multiview opens a libav context it owns (the
+    /// `AVFormatContext*` for a source/output, or a reachable child context);
+    /// hold it for the context's lifetime. On `Drop` it removes the map entry
+    /// **before** the context's memory can be reused, but only if the live entry
+    /// still bears this registration's epoch — so an `open → close → reopen` at
+    /// the same address never has the new registration torn down by the old
+    /// guard, and a reused address never resolves to the prior owner.
+    #[derive(Debug)]
+    #[must_use = "the libav context is only attributed while the registration is alive"]
+    pub struct AvContextRegistration {
+        ptr: usize,
+        epoch: u64,
+    }
+
+    impl Drop for AvContextRegistration {
+        fn drop(&mut self) {
+            let map = av_class_map();
+            let mut guard = match map.write() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            // Remove only if the live entry is still *ours* (same epoch). A newer
+            // registration at the same address (reopen) has a larger epoch and is
+            // left intact.
+            if guard.get(&self.ptr).is_some_and(|e| e.epoch == self.epoch) {
+                guard.remove(&self.ptr);
+            }
+        }
+    }
+
+    /// Register a libav context pointer as belonging to `context`, returning a
+    /// guard that removes the mapping on drop (ADR-0060 §3.2, mechanism B).
+    ///
+    /// `ptr` is the address of the owned libav object (e.g. the `AVFormatContext`)
+    /// as a `usize`; the caller is responsible for holding the returned guard for
+    /// no longer than the context lives. Registration is bounded by the number of
+    /// open contexts and is safe under pointer reuse via the per-entry epoch.
+    pub fn register_av_context(ptr: usize, context: ResourceContext) -> AvContextRegistration {
+        let epoch = AV_CLASS_EPOCH.fetch_add(1, Ordering::Relaxed);
+        let map = av_class_map();
+        let mut guard = match map.write() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.insert(ptr, AvClassEntry { context, epoch });
+        AvContextRegistration { ptr, epoch }
+    }
+
+    /// Resolve a registered resource from a raw libav object pointer, if any.
+    ///
+    /// Looks up `ptr` directly; a miss returns [`None`] (the caller then falls
+    /// through to component-only attribution). The lookup takes only the read lock.
+    fn resolve_registered(ptr: usize) -> Option<ResourceContext> {
+        if ptr == 0 {
+            return None;
+        }
+        let map = av_class_map();
+        let guard = match map.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.get(&ptr).map(|e| e.context.clone())
     }
 
     /// Install the libav → `tracing` log bridge for the process, exactly once.
@@ -528,66 +804,95 @@ mod ffi {
         }
     }
 
-    /// The pure (panic-free, libav-free) core of the callback: given the level,
-    /// component name, and rendered line, run the suppressor and emit via
-    /// `tracing`. Split out so the unsafe trampoline body stays tiny.
-    fn route(level: c_int, component: &str, line: &str) {
+    /// The pure (panic-free, libav-free) core of the callback: resolve the
+    /// resource, run the suppressor (keyed by `(level, resource_id, message)`),
+    /// and emit via `tracing`. Split out so the unsafe trampoline body stays tiny.
+    ///
+    /// `ctx_ptr` is the libav object address (`avcl as usize`); attribution is
+    /// resolved in priority order — (A) the thread-local [`current_resource`] for
+    /// lines on a thread we own, then (B) the [`av_class_map`] for libav-owned
+    /// worker threads, then (C) none (component-only, never a guessed id).
+    fn route(level: c_int, component: &str, ctx_ptr: usize, line: &str) {
         let bridge_level = map_av_level(level);
         let clean = sanitize_line(line);
         if clean.is_empty() {
             return;
         }
+        // Mechanism A → B → C (ADR-0060 §3): never guess on a miss.
+        let resource = current_resource().or_else(|| resolve_registered(ctx_ptr));
+        let resource_id = resource.as_ref().map(super::ResourceContext::id);
         let now = origin().elapsed();
         let outcome = match suppressor().lock() {
-            Ok(mut guard) => guard.observe(bridge_level, &clean, now),
+            Ok(mut guard) => guard.observe_scoped(bridge_level, resource_id, &clean, now),
             // A poisoned lock means another thread panicked while holding it;
             // rather than propagate, emit unconditionally (correctness over
             // anti-flood — never drop a line because of a lock fault).
-            Err(poisoned) => poisoned.into_inner().observe(bridge_level, &clean, now),
+            Err(poisoned) => {
+                poisoned
+                    .into_inner()
+                    .observe_scoped(bridge_level, resource_id, &clean, now)
+            }
         };
         match outcome {
             SuppressOutcome::Suppress => {}
-            SuppressOutcome::Emit => emit(bridge_level, component, &clean, None),
+            SuppressOutcome::Emit => emit(bridge_level, component, resource.as_ref(), &clean, None),
             SuppressOutcome::EmitWithSummary { suppressed } => {
-                emit(bridge_level, component, &clean, Some(suppressed));
+                emit(bridge_level, component, resource.as_ref(), &clean, Some(suppressed));
             }
         }
     }
 
-    /// Emit one record at the mapped tracing level, carrying the libav component
-    /// as a field and, when flushing, the coalesced suppressed count.
-    fn emit(level: BridgeLevel, component: &str, line: &str, suppressed: Option<u64>) {
+    /// Emit one record at the mapped tracing level, carrying the libav component,
+    /// the resolved resource attribution (`resource_kind` / `resource_id` /
+    /// `label`, when present), and the coalesced suppressed count when flushing.
+    ///
+    /// An unattributed line (`resource == None`) emits exactly the prior shape
+    /// (component-only) so it keeps `component` and **omits** `resource_id`
+    /// rather than guessing (ADR-0060 §3.3). Resource fields are attached as
+    /// plain event fields (`Option<&str>` empty when absent) so the capture layer
+    /// and the fmt writer both see them; the capture layer reads the enclosing
+    /// span first and only falls back to these for libav-thread lines.
+    fn emit(
+        level: BridgeLevel,
+        component: &str,
+        resource: Option<&ResourceContext>,
+        line: &str,
+        suppressed: Option<u64>,
+    ) {
         let window_s = SUPPRESS_WINDOW.as_secs();
+        let resource_kind = resource.map(ResourceContext::kind);
+        let resource_id = resource.map(ResourceContext::id);
+        let label = resource.and_then(ResourceContext::label);
         match (level, suppressed) {
             (BridgeLevel::Error, None) => {
-                tracing::error!(target: "libav", component, "{line}");
+                tracing::error!(target: "libav", component, resource_kind, resource_id, label, "{line}");
             }
             (BridgeLevel::Error, Some(n)) => {
-                tracing::error!(target: "libav", component, repeated = n, "{line} (repeated {n}× in the last {window_s}s)");
+                tracing::error!(target: "libav", component, resource_kind, resource_id, label, repeated = n, "{line} (repeated {n}× in the last {window_s}s)");
             }
             (BridgeLevel::Warn, None) => {
-                tracing::warn!(target: "libav", component, "{line}");
+                tracing::warn!(target: "libav", component, resource_kind, resource_id, label, "{line}");
             }
             (BridgeLevel::Warn, Some(n)) => {
-                tracing::warn!(target: "libav", component, repeated = n, "{line} (repeated {n}× in the last {window_s}s)");
+                tracing::warn!(target: "libav", component, resource_kind, resource_id, label, repeated = n, "{line} (repeated {n}× in the last {window_s}s)");
             }
             (BridgeLevel::Info, None) => {
-                tracing::info!(target: "libav", component, "{line}");
+                tracing::info!(target: "libav", component, resource_kind, resource_id, label, "{line}");
             }
             (BridgeLevel::Info, Some(n)) => {
-                tracing::info!(target: "libav", component, repeated = n, "{line} (repeated {n}× in the last {window_s}s)");
+                tracing::info!(target: "libav", component, resource_kind, resource_id, label, repeated = n, "{line} (repeated {n}× in the last {window_s}s)");
             }
             (BridgeLevel::Debug, None) => {
-                tracing::debug!(target: "libav", component, "{line}");
+                tracing::debug!(target: "libav", component, resource_kind, resource_id, label, "{line}");
             }
             (BridgeLevel::Debug, Some(n)) => {
-                tracing::debug!(target: "libav", component, repeated = n, "{line} (repeated {n}× in the last {window_s}s)");
+                tracing::debug!(target: "libav", component, resource_kind, resource_id, label, repeated = n, "{line} (repeated {n}× in the last {window_s}s)");
             }
             (BridgeLevel::Trace, None) => {
-                tracing::trace!(target: "libav", component, "{line}");
+                tracing::trace!(target: "libav", component, resource_kind, resource_id, label, "{line}");
             }
             (BridgeLevel::Trace, Some(n)) => {
-                tracing::trace!(target: "libav", component, repeated = n, "{line} (repeated {n}× in the last {window_s}s)");
+                tracing::trace!(target: "libav", component, resource_kind, resource_id, label, repeated = n, "{line} (repeated {n}× in the last {window_s}s)");
             }
         }
     }
@@ -644,7 +949,15 @@ mod ffi {
                 None => std::borrow::Cow::Borrowed(""),
             };
 
-            route(level, component.as_ref(), line.as_ref());
+            // The libav object address is the lookup key for the AVClass map
+            // (mechanism B); it is only ever compared, never dereferenced here.
+            // reason(allow): a pointer→address cast for use purely as a map key
+            // (never cast back / dereferenced), so no provenance is needed; the
+            // stable `<*mut T>::addr()` is MSRV-1.84 and this crate's MSRV is 1.82,
+            // so `as usize` is the only option until the MSRV moves.
+            #[allow(clippy::as_conversions)]
+            let ctx_ptr = avcl as usize;
+            route(level, component.as_ref(), ctx_ptr, line.as_ref());
         });
         // On any caught panic, drop the line silently. Never re-raise across FFI.
         drop(result);
@@ -685,6 +998,64 @@ mod ffi {
         fn component_name_is_none_for_null_object() {
             let mut buf = [0u8; 64];
             assert_eq!(component_name(std::ptr::null_mut(), &mut buf), None);
+        }
+
+        // ---- AVClassMap (mechanism B) registration + pointer reuse ----------
+
+        #[test]
+        fn registered_context_resolves_then_clears_on_drop() {
+            // Use a distinct, never-aliasing synthetic address per test to avoid
+            // cross-test interference on the process-global map.
+            let ptr = 0xA11C_E000_usize;
+            assert_eq!(resolve_registered(ptr), None, "unregistered → no resource");
+            {
+                let _reg = register_av_context(ptr, ResourceContext::source("cnn"));
+                let got = resolve_registered(ptr).expect("registered resolves");
+                assert_eq!(got.id(), "cnn");
+                assert_eq!(got.kind(), "source");
+            }
+            assert_eq!(
+                resolve_registered(ptr),
+                None,
+                "the registration guard removed the entry on drop"
+            );
+        }
+
+        #[test]
+        fn null_pointer_never_resolves() {
+            assert_eq!(resolve_registered(0), None);
+        }
+
+        #[test]
+        fn pointer_reuse_does_not_resolve_to_the_dead_resource() {
+            // open(cnn)@addr → close → reopen(bbc)@same addr. The reopen must win;
+            // dropping the OLD guard must NOT tear down the NEW registration.
+            let ptr = 0xBEEF_0000_usize;
+            let old = register_av_context(ptr, ResourceContext::source("cnn"));
+            assert_eq!(resolve_registered(ptr).map(|r| r.id().to_owned()), Some("cnn".to_owned()));
+
+            // Reopen at the same address with a new resource (fresh, larger epoch).
+            let new = register_av_context(ptr, ResourceContext::source("bbc"));
+            assert_eq!(
+                resolve_registered(ptr).map(|r| r.id().to_owned()),
+                Some("bbc".to_owned()),
+                "the reopen overwrites the stale mapping"
+            );
+
+            // Dropping the OLD guard must leave the NEW (different-epoch) entry.
+            drop(old);
+            assert_eq!(
+                resolve_registered(ptr).map(|r| r.id().to_owned()),
+                Some("bbc".to_owned()),
+                "the old guard's drop must not remove the reopened registration"
+            );
+
+            drop(new);
+            assert_eq!(
+                resolve_registered(ptr),
+                None,
+                "dropping the live registration finally clears it"
+            );
         }
     }
 }

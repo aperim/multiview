@@ -365,11 +365,14 @@ impl Visit for SpanFieldVisitor {
 }
 
 /// A `tracing` field visitor that extracts an event's own fields: the `message`,
-/// the libav `component`, and the coalesced `repeated` count.
+/// the libav `component`, the coalesced `repeated` count, and — for libav lines
+/// emitted on a libav-owned thread (no enclosing resource span) — the resource
+/// attribution carried directly as event fields by the bridge (ADR-0060 §3).
 struct EventFieldVisitor {
     message: String,
     component: Option<String>,
     repeated: Option<u64>,
+    resource: SpanResource,
 }
 
 impl EventFieldVisitor {
@@ -378,6 +381,7 @@ impl EventFieldVisitor {
             message: String::new(),
             component: None,
             repeated: None,
+            resource: SpanResource::default(),
         }
     }
 }
@@ -399,14 +403,32 @@ impl Visit for EventFieldVisitor {
         match field.name() {
             "message" => value.clone_into(&mut self.message),
             "component" => self.component = Some(value.to_owned()),
+            "resource_kind" => self.resource.resource_kind = LogResourceKind::parse(value),
+            "resource_id" => self.resource.resource_id = Some(value.to_owned()),
+            "label" => self.resource.label = Some(value.to_owned()),
+            "run_id" => self.resource.run_id = Some(value.to_owned()),
             _ => {}
         }
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        match field.name() {
+        let name = field.name();
+        match name {
             "message" => self.message = format!("{value:?}"),
             "component" => self.component = Some(format!("{value:?}").trim_matches('"').to_owned()),
+            "resource_kind" | "resource_id" | "label" | "run_id" => {
+                let cleaned = format!("{value:?}");
+                let cleaned = cleaned.trim_matches('"');
+                match name {
+                    "resource_kind" => {
+                        self.resource.resource_kind = LogResourceKind::parse(cleaned);
+                    }
+                    "resource_id" => self.resource.resource_id = Some(cleaned.to_owned()),
+                    "label" => self.resource.label = Some(cleaned.to_owned()),
+                    "run_id" => self.resource.run_id = Some(cleaned.to_owned()),
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -525,6 +547,23 @@ where
 
         let mut ev = EventFieldVisitor::new();
         event.record(&mut ev);
+
+        // A libav line emitted on a libav-owned thread has no enclosing resource
+        // span, so the bridge attaches attribution as event fields. Prefer the
+        // span scope (our own code) and fall back to the event fields (the
+        // bridge) — never overwrite a span-resolved id with an empty event field.
+        if resolved.resource_kind.is_none() {
+            resolved.resource_kind = ev.resource.resource_kind;
+        }
+        if resolved.resource_id.is_none() {
+            resolved.resource_id = ev.resource.resource_id;
+        }
+        if resolved.label.is_none() {
+            resolved.label = ev.resource.label;
+        }
+        if resolved.run_id.is_none() {
+            resolved.run_id = ev.resource.run_id;
+        }
 
         let meta = event.metadata();
         let record = LogRecord {

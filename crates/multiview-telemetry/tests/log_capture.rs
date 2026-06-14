@@ -77,6 +77,50 @@ fn event_outside_any_resource_span_has_no_resource_id() {
 }
 
 #[test]
+fn event_field_resource_id_is_captured_when_no_span() {
+    // A libav line emitted on a libav-owned thread has NO enclosing resource
+    // span; the bridge attaches resource_kind/resource_id/label as event fields.
+    // The capture layer must read those when the span scope yields nothing.
+    let ring = Arc::new(LogRing::new(64));
+    with_capture(&ring, || {
+        tracing::error!(
+            target: "libav",
+            component = "hevc",
+            resource_kind = "source",
+            resource_id = "cnn",
+            label = "CNN",
+            "Error constructing the frame RPS."
+        );
+    });
+    let records = ring.snapshot();
+    assert_eq!(records.len(), 1);
+    let rec = &records[0];
+    assert_eq!(
+        rec.resource_id.as_deref(),
+        Some("cnn"),
+        "the libav-thread event field is captured as the record's resource_id"
+    );
+    assert_eq!(rec.resource_kind, Some(LogResourceKind::Source));
+    assert_eq!(rec.label.as_deref(), Some("CNN"));
+    assert_eq!(rec.component.as_deref(), Some("hevc"));
+}
+
+#[test]
+fn span_resource_id_wins_over_event_field() {
+    // If BOTH a span and an event field carry resource_id, the span (our own
+    // attributed code) takes precedence — the event field is the fallback only.
+    let ring = Arc::new(LogRing::new(64));
+    with_capture(&ring, || {
+        let span = tracing::info_span!("source", resource_kind = "source", resource_id = "span-id");
+        let _g = span.enter();
+        tracing::info!(resource_id = "event-id", "x");
+    });
+    let records = ring.snapshot();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].resource_id.as_deref(), Some("span-id"));
+}
+
+#[test]
 fn ring_is_bounded_drop_oldest() {
     let ring = Arc::new(LogRing::new(3));
     with_capture(&ring, || {
