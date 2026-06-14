@@ -321,7 +321,7 @@ impl WhipPushClient {
                         if !*saw_keyframe {
                             continue;
                         }
-                        let _ = session.write_video_sample_at(
+                        let _ = session.write_video_sample(
                             &sample.data,
                             sample.keyframe,
                             sample.rtp_timestamp,
@@ -330,7 +330,7 @@ impl WhipPushClient {
                     }
                     EgressMedia::Audio => {
                         let _ =
-                            session.write_audio_sample_at(&sample.data, sample.rtp_timestamp, now);
+                            session.write_audio_sample(&sample.data, sample.rtp_timestamp, now);
                     }
                 }
             }

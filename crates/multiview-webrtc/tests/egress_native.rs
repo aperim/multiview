@@ -103,7 +103,7 @@ fn whep_serve_sample_write_reaches_the_viewer() {
     let mut au = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
     au.extend(std::iter::repeat_n(0xABu8, 1200));
     server
-        .write_video_sample_at(&au, true, 90_000, now)
+        .write_video_sample(&au, true, 90_000, now)
         .unwrap();
 
     assert!(
@@ -183,7 +183,7 @@ fn whip_push_offer_answer_and_send_reaches_the_remote() {
     let mut au = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
     au.extend(std::iter::repeat_n(0xCDu8, 1200));
     client
-        .write_video_sample_at(&au, true, 90_000, now)
+        .write_video_sample(&au, true, 90_000, now)
         .unwrap();
 
     assert!(
@@ -236,10 +236,10 @@ fn one_access_unit_serves_two_viewers() {
     let mut au = vec![0x00u8, 0x00, 0x00, 0x01, 0x65];
     au.extend(std::iter::repeat_n(0x77u8, 1000));
     server1
-        .write_video_sample_at(&au, true, 90_000, now)
+        .write_video_sample(&au, true, 90_000, now)
         .unwrap();
     server2
-        .write_video_sample_at(&au, true, 90_000, now)
+        .write_video_sample(&au, true, 90_000, now)
         .unwrap();
 
     assert!(pump_until(
