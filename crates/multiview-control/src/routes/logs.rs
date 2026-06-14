@@ -58,12 +58,13 @@ impl LogQuery {
     /// [`ControlError::Validation`] if `level` or `kind` is present but not a
     /// recognised name.
     pub fn into_filter(self) -> ControlResult<LogFilter> {
-        let min_level = match self.level {
-            None => None,
-            Some(name) => Some(LogLevel::parse(&name).ok_or_else(|| {
-                ControlError::Validation(format!("unknown log level {name:?}"))
-            })?),
-        };
+        let min_level =
+            match self.level {
+                None => None,
+                Some(name) => Some(LogLevel::parse(&name).ok_or_else(|| {
+                    ControlError::Validation(format!("unknown log level {name:?}"))
+                })?),
+            };
         let resource_kind = match self.kind {
             None => None,
             Some(name) => Some(LogResourceKind::parse(&name).ok_or_else(|| {

@@ -300,8 +300,11 @@ impl LogRing {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let mut matched: Vec<LogRecord> =
-            guard.iter().filter(|r| filter.matches(r)).cloned().collect();
+        let mut matched: Vec<LogRecord> = guard
+            .iter()
+            .filter(|r| filter.matches(r))
+            .cloned()
+            .collect();
         if let Some(limit) = filter.limit {
             if matched.len() > limit {
                 let drop = matched.len() - limit;

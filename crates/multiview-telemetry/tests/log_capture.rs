@@ -218,10 +218,9 @@ fn on_record_hook_observes_every_captured_record() {
     let ring = Arc::new(LogRing::new(64));
     let count = Arc::new(AtomicUsize::new(0));
     let count2 = Arc::clone(&count);
-    let layer = LogCaptureLayer::new(Arc::clone(&ring))
-        .with_on_record(move |_rec| {
-            count2.fetch_add(1, Ordering::Relaxed);
-        });
+    let layer = LogCaptureLayer::new(Arc::clone(&ring)).with_on_record(move |_rec| {
+        count2.fetch_add(1, Ordering::Relaxed);
+    });
     let subscriber = tracing_subscriber::registry().with(layer);
     tracing::subscriber::with_default(subscriber, || {
         tracing::info!("a");

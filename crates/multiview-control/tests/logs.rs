@@ -35,7 +35,8 @@ fn record(seq: u64, resource_id: Option<&str>, level: LogLevel, message: &str) -
 #[tokio::test]
 async fn lists_recent_records_for_a_viewer() {
     let h = harness();
-    h.logs.push(record(0, Some("cnn"), LogLevel::Info, "cnn opening"));
+    h.logs
+        .push(record(0, Some("cnn"), LogLevel::Info, "cnn opening"));
     h.logs
         .push(record(1, Some("cnn"), LogLevel::Error, "cnn RPS error"));
 
@@ -52,7 +53,8 @@ async fn lists_recent_records_for_a_viewer() {
 #[tokio::test]
 async fn filters_by_resource_id_and_minimum_level() {
     let h = harness();
-    h.logs.push(record(0, Some("cnn"), LogLevel::Info, "cnn info"));
+    h.logs
+        .push(record(0, Some("cnn"), LogLevel::Info, "cnn info"));
     h.logs
         .push(record(1, Some("cnn"), LogLevel::Error, "cnn error"));
     h.logs
@@ -88,7 +90,8 @@ async fn filters_by_since_cursor() {
 async fn limit_caps_the_returned_count() {
     let h = harness();
     for i in 0..10 {
-        h.logs.push(record(i, None, LogLevel::Info, &format!("line {i}")));
+        h.logs
+            .push(record(i, None, LogLevel::Info, &format!("line {i}")));
     }
     let resp = send(&h.router, get("/api/v1/logs?limit=3", VIEWER_TOKEN)).await;
     let arr = body_json(resp).await;

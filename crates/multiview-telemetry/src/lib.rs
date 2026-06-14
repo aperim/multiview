@@ -72,9 +72,7 @@ pub use availability::{AvailabilityCounters, AvailabilitySnapshot};
 pub use error::{Result, TelemetryError};
 pub use gpu::{CpuGauge, CpuSampler, GpuGauges, GpuLabels, VendorExposes};
 pub use health::{GateId, HealthState, Liveness, Readiness};
-pub use log_capture::{
-    LogCaptureLayer, LogFilter, LogLevel, LogRecord, LogResourceKind, LogRing,
-};
+pub use log_capture::{LogCaptureLayer, LogFilter, LogLevel, LogRecord, LogResourceKind, LogRing};
 pub use metrics::{
     Counter, Gauge, Histogram, HistogramSnapshot, Labels, MetricKind, MetricsRegistry,
     SeriesDescriptor,

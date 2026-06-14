@@ -126,7 +126,10 @@ fn guard_sets_and_clears_current_resource() {
 #[test]
 fn nested_guards_restore_the_outer_context() {
     let _outer = ResourceGuard::enter(ResourceContext::source("cnn"));
-    assert_eq!(current_resource().map(|r| r.id().to_owned()), Some("cnn".to_owned()));
+    assert_eq!(
+        current_resource().map(|r| r.id().to_owned()),
+        Some("cnn".to_owned())
+    );
     {
         let _inner = ResourceGuard::enter(ResourceContext::output("rtsp-main"));
         assert_eq!(

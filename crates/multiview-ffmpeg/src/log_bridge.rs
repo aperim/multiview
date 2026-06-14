@@ -243,9 +243,9 @@ impl Suppressor {
     /// Find the index of the entry whose key matches
     /// `(level, resource_id, message)`.
     fn find(&self, level: BridgeLevel, resource: Option<&str>, message: &str) -> Option<usize> {
-        self.entries.iter().position(|e| {
-            e.key.0 == level && e.key.1.as_deref() == resource && e.key.2 == message
-        })
+        self.entries
+            .iter()
+            .position(|e| e.key.0 == level && e.key.1.as_deref() == resource && e.key.2 == message)
     }
 
     /// Index of the least-recently-touched entry (smallest `touched`).
@@ -837,7 +837,13 @@ mod ffi {
             SuppressOutcome::Suppress => {}
             SuppressOutcome::Emit => emit(bridge_level, component, resource.as_ref(), &clean, None),
             SuppressOutcome::EmitWithSummary { suppressed } => {
-                emit(bridge_level, component, resource.as_ref(), &clean, Some(suppressed));
+                emit(
+                    bridge_level,
+                    component,
+                    resource.as_ref(),
+                    &clean,
+                    Some(suppressed),
+                );
             }
         }
     }
@@ -1032,7 +1038,10 @@ mod ffi {
             // dropping the OLD guard must NOT tear down the NEW registration.
             let ptr = 0xBEEF_0000_usize;
             let old = register_av_context(ptr, ResourceContext::source("cnn"));
-            assert_eq!(resolve_registered(ptr).map(|r| r.id().to_owned()), Some("cnn".to_owned()));
+            assert_eq!(
+                resolve_registered(ptr).map(|r| r.id().to_owned()),
+                Some("cnn".to_owned())
+            );
 
             // Reopen at the same address with a new resource (fresh, larger epoch).
             let new = register_av_context(ptr, ResourceContext::source("bbc"));
