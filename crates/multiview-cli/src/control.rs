@@ -203,6 +203,13 @@ where
     // zowietek-control service type (the vendor's type is unverified — only a
     // configured string is ever recognised) plus any extra DNS-SD types.
     .with_discovery_config(config.discovery.clone().unwrap_or_default());
+    // Serve the process log-tail ring the capture layer feeds (ADR-0060): the
+    // same `Arc` `init_tracing` installed, so `GET /api/v1/logs` returns live
+    // captured, resource-attributed records. If logging was not initialized
+    // (never, in the binary), the AppState keeps its empty default ring.
+    if let Some(logs) = crate::log_ring() {
+        state = state.with_log_ring(logs);
+    }
     if let Some(delivery) = delivery {
         state = state.with_cast_delivery(delivery);
     }

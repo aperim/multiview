@@ -33,6 +33,7 @@ pub mod discovery;
 pub mod health;
 pub mod inputs;
 pub mod licence;
+pub mod logs;
 pub mod mesh;
 pub mod outputs;
 pub mod overlays;
@@ -833,6 +834,9 @@ pub fn api_router() -> Router<AppState> {
         .route("/commands/apply-layout", post(cmd_apply_layout))
         .route("/alarms", get(alarms::list_alarms))
         .route("/alarms/{id}/ack", post(alarms::ack_alarm))
+        // Read-only structured log tail (ADR-0060): recent buffered records from
+        // the bounded drop-oldest ring, filterable by resource/kind/level/since.
+        .route("/logs", get(logs::list_logs))
         // Read-only health warnings (SA-0 / ADR-0035): active capability mismatches
         // (e.g. GPU present but compositing fell back to CPU) with remediation.
         .route("/health", get(health::list_health))

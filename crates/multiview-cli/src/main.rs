@@ -63,13 +63,31 @@ async fn main() -> ExitCode {
 }
 
 /// Initialize the structured `tracing` subscriber (stderr, env-overridable via
-/// `RUST_LOG`, defaulting to `info`).
+/// `RUST_LOG`, defaulting to `info`) **with** the resource-scoped log capture
+/// layer (ADR-0060): every emitted event — ours and the libav bridge's — is
+/// mirrored into a bounded drop-oldest `LogRing` the control plane serves over
+/// `GET /api/v1/logs`. The ring is published into the library's process-global
+/// slot ([`multiview_cli::set_log_ring`]) so `control::bind_and_serve` wires the
+/// same `Arc` into the `AppState`.
 fn init_tracing() -> anyhow::Result<()> {
+    let ring = Arc::new(multiview_telemetry::LogRing::new(
+        multiview_cli::LOG_RING_CAPACITY,
+    ));
+    // A per-process run id groups a process lifetime's records across restarts.
+    let run_id = format!(
+        "run-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    );
     SubscriberBuilder::new()
         .with_default_level("info")
         .with_env(true)
-        .try_init()
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        .try_init_with_capture(Arc::clone(&ring), run_id)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Publish the ring for the control plane (set-once; ignore a redundant set).
+    let _ = multiview_cli::set_log_ring(ring);
+    Ok(())
 }
 
 /// Dispatch a parsed [`Cli`] to its subcommand, returning the process exit code.
@@ -381,7 +399,12 @@ async fn serve_control_plane(
 // line-count lint is allowed here with justification (matching `bind_and_serve`).
 #[allow(clippy::too_many_lines)]
 async fn run_pipeline_until_ctrl_c(
-    mut pipeline: multiview_cli::pipeline::Pipeline,
+    // `mut` is needed only under `webrtc-native` (the program-audio preview tap
+    // below calls `pipeline.set_program_audio_preview`). Without that feature the
+    // binding is never mutated, so the `mut` is conditional to stay
+    // `unused_mut`-clean on the `ffmpeg`/`rist`-only feature legs.
+    #[cfg(feature = "webrtc-native")] mut pipeline: multiview_cli::pipeline::Pipeline,
+    #[cfg(not(feature = "webrtc-native"))] pipeline: multiview_cli::pipeline::Pipeline,
     config: &MultiviewConfig,
     plane: &multiview_cli::licence::EntitlementPlane,
     config_path: &Path,

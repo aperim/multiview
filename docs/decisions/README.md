@@ -202,8 +202,9 @@ The **production-switcher layer** — M/E (mix/effects) stages with program/prev
 
 - [ADR-G001](ADR-G001.md) — Absolute typing enforced via centralized workspace lints + TS strictTypeChecked, blocking in CI
 - [ADR-G002](ADR-G002.md) — TDD-first with a mutation-testing gate and protected tests (anti-reward-hacking)
-- [ADR-G003](ADR-G003.md) — Mandatory adversarial cross-vendor review in a fresh context; human is the final approver
+- [ADR-G003](ADR-G003.md) — Mandatory adversarial cross-vendor review in a fresh context (amended by ADR-G005 — routine final approval + merge delegated to the agent)
 - [ADR-G004](ADR-G004.md) — Scope discipline, no-silent-suppression, secrets, and supply-chain guardrails for agents
+- [ADR-G005](ADR-G005.md) — Operator delegates routine review sign-off + merge to the agent (amends ADR-G003); cross-vendor review stays mandatory, operator retains override
 - [ADR-0046](ADR-0046.md) — Skip the heavy CI matrix on **prose-docs-only** PRs via a fail-safe `dorny/paths-filter` `changes` job: `code = '**'` minus a strict prose allowlist under `predicate-quantifier: every`, so any non-prose file (incl. `docs/api/**` specs, lockfiles, configs, new extensions) keeps `code=true` → full matrix; only `.md`/`.txt`/images/`LICENSE*`/`NOTICE` outside `docs/api/**` can skip. Heavy jobs gate on `code=='true'` (and only on `pull_request`; pushes to `main` always run full); `inclusive-language` + a new dependency-free `docs-sanity` link check always run so docs PRs still get a green signal (and stay required-check-safe if branch protection is added). No code/config/spec/web PR loses any check — only *when* the unchanged jobs run changes *(Accepted)*
 
 ## Broadcast Multiviewer

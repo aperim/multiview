@@ -77,9 +77,10 @@ pub use routing::{
 };
 pub use salvo::{Salvo, SourceRecall, TallyRecall, UmdRecall};
 pub use schema::{
-    Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig, ColorOverride,
-    DisplayModeSpec, Fps, Layout, Output, Overlay, Rect, RtspOptions, Source, SourceAuth,
-    SourceKind,
+    lower_rist_url, Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig,
+    ColorOverride, DisplayModeSpec, Fps, Layout, Output, Overlay, Rect, RistAesBits,
+    RistEncryption, RistOptions, RistPeer, RistProfile, RistUrlError, RtspOptions, Source,
+    SourceAuth, SourceKind,
 };
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
@@ -123,6 +124,53 @@ pub struct ControlConfig {
     /// are refused).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_media_base: Option<String>,
+}
+
+/// Process-wide system settings.
+///
+/// Currently the NDI® runtime license-acceptance gate (ADR-0008 §7.5); future
+/// process-wide settings join here as additional sub-tables. Absent ⇒ no system
+/// settings are configured (NDI I/O stays inert — unaccepted).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemConfig {
+    /// The NDI® SDK runtime license-acceptance gate. Absent ⇒ NDI I/O is refused
+    /// (`ndi_unlicensed`) and never started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ndi: Option<NdiSystemConfig>,
+}
+
+/// The operator's NDI® SDK runtime license acceptance (ADR-0008 §7.5).
+///
+/// NDI I/O (source **and** output) is gated twice: the off-by-default `ndi` build
+/// feature, and this explicit, audited runtime acceptance. Until
+/// `accept_license = true` — with the audit fields [`accepted_by`](Self::accepted_by)
+/// and [`accepted_at`](Self::accepted_at) (who/when) — every configured NDI
+/// source/output is refused with the `ndi_unlicensed` status and never started
+/// (the output-clock invariant is untouched; the tile degrades).
+///
+/// The acceptance is **exported with config as a flag, never a secret**: it is
+/// ordinary, version-controllable config (no `secret_ref`, nothing redacted) so
+/// the legal acceptance travels with the configuration. It is a plain
+/// constructable data struct (mirroring the runtime `LicenseAcceptance` the gate
+/// consumes) so the control-plane settings handler and tests build it directly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NdiSystemConfig {
+    /// Operator confirmation that the NDI SDK license has been read and accepted.
+    /// `false`/absent ⇒ all NDI I/O is refused (`ndi_unlicensed`).
+    #[serde(default)]
+    pub accept_license: bool,
+    /// Audit — **who** accepted (operator id/principal). Required (non-empty) when
+    /// `accept_license = true`; enforced at config load by
+    /// [`MultiviewConfig::validate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_by: Option<String>,
+    /// Audit — **when** acceptance was recorded (free-form, e.g. RFC 3339).
+    /// Required (non-empty) when `accept_license = true`; enforced at config load
+    /// by [`MultiviewConfig::validate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_at: Option<String>,
 }
 
 /// A complete Multiview configuration document (config-as-code).
@@ -219,6 +267,11 @@ pub struct MultiviewConfig {
     /// system-clock wall source).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<TimingConfig>,
+    /// Process-wide system settings (ADR-0008 §7.5): currently the NDI® runtime
+    /// license-acceptance gate (`[system.ndi] accept_license`). Absent ⇒ no
+    /// system settings (NDI I/O stays inert — unaccepted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<SystemConfig>,
 }
 
 /// Parse a `#RGB` / `#RRGGBB` hex color into its `(r, g, b)` bytes.
@@ -349,6 +402,7 @@ impl MultiviewConfig {
         self.validate_discovery()?;
         self.validate_control()?;
         self.validate_webrtc()?;
+        self.validate_system()?;
         self.validate_placement()?;
         self.validate_routing()?;
         if let Some(timing) = &self.timing {
@@ -531,6 +585,31 @@ impl MultiviewConfig {
     /// (absent) section always validates.
     fn validate_webrtc(&self) -> Result<(), ConfigError> {
         self.webrtc.validate()
+    }
+
+    /// Validate the optional `[system.ndi]` license-acceptance gate (ADR-0008
+    /// §7.5): when `accept_license = true`, the audit fields `accepted_by` +
+    /// `accepted_at` (who/when) must be present and non-empty — the same who/when
+    /// invariant the runtime `NdiLicense::accept` enforces, surfaced at
+    /// config-load so a malformed acceptance fails fast rather than at first NDI
+    /// start. Declining (`accept_license = false`) needs no audit.
+    fn validate_system(&self) -> Result<(), ConfigError> {
+        let Some(ndi) = self.system.as_ref().and_then(|s| s.ndi.as_ref()) else {
+            return Ok(());
+        };
+        if !ndi.accept_license {
+            return Ok(());
+        }
+        let nonblank = |f: &Option<String>| f.as_deref().is_some_and(|s| !s.trim().is_empty());
+        if !nonblank(&ndi.accepted_by) || !nonblank(&ndi.accepted_at) {
+            return Err(ConfigError::Validation(
+                "system.ndi.accept_license = true requires the audit fields \
+                 accepted_by and accepted_at (who/when); add them, or set \
+                 accept_license = false to decline"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Flatten this document into a validated-shape [`multiview_core::layout::Layout`].
@@ -1153,6 +1232,16 @@ impl Source {
                     }
                 }
             }
+            // RIST (ADR-0095): the typed options validate structurally here — a
+            // non-empty bonding list is rejected on the Tier-0 build (FFmpeg's
+            // protocol is single-peer; honest capability reporting, never a
+            // silent single-link), and an encryption block must carry a
+            // non-empty secret_ref. The URL's reachability is a runtime concern.
+            SourceKind::Rist { rist, .. } => {
+                if let Some(opts) = rist {
+                    validate_rist_options(&self.id, opts)?;
+                }
+            }
             // Network/synthetic kinds carry no kind-specific field that can be
             // validated structurally here (a URL's reachability is a runtime
             // concern, not a config one). The `youtube` URL is resolved at
@@ -1224,6 +1313,7 @@ impl Output {
             | Output::Hls { codec, .. }
             | Output::Rtmp { codec, .. }
             | Output::Srt { codec, .. }
+            | Output::Rist { codec, .. }
             | Output::Webrtc { codec, .. }
             | Output::WhipPush { codec, .. } => Some(codec),
             // NDI carries a channel-map, AES67 sends raw PCM, and a display
@@ -1257,6 +1347,14 @@ impl Output {
         } = self
         {
             validate_display_output(connector, mode.as_ref(), forced_mode.as_ref())?;
+        }
+        // RIST push options (bonding rejection + PSK secret_ref) are validated
+        // by the same shared helper the `rist` source uses (ADR-0095 §4).
+        if let Output::Rist {
+            rist: Some(opts), ..
+        } = self
+        {
+            validate_rist_options(&self.label(), opts)?;
         }
         self.validate_webrtc_rules()
     }
@@ -1297,6 +1395,7 @@ impl Output {
             | Output::Ndi { .. }
             | Output::Rtmp { .. }
             | Output::Srt { .. }
+            | Output::Rist { .. }
             | Output::Aes67 { .. }
             | Output::Display { .. } => Ok(()),
         }
@@ -1360,6 +1459,38 @@ impl Output {
 /// non-empty connector, `mode`/`forced_mode` mutual exclusion (an explicit
 /// EDID override and an EDID-less forced timing are contradictory requests),
 /// and a structurally sound [`DisplayModeSpec`] wherever one is given.
+/// Validate a [`crate::schema::RistOptions`] block (shared by the `rist` source
+/// and the `rist` push output).
+///
+/// Tier-0 (`FFmpeg` `rist://`) honest capability reporting (ADR-0095 §4):
+/// - a **non-empty `bonding`** list is rejected with a clear error — bonding is
+///   genuinely unreachable through `FFmpeg`'s single-peer protocol (it is the
+///   Tier-2 direct-FFI feature), so it is never silently single-linked;
+/// - an **encryption block** must carry a non-empty `secret_ref` (`PSK`
+///   requested with no key reference is a misconfiguration).
+fn validate_rist_options(
+    owner: &str,
+    opts: &crate::schema::RistOptions,
+) -> Result<(), ConfigError> {
+    if !opts.bonding.is_empty() {
+        return Err(ConfigError::Validation(format!(
+            "rist {owner:?}: bonding/load-sharing ({} peer(s)) requires the `rist` direct-FFI \
+             build (Tier-2); the Tier-0 FFmpeg `rist://` path is single-link only — remove the \
+             `bonding` list or build the direct-FFI leaf (ADR-0095)",
+            opts.bonding.len()
+        )));
+    }
+    if let Some(enc) = &opts.encryption {
+        if enc.secret_ref.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "rist {owner:?}: encryption is configured but secret_ref is empty (the PSK is a \
+                 secret-manager reference, e.g. `op://…` or `env:VAR`; it is never a plaintext key)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_display_output(
     connector: &str,
     mode: Option<&DisplayModeSpec>,

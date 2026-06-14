@@ -334,6 +334,20 @@ ffmpeg = [
     "multiview-audio/ffmpeg",
 ]
 
+# RIST (Reliable Internet Stream Transport, VSF TR-06) ingest + egress
+# (ADR-0095 Tier-0): wire a `rist` source through the libav `rist://` demuxer and
+# a `rist` push output through the `mpegts` muxer over `rist://` — the
+# open-standard sibling of SRT, single-link Simple/Main Profile with PSK-AES.
+# Implies `ffmpeg` (the live run/ingest/encode path lives in the `ffmpeg`-gated
+# pipeline; without it a `rist` kind has nowhere to run). LGPL-clean: librist is
+# BSD-2-Clause and `--enable-librist` forces neither `--enable-gpl` nor
+# `--enable-nonfree` (conventions §7), so this is an off-by-default *native-dep*
+# gate only, NOT a license-escalating one. The deployed FFmpeg must be built
+# `--enable-librist`; without it a `rist://` open fails at run time and the tile
+# rides NO_SIGNAL (it never crashes). Tier-1 stats / Tier-2 bonding (the
+# `multiview-rist-sys` FFI leaf) are deferred and gated by this SAME flag.
+rist = ["ffmpeg"]
+
 # YouTube live ingest (ADR-0015): resolve a `youtube` source's watch URL to a
 # time-limited `*.googlevideo.com` HLS master via a runtime-discovered `yt-dlp`
 # (multiview-input's off-by-default `youtube` feature), feed it into the existing
@@ -422,6 +436,10 @@ nvidia = [
     # egress over the single native str0m endpoint, over real DTLS/SRTP with
     # audio, TURN-enabled (ADR-0048 §11 / ADR-T014 / ADR-P006).
     "webrtc-native",
+    # RIST (Reliable Internet Stream Transport) ingest + egress (ADR-0095): the
+    # shipped deploy image takes/delivers `rist://` feeds (the deployed FFmpeg is
+    # built `--enable-librist`). LGPL-clean (librist is BSD-2-Clause).
+    "rist",
     # Live local-mesh discovery (Conspect, ADR-0051 §6): the shipped deploy image
     # runs the real mDNS announce/browse loop.
     "mesh-mdns",
@@ -444,6 +462,8 @@ apple = [
     # WebRTC ingest + WHEP preview/output egress over the native str0m endpoint
     # (ADR-0048 §11 / ADR-P006).
     "webrtc-native",
+    # RIST ingest + egress (ADR-0095): LGPL-clean (librist BSD-2-Clause).
+    "rist",
     # Live local-mesh discovery (Conspect, ADR-0051 §6).
     "mesh-mdns",
 ]
@@ -472,6 +492,8 @@ linux-vaapi = [
     # WebRTC ingest + WHEP preview/output egress over the native str0m endpoint
     # (ADR-0048 §11 / ADR-P006).
     "webrtc-native",
+    # RIST ingest + egress (ADR-0095): LGPL-clean (librist BSD-2-Clause).
+    "rist",
     # Live local-mesh discovery (Conspect, ADR-0051 §6).
     "mesh-mdns",
 ]
@@ -509,6 +531,10 @@ full = [
     # HTTP backend. LGPL-clean (reqwest + rustls, no native lib), so it belongs
     # in the non-GPL `full` build.
     "devices-net",
+    # RIST ingest + egress (ADR-0095): comes transitively via the presets above;
+    # named explicitly so the everything-non-GPL build keeps it on a refactor.
+    # LGPL-clean (librist BSD-2-Clause).
+    "rist",
 ]
 
 [lints]

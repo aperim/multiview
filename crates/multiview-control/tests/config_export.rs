@@ -218,6 +218,54 @@ async fn export_retains_base_config_sections_the_stores_do_not_carry() {
 }
 
 #[tokio::test]
+async fn export_round_trips_the_system_ndi_acceptance_as_a_flag() {
+    // ADR-0008 §7.5: the NDI license acceptance is an authored [system] section no
+    // store carries; the export must pass it through verbatim and "as a flag, never
+    // a secret" (visible in the rendered TOML, not redacted) so the legal acceptance
+    // travels with the config. Guards the verbatim base_document passthrough against
+    // future export refactors that reconstruct sections explicitly.
+    let base = json!({
+        "system": {
+            "ndi": {
+                "accept_license": true,
+                "accepted_by": "operator@example",
+                "accepted_at": "2026-06-06T00:00:00Z"
+            }
+        }
+    });
+    let h = support::harness_with(|state| state.with_base_document(base.clone()));
+    seed(&h).await;
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    // Round-trips through the canonical type with the acceptance intact.
+    let parsed: multiview_config::MultiviewConfig =
+        toml::from_str(&text).expect("export is a valid MultiviewConfig document");
+    let ndi = parsed
+        .system
+        .as_ref()
+        .and_then(|s| s.ndi.as_ref())
+        .expect("the [system.ndi] acceptance survives the export round-trip");
+    assert!(ndi.accept_license);
+    assert_eq!(ndi.accepted_by.as_deref(), Some("operator@example"));
+
+    // Exported as a plain flag, never a secret (not redacted / behind a secret_ref).
+    assert!(
+        text.contains("accept_license = true"),
+        "the acceptance flag must export plainly:\n{text}"
+    );
+    assert!(
+        text.contains("operator@example"),
+        "the audit principal must export plainly (not redacted):\n{text}"
+    );
+}
+
+#[tokio::test]
 async fn export_prefers_the_seeded_working_layout_over_alphabetical_order() {
     // Review M1: with several layouts carrying a canvas, the export must use
     // the designated working layout, not the id-sorted first.
@@ -433,6 +481,111 @@ async fn export_carries_a_download_disposition() {
             .to_str()
             .unwrap(),
         "attachment; filename=\"multiview.toml\""
+    );
+}
+
+#[tokio::test]
+async fn export_redacts_webrtc_ice_secrets_and_source_tokens() {
+    // SECURITY: `GET /config/export` renders the live stores + the authored base
+    // document. WebRTC ICE credentials (`password` long-term + `static_auth_secret`
+    // ephemeral-REST) and a WHIP-source bearer `token` are plaintext secrets that
+    // must NEVER appear in the exported document. They are redacted to a clear
+    // sentinel, and the redacted document is still a structurally valid
+    // MultiviewConfig (a TURN server keeps a non-empty credential field, so it
+    // round-trips as a clearly-marked placeholder rather than clobbering nothing).
+    const ICE_PASSWORD: &str = "sup3r-secret-turn-password";
+    const ICE_AUTH_SECRET: &str = "coturn-shared-rest-secret-9z";
+    const SOURCE_TOKEN: &str = "whip-bearer-token-abc123";
+
+    let base = json!({
+        "schema_version": 1,
+        "canvas": {
+            "width": 1280, "height": 720, "fps": "25/1",
+            "pixel_format": "nv12", "background": "#000000",
+            "color": { "profile": "sdr-bt709-limited" }
+        },
+        "layout": { "kind": "absolute" },
+        "cells": [],
+        "sources": [],
+        "outputs": [ { "kind": "hls", "path": "/srv/hls", "codec": "h264" } ],
+        "webrtc": {
+            "ice_servers": [
+                {
+                    "kind": "turn",
+                    "url": "turn:[2001:db8::55]:3478",
+                    "username": "publisher",
+                    "password": ICE_PASSWORD
+                },
+                {
+                    "kind": "turn",
+                    "url": "turns:[2001:db8::56]:5349",
+                    "username": "ephemeral",
+                    "static_auth_secret": ICE_AUTH_SECRET
+                }
+            ]
+        }
+    });
+    let h = support::harness_with(|state| state.with_base_document(base.clone()));
+    seed(&h).await;
+
+    // A WHIP source carrying a plaintext bearer token (another inline secret).
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/sources/whip-cam",
+            OPERATOR_TOKEN,
+            &json!({
+                "name": "WHIP cam",
+                "body": { "id": "whip-cam", "kind": "webrtc", "token": SOURCE_TOKEN }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "whip source seed lands");
+
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+
+    // No plaintext secret VALUE may appear anywhere in the exported document.
+    assert!(
+        !text.contains(ICE_PASSWORD),
+        "the ICE long-term password leaked in the export:\n{text}"
+    );
+    assert!(
+        !text.contains(ICE_AUTH_SECRET),
+        "the ICE static_auth_secret leaked in the export:\n{text}"
+    );
+    assert!(
+        !text.contains(SOURCE_TOKEN),
+        "the WHIP source bearer token leaked in the export:\n{text}"
+    );
+
+    // The redaction sentinel marks where a secret was removed.
+    assert!(
+        text.contains("<redacted>"),
+        "the export carries the redaction sentinel:\n{text}"
+    );
+
+    // The redacted document is still a valid MultiviewConfig: the TURN servers
+    // keep a non-empty (sentinel) credential, so validation passes and the
+    // document round-trips as a clearly-marked placeholder.
+    let parsed: multiview_config::MultiviewConfig =
+        toml::from_str(&text).expect("the redacted export is still a valid document");
+    let ice = &parsed.webrtc.ice_servers;
+    assert_eq!(ice.len(), 2, "both TURN servers survive (structure intact)");
+    assert_eq!(
+        ice[0].password.as_deref(),
+        Some("<redacted>"),
+        "the long-term password is the sentinel, not the cleartext"
+    );
+    assert_eq!(
+        ice[1].static_auth_secret.as_deref(),
+        Some("<redacted>"),
+        "the ephemeral-REST secret is the sentinel, not the cleartext"
     );
 }
 
