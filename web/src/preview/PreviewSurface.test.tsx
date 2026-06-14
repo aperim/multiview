@@ -20,12 +20,15 @@ function caps(over: Partial<PreviewCapabilities> = {}): PreviewCapabilities {
   };
 }
 
+// A minimal local description for the idle fake (jsdom has no WebRTC types).
+const IDLE_LOCAL_DESCRIPTION = { type: 'offer', sdp: 'v=0' } as unknown as RTCSessionDescription;
+
 // A no-op PC factory: never emits a track or transitions, so a mounted player
 // just sits in "connecting" unless the test drives a fatal error via fetch.
 class IdlePeerConnection extends EventTarget {
   iceGatheringState: RTCIceGatheringState = 'complete';
   connectionState: RTCPeerConnectionState = 'new';
-  localDescription = { type: 'offer', sdp: 'v=0' } as RTCSessionDescription;
+  localDescription: RTCSessionDescription = IDLE_LOCAL_DESCRIPTION;
   ontrack: ((event: RTCTrackEvent) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
   addTransceiver(): void {
@@ -56,9 +59,9 @@ function okSdp(): Response {
     status: 201,
     url: 'https://h/api/v1/preview/program/whep',
     headers,
-    text: async (): Promise<string> => 'v=0\r\na=answer',
+    text: (): Promise<string> => Promise.resolve('v=0\r\na=answer'),
     clone(): Response {
-      return { json: async (): Promise<unknown> => ({}) } as Response;
+      return { json: (): Promise<unknown> => Promise.resolve({}) } as unknown as Response;
     },
   } as unknown as Response;
 }
@@ -69,9 +72,11 @@ function rejectSdp(): Response {
     status: 503,
     url: 'https://h/api/v1/preview/program/whep',
     headers: new Headers(),
-    text: async (): Promise<string> => '',
+    text: (): Promise<string> => Promise.resolve(''),
     clone(): Response {
-      return { json: async (): Promise<unknown> => ({ fallback: 'jpeg' }) } as Response;
+      return {
+        json: (): Promise<unknown> => Promise.resolve({ fallback: 'jpeg' }),
+      } as unknown as Response;
     },
   } as unknown as Response;
 }
@@ -85,9 +90,7 @@ beforeEach(() => {
   // Stub the JPEG-poll fetch so the JpegRung does not hit the network.
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (): Promise<Response> => {
-      throw new Error('jpeg fetch suppressed in test');
-    }),
+    vi.fn((): Promise<Response> => Promise.reject(new Error('jpeg fetch suppressed in test'))),
   );
 });
 
@@ -143,7 +146,7 @@ describe('<PreviewSurface>', () => {
         label="Program"
         capabilities={caps()}
         pcFactory={() => new IdlePeerConnection() as unknown as RTCPeerConnection}
-        fetchImpl={(async (): Promise<Response> => okSdp()) as unknown as typeof fetch}
+        fetchImpl={(): Promise<Response> => Promise.resolve(okSdp())}
       />,
     );
     expect(getByTestId('whep-player')).toBeInTheDocument();
@@ -159,7 +162,7 @@ describe('<PreviewSurface>', () => {
         label="Program"
         capabilities={caps()}
         pcFactory={() => new IdlePeerConnection() as unknown as RTCPeerConnection}
-        fetchImpl={(async (): Promise<Response> => rejectSdp()) as unknown as typeof fetch}
+        fetchImpl={(): Promise<Response> => Promise.resolve(rejectSdp())}
       />,
     );
     // The WHEP POST is rejected ⇒ the surface degrades to JPEG with the badge.

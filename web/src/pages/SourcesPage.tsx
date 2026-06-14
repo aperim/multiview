@@ -256,7 +256,7 @@ function WebrtcSourceFields({
           }
           trailing={
             <HelpLink
-              to="/help/glossary#whip"
+              to="/help/concepts/glossary#whip"
               label={t`What is WHIP?`}
               compact
             />

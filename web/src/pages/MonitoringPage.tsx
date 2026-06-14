@@ -175,7 +175,7 @@ export function MonitoringPage(): JSX.Element {
         <section aria-labelledby="outputs-heading" className="mt-8">
           <h2 id="outputs-heading" className="mb-3 flex items-center gap-2 text-lg font-semibold">
             <Trans>WebRTC outputs</Trans>
-            <HelpLink to="/help/glossary#whep" label={t`What is WHEP?`} compact />
+            <HelpLink to="/help/concepts/glossary#whep" label={t`What is WHEP?`} compact />
           </h2>
           <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {webrtcOutputs.map((output) => (

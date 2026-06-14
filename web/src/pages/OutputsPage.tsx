@@ -305,7 +305,7 @@ function WebrtcOutputFields({
               Relative to the control plane origin.
             </Trans>
           }
-          trailing={<HelpLink to="/help/glossary#whep" label={t`What is WHEP?`} compact />}
+          trailing={<HelpLink to="/help/concepts/glossary#whep" label={t`What is WHEP?`} compact />}
         />
       )}
       <FormField
