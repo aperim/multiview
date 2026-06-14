@@ -60,6 +60,12 @@ pub mod live_sources;
 /// `MultiviewConfig`. Always compiled, so the default build tests the
 /// rejection path and a node build tests the acceptance path.
 pub mod node;
+/// The node enrollment client (DEV-B6 / ADR-0045 §9): a `multiview node`
+/// becomes a managed `displaynode` device. The keypair + signing + request-body
+/// core is always compiled and tested; the live HTTP enroll/heartbeat runner is
+/// behind the off-by-default `node-enroll` feature. Additive — a node without a
+/// `[controller]` block runs exactly as DEV-B5.
+pub mod node_enroll;
 /// Build-capability gating for configured outputs (DEV-B1 / ADR-0044): a
 /// `display` output must FAIL a non-`display-kms` build with a clear error —
 /// never be silently skipped. Always compiled, so the default build tests the

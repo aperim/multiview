@@ -20,6 +20,7 @@ use crate::schema::Fps;
 
 /// Per-head output geometry and the layout name rendered on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct HeadConfig {
     /// Stable head id, unique within the wall.
@@ -71,6 +72,7 @@ pub struct WallBezel {
 /// A multi-head video wall: a `cols × rows` grid of heads with bezel
 /// compensation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct WallConfig {
     /// Wall name.
@@ -118,5 +120,82 @@ impl WallConfig {
             multiview_core::Error::Config(msg) => ConfigError::Validation(msg),
             other => ConfigError::Validation(other.to_string()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::{HeadConfig, WallConfig};
+
+    /// A well-formed single-head wall (the round-trip baseline these rejection
+    /// tests perturb a single field of).
+    const GOOD_WALL: &str = r#"
+name = "lobby"
+cols = 1
+rows = 1
+[[heads]]
+id = "head-l"
+width = 1920
+height = 1080
+fps = "60/1"
+layout = "main"
+"#;
+
+    #[test]
+    fn a_well_formed_wall_parses() {
+        let wall: WallConfig = toml::from_str(GOOD_WALL).expect("the baseline wall parses");
+        assert_eq!(wall.heads.len(), 1);
+        wall.validate().expect("the baseline wall validates");
+    }
+
+    #[test]
+    fn an_unknown_wall_field_is_rejected_naming_it() {
+        // A typo'd top-level wall field (`column` for `cols`) MUST be a loud
+        // parse error naming the offender — never a silent revert to a default.
+        let doc = GOOD_WALL.replace("cols = 1", "cols = 1\ncolumn = 2");
+        let err =
+            toml::from_str::<WallConfig>(&doc).expect_err("an unknown wall field must be rejected");
+        let text = err.to_string();
+        assert!(
+            text.contains("column"),
+            "the parse error names the offending field: {text}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_head_field_is_rejected_naming_it() {
+        // A typo'd per-head field (`orientaton` for `orientation`) MUST be a
+        // loud parse error — otherwise the misspelling silently reverts to the
+        // default orientation on a config round-trip.
+        let doc = GOOD_WALL.replace(
+            "layout = \"main\"",
+            "orientaton = \"portrait\"\nlayout = \"main\"",
+        );
+        let err =
+            toml::from_str::<WallConfig>(&doc).expect_err("an unknown head field must be rejected");
+        let text = err.to_string();
+        assert!(
+            text.contains("orientaton"),
+            "the parse error names the offending head field: {text}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_head_field_at_the_struct_level_is_rejected() {
+        // Direct HeadConfig parse: a misspelled field must fail rather than
+        // silently dropping (the head struct itself denies unknown fields).
+        let doc = r#"
+id = "h"
+width = 1920
+height = 1080
+fps = "60/1"
+layout = "main"
+refresh = "60/1"
+"#;
+        let err = toml::from_str::<HeadConfig>(doc)
+            .expect_err("an unknown HeadConfig field must be rejected");
+        assert!(err.to_string().contains("refresh"), "{err}");
     }
 }
