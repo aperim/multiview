@@ -1,6 +1,6 @@
 //! OUTMETA config-schema tests (ADR-0088 output metadata + ADR-0089 output
 //! orientation): the additive per-output `metadata` / `orientation` surfaces,
-//! their TOML/JSON round-trip, validation (service_id range, ISO-639-2
+//! their TOML/JSON round-trip, validation (`service_id` range, ISO-639-2
 //! language, `mode = "tag"` rejected on tag-less transports), the per-transport
 //! capability matrices, and the projection plans (`Applied`/`Dropped`).
 //!

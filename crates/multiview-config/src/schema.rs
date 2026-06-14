@@ -1126,8 +1126,8 @@ impl OutputMetadata {
 }
 
 /// Per-output **presentation orientation** (ADR-0089): a quarter-turn rotation
-/// + optional flip, applied either as a zero-cost display-rotation **tag** or by
-/// **rotating the pixels** into a distinct rendition.
+/// with an optional flip, applied either as a zero-cost display-rotation **tag**
+/// or by **rotating the pixels** into a distinct rendition.
 ///
 /// Reuses the existing core [`QuarterTurn`] vocabulary (`none`/`cw90`/`cw180`/
 /// `cw270`) — it does **not** invent a new rotation enum. Distinct from
@@ -1331,7 +1331,7 @@ pub struct OutputMetadataPlan {
 impl OutputMetadataPlan {
     /// Every field in this plan that was **dropped** (requested but uncarried),
     /// for surfacing to the operator. Order: title, provider, language,
-    /// service_id, description.
+    /// `service_id`, description.
     #[must_use]
     pub fn dropped(&self) -> Vec<(&'static str, &'static str)> {
         let mut out = Vec::new();

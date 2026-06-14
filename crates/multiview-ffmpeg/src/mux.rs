@@ -308,6 +308,8 @@ impl Muxer {
     ///   unknown, or libav could not allocate the side-data block.
     #[allow(unsafe_code)]
     pub fn set_stream_display_matrix(&mut self, index: usize, matrix: [i32; 9]) -> Result<()> {
+        /// The DISPLAYMATRIX side-data size: nine 32-bit fixed-point entries.
+        const N: usize = 9 * std::mem::size_of::<i32>();
         if self.header_written {
             return Err(FfmpegError::Mux(ffmpeg::Error::InvalidData));
         }
@@ -318,20 +320,12 @@ impl Muxer {
             .output
             .stream_mut(index)
             .ok_or(FfmpegError::Mux(ffmpeg::Error::InvalidData))?;
-        const N: usize = 9 * std::mem::size_of::<i32>();
-        let bytes: [u8; N] = {
-            let mut b = [0u8; N];
-            let mut i = 0;
-            while i < 9 {
-                let le = matrix[i].to_le_bytes();
-                b[i * 4] = le[0];
-                b[i * 4 + 1] = le[1];
-                b[i * 4 + 2] = le[2];
-                b[i * 4 + 3] = le[3];
-                i += 1;
-            }
-            b
-        };
+        // Pack the nine i32s little-endian (the displaymatrix wire layout) via
+        // iterators — no slice indexing.
+        let mut bytes = [0u8; N];
+        for (chunk, value) in bytes.chunks_exact_mut(4).zip(matrix) {
+            chunk.copy_from_slice(&value.to_le_bytes());
+        }
         // SAFETY: `stream.as_mut_ptr()` is the live `AVStream` owned by the
         // `AVFormatContext` we hold `&mut`. `av_packet_side_data_add` appends a
         // side-data block of `N` bytes to the stream's `codecpar.coded_side_data`

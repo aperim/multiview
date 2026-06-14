@@ -10181,6 +10181,15 @@
         "type": "string",
         "description": "A correlation id for an asynchronously-applied control command.\n\nReturned to the client in a `202 Accepted` response and echoed by the engine\non the realtime stream (`corr`) when the command's outcome is known."
       },
+      "OrientationModeDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::OrientationMode` (ADR-0089 §2.2).",
+        "enum": [
+          "auto",
+          "tag",
+          "pixels"
+        ]
+      },
       "OutputAudioDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of `multiview_config::audio::OutputAudio`.",
@@ -10267,9 +10276,31 @@
                 ],
                 "description": "Latency profile hint."
               },
+              "metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputMetadataDoc",
+                    "description": "Per-output declarative metadata intent (ADR-0088)."
+                  }
+                ]
+              },
               "mount": {
                 "type": "string",
                 "description": "Mount point (e.g. `/multiview`)."
+              },
+              "orientation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputOrientationDoc",
+                    "description": "Per-output presentation orientation (ADR-0089)."
+                  }
+                ]
               }
             }
           },
@@ -10328,6 +10359,28 @@
                 "type": "string",
                 "enum": [
                   "ll_hls"
+                ]
+              },
+              "metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputMetadataDoc",
+                    "description": "Per-output declarative metadata intent (ADR-0088)."
+                  }
+                ]
+              },
+              "orientation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputOrientationDoc",
+                    "description": "Per-output presentation orientation (ADR-0089)."
+                  }
                 ]
               },
               "part_target_ms": {
@@ -10402,6 +10455,28 @@
                   "hls"
                 ]
               },
+              "metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputMetadataDoc",
+                    "description": "Per-output declarative metadata intent (ADR-0088)."
+                  }
+                ]
+              },
+              "orientation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputOrientationDoc",
+                    "description": "Per-output presentation orientation (ADR-0089)."
+                  }
+                ]
+              },
               "path": {
                 "type": "string",
                 "description": "Output path."
@@ -10460,9 +10535,31 @@
                   "ndi"
                 ]
               },
+              "metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputMetadataDoc",
+                    "description": "Per-output declarative metadata intent (ADR-0088)."
+                  }
+                ]
+              },
               "name": {
                 "type": "string",
                 "description": "NDI source name to advertise."
+              },
+              "orientation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputOrientationDoc",
+                    "description": "Per-output presentation orientation (ADR-0089)."
+                  }
+                ]
               }
             }
           },
@@ -10512,6 +10609,28 @@
                 "type": "string",
                 "enum": [
                   "rtmp"
+                ]
+              },
+              "metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputMetadataDoc",
+                    "description": "Per-output declarative metadata intent (ADR-0088)."
+                  }
+                ]
+              },
+              "orientation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputOrientationDoc",
+                    "description": "Per-output presentation orientation (ADR-0089)."
+                  }
                 ]
               },
               "url": {
@@ -10568,6 +10687,28 @@
                   "srt"
                 ]
               },
+              "metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputMetadataDoc",
+                    "description": "Per-output declarative metadata intent (ADR-0088)."
+                  }
+                ]
+              },
+              "orientation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputOrientationDoc",
+                    "description": "Per-output presentation orientation (ADR-0089)."
+                  }
+                ]
+              },
               "url": {
                 "type": "string",
                 "description": "Destination URL."
@@ -10620,6 +10761,28 @@
                 "type": "string",
                 "enum": [
                   "rist"
+                ]
+              },
+              "metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputMetadataDoc",
+                    "description": "Per-output declarative metadata intent (ADR-0088)."
+                  }
+                ]
+              },
+              "orientation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputOrientationDoc",
+                    "description": "Per-output presentation orientation (ADR-0089)."
+                  }
                 ]
               },
               "rist": {
@@ -10694,9 +10857,31 @@
                 "type": "string",
                 "description": "Display name (no mount/path/url to derive one from)."
               },
+              "metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputMetadataDoc",
+                    "description": "Per-output declarative metadata intent (ADR-0088)."
+                  }
+                ]
+              },
               "multicast": {
                 "type": "string",
                 "description": "Multicast `group:port` to send to (`[ff3e::1]:5004`)."
+              },
+              "orientation": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OutputOrientationDoc",
+                    "description": "Per-output presentation orientation (ADR-0089)."
+                  }
+                ]
               },
               "ptime_ms": {
                 "type": [
@@ -10720,6 +10905,89 @@
           }
         ],
         "description": "`OpenAPI` mirror of `multiview_config::Output` (tagged by `kind`) — the body\naccepted by `POST`/`PUT /api/v1/outputs/{id}`."
+      },
+      "OutputFlipDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_config::OutputFlip` (ADR-0089 §2.2). A flip is\npixel-only (no container \"flip\" tag), so it forces the pixels path.",
+        "enum": [
+          "none",
+          "horizontal",
+          "vertical"
+        ]
+      },
+      "OutputMetadataDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::OutputMetadata` (ADR-0088): per-output\ndeclarative metadata intent, projected onto whatever the transport can carry.",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Free-text description / comment (container `comment`, SDT free-text)."
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Primary program language, ISO-639-2 (three lowercase ASCII letters)."
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Service provider (TS SDT `provider_name`). No carrier on most transports."
+          },
+          "service_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "DVB / MPEG-TS service id (program number), `1..=65535`.",
+            "minimum": 0
+          },
+          "timed": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OutputTimedMetadataDoc",
+                "description": "Timed-metadata opt-ins (HLS/TS now-playing/cue side stream)."
+              }
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Service/program title (TS SDT `service_name`, RTMP `onMetaData` title,\ncontainer `title`, SDP `s=`)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "OutputOrientationDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::OutputOrientation` (ADR-0089):\nper-output presentation orientation (quarter-turn + mechanism + flip).",
+        "properties": {
+          "flip": {
+            "$ref": "#/components/schemas/OutputFlipDoc",
+            "description": "Optional flip (forces the pixels path). Defaults to `none`."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/OrientationModeDoc",
+            "description": "The orientation mechanism. Defaults to `auto`."
+          },
+          "turn": {
+            "$ref": "#/components/schemas/QuarterTurnDoc",
+            "description": "The clockwise quarter-turn. Defaults to `none`."
+          }
+        },
+        "additionalProperties": false
       },
       "OutputResourceInputDoc": {
         "type": "object",
@@ -10763,6 +11031,21 @@
             "description": "A human-friendly label for the decode slot, if the driver reports one."
           }
         }
+      },
+      "OutputTimedMetadataDoc": {
+        "type": "object",
+        "description": "`OpenAPI` mirror of `multiview_config::OutputTimedMetadata` (ADR-0088 §4):\nthe HLS/TS now-playing/cue timed-metadata carrier opt-ins.",
+        "properties": {
+          "daterange": {
+            "type": "boolean",
+            "description": "Emit out-of-band `EXT-X-DATERANGE` playlist tags."
+          },
+          "id3": {
+            "type": "boolean",
+            "description": "Emit in-band ID3 metadata frames as MPEG-TS PES."
+          }
+        },
+        "additionalProperties": false
       },
       "OverlayBodyDoc": {
         "type": "object",
@@ -11134,6 +11417,16 @@
         "enum": [
           "real-encoded-output",
           "pre-encode-canvas-approx"
+        ]
+      },
+      "QuarterTurnDoc": {
+        "type": "string",
+        "description": "`OpenAPI` mirror of `multiview_core::layout::QuarterTurn` for the output\norientation turn (`none`/`cw90`/`cw180`/`cw270`).",
+        "enum": [
+          "none",
+          "cw90",
+          "cw180",
+          "cw270"
         ]
       },
       "RaiseTicketRequest": {

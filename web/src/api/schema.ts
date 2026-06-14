@@ -3411,6 +3411,11 @@ export interface components {
          *     on the realtime stream (`corr`) when the command's outcome is known.
          */
         OperationId: string;
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::OrientationMode` (ADR-0089 §2.2).
+         * @enum {string}
+         */
+        OrientationModeDoc: "auto" | "tag" | "pixels";
         /** @description `OpenAPI` mirror of `multiview_config::audio::OutputAudio`. */
         OutputAudioDoc: {
             /** @description `program` (mixed bus) or `tracks` (explicit selection). */
@@ -3438,8 +3443,10 @@ export interface components {
             kind: "rtsp_server";
             /** @description Latency profile hint. */
             latency_profile?: string | null;
+            metadata?: null | components["schemas"]["OutputMetadataDoc"];
             /** @description Mount point (e.g. `/multiview`). */
             mount: string;
+            orientation?: null | components["schemas"]["OutputOrientationDoc"];
         } | {
             audio?: null | components["schemas"]["OutputAudioDoc"];
             /** @description Video codec. */
@@ -3454,6 +3461,8 @@ export interface components {
             id?: string | null;
             /** @enum {string} */
             kind: "ll_hls";
+            metadata?: null | components["schemas"]["OutputMetadataDoc"];
+            orientation?: null | components["schemas"]["OutputOrientationDoc"];
             /**
              * Format: int32
              * @description Target part duration (ms).
@@ -3475,6 +3484,8 @@ export interface components {
             id?: string | null;
             /** @enum {string} */
             kind: "hls";
+            metadata?: null | components["schemas"]["OutputMetadataDoc"];
+            orientation?: null | components["schemas"]["OutputOrientationDoc"];
             /** @description Output path. */
             path: string;
             /**
@@ -3489,8 +3500,10 @@ export interface components {
             id?: string | null;
             /** @enum {string} */
             kind: "ndi";
+            metadata?: null | components["schemas"]["OutputMetadataDoc"];
             /** @description NDI source name to advertise. */
             name: string;
+            orientation?: null | components["schemas"]["OutputOrientationDoc"];
         } | {
             audio?: null | components["schemas"]["OutputAudioDoc"];
             /** @description Video codec. */
@@ -3500,6 +3513,8 @@ export interface components {
             id?: string | null;
             /** @enum {string} */
             kind: "rtmp";
+            metadata?: null | components["schemas"]["OutputMetadataDoc"];
+            orientation?: null | components["schemas"]["OutputOrientationDoc"];
             /** @description Destination URL. */
             url: string;
         } | {
@@ -3511,6 +3526,8 @@ export interface components {
             id?: string | null;
             /** @enum {string} */
             kind: "srt";
+            metadata?: null | components["schemas"]["OutputMetadataDoc"];
+            orientation?: null | components["schemas"]["OutputOrientationDoc"];
             /** @description Destination URL. */
             url: string;
         } | {
@@ -3522,6 +3539,8 @@ export interface components {
             id?: string | null;
             /** @enum {string} */
             kind: "rist";
+            metadata?: null | components["schemas"]["OutputMetadataDoc"];
+            orientation?: null | components["schemas"]["OutputOrientationDoc"];
             rist?: null | components["schemas"]["RistOptionsDoc"];
             /** @description Destination URL (`rist://host:port`). */
             url: string;
@@ -3536,8 +3555,10 @@ export interface components {
             kind: "aes67";
             /** @description Display name (no mount/path/url to derive one from). */
             label: string;
+            metadata?: null | components["schemas"]["OutputMetadataDoc"];
             /** @description Multicast `group:port` to send to (`[ff3e::1]:5004`). */
             multicast: string;
+            orientation?: null | components["schemas"]["OutputOrientationDoc"];
             /**
              * Format: int32
              * @description Packet time in milliseconds (`1` = Class A).
@@ -3548,6 +3569,47 @@ export interface components {
              * @description Optional PTP domain (`0..=127`).
              */
             ptp_domain?: number | null;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::OutputFlip` (ADR-0089 §2.2). A flip is
+         *     pixel-only (no container "flip" tag), so it forces the pixels path.
+         * @enum {string}
+         */
+        OutputFlipDoc: "none" | "horizontal" | "vertical";
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::OutputMetadata` (ADR-0088): per-output
+         *     declarative metadata intent, projected onto whatever the transport can carry.
+         */
+        OutputMetadataDoc: {
+            /** @description Free-text description / comment (container `comment`, SDT free-text). */
+            description?: string | null;
+            /** @description Primary program language, ISO-639-2 (three lowercase ASCII letters). */
+            language?: string | null;
+            /** @description Service provider (TS SDT `provider_name`). No carrier on most transports. */
+            provider?: string | null;
+            /**
+             * Format: int32
+             * @description DVB / MPEG-TS service id (program number), `1..=65535`.
+             */
+            service_id?: number | null;
+            timed?: null | components["schemas"]["OutputTimedMetadataDoc"];
+            /**
+             * @description Service/program title (TS SDT `service_name`, RTMP `onMetaData` title,
+             *     container `title`, SDP `s=`).
+             */
+            title?: string | null;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::OutputOrientation` (ADR-0089):
+         *     per-output presentation orientation (quarter-turn + mechanism + flip).
+         */
+        OutputOrientationDoc: {
+            /** @description Optional flip (forces the pixels path). Defaults to `none`. */
+            flip?: components["schemas"]["OutputFlipDoc"];
+            /** @description The orientation mechanism. Defaults to `auto`. */
+            mode?: components["schemas"]["OrientationModeDoc"];
+            /** @description The clockwise quarter-turn. Defaults to `none`. */
+            turn?: components["schemas"]["QuarterTurnDoc"];
         };
         /** @description The request envelope for `POST`/`PUT /api/v1/outputs/{id}` (`name` + body). */
         OutputResourceInputDoc: {
@@ -3567,6 +3629,16 @@ export interface components {
             kind: string;
             /** @description A human-friendly label for the decode slot, if the driver reports one. */
             label?: string | null;
+        };
+        /**
+         * @description `OpenAPI` mirror of `multiview_config::OutputTimedMetadata` (ADR-0088 §4):
+         *     the HLS/TS now-playing/cue timed-metadata carrier opt-ins.
+         */
+        OutputTimedMetadataDoc: {
+            /** @description Emit out-of-band `EXT-X-DATERANGE` playlist tags. */
+            daterange?: boolean;
+            /** @description Emit in-band ID3 metadata frames as MPEG-TS PES. */
+            id3?: boolean;
         };
         /**
          * @description `OpenAPI` mirror of `multiview_config::Overlay` — the body accepted by
@@ -3771,6 +3843,12 @@ export interface components {
          * @enum {string}
          */
         ProgramFidelity: "real-encoded-output" | "pre-encode-canvas-approx";
+        /**
+         * @description `OpenAPI` mirror of `multiview_core::layout::QuarterTurn` for the output
+         *     orientation turn (`none`/`cw90`/`cw180`/`cw270`).
+         * @enum {string}
+         */
+        QuarterTurnDoc: "none" | "cw90" | "cw180" | "cw270";
         /** @description The `POST /api/v1/support/tickets` request body. */
         RaiseTicketRequest: {
             /**

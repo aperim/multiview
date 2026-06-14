@@ -5409,7 +5409,7 @@ fn output_mux_meta(output: &Output) -> (multiview_output::MuxMetadata, Option<Di
         // it from the format `service_id` key (carried by the TS family only).
         if applied(&plan.service_id) {
             if let Some(id) = meta.service_id {
-                if let Err(e) = mux.push_format("service_id", &id.to_string()) {
+                if let Err(e) = mux.push_format("service_id", id.to_string()) {
                     tracing::warn!(error = %e, "skipping unencodable service_id metadata");
                 }
             }
@@ -5440,6 +5440,36 @@ fn output_mux_meta(output: &Output) -> (multiview_output::MuxMetadata, Option<Di
         }
     });
     (mux, matrix)
+}
+
+/// Build the `RunnableOutput::Hls` for an HLS/LL-HLS output: create the segment
+/// dir, then a rolling-live segment sink (HLS-0/1, ADR-0032) carrying the
+/// OUTMETA per-output metadata + tag-path display matrix. The sink shares the
+/// pipeline epoch cell so each closed segment is PDT-stamped from the same
+/// outbound epoch the control WS publishes (DEV-C1 / ADR-M010).
+fn build_hls_output(
+    output: &Output,
+    path: &str,
+    epoch: &multiview_output::SharedEpoch,
+) -> Result<RunnableOutput, PipelineError> {
+    let (dir, prefix, playlist_path) = hls_paths(Path::new(path));
+    std::fs::create_dir_all(&dir).map_err(|e| PipelineError::Output {
+        kind: "hls",
+        reason: format!("creating {}: {e}", dir.display()),
+    })?;
+    let (meta, matrix) = output_mux_meta(output);
+    Ok(RunnableOutput::Hls {
+        id: output.id(),
+        sink: PacketMuxSink::segment_live(
+            dir,
+            prefix,
+            playlist_path.clone(),
+            HLS_LIVE_WINDOW,
+            epoch.clone(),
+        )
+        .with_output_metadata(meta, matrix),
+        playlist_path,
+    })
 }
 
 /// Build the runnable sinks from the config outputs.
@@ -5485,32 +5515,7 @@ fn build_outputs(
                 }
             }
             Output::Hls { path, .. } | Output::LlHls { path, .. } => {
-                let (dir, prefix, playlist_path) = hls_paths(Path::new(path));
-                std::fs::create_dir_all(&dir).map_err(|e| PipelineError::Output {
-                    kind: "hls",
-                    reason: format!("creating {}: {e}", dir.display()),
-                })?;
-                // Live rolling playlist (HLS-0/1, ADR-0032): the sink publishes the
-                // windowed `.m3u8` on every closed segment and prunes the evicted
-                // `.ts` — so a live (infinite) run keeps `multiview.m3u8` current
-                // and disk bounded, instead of 404ing until a finalize that never
-                // comes. A 6-segment window is the rolling DVR depth.
-                let (meta, matrix) = output_mux_meta(output);
-                runnable.push(RunnableOutput::Hls {
-                    id: output.id(),
-                    // The sink shares the pipeline's epoch cell so each closed
-                    // segment is PDT-stamped from the SAME outbound epoch the
-                    // control WS publishes (DEV-C1 / ADR-M010).
-                    sink: PacketMuxSink::segment_live(
-                        dir,
-                        prefix,
-                        playlist_path.clone(),
-                        HLS_LIVE_WINDOW,
-                        epoch.clone(),
-                    )
-                    .with_output_metadata(meta, matrix),
-                    playlist_path,
-                });
+                runnable.push(build_hls_output(output, path, epoch)?);
             }
             Output::Rtmp { url, .. } => {
                 let (meta, matrix) = output_mux_meta(output);
@@ -6586,7 +6591,10 @@ fn main_demuxer_open_url(url: &str, location: &SourceLocation, tile_h: u32) -> S
 /// family. The guard is a cheap thread-local swap (no allocation on enter/drop),
 /// safe to hold across the whole decode/reconnect region; it never blocks and
 /// never back-pressures the engine (invariant #10).
-#[must_use]
+//
+// No `#[must_use]` here: the returned `ResourceGuard` is itself `#[must_use]`,
+// so the attribute would be redundant (clippy `double_must_use`) — the guard's
+// own marker already warns on an accidentally-dropped scope.
 fn ingest_resource_scope(id: &str) -> multiview_ffmpeg::ResourceGuard {
     multiview_ffmpeg::ResourceGuard::enter(multiview_ffmpeg::ResourceContext::source(id))
 }
