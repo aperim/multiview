@@ -41,7 +41,9 @@ use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
 use multiview_config::ProgramSpec;
 use multiview_core::color::ColorInfo;
 use multiview_core::layout::{Canvas as CoreCanvas, Layout as CoreLayout};
+use multiview_core::pixel::PixelFormat;
 use multiview_core::time::Rational;
+use multiview_core::traits::BackendKind;
 use multiview_engine::clock::ManualTimeSource;
 use multiview_engine::migration::{
     KeepaliveSink, LoadSnapshot, MigrationOutcome, OutputCrosspoint, PlacementCoordinator,
@@ -58,8 +60,6 @@ use multiview_hal::{Capability, Resolution, Stage};
 use multiview_output::fanout::{
     EncodedPacket, PacketKind, PacketSink, RenditionEncoder, RenditionId,
 };
-use multiview_core::traits::BackendKind;
-use multiview_core::pixel::PixelFormat;
 
 // ----------------------------------------------------------------------------
 // Program + load fakes (mirror tests/programset.rs and tests/placement.rs).
@@ -113,7 +113,11 @@ fn spec_with_id(id: &str, num: i64, den: i64) -> ProgramSpec {
     serde_json::from_str(&json).expect("multiview spec deserializes")
 }
 
-fn program_at(spec: &ProgramSpec, cadence: Rational, time: Arc<dyn TimeSource>) -> Program<RealtimePacer> {
+fn program_at(
+    spec: &ProgramSpec,
+    cadence: Rational,
+    time: Arc<dyn TimeSource>,
+) -> Program<RealtimePacer> {
     let clock = OutputClock::new(cadence).unwrap();
     let drive = empty_drive(cadence);
     Program::multiview(spec, clock, drive, time, RealtimePacer).unwrap()
@@ -124,11 +128,20 @@ fn nv(id: &str, index: u32) -> DeviceId {
 }
 
 fn cap(stage: Stage) -> Capability {
-    Capability::new(BackendKind::Cuda, stage, Resolution::UHD4K, vec![PixelFormat::Nv12])
+    Capability::new(
+        BackendKind::Cuda,
+        stage,
+        Resolution::UHD4K,
+        vec![PixelFormat::Nv12],
+    )
 }
 
 fn full_caps() -> StageCaps {
-    StageCaps::new(cap(Stage::Decode), cap(Stage::Composite), cap(Stage::Encode))
+    StageCaps::new(
+        cap(Stage::Decode),
+        cap(Stage::Composite),
+        cap(Stage::Encode),
+    )
 }
 
 fn generous_budget() -> CostBudget {
@@ -264,7 +277,11 @@ fn swap_onto_a_warm_rendition_spawns_zero_new_encodes() {
         crosspoint.tick(t, &spy);
     }
     assert_eq!(spy.count("main.old"), 3, "OLD encodes once per tick");
-    assert_eq!(spy.count("main.new"), 0, "NEW is cold (no sinks) — not encoded");
+    assert_eq!(
+        spy.count("main.new"),
+        0,
+        "NEW is cold (no sinks) — not encoded"
+    );
 
     // WARM: pre-attach the keepalive to NEW so it is warm BEFORE the cut.
     let keepalive = KeepaliveSink::new("keepalive-main.new");
@@ -273,12 +290,21 @@ fn swap_onto_a_warm_rendition_spawns_zero_new_encodes() {
         crosspoint.tick(t, &spy);
     }
     let new_warm_at_swap = spy.count("main.new");
-    assert_eq!(new_warm_at_swap, 3, "NEW is warm (keepalive sink) — encoding once/tick");
+    assert_eq!(
+        new_warm_at_swap, 3,
+        "NEW is warm (keepalive sink) — encoding once/tick"
+    );
 
     // SWAP: move the real consumer OLD->NEW, THEN drop the keepalive (ordering).
-    assert!(crosspoint.move_sink("rtsp-1", &old, new.clone()), "the consumer moved");
+    assert!(
+        crosspoint.move_sink("rtsp-1", &old, new.clone()),
+        "the consumer moved"
+    );
     // Drop keepalive only AFTER the real consumer is on NEW.
-    assert!(crosspoint.deregister(&new, keepalive.sink_id()), "keepalive dropped post-move");
+    assert!(
+        crosspoint.deregister(&new, keepalive.sink_id()),
+        "keepalive dropped post-move"
+    );
 
     // The SWAP tick: NEW encodes exactly ONCE more (it was already warm — the
     // move spawned zero NEW encodes at the critical instant; the +1 is its
@@ -293,9 +319,16 @@ fn swap_onto_a_warm_rendition_spawns_zero_new_encodes() {
     // OLD has no sinks after the move -> not encoded post-SWAP.
     let old_before = spy.count("main.old");
     crosspoint.tick(7, &spy);
-    assert_eq!(spy.count("main.old"), old_before, "OLD is cold post-SWAP (no sinks)");
+    assert_eq!(
+        spy.count("main.old"),
+        old_before,
+        "OLD is cold post-SWAP (no sinks)"
+    );
     // The consumer kept receiving across the cut (identity preserved).
-    assert!(consumer.delivered.load(Ordering::Acquire) > 0, "consumer fed across the cut");
+    assert!(
+        consumer.delivered.load(Ordering::Acquire) > 0,
+        "consumer fed across the cut"
+    );
 }
 
 #[test]
@@ -313,7 +346,11 @@ fn dropping_keepalive_before_the_move_would_make_new_cold_so_ordering_holds() {
     assert_eq!(spy.count("main.new"), 1, "warm while keepalive attached");
     crosspoint.deregister(&new, keepalive.sink_id());
     crosspoint.tick(1, &spy);
-    assert_eq!(spy.count("main.new"), 1, "cold after keepalive dropped with no real sink");
+    assert_eq!(
+        spy.count("main.new"),
+        1,
+        "cold after keepalive dropped with no real sink"
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -358,7 +395,10 @@ async fn mbb_migration_completes_with_no_output_gap() {
     crosspoint.attach_keepalive(new_rendition.clone(), keepalive.clone());
     let started = Instant::now();
     while programs.ticks_emitted("main.migrating").unwrap_or(0) < 5 {
-        assert!(started.elapsed() < Duration::from_secs(30), "NEW never warmed");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "NEW never warmed"
+        );
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     // OLD kept ticking through NEW's spin-up + warm (no gap).
@@ -382,7 +422,10 @@ async fn mbb_migration_completes_with_no_output_gap() {
     // new clock).
     let started = Instant::now();
     while programs.ticks_emitted("main.migrating").unwrap() < new_at_swap + 10 {
-        assert!(started.elapsed() < Duration::from_secs(30), "NEW stalled after SWAP");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "NEW stalled after SWAP"
+        );
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 
@@ -432,7 +475,10 @@ fn validate_admits_a_target_with_headroom() {
         test_config().select_policy,
         &plan,
     );
-    assert!(outcome.is_ok(), "an idle target with headroom is admitted: {outcome:?}");
+    assert!(
+        outcome.is_ok(),
+        "an idle target with headroom is admitted: {outcome:?}"
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -501,7 +547,10 @@ async fn tearing_down_a_wedged_new_program_is_bounded() {
     // deadline the frozen source never reaches — wedged, cannot observe stop.
     let started = Instant::now();
     while ticks.load(Ordering::Acquire) < 1 {
-        assert!(started.elapsed() < Duration::from_secs(30), "NEW never paced tick 0");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "NEW never paced tick 0"
+        );
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 

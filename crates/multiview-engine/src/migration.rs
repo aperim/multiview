@@ -48,7 +48,9 @@ use multiview_hal::load::{DeviceId, DeviceLoad};
 use multiview_hal::select::{
     select_device, GpuCandidate, Pins, PipelineDemand, PlacementPolicy, RejectReason,
 };
-use multiview_output::fanout::{EncodedPacket, PacketRouter, PacketSink, RenditionEncoder, RenditionId};
+use multiview_output::fanout::{
+    EncodedPacket, PacketRouter, PacketSink, RenditionEncoder, RenditionId,
+};
 use multiview_telemetry::{PlacementCounters, SuppressReason};
 
 use crate::placement::{MigrationPlan, PlacementController, PlacementProposal, ShedReason};
