@@ -492,7 +492,7 @@ impl WhepServeEndpoint {
                                 // Late joiner before its first IDR: skip delta AUs.
                                 continue;
                             }
-                            let _ = v.session.write_video_sample_at(
+                            let _ = v.session.write_video_sample(
                                 &sample.data,
                                 sample.keyframe,
                                 sample.rtp_timestamp,
@@ -500,7 +500,7 @@ impl WhepServeEndpoint {
                             );
                         }
                         EgressMedia::Audio => {
-                            let _ = v.session.write_audio_sample_at(
+                            let _ = v.session.write_audio_sample(
                                 &sample.data,
                                 sample.rtp_timestamp,
                                 now,
