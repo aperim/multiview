@@ -6722,6 +6722,54 @@ fn connect_ndi_receiver(
     Err(status)
 }
 
+#[cfg(all(test, feature = "ndi"))]
+mod ndi_license_gate_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use multiview_input::ndi::license::LicenseAcceptance;
+    use multiview_input::ndi::NdiLoadStatus;
+
+    fn complete_audit() -> LicenseAcceptance {
+        LicenseAcceptance {
+            accepted_by: "ops".to_owned(),
+            accepted_at: "2026-06-06T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn connect_refuses_unlicensed_before_probing_the_runtime() {
+        // accept_license = false: the gate refuses with the distinct `ndi_unlicensed`
+        // status BEFORE the runtime is probed — never RuntimeNotFound, never a panic.
+        // (ADR-0008 §7.5: the license axis is checked first and is its own status.)
+        // `match` (not `expect_err`): the Ok arm carries a `Box<dyn NdiReceiver>`,
+        // which is not `Debug`.
+        match connect_ndi_receiver("STUDIO (CAM 1)", false, complete_audit()) {
+            Ok(_) => panic!("an unaccepted NDI source must be refused"),
+            Err(status) => assert_eq!(
+                status,
+                NdiLoadStatus::Unlicensed,
+                "unaccepted must surface ndi_unlicensed, distinct from the runtime axis"
+            ),
+        }
+    }
+
+    #[test]
+    fn connect_passes_the_license_gate_when_accepted() {
+        // accept_license = true + complete audit: the license gate passes, so the
+        // result is NEVER the Unlicensed refusal. The live receiver binding is the
+        // deferred half, so this still reports the runtime probe status on a host
+        // with no runtime — but never the license refusal.
+        match connect_ndi_receiver("STUDIO (CAM 1)", true, complete_audit()) {
+            Ok(_) => { /* a live receiver bound (SDK box): the gate passed */ }
+            Err(status) => assert_ne!(
+                status,
+                NdiLoadStatus::Unlicensed,
+                "an accepted + audited source must pass the license gate"
+            ),
+        }
+    }
+}
+
 /// Drive a WHIP ingest source (ADR-T014): wait for a publisher, decode its
 /// depacketized H.264/Opus into the last-good store, ride `NO_SIGNAL` between
 /// publishers.
