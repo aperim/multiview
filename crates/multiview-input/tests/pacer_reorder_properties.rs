@@ -73,15 +73,17 @@ fn slot_pts_ns(store: &TileStore<StoredFrame>) -> Option<i64> {
 /// distinct published instants (publish order). Bounded-iteration: a hung pump
 /// would blow the cap and fail the test rather than hang CI.
 fn drive_to_eos(producer: &mut ScriptedRtp, pump: &mut IngestPump) -> Vec<i64> {
+    const TICK_NS: i64 = 1_000_000; // 1 ms — finer than the 40 ms release spacing
     let store: TileStore<StoredFrame> = TileStore::with_defaults("prop");
     let mut now = 0_i64;
     let mut published: Vec<i64> = Vec::new();
     let mut last: Option<i64> = None;
-    // Generous cap: at most a few iterations per input frame; far below a hang.
+    // Generous cap: a few iterations per ms of timeline; a hang blows it and
+    // fails rather than wedging CI.
     let mut guard = 0_u64;
     loop {
         guard += 1;
-        assert!(guard < 100_000, "paced pump must terminate, not hang");
+        assert!(guard < 10_000_000, "paced pump must terminate, not hang");
         let step = pump
             .pump_one_paced(producer, &store, now)
             .expect("paced pump must not fault");
@@ -91,11 +93,12 @@ fn drive_to_eos(producer: &mut ScriptedRtp, pump: &mut IngestPump) -> Vec<i64> {
                 last = Some(p);
             }
         }
-        match step {
-            PaceStep::Eos => break,
-            PaceStep::WakeAt(deadline) => now = now.max(deadline),
-            PaceStep::Pending => now = now.saturating_add(1_000_000),
+        if step == PaceStep::Eos {
+            break;
         }
+        // Fine-step so each paced release is observed individually at the single
+        // freshest-wins slot.
+        now = now.saturating_add(TICK_NS);
     }
     published
 }
@@ -139,8 +142,9 @@ proptest! {
         let step = 3_600_i64;
         // Build an in-order sequence that starts just before the wrap and crosses
         // it, so consecutive raw ticks roll 2^32 -> 0.
-        let first = modulus - (start_offset + (n as i64)) * step;
-        let raws: Vec<i64> = (0..n as i64)
+        let n_i64 = i64::try_from(n).unwrap();
+        let first = modulus - (start_offset + n_i64) * step;
+        let raws: Vec<i64> = (0..n_i64)
             .map(|k| (first + k * step).rem_euclid(modulus))
             .collect();
         let mut producer = ScriptedRtp::new(raws);

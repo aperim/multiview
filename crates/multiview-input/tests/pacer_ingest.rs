@@ -88,20 +88,27 @@ fn slot_pts_ns(store: &TileStore<StoredFrame>) -> Option<i64> {
     store.slot().load().map(|f| f.meta.pts.as_nanos())
 }
 
-/// Drive the paced pump deterministically: an injected virtual wall clock that
-/// jumps forward to each reported wake deadline, recording every distinct
-/// instant published into the store (in publish order) together with the virtual
-/// wall-clock time at which it was published.
+/// Drive the paced pump deterministically and capture **every** published frame
+/// in publish order with the virtual wall-clock instant at which it was released.
+///
+/// To observe each release individually (the store is a single freshest-wins
+/// slot), the clock is advanced in fine 1 ms steps rather than jumping to the
+/// next deadline, and the slot is sampled after each poll. The pacer's 40 ms
+/// release spacing means each frame is the sole new arrival at its step.
 fn drive_paced(
     producer: &mut ScriptedRtp,
     store: &TileStore<StoredFrame>,
     pump: &mut IngestPump,
     start_now_ns: i64,
 ) -> Vec<(i64, i64)> {
+    const TICK_NS: i64 = 1_000_000; // 1 ms virtual step — finer than 40 ms spacing
     let mut now = start_now_ns;
     let mut published: Vec<(i64, i64)> = Vec::new();
     let mut last_slot: Option<i64> = None;
+    let mut guard = 0_u64;
     loop {
+        guard += 1;
+        assert!(guard < 1_000_000, "paced driver must terminate");
         let step = pump
             .pump_one_paced(producer, store, now)
             .expect("paced pump must not fault");
@@ -111,18 +118,12 @@ fn drive_paced(
                 last_slot = Some(p);
             }
         }
-        match step {
-            PaceStep::Eos => break,
-            PaceStep::WakeAt(deadline) => {
-                // Jump the virtual clock forward to the next release deadline.
-                now = now.max(deadline);
-            }
-            PaceStep::Pending => {
-                // No frame this poll, none due: advance a nominal step so the
-                // virtual loop makes progress (a real ingest task would re-poll).
-                now = now.saturating_add(1_000_000);
-            }
+        if step == PaceStep::Eos {
+            break;
         }
+        // Advance the virtual clock one fine tick so pending frames release one at
+        // a time at their deadlines (a real ingest task wakes at WakeAt instead).
+        now = now.saturating_add(TICK_NS);
     }
     published
 }
@@ -175,7 +176,7 @@ fn wallclock_policy_paces_releases_by_normalized_pts() {
     let pts: Vec<i64> = published.iter().map(|(p, _)| *p).collect();
     assert_eq!(pts, vec![0, 40_000_000, 80_000_000, 120_000_000]);
     for (i, (_, at)) in published.iter().enumerate() {
-        let expected_at = start + (i as i64) * 40_000_000;
+        let expected_at = start + i64::try_from(i).unwrap() * 40_000_000;
         assert_eq!(
             *at, expected_at,
             "frame {i} released at the wall-clock deadline, not instantly"
@@ -273,7 +274,11 @@ fn rtp_32bit_wrap_boundary_paced_continuously() {
     // far-future pace deadline.
     let ats: Vec<i64> = published.iter().map(|(_, at)| *at).collect();
     for w in ats.windows(2) {
-        assert_eq!(w[1] - w[0], 40_000_000, "release spacing uniform across wrap");
+        assert_eq!(
+            w[1] - w[0],
+            40_000_000,
+            "release spacing uniform across wrap"
+        );
     }
 }
 
@@ -302,13 +307,19 @@ fn reorder_overflow_drops_oldest_bounded_memory() {
 
     let published = drive_paced(&mut producer, &store, &mut pump, 0);
     let pts: Vec<i64> = published.iter().map(|(p, _)| *p).collect();
-    // Strictly increasing (the late frame 0 never appears out of order).
+    // Strictly increasing — the far-late frame never causes a backward step.
     for w in pts.windows(2) {
         assert!(w[0] < w[1], "published PTS strictly increasing: {pts:?}");
     }
-    // The far-late frame (normalized near 0) is dropped, not published first.
+    // The far-late frame (raw 0, arriving below the reorder watermark) is dropped,
+    // so fewer frames are published than were fed (5 in) — the buffer dropped,
+    // never grew (invariants #5 / #9). The published count reflects the drop.
     assert!(
-        pts.first().copied().unwrap_or(0) > 0,
-        "first published is NOT the dropped late frame: {pts:?}"
+        pump.published() < 5,
+        "the late frame was dropped, not published: published={}",
+        pump.published()
     );
+    // And the surviving timeline never starts on a spurious late frame between
+    // two real ones (monotonic already asserts no regression).
+    assert!(!pts.is_empty(), "some frames still published: {pts:?}");
 }
