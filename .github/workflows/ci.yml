@@ -240,11 +240,10 @@ jobs:
           # is itself pure-Rust — it links NO ffmpeg — but its lint coverage rides
           # the same ffmpeg-equipped leg as the cli for one cohesive webrtc gate.)
           # Guarding the ffmpeg-linked cli surface needs the pinned FFmpeg base
-          # image (ghcr.io/aperim/multiview-ffmpeg:8.1.1-lgpl, libavcodec .so.62);
-          # that base-image-backed webrtc-link leg lives on its own branch/PR
-          # (`ci/webrtc-ffmpeg-base-leg`) so it can iterate to green without
-          # blocking these lint fixes. The crate leg below already guards the
-          # pure-str0m Session/egress API surface that broke.
+          # image (ghcr.io/aperim/multiview-ffmpeg:8.1.1-lgpl, libavcodec .so.62) —
+          # that is the dedicated `feature-clippy-ffmpeg-webrtc` job below. The
+          # crate leg here already guards the pure-str0m Session/egress API
+          # surface that broke.
           - crate: multiview-webrtc
             feature: native
     steps:
@@ -277,6 +276,127 @@ jobs:
           cargo test
           -p ${{ matrix.crate }}
           --features ${{ matrix.feature }}
+
+  # ── ffmpeg-linked webrtc-native clippy (closes the #154 follow-up gap) ───────
+  # The `feature-clippy` matrix above runs on a libav-FREE runner, so it cannot
+  # clippy the targets whose feature pulls ffmpeg. `multiview-cli`'s
+  # `webrtc-native` feature implies the cli `ffmpeg` feature (WHIP ingest decode
+  # + WHEP encode ride the libav path), and `multiview-preview`'s `webrtc` seam
+  # is the paired preview surface — neither is covered by the default `lint`
+  # clippy (default features only) NOR by the libav-free `feature-clippy` matrix.
+  # That is exactly the gap that let the wave-1 webrtc-native break (ADR-0049 /
+  # ADR-0060 cli wiring: a `too_many_lines` + a `double_must_use`) reach main
+  # silently: a `cargo build` never runs those clippy lints, and no clippy leg
+  # built these features.
+  #
+  # This leg clippies them against the SAME pinned FFmpeg the deploy images link:
+  # ghcr.io/aperim/multiview-ffmpeg:8.1.1-lgpl (libavcodec .so.62 — the soname
+  # `ffmpeg-sys-next 8.1.0` binds, NOT ubuntu apt's 6.x/so.60, which would
+  # generate the WRONG bindings). That base image is `FROM scratch` (it ships
+  # ONLY /opt/multiview-ffmpeg — no shell/apt, so it cannot be a job `container:`),
+  # so we pull it and `docker cp` /opt/multiview-ffmpeg out onto the runner, then
+  # point pkg-config + the loader at it — the identical mechanism deploy/Dockerfile
+  # uses (`COPY --from=ffmpeg /opt/multiview-ffmpeg` + PKG_CONFIG_PATH, ADR-0031).
+  feature-clippy-ffmpeg-webrtc:
+    name: ffmpeg-linked webrtc clippy
+    runs-on: ubuntu-latest
+    # Pull the base image + a per-feature-scoped clippy build (str0m + aws-lc-rs
+    # + ffmpeg-sys bindgen from cold). A cold cargo cache pushes this into the
+    # several-minute range; 30min is generous headroom while capping a wedge.
+    timeout-minutes: 30
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
+    permissions:
+      contents: read
+      # docker pull from GHCR needs a token to read the (private) base package.
+      packages: read
+    env:
+      # The pinned, LGPL-clean FFmpeg 8.1.1 base (libavcodec .so.62) — the same
+      # image the docker app build COPYs /opt/multiview-ffmpeg from (ADR-0031 §5).
+      FFMPEG_IMAGE: ghcr.io/aperim/multiview-ffmpeg:8.1.1-lgpl
+      # Where we extract /opt/multiview-ffmpeg to on the runner. pkg-config + the
+      # dynamic loader are pointed here so ffmpeg-sys-next's build.rs discovers
+      # FFmpeg 8.1.1 (detects ffmpeg_8_1 → libavcodec 62) and the link finds .so.62.
+      FFMPEG_PREFIX: /opt/multiview-ffmpeg
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct cache key — this leg's graph (ffmpeg-sys + str0m + aws-lc-rs)
+          # differs from every libav-free `feature-clippy` leg.
+          key: feature-clippy-ffmpeg-webrtc
+      - name: Log in to GHCR
+        # The base image package is read via the workflow token (packages: read).
+        uses: docker/login-action@v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install bindgen toolchain
+        # ffmpeg-sys-next's build.rs runs bindgen (needs clang/libclang) and the
+        # libav build wants nasm present; pkg-config locates our prefix's .pc.
+        # Installed BEFORE the extract step so the modversion assertion below has
+        # a guaranteed pkg-config (the ubuntu image ships one, but don't rely on it).
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libclang-dev nasm
+      - name: Extract pinned FFmpeg 8.1.1 from the base image
+        # The base is `FROM scratch` (only /opt/multiview-ffmpeg), so we create a
+        # (never-run) container from it and `docker cp` the prefix out — the same
+        # libav* tree deploy/Dockerfile pulls via `COPY --from=ffmpeg`.
+        run: |
+          set -euo pipefail
+          docker pull "${FFMPEG_IMAGE}"
+          # `docker create` on a `FROM scratch` image with no CMD/ENTRYPOINT fails
+          # with "no command specified"; pass a dummy argv so the create succeeds.
+          # It is NEVER executed — `docker cp` only reads the container's rootfs,
+          # which already holds /opt/multiview-ffmpeg from the image layer.
+          cid="$(docker create "${FFMPEG_IMAGE}" /nonexistent)"
+          sudo mkdir -p "$(dirname "${FFMPEG_PREFIX}")"
+          # Copy the whole prefix ({lib,include,lib/pkgconfig}) to its canonical
+          # location so the .pc files' absolute prefix= paths resolve unchanged.
+          sudo docker cp "${cid}:${FFMPEG_PREFIX}" "${FFMPEG_PREFIX}"
+          docker rm "${cid}" >/dev/null
+          # Sanity: the extracted prefix must actually carry the .pc + the .so.
+          test -f "${FFMPEG_PREFIX}/lib/pkgconfig/libavcodec.pc" \
+            || { echo "::error::libavcodec.pc missing under ${FFMPEG_PREFIX}"; exit 1; }
+          # Assert we got the soname the binding targets (FFmpeg 8.1.x →
+          # libavcodec 62.x). A wrong major here would compile the wrong cfg and
+          # link the wrong .so — fail loudly rather than silently mis-bind.
+          MODVER="$(PKG_CONFIG_PATH="${FFMPEG_PREFIX}/lib/pkgconfig" pkg-config --modversion libavcodec)"
+          echo "libavcodec modversion: ${MODVER}"
+          case "${MODVER}" in
+            62.*) echo "FFmpeg 8.1.x confirmed (libavcodec ${MODVER})." ;;
+            *) echo "::error::Expected libavcodec 62.x (FFmpeg 8.1.x), got ${MODVER}"; exit 1 ;;
+          esac
+          # Export the discovery env for the clippy steps (build.rs probes these).
+          {
+            echo "PKG_CONFIG_PATH=${FFMPEG_PREFIX}/lib/pkgconfig"
+            echo "LD_LIBRARY_PATH=${FFMPEG_PREFIX}/lib"
+          } >> "$GITHUB_ENV"
+      - name: clippy multiview-cli --features webrtc-native
+        # The ffmpeg-linked target the libav-free matrix cannot build. -D warnings
+        # matches the default `lint` gate; --all-targets also lints test binaries.
+        run: >
+          cargo clippy
+          -p multiview-cli
+          --features webrtc-native
+          --all-targets
+          -- -D warnings
+      - name: clippy multiview-preview --features webrtc
+        # The paired preview WHEP seam. Built here alongside the cli target so the
+        # whole webrtc-native surface is clippy-gated in one ffmpeg-equipped leg.
+        run: >
+          cargo clippy
+          -p multiview-preview
+          --features webrtc
+          --all-targets
+          -- -D warnings
 
   # ── AsyncAPI 3.0 spec validation (SUR-6b follow-on, folded into IN-7) ────────
   # Validates docs/api/asyncapi.json against the AsyncAPI 3.0 JSON Schema using
