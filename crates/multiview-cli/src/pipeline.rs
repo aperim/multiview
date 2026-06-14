@@ -846,6 +846,9 @@ mod encoder_format_tests {
 enum RunnableOutput {
     /// A single container file (container inferred from the path extension).
     File {
+        /// The output's stable config id, for the ADR-0060 `output` resource
+        /// scope so this sink's libav mux lines name the output.
+        id: String,
         /// The packet-fed file muxer.
         sink: PacketMuxSink,
         /// Where the container is written (for the run report).
@@ -857,6 +860,9 @@ enum RunnableOutput {
     /// infinite live run writes (and bounds) the playlist + segment set instead of
     /// rendering once at a finalize that never arrives.
     Hls {
+        /// The output's stable config id, for the ADR-0060 `output` resource
+        /// scope so this sink's libav segment/mux lines name the output.
+        id: String,
         /// The packet-fed GOP-segment muxer (live flavour).
         sink: PacketMuxSink,
         /// Where the `.m3u8` playlist is published (owned + written by the live
@@ -869,6 +875,9 @@ enum RunnableOutput {
     /// network URL. A push whose peer is unreachable is reported and dropped,
     /// never allowed to fail the program (invariants #1/#10).
     Push {
+        /// The output's stable config id, for the ADR-0060 `output` resource
+        /// scope so this push's libav mux/transport lines name the output.
+        id: String,
         /// The packet-fed push muxer.
         sink: PacketMuxSink,
         /// A short transport label (`rtmp`/`srt`) for the run report + logs.
@@ -887,11 +896,28 @@ enum RunnableOutput {
     /// `webrtc-native`.
     #[cfg(feature = "webrtc-native")]
     WebRtc {
+        /// The output's stable config id, for the ADR-0060 `output` resource
+        /// scope (this mux-free sink emits no libav lines, but our own logs on
+        /// its runner thread are still attributed to the output).
+        id: String,
         /// The bounded drop-oldest egress sink the program AUs are pushed onto.
         sink: multiview_webrtc::egress::EgressSink,
         /// A short label (`webrtc`/`whip_push`) + the output id for the report.
         label: String,
     },
+}
+
+impl RunnableOutput {
+    /// The output's stable config id, for the ADR-0060 `output` resource scope
+    /// [`run_one_output`] enters so this sink's logs (ours and libav's mux
+    /// lines) name the output.
+    fn id(&self) -> &str {
+        match self {
+            Self::File { id, .. } | Self::Hls { id, .. } | Self::Push { id, .. } => id,
+            #[cfg(feature = "webrtc-native")]
+            Self::WebRtc { id, .. } => id,
+        }
+    }
 }
 
 /// A built, ready-to-run pipeline.
@@ -3643,8 +3669,21 @@ fn run_one_output(
     time_base: Rational,
     audio: Option<&(StreamCodecParameters, Rational)>,
 ) -> Result<SinkRunOutcome, PipelineError> {
+    // ADR-0060: run this sink's mux region inside an `output` resource scope so
+    // our own logs (via the span) AND libav's synchronous mux/transport lines
+    // (via the thread-local ResourceContext the bridge resolves) name this output
+    // by its stable config id. Both clear on return (scoped, never stale).
+    let _span = tracing::info_span!(
+        "output",
+        resource_kind = "output",
+        resource_id = %output.id(),
+    )
+    .entered();
+    let _resource = multiview_ffmpeg::ResourceGuard::enter(
+        multiview_ffmpeg::ResourceContext::output(output.id()),
+    );
     match output {
-        RunnableOutput::File { sink, path } => {
+        RunnableOutput::File { id: _, sink, path } => {
             let mut source = StreamingPacketSource::new(rx);
             let audio_mux = audio.map(|(p, tb)| multiview_output::MuxStream::new(p, *tb));
             let outcome = sink
@@ -3671,6 +3710,7 @@ fn run_one_output(
             })
         }
         RunnableOutput::Hls {
+            id: _,
             sink,
             playlist_path,
         } => {
@@ -3718,11 +3758,16 @@ fn run_one_output(
                 }),
             }
         }
-        RunnableOutput::Push { sink, label, url } => Ok(run_push_output(
+        RunnableOutput::Push {
+            id: _,
+            sink,
+            label,
+            url,
+        } => Ok(run_push_output(
             &sink, label, &url, rx, params, time_base, audio,
         )),
         #[cfg(feature = "webrtc-native")]
-        RunnableOutput::WebRtc { sink, label } => {
+        RunnableOutput::WebRtc { id: _, sink, label } => {
             Ok(run_webrtc_output(&sink, &label, rx, time_base))
         }
     }
@@ -5346,6 +5391,7 @@ fn build_outputs(
                 // and disk bounded, instead of 404ing until a finalize that never
                 // comes. A 6-segment window is the rolling DVR depth.
                 runnable.push(RunnableOutput::Hls {
+                    id: output.id(),
                     // The sink shares the pipeline's epoch cell so each closed
                     // segment is PDT-stamped from the SAME outbound epoch the
                     // control WS publishes (DEV-C1 / ADR-M010).
@@ -5361,6 +5407,7 @@ fn build_outputs(
             }
             Output::Rtmp { url, .. } => {
                 runnable.push(RunnableOutput::Push {
+                    id: output.id(),
                     sink: PacketMuxSink::push(PushProtocol::Rtmp, url.clone()),
                     label: "rtmp",
                     url: url.clone(),
@@ -5368,6 +5415,7 @@ fn build_outputs(
             }
             Output::Srt { url, .. } => {
                 runnable.push(RunnableOutput::Push {
+                    id: output.id(),
                     sink: PacketMuxSink::push(PushProtocol::Srt, url.clone()),
                     label: "srt",
                     url: url.clone(),
@@ -5406,6 +5454,7 @@ fn build_outputs(
                         _ => format!("webrtc {id}"),
                     };
                     runnable.push(RunnableOutput::WebRtc {
+                        id: id.clone(),
                         sink: sink.clone(),
                         label,
                     });
@@ -5473,6 +5522,10 @@ fn maybe_prepend_program_ts(mut runnable: Vec<RunnableOutput>, live: bool) -> Ve
         runnable.insert(
             0,
             RunnableOutput::File {
+                // The self-contained anchor is synthetic (derived from the first
+                // HLS output, not a config output), so it carries a synthetic
+                // resource id for the ADR-0060 output scope.
+                id: "program.ts".to_owned(),
                 sink: PacketMuxSink::file(path.clone()),
                 path,
             },
@@ -6412,7 +6465,34 @@ fn main_demuxer_open_url(url: &str, location: &SourceLocation, tile_h: u32) -> S
 /// its last-good frame meanwhile (invariant #2). The loop only ever *writes* the
 /// lock-free store, so it can neither pace nor stall the output clock
 /// (invariant #1) nor back-pressure the engine (invariant #10).
+/// Enter the per-source **resource scope** for the current decode thread
+/// (ADR-0060 §3.1, mechanism A): a thread-local [`ResourceContext`] tagged with
+/// the source's stable config id, set for the lifetime of the returned RAII
+/// [`ResourceGuard`] and cleared on its drop. Every libav line emitted
+/// synchronously on this thread while the guard is live (the HLS open, a decode
+/// error, an AVIO statistic) is attributed to this source by the libav→`tracing`
+/// bridge — so the operator sees *which* tile is flapping, not just the codec
+/// family. The guard is a cheap thread-local swap (no allocation on enter/drop),
+/// safe to hold across the whole decode/reconnect region; it never blocks and
+/// never back-pressures the engine (invariant #10).
+#[must_use]
+fn ingest_resource_scope(id: &str) -> multiview_ffmpeg::ResourceGuard {
+    multiview_ffmpeg::ResourceGuard::enter(multiview_ffmpeg::ResourceContext::source(id))
+}
+
 fn ingest_loop(plan: &IngestPlan, stop: &AtomicBool) {
+    // ADR-0060: run this source's whole decode/reconnect region inside a resource
+    // scope so our own logs (via the `source` span) AND libav's synchronous lines
+    // (via the thread-local ResourceContext the bridge resolves) name this source
+    // by its stable config id. The span is entered for the thread's lifetime; the
+    // guard sets the thread-local the libav bridge reads. Both clear on return.
+    let _span = tracing::info_span!(
+        "source",
+        resource_kind = "source",
+        resource_id = %plan.id,
+    )
+    .entered();
+    let _resource = ingest_resource_scope(&plan.id);
     // Synthetic sources (bars/solid/clock) render in-process — no decode, no
     // reconnect; the generator publishes into the store at cadence until `stop`.
     if let SourceLocation::Synthetic(kind) = &plan.location {
@@ -9328,6 +9408,43 @@ mod live_overlay_bake_tests {
         assert!(
             region_diff(&blank, &third, FACE) > 50,
             "a new generation must re-derive (the face returns)"
+        );
+    }
+}
+
+/// ADR-0060: every per-source decode thread must run inside a resource scope so
+/// libav lines emitted synchronously on that thread (HLS opens, decode errors)
+/// are attributed to the source's stable config id via the thread-local
+/// [`ResourceContext`] (mechanism A) — not left context-free. The scope is the
+/// [`ResourceGuard`] [`ingest_resource_scope`] enters at the top of
+/// [`ingest_loop`]; this proves the guard sets the right id while live and
+/// clears it on drop (scoped, never stale — a line after the thread releases the
+/// source must not inherit it).
+#[cfg(test)]
+mod obs_resource_scope_tests {
+    use multiview_ffmpeg::current_resource;
+
+    use super::ingest_resource_scope;
+
+    /// While the guard is alive, the thread's current resource is the source's
+    /// config id with kind `source`; after it drops, the thread is unattributed
+    /// again (so an unrelated later line falls through to weaker attribution
+    /// rather than inheriting a stale id, ADR-0060 §3.1).
+    #[test]
+    fn ingest_scope_attributes_then_clears_the_source_id() {
+        assert!(
+            current_resource().is_none(),
+            "no resource is owned before entering the scope"
+        );
+        {
+            let _scope = ingest_resource_scope("cnn");
+            let ctx = current_resource().expect("the guard sets a resource while live");
+            assert_eq!(ctx.id(), "cnn", "scoped to the source's stable config id");
+            assert_eq!(ctx.kind(), "source", "attributed as a source resource");
+        }
+        assert!(
+            current_resource().is_none(),
+            "the guard clears the resource on drop (scoped, never stale)"
         );
     }
 }

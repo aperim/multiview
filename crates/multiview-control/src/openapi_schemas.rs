@@ -1925,3 +1925,80 @@ pub struct MeshPeerDoc {
     /// confirm-adopt, never by observation (untrusted inventory).
     pub relaying_for_us: bool,
 }
+
+/// `OpenAPI` mirror of [`multiview_telemetry::LogLevel`] (ADR-0060): the five
+/// `tracing` severities. Serde-equivalent: a unit enum rendered lowercase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevelDoc {
+    /// `tracing::Level::TRACE`.
+    Trace,
+    /// `tracing::Level::DEBUG`.
+    Debug,
+    /// `tracing::Level::INFO`.
+    Info,
+    /// `tracing::Level::WARN`.
+    Warn,
+    /// `tracing::Level::ERROR`.
+    Error,
+}
+
+/// `OpenAPI` mirror of [`multiview_telemetry::LogResourceKind`] (ADR-0060 §2.2):
+/// the resource a log record is attributed to. Serde-equivalent: a unit enum
+/// rendered `snake_case`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LogResourceKindDoc {
+    /// An ingest source (`Source.id`).
+    Source,
+    /// An output sink (`Output.id`).
+    Output,
+    /// A layout / hot-reconfig operation (`Layout.id`).
+    Layout,
+    /// The protected output core's own rare program-level events.
+    Program,
+    /// A managed device (`Device.id`).
+    Device,
+}
+
+/// `OpenAPI` mirror of [`multiview_telemetry::LogRecord`] — one structured
+/// record in the `GET /api/v1/logs` tail (ADR-0060 §2.3).
+///
+/// Serde-equivalent field-for-field to the real record: the optional resource
+/// attribution (`run_id` / `resource_kind` / `resource_id` / `label`), the libav
+/// `component` / `repeated`, and the always-present `seq` / `timestamp_ms` /
+/// `level` / `target` / `message`. Optionals are omitted when absent — an
+/// unattributed line carries no `resource_id` (honesty over a wrong id, §3.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LogRecordDoc {
+    /// Monotonic capture sequence number (the cursor for the `since` filter).
+    pub seq: u64,
+    /// Wall-clock capture time, milliseconds since the Unix epoch.
+    pub timestamp_ms: u64,
+    /// The record's severity.
+    pub level: LogLevelDoc,
+    /// The `tracing` target (e.g. `libav`, `multiview_engine`).
+    pub target: String,
+    /// The rendered event message.
+    pub message: String,
+    /// The process run id, when configured.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub run_id: Option<String>,
+    /// The resource kind this record is attributed to, if any.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub resource_kind: Option<LogResourceKindDoc>,
+    /// The stable config resource id this record is attributed to, if any.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub resource_id: Option<String>,
+    /// The resource's human label, if the span carried one.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub label: Option<String>,
+    /// The libav component class (`hevc`, `hls`), for bridge records.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub component: Option<String>,
+    /// The coalesced suppressed-repeat count, when a bridge record flushes a
+    /// summary.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repeated: Option<u64>,
+}
