@@ -34,7 +34,10 @@ pkt_size = 1316
 "#;
     let opts: RistOptions = toml::from_str(toml_str).expect("opts");
     let url = lower_rist_url("rist://[::]:5000", &opts, None, false).expect("url");
-    assert!(url.starts_with("rist://[::]:5000?"), "base preserved: {url}");
+    assert!(
+        url.starts_with("rist://[::]:5000?"),
+        "base preserved: {url}"
+    );
     assert!(url.contains("rist_profile=1"), "main ⇒ 1: {url}");
     assert!(url.contains("buffer_size=1000"), "{url}");
     assert!(url.contains("pkt_size=1316"), "{url}");

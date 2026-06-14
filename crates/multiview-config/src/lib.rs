@@ -1272,7 +1272,10 @@ impl Output {
         }
         // RIST push options (bonding rejection + PSK secret_ref) are validated
         // by the same shared helper the `rist` source uses (ADR-0095 §4).
-        if let Output::Rist { rist: Some(opts), .. } = self {
+        if let Output::Rist {
+            rist: Some(opts), ..
+        } = self
+        {
             validate_rist_options(&self.label(), opts)?;
         }
         self.validate_webrtc_rules()
@@ -1387,7 +1390,10 @@ impl Output {
 ///   Tier-2 direct-FFI feature), so it is never silently single-linked;
 /// - an **encryption block** must carry a non-empty `secret_ref` (`PSK`
 ///   requested with no key reference is a misconfiguration).
-fn validate_rist_options(owner: &str, opts: &crate::schema::RistOptions) -> Result<(), ConfigError> {
+fn validate_rist_options(
+    owner: &str,
+    opts: &crate::schema::RistOptions,
+) -> Result<(), ConfigError> {
     if !opts.bonding.is_empty() {
         return Err(ConfigError::Validation(format!(
             "rist {owner:?}: bonding/load-sharing ({} peer(s)) requires the `rist` direct-FFI \

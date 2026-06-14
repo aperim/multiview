@@ -74,9 +74,9 @@ use ffmpeg_next::util::frame::Video;
 
 use multiview_compositor::blend::LinearRgba;
 use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
-use multiview_config::{MultiviewConfig, Output, Source, SourceKind};
 #[cfg(feature = "rist")]
 use multiview_config::{lower_rist_url, RistOptions};
+use multiview_config::{MultiviewConfig, Output, Source, SourceKind};
 use multiview_control::EngineStateSnapshot;
 use multiview_core::frame::FrameMeta;
 use multiview_core::layout::{Cell, Layout};
@@ -5277,10 +5277,7 @@ fn rist_resolved_url(
 /// [`PipelineError::Output`] when the options cannot be lowered (bonding on the
 /// Tier-0 build, or an unresolved encryption `secret_ref`).
 #[cfg(feature = "rist")]
-fn build_rist_push(
-    url: &str,
-    rist: Option<&RistOptions>,
-) -> Result<RunnableOutput, PipelineError> {
+fn build_rist_push(url: &str, rist: Option<&RistOptions>) -> Result<RunnableOutput, PipelineError> {
     let to_err = |e: multiview_config::RistUrlError| PipelineError::Output {
         kind: "rist",
         reason: e.to_string(),
@@ -5744,11 +5741,12 @@ fn ingest_plan_for(
         // ingest loop reconnects forever.
         #[cfg(feature = "rist")]
         SourceKind::Rist { url, rist } => {
-            let lowered =
-                rist_resolved_url(url, rist.as_ref(), false).map_err(|e| PipelineError::Ingest {
+            let lowered = rist_resolved_url(url, rist.as_ref(), false).map_err(|e| {
+                PipelineError::Ingest {
                     id: source.id.clone(),
                     reason: e.to_string(),
-                })?;
+                }
+            })?;
             (SourceLocation::Url(lowered), true)
         }
         // Without the `rist` feature the librist obligation is not built in, so a
@@ -8635,7 +8633,9 @@ mod rist_tests {
     use multiview_core::time::Rational;
     use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
 
-    use super::{build_outputs, ingest_plan_for, rist_resolved_url, RunnableOutput, SourceLocation};
+    use super::{
+        build_outputs, ingest_plan_for, rist_resolved_url, RunnableOutput, SourceLocation,
+    };
 
     fn rist_source(json: serde_json::Value) -> Source {
         serde_json::from_value(json).expect("rist source deserializes")
@@ -8667,7 +8667,10 @@ mod rist_tests {
         let SourceLocation::Url(url) = &plan.location else {
             panic!("expected a Url location for a rist source");
         };
-        assert!(url.starts_with("rist://[::1]:5000?"), "base preserved: {url}");
+        assert!(
+            url.starts_with("rist://[::1]:5000?"),
+            "base preserved: {url}"
+        );
         assert!(url.contains("rist_profile=1"), "main ⇒ 1: {url}");
         assert!(url.contains("buffer_size=1000"), "{url}");
         assert!(plan.live, "a rist source must be live (reconnects)");

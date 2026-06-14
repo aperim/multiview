@@ -222,12 +222,11 @@ profile = "simple"
 url = "rist://[2001:db8::2]:5000"
 "#;
     let src: Source = toml::from_str(toml_str).expect("parse");
-    let err = src.validate().expect_err("bonding must be rejected on Tier-0");
+    let err = src
+        .validate()
+        .expect_err("bonding must be rejected on Tier-0");
     let msg = format!("{err}");
-    assert!(
-        msg.contains("bonding"),
-        "the error names bonding: {msg}"
-    );
+    assert!(msg.contains("bonding"), "the error names bonding: {msg}");
 }
 
 #[test]
@@ -265,7 +264,8 @@ aes_bits = "aes256"
 secret_ref = "env:RIST_PSK"
 "#;
     let src: Source = toml::from_str(toml_str).expect("parse");
-    src.validate().expect("a single-link encrypted RIST source validates");
+    src.validate()
+        .expect("a single-link encrypted RIST source validates");
 }
 
 #[test]
@@ -295,7 +295,10 @@ aes_bits = "aes256"
 secret_ref = "env:X"
 "#;
     let src: Source = toml::from_str(toml_str).expect("parse");
-    let SourceKind::Rist { rist: Some(opts), .. } = &src.kind else {
+    let SourceKind::Rist {
+        rist: Some(opts), ..
+    } = &src.kind
+    else {
         panic!("expected Rist with options");
     };
     let enc: &RistEncryption = opts.encryption.as_ref().expect("encryption");
