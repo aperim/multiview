@@ -123,9 +123,9 @@ url = "rist://[2001:db8::2]:5000"
 fn rist_base_url_keeps_existing_query_with_ampersand() {
     // A base URL that already carries a query gets the lowered options appended
     // with `&`, not a second `?`.
-    let toml_str = r#"
+    let toml_str = r"
 buffer_ms = 500
-"#;
+";
     let opts: RistOptions = toml::from_str(toml_str).expect("opts");
     let url = lower_rist_url("rist://[::1]:5000?weight=5", &opts, None, false).expect("url");
     assert!(url.starts_with("rist://[::1]:5000?weight=5&"), "{url}");

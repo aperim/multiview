@@ -306,6 +306,131 @@ pub struct RistOptions {
     pub bonding: Vec<RistPeer>,
 }
 
+/// Errors raised while lowering [`RistOptions`] to a `rist://…?…` `AVIO` URL.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum RistUrlError {
+    /// A non-empty `bonding` list was configured against the Tier-0 `FFmpeg`
+    /// path, which is single-peer (ADR-0095 §4). Bonding needs the Tier-2
+    /// direct-FFI build.
+    #[error(
+        "rist bonding/load-sharing requires the `rist` direct-FFI build (Tier-2); the Tier-0 \
+         FFmpeg `rist://` path is single-link only"
+    )]
+    BondingUnsupported,
+    /// Encryption was configured but the caller supplied no resolved secret
+    /// (the `secret_ref` could not be resolved from the secret manager).
+    #[error("rist encryption is configured but the pre-shared key (secret_ref) was not resolved")]
+    UnresolvedSecret,
+}
+
+/// Lower a base `rist://host:port` URL + typed [`RistOptions`] + a
+/// **resolved** pre-shared key into the `rist://…?…` `AVIO` URL the libav
+/// `librist` protocol opens (ADR-0095 Tier-0).
+///
+/// The lowered query carries the `FFmpeg` `librist` option names: `rist_profile`
+/// (`0`/`1`/`2`), `buffer_size` (ms), `pkt_size`, `encryption` (`128`/`256`),
+/// and `secret`. Options absent from [`RistOptions`] are omitted so `FFmpeg`'s
+/// own defaults apply. When the base URL already carries a query the lowered
+/// options are appended with `&`.
+///
+/// `resolved_secret` is the plaintext passphrase the **caller** resolved from
+/// [`RistEncryption::secret_ref`] (the config never holds it). When `redact` is
+/// `true` the `secret=` value is replaced by `***` for logging — the plaintext
+/// PSK never reaches a redacted (loggable) URL.
+///
+/// # Errors
+///
+/// - [`RistUrlError::BondingUnsupported`] when `opts.bonding` is non-empty
+///   (Tier-0 is single-link).
+/// - [`RistUrlError::UnresolvedSecret`] when `opts.encryption` is set but
+///   `resolved_secret` is `None`.
+pub fn lower_rist_url(
+    base_url: &str,
+    opts: &RistOptions,
+    resolved_secret: Option<&str>,
+    redact: bool,
+) -> Result<String, RistUrlError> {
+    if !opts.bonding.is_empty() {
+        return Err(RistUrlError::BondingUnsupported);
+    }
+    let mut params: Vec<(&str, String)> = Vec::new();
+    if let Some(profile) = opts.profile {
+        params.push(("rist_profile", profile.as_ffmpeg_token().to_owned()));
+    }
+    if let Some(buffer_ms) = opts.buffer_ms {
+        params.push(("buffer_size", buffer_ms.to_string()));
+    }
+    if let Some(pkt_size) = opts.pkt_size {
+        params.push(("pkt_size", pkt_size.to_string()));
+    }
+    if let Some(enc) = &opts.encryption {
+        params.push(("encryption", enc.aes_bits.bits().to_string()));
+        let Some(secret) = resolved_secret else {
+            return Err(RistUrlError::UnresolvedSecret);
+        };
+        let value = if redact {
+            "***".to_owned()
+        } else {
+            rist_percent_encode(secret)
+        };
+        params.push(("secret", value));
+    }
+    if params.is_empty() {
+        return Ok(base_url.to_owned());
+    }
+    let query = params
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    // Append to an existing query with `&`, otherwise open one with `?`.
+    let sep = if base_url.contains('?') { '&' } else { '?' };
+    Ok(format!("{base_url}{sep}{query}"))
+}
+
+/// Percent-encode the characters that would break a `rist://` URL query value
+/// (`&`, `=`, `?`, `#`, space, and `%` itself) — the SRT precedent's encoder.
+fn rist_percent_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'&' | b'=' | b'?' | b'#' | b'%' | b' ' => {
+                out.push('%');
+                out.push(rist_hex_digit(byte >> 4));
+                out.push(rist_hex_digit(byte & 0x0F));
+            }
+            other => match char::from_u32(u32::from(other)) {
+                Some(c) => out.push(c),
+                None => out.push('?'),
+            },
+        }
+    }
+    out
+}
+
+/// Map a nibble (`0..=15`) to its uppercase hex digit.
+const fn rist_hex_digit(nibble: u8) -> char {
+    match nibble {
+        0 => '0',
+        1 => '1',
+        2 => '2',
+        3 => '3',
+        4 => '4',
+        5 => '5',
+        6 => '6',
+        7 => '7',
+        8 => '8',
+        9 => '9',
+        10 => 'A',
+        11 => 'B',
+        12 => 'C',
+        13 => 'D',
+        14 => 'E',
+        _ => 'F',
+    }
+}
+
 /// Reference-only credential pointer for a source (never plaintext).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]

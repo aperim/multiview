@@ -77,9 +77,10 @@ pub use routing::{
 };
 pub use salvo::{Salvo, SourceRecall, TallyRecall, UmdRecall};
 pub use schema::{
-    Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig, ColorOverride,
-    DisplayModeSpec, Fps, Layout, Output, Overlay, Rect, RistAesBits, RistEncryption, RistOptions,
-    RistPeer, RistProfile, RtspOptions, Source, SourceAuth, SourceKind,
+    lower_rist_url, Border, Canvas, CanvasColor, Cell, CellQos, CellSource, ClockFaceConfig,
+    ColorOverride, DisplayModeSpec, Fps, Layout, Output, Overlay, Rect, RistAesBits,
+    RistEncryption, RistOptions, RistPeer, RistProfile, RistUrlError, RtspOptions, Source,
+    SourceAuth, SourceKind,
 };
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};
