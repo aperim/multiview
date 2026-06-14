@@ -416,7 +416,12 @@ impl Session {
             .sdp_api()
             .accept_offer(offer)
             .map_err(|e| WebRtcError::Transport(format!("accept_offer: {e}")))?;
-        let answer_sdp = answer.to_sdp_string();
+        // str0m hardcodes the dummy `c=IN IP4 0.0.0.0` / `o=… IN IP4 0.0.0.0`
+        // even when every gathered candidate is IPv6 (RFC 8839 §4.3.2 makes the
+        // c= line a placeholder under ICE). Box-validation found IPv6-only peers
+        // reject the family mismatch, so align the served answer's connection /
+        // origin family to the candidate family — IPv6-first (ADR-0042, defect D1).
+        let answer_sdp = crate::sdp::align_connection_family(&answer.to_sdp_string());
         // Record the negotiated `(mid, kind)` pairs from the answer so the
         // answerer can address each stream by mid: the ingest side requests a
         // video keyframe (PLI via `request_video_keyframe`), and the WHEP egress
