@@ -1573,6 +1573,30 @@ impl Pipeline {
         self.stores.len()
     }
 
+    /// The number of layout tiles (cells) the canvas composites — the decode-stage
+    /// demand magnitude the placement controller admits against (GPU-5c).
+    #[must_use]
+    pub fn tile_count(&self) -> usize {
+        self.layout.cells.len()
+    }
+
+    /// The output canvas resolution (the placement controller's per-stage demand
+    /// resolution, GPU-5c).
+    #[must_use]
+    pub fn canvas_resolution(&self) -> multiview_hal::Resolution {
+        multiview_hal::Resolution::new(
+            self.layout.canvas.width.max(1),
+            self.layout.canvas.height.max(1),
+        )
+    }
+
+    /// Whether this run's encode opens an NVENC session (the session-ceiling gate
+    /// applies in placement admission, GPU-5c).
+    #[must_use]
+    pub fn opens_encode_session(&self) -> bool {
+        self.encoder.name.ends_with("_nvenc")
+    }
+
     /// The shared per-source producer stop registry (ADR-W018): hand this to
     /// the [`LiveSourceHub`](crate::live_sources::LiveSourceHub) so a live
     /// remove can tear down a startup producer (ingest thread or generator).

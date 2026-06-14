@@ -97,6 +97,7 @@ pub mod error;
 pub mod ha;
 pub mod heads;
 pub mod isolation;
+pub mod migration;
 pub mod placement;
 pub mod probe;
 pub mod program;
@@ -134,6 +135,10 @@ pub use heads::{HeadBinding, HeadPlacement, WallComposition};
 pub use isolation::{
     event_stream, EnginePublisher, EventStream, EventSubscription, LatestState, RecvError,
     SeqEvent, TryRecvError,
+};
+pub use migration::{
+    drain_stop, validate_migration, KeepaliveSink, LoadSnapshot, MigrationOutcome,
+    OutputCrosspoint, PlacementCoordinator, RollbackReason,
 };
 pub use placement::{
     MigrationPlan, PlacementController, PlacementControllerConfig, PlacementProposal, ShedReason,
