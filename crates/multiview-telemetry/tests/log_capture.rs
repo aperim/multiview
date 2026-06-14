@@ -1,9 +1,10 @@
 //! Integration tests for the resource-scoped log capture layer + bounded ring
 //! (ADR-0060 §4.4): a `tracing` event emitted inside a resource span is captured
 //! into the bounded drop-oldest ring with its `resource_id` field, the ring drops
-//! oldest beyond its capacity, and the filter (resource_id / minimum level /
+//! oldest beyond its capacity, and the filter (`resource_id` / minimum level /
 //! since) selects the right records. Logging is best-effort and bounded
-//! (invariant #10): the ring never grows past its cap.
+//! (invariant #10): the ring never grows past its cap. `resource_id` /
+//! `min_level` / `since_seq` are the operator's triage filters.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -20,8 +21,8 @@ use tracing_subscriber::layer::SubscriberExt;
 
 /// Run `body` with a subscriber that has the capture layer installed, returning
 /// the shared ring afterwards.
-fn with_capture<F: FnOnce()>(ring: Arc<LogRing>, body: F) {
-    let layer = LogCaptureLayer::new(Arc::clone(&ring)).with_run_id("run-test");
+fn with_capture<F: FnOnce()>(ring: &Arc<LogRing>, body: F) {
+    let layer = LogCaptureLayer::new(Arc::clone(ring)).with_run_id("run-test");
     let subscriber = tracing_subscriber::registry().with(layer);
     tracing::subscriber::with_default(subscriber, body);
 }
@@ -29,7 +30,7 @@ fn with_capture<F: FnOnce()>(ring: Arc<LogRing>, body: F) {
 #[test]
 fn event_inside_source_span_captures_resource_id() {
     let ring = Arc::new(LogRing::new(64));
-    with_capture(Arc::clone(&ring), || {
+    with_capture(&ring, || {
         let span = tracing::info_span!(
             "source",
             resource_kind = "source",
@@ -63,7 +64,7 @@ fn event_inside_source_span_captures_resource_id() {
 #[test]
 fn event_outside_any_resource_span_has_no_resource_id() {
     let ring = Arc::new(LogRing::new(64));
-    with_capture(Arc::clone(&ring), || {
+    with_capture(&ring, || {
         tracing::warn!(target: "libav", component = "https", "Opening 'https://host/x' for reading");
     });
     let records = ring.snapshot();
@@ -78,7 +79,7 @@ fn event_outside_any_resource_span_has_no_resource_id() {
 #[test]
 fn ring_is_bounded_drop_oldest() {
     let ring = Arc::new(LogRing::new(3));
-    with_capture(Arc::clone(&ring), || {
+    with_capture(&ring, || {
         for i in 0..10 {
             tracing::info!(seq = i, "line {i}");
         }
@@ -98,7 +99,7 @@ fn ring_is_bounded_drop_oldest() {
 #[test]
 fn filter_by_resource_id_and_minimum_level() {
     let ring = Arc::new(LogRing::new(64));
-    with_capture(Arc::clone(&ring), || {
+    with_capture(&ring, || {
         {
             let s = tracing::info_span!("source", resource_kind = "source", resource_id = "cnn");
             let _g = s.enter();
@@ -133,7 +134,7 @@ fn filter_by_resource_id_and_minimum_level() {
 #[test]
 fn filter_since_sequence_returns_only_newer_records() {
     let ring = Arc::new(LogRing::new(64));
-    with_capture(Arc::clone(&ring), || {
+    with_capture(&ring, || {
         tracing::info!("first");
         tracing::info!("second");
         tracing::info!("third");
@@ -153,7 +154,7 @@ fn filter_since_sequence_returns_only_newer_records() {
 #[test]
 fn limit_returns_most_recent_n() {
     let ring = Arc::new(LogRing::new(64));
-    with_capture(Arc::clone(&ring), || {
+    with_capture(&ring, || {
         for i in 0..10 {
             tracing::info!("line {i}");
         }
