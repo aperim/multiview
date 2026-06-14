@@ -606,7 +606,10 @@ fn relay_forced_media_flows_both_ways_through_the_turn_relay() {
     let b_addr: SocketAddr = "[2001:db8::b]:50000".parse().unwrap();
 
     let mut turn_server = FakeTurn::new(server_addr, a_relay, "alice", "s3cret", "example.org");
-    let mut a_turn = TurnClient::new(server_addr, TurnCredential::static_credential("alice", "s3cret", None));
+    let mut a_turn = TurnClient::new(
+        server_addr,
+        TurnCredential::static_credential("alice", "s3cret", None),
+    );
 
     // 1. Drive A's TURN client to an allocation against the fake server.
     let mut relay = None;

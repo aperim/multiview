@@ -331,7 +331,10 @@ impl UnifiedEndpoint {
     /// classification (TURN control / relayed Data / media) happens once; relayed
     /// media is fanned to every role exactly like direct media (str0m's per-session
     /// ufrag/peer demux silently ignores a datagram not addressed to a session).
-    #[allow(clippy::too_many_arguments, reason = "the single demux fans one datagram to every role lane")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the single demux fans one datagram to every role lane"
+    )]
     fn route_inbound(
         turn: &mut TurnRelayDriver,
         ingest: Option<&mut IngestLane>,
@@ -348,9 +351,11 @@ impl UnifiedEndpoint {
         // else is media from `src` on the local socket addr (defect C).
         let (route_src, route_dst, bytes): (SocketAddr, SocketAddr, Vec<u8>) =
             match crate::transport::relay_io::classify_inbound(turn, src, payload, now) {
-                crate::transport::relay_io::Inbound::Relayed { peer, relay, payload } => {
-                    (peer, relay, payload)
-                }
+                crate::transport::relay_io::Inbound::Relayed {
+                    peer,
+                    relay,
+                    payload,
+                } => (peer, relay, payload),
                 crate::transport::relay_io::Inbound::TurnControl => return,
                 crate::transport::relay_io::Inbound::Media => (src, local_addr, payload.to_vec()),
             };
@@ -372,7 +377,10 @@ impl UnifiedEndpoint {
     }
 
     /// Pump every role's outbound + the shared TURN driver onto the one socket.
-    #[allow(clippy::too_many_arguments, reason = "the single loop drives every role on one socket")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the single loop drives every role on one socket"
+    )]
     async fn pump_all(
         socket: &tokio::net::UdpSocket,
         turn: &mut TurnRelayDriver,
@@ -390,7 +398,13 @@ impl UnifiedEndpoint {
         }
         let new_relays = turn.take_new_relays();
         if !new_relays.is_empty() {
-            Self::publish_relays(&new_relays, ingest.as_deref(), serve.as_deref(), preview, local_addr);
+            Self::publish_relays(
+                &new_relays,
+                ingest.as_deref(),
+                serve.as_deref(),
+                preview,
+                local_addr,
+            );
         }
 
         if let Some(lane) = ingest {

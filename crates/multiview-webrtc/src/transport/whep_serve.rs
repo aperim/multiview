@@ -389,8 +389,7 @@ impl WhepServeEndpoint {
     pub fn bind(config: EndpointConfig) -> Result<(Self, WhepServeHandle)> {
         let endpoint = WebRtcEndpoint::bind(config)?;
         let host_candidates = endpoint.host_candidates()?;
-        let (handle, commands, shared) =
-            WhepServeHandle::build(endpoint.config(), host_candidates);
+        let (handle, commands, shared) = WhepServeHandle::build(endpoint.config(), host_candidates);
         Ok((
             Self {
                 endpoint,
@@ -467,10 +466,7 @@ impl WhepServeEndpoint {
 
     /// Apply a register/release command to the viewer set. Returns `false` when the
     /// command channel has closed (all handles dropped) so the driver should exit.
-    pub(crate) fn apply_command(
-        viewers: &mut Vec<ViewerSession>,
-        cmd: Option<Command>,
-    ) -> bool {
+    pub(crate) fn apply_command(viewers: &mut Vec<ViewerSession>, cmd: Option<Command>) -> bool {
         match cmd {
             Some(Command::Register(v)) => {
                 viewers.push(*v);
@@ -597,10 +593,8 @@ impl WhepServeEndpoint {
     ) {
         for v in viewers.iter_mut() {
             while let Some((source, dst, payload)) = v.session.poll_transmit(now) {
-                crate::transport::relay_io::send_routed(
-                    socket, turn, source, dst, &payload, now,
-                )
-                .await;
+                crate::transport::relay_io::send_routed(socket, turn, source, dst, &payload, now)
+                    .await;
             }
         }
     }

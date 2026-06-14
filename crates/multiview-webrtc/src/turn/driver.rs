@@ -193,9 +193,7 @@ impl TurnRelayDriver {
     /// for a relay-routed datagram, i.e. a relay candidate's base).
     #[must_use]
     pub fn is_relay(&self, addr: SocketAddr) -> bool {
-        self.clients
-            .iter()
-            .any(|c| c.client.relay() == Some(addr))
+        self.clients.iter().any(|c| c.client.relay() == Some(addr))
     }
 
     /// Frame an outbound application datagram for the relay `relay` toward `peer`

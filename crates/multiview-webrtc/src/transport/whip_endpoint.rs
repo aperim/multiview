@@ -389,8 +389,7 @@ impl WhipEndpoint {
     pub fn bind(config: EndpointConfig) -> Result<(Self, WhipHandle)> {
         let endpoint = WebRtcEndpoint::bind(config)?;
         let host_candidates = endpoint.host_candidates()?;
-        let (handle, commands, shared) =
-            WhipHandle::build(endpoint.config(), host_candidates);
+        let (handle, commands, shared) = WhipHandle::build(endpoint.config(), host_candidates);
         Ok((
             Self {
                 endpoint,
@@ -476,10 +475,7 @@ impl WhipEndpoint {
 
     /// Apply a register/release command to the ingest session set. Returns `false`
     /// when the command channel closed (all handles dropped) so the driver exits.
-    pub(crate) fn apply_command(
-        sessions: &mut Vec<DrivenSession>,
-        cmd: Option<Command>,
-    ) -> bool {
+    pub(crate) fn apply_command(sessions: &mut Vec<DrivenSession>, cmd: Option<Command>) -> bool {
         match cmd {
             Some(Command::Register(driven)) => {
                 sessions.push(*driven);
@@ -570,10 +566,8 @@ impl WhipEndpoint {
             while let Some((source, dst, payload)) = s.session.poll_transmit(now) {
                 // A send error (e.g. unreachable) is dropped: the publisher's
                 // own retransmit/ICE recovers it; the loop never blocks.
-                crate::transport::relay_io::send_routed(
-                    socket, turn, source, dst, &payload, now,
-                )
-                .await;
+                crate::transport::relay_io::send_routed(socket, turn, source, dst, &payload, now)
+                    .await;
             }
         }
     }

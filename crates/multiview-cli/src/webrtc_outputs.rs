@@ -290,10 +290,7 @@ pub fn whip_push_specs(registry: &EgressRegistry) -> Vec<WhipPushOutputSpec> {
 /// Build a boxed reqwest-backed [`WhipSignaller`] for a `whip_push` output, or
 /// `None` if the HTTP client cannot be built (the output is then skipped).
 #[must_use]
-pub fn build_push_signaller(
-    url: String,
-    token: Option<String>,
-) -> Option<Box<dyn WhipSignaller>> {
+pub fn build_push_signaller(url: String, token: Option<String>) -> Option<Box<dyn WhipSignaller>> {
     match ReqwestWhipSignaller::new(url, token) {
         Ok(s) => Some(Box::new(s)),
         Err(err) => {

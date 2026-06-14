@@ -557,7 +557,10 @@ impl WhepEgress {
     /// # Errors
     ///
     /// [`WhepError::MalformedOffer`] only if the bookkeeping mutex is poisoned.
-    pub fn drive_all(&self, now: Instant) -> Result<Vec<(SocketAddr, SocketAddr, Vec<u8>)>, WhepError> {
+    pub fn drive_all(
+        &self,
+        now: Instant,
+    ) -> Result<Vec<(SocketAddr, SocketAddr, Vec<u8>)>, WhepError> {
         let mut out = Vec::new();
         for id in self.session_ids() {
             out.extend(self.drive_egress(&id, now)?);

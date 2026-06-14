@@ -167,7 +167,10 @@ fn driver_frames_outbound_media_for_a_relay_and_unwraps_inbound() {
     let framed = driver
         .frame_for_relay(relay_addr, peer, &media, now)
         .expect("a transmit from the relay source is framed for the TURN server");
-    assert_eq!(framed.0, server_addr, "framed datagram targets the TURN server");
+    assert_eq!(
+        framed.0, server_addr,
+        "framed datagram targets the TURN server"
+    );
     // The fake server, on a Send indication, installs a permission and (here)
     // loops the data back as a Data indication from the peer (a stand-in for the
     // relay forwarding to and from the far peer).
@@ -188,7 +191,10 @@ fn driver_frames_outbound_media_for_a_relay_and_unwraps_inbound() {
         .try_unwrap_relayed(server_addr, &inbound, now)
         .expect("a Data indication from the TURN server unwraps");
     assert_eq!(unwrapped.peer, peer, "the originating peer is recovered");
-    assert_eq!(unwrapped.payload, media, "the application payload is recovered");
+    assert_eq!(
+        unwrapped.payload, media,
+        "the application payload is recovered"
+    );
     assert_eq!(
         unwrapped.relay, relay_addr,
         "the relay the data arrived on is reported (the local candidate addr)"

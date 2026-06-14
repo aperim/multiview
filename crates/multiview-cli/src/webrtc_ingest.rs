@@ -40,7 +40,6 @@ use multiview_input::webrtc::{Codec, MediaKind, NegotiatedMedia, NegotiatedSessi
 use multiview_webrtc::error::WebRtcError;
 use multiview_webrtc::transport::{RtpRing, WhipHandle};
 
-
 /// Per-source publish authorization: the configured token + whether audio is
 /// accepted (from `SourceKind::Webrtc`). A source absent from the map is not a
 /// configured `webrtc` source and is refused.

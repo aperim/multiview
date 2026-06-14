@@ -36,7 +36,8 @@ fn offer(direction_recv: bool) -> String {
         s.create_recv_offer(&[MediaKind::Video, MediaKind::Audio])
             .unwrap()
     } else {
-        s.create_offer(&[MediaKind::Video, MediaKind::Audio]).unwrap()
+        s.create_offer(&[MediaKind::Video, MediaKind::Audio])
+            .unwrap()
     }
 }
 
@@ -68,10 +69,11 @@ fn one_socket_hosts_preview_whip_and_whep_serve_without_eaddrinuse() {
         .expect("a concrete advertised host candidate");
     let (builder, whip) = builder.with_ingest();
     let (builder, whep_serve) = builder.with_serve();
-    let preview = std::sync::Arc::new(
-        multiview_webrtc::whep_egress::WhepEgress::with_host_candidate(host),
-    );
-    let _endpoint = builder.with_preview(std::sync::Arc::clone(&preview)).build();
+    let preview =
+        std::sync::Arc::new(multiview_webrtc::whep_egress::WhepEgress::with_host_candidate(host));
+    let _endpoint = builder
+        .with_preview(std::sync::Arc::clone(&preview))
+        .build();
 
     // 1. WHIP ingest negotiates a publisher answer.
     let whip_answer = whip

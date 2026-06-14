@@ -821,7 +821,9 @@ fn decode_attribute(
         ATTR_LIFETIME => Some(Attribute::Lifetime(be32(value, 0)?)),
         ATTR_REQUESTED_TRANSPORT => Some(Attribute::RequestedTransportUdp),
         ATTR_REQUESTED_ADDRESS_FAMILY => {
-            let byte = *value.first().ok_or(TurnError::Malformed("address-family"))?;
+            let byte = *value
+                .first()
+                .ok_or(TurnError::Malformed("address-family"))?;
             AddressFamily::from_byte(byte).map(Attribute::RequestedAddressFamily)
         }
         ATTR_DATA => Some(Attribute::Data(value.to_vec())),

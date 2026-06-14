@@ -283,9 +283,7 @@ impl PushLane {
                     self.begin_connect(now)
                 }
             }
-            PushState::Connecting { session, join } => {
-                self.poll_connect(session, join, now).await
-            }
+            PushState::Connecting { session, join } => self.poll_connect(session, join, now).await,
             PushState::Connected {
                 mut session,
                 resource_url,
@@ -321,7 +319,13 @@ impl PushLane {
 
     /// Feed one inbound datagram (already relay-decapsulated by the unified driver)
     /// to a connecting/connected push session — str0m ignores a datagram not for it.
-    pub fn handle_inbound(&mut self, src: SocketAddr, dst: SocketAddr, payload: &[u8], now: Instant) {
+    pub fn handle_inbound(
+        &mut self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        payload: &[u8],
+        now: Instant,
+    ) {
         match &mut self.state {
             PushState::Connected { session, .. } | PushState::Connecting { session, .. } => {
                 let _ = session.handle_datagram(src, dst, payload, now);
@@ -339,8 +343,7 @@ impl PushLane {
         };
         let signaller = Arc::clone(&self.signaller);
         let offer_sdp = offer.sdp;
-        let join =
-            tokio::task::spawn_blocking(move || signaller.post_offer(&offer_sdp));
+        let join = tokio::task::spawn_blocking(move || signaller.post_offer(&offer_sdp));
         PushState::Connecting {
             session: Box::new(offer.session),
             join,
