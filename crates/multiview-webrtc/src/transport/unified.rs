@@ -3,7 +3,7 @@
 //! ADR-0048 mandates **one** process-wide dual-stack UDP socket adopted by **all**
 //! WebRTC roles: WHIP ingest publishers, WHEP preview viewers, WHEP output
 //! viewers, and the outbound `whip_push` client. Before this, the cli bound the
-//! `webrtc.udp_port` once per role (preview + WHIP + WHEP-serve + each whip_push),
+//! `webrtc.udp_port` once per role (preview + WHIP + WHEP-serve + each `whip_push`),
 //! so the 2nd/3rd `bind` hit `EADDRINUSE` and silently degraded those roles to
 //! "unavailable" — with preview + WHIP + WHEP-serve in one config, ingest and
 //! output-serve were dead (box-validation defect B).
@@ -150,7 +150,7 @@ impl UnifiedBuilder {
     #[must_use]
     pub fn with_ingest(mut self) -> (Self, WhipHandle) {
         let (handle, commands, shared) =
-            WhipHandle::build(self.endpoint.config.clone(), self.host_candidates.clone());
+            WhipHandle::build(&self.endpoint.config, self.host_candidates.clone());
         self.endpoint.ingest = Some(IngestLane {
             commands,
             shared,
@@ -164,7 +164,7 @@ impl UnifiedBuilder {
     #[must_use]
     pub fn with_serve(mut self) -> (Self, WhepServeHandle) {
         let (handle, commands, shared) =
-            WhepServeHandle::build(self.endpoint.config.clone(), self.host_candidates.clone());
+            WhepServeHandle::build(&self.endpoint.config, self.host_candidates.clone());
         self.endpoint.serve = Some(ServeLane {
             commands,
             shared,

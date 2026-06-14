@@ -170,7 +170,7 @@ impl WhipHandle {
     /// [`WhipEndpoint::bind`] and the single-socket
     /// [`UnifiedEndpoint`](crate::transport::UnifiedEndpoint) (ADR-0048 §4).
     pub(crate) fn build(
-        config: EndpointConfig,
+        config: &EndpointConfig,
         host_candidates: Vec<SocketAddr>,
     ) -> (Self, mpsc::Receiver<Command>, Arc<WhipShared>) {
         let (tx, rx) = mpsc::channel(64);
@@ -390,7 +390,7 @@ impl WhipEndpoint {
         let endpoint = WebRtcEndpoint::bind(config)?;
         let host_candidates = endpoint.host_candidates()?;
         let (handle, commands, shared) =
-            WhipHandle::build(endpoint.config().clone(), host_candidates);
+            WhipHandle::build(endpoint.config(), host_candidates);
         Ok((
             Self {
                 endpoint,

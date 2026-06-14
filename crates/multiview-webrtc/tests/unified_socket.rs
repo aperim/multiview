@@ -1,8 +1,9 @@
 //! Failing-first tests for the single-socket [`UnifiedEndpoint`] (ADR-0048 §4,
 //! box-validation defect B). The cli previously bound `webrtc.udp_port` once per
-//! role (preview WHEP + WHIP ingest + WHEP-serve + each whip_push), so the 2nd/3rd
-//! `bind` hit `EADDRINUSE` and silently degraded those roles to "unavailable" —
-//! with preview + WHIP + WHEP-serve in one config, ingest + output-serve were dead.
+//! role (preview WHEP + WHIP ingest + WHEP-serve + each `whip_push`), so the
+//! 2nd/3rd `bind` hit `EADDRINUSE` and silently degraded those roles to
+//! "unavailable" — with preview + WHIP + WHEP-serve in one config, ingest +
+//! output-serve were dead.
 //!
 //! The fix: ONE bound dual-stack socket adopted by ALL roles. These tests prove a
 //! single [`UnifiedEndpoint`] hosts preview + WHIP + WHEP-serve at once, each role
@@ -13,7 +14,9 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::as_conversions
+    clippy::as_conversions,
+    clippy::similar_names,
+    clippy::default_constructed_unit_structs
 )]
 
 use std::net::SocketAddr;
@@ -108,10 +111,10 @@ fn one_socket_hosts_preview_whip_and_whep_serve_without_eaddrinuse() {
 }
 
 /// A bounded egress feed for the WHEP-serve output registration. The sink is
-/// leaked alive for the test's duration so the feed stays open.
+/// leaked alive (`Box::leak`) for the test's duration so the feed stays open.
 fn test_feed() -> multiview_webrtc::egress::EgressFeed {
     let (sink, feed) = multiview_webrtc::egress::egress_feed();
-    std::mem::forget(sink);
+    let _: &'static _ = Box::leak(Box::new(sink));
     feed
 }
 
@@ -126,7 +129,7 @@ impl multiview_preview::whep::transport::PreviewMediaSource for FakeMedia {
     }
     fn feed(&self) -> multiview_preview::whep::transport::SampleFeed {
         let (sink, feed) = multiview_preview::whep::transport::sample_feed(8);
-        std::mem::forget(sink);
+        let _: &'static _ = Box::leak(Box::new(sink));
         feed
     }
     fn audio_feed(&self) -> Option<multiview_preview::whep::transport::SampleFeed> {

@@ -158,7 +158,7 @@ impl WhepServeHandle {
     /// [`UnifiedEndpoint`](crate::transport::UnifiedEndpoint) (which shares one
     /// socket across roles, ADR-0048 §4).
     pub(crate) fn build(
-        config: EndpointConfig,
+        config: &EndpointConfig,
         host_candidates: Vec<SocketAddr>,
     ) -> (Self, mpsc::Receiver<Command>, Arc<WhepShared>) {
         let (tx, rx) = mpsc::channel(64);
@@ -390,7 +390,7 @@ impl WhepServeEndpoint {
         let endpoint = WebRtcEndpoint::bind(config)?;
         let host_candidates = endpoint.host_candidates()?;
         let (handle, commands, shared) =
-            WhepServeHandle::build(endpoint.config().clone(), host_candidates);
+            WhepServeHandle::build(endpoint.config(), host_candidates);
         Ok((
             Self {
                 endpoint,
