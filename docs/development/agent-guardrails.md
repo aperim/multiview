@@ -135,7 +135,7 @@ Keep an acceptance/e2e suite the authoring agent does **not** see or run during 
 
 ## C. Adversarial cross-vendor review
 
-Code authored primarily by one vendor/model **MUST** be reviewed by a **different** vendor (Claude ↔ OpenAI Codex ↔ Gemini) before a human approves. Two stacked mechanisms, both required:
+Code authored primarily by one vendor/model **MUST** be reviewed by a **different** vendor (Claude ↔ OpenAI Codex ↔ Gemini) before it is approved and merged. Two stacked mechanisms, both required:
 
 1. **Context separation (biggest cheap win):** the reviewer runs in a **fresh session/subagent** seeing **only** (a) the diff, (b) the spec/PLAN, (c) the checklist — never the author's chat history. Fresh-session review beats same-session self-review even with the *same* model (CCR, arXiv 2603.12123: F1 28.6% vs 24.6%, p=0.008; +4.7 F1 on code; +11pp on critical errors).
 2. **Vendor diversity:** different training → less-correlated blind spots. Both separation **and** model heterogeneity independently help (do not over-claim one beats the other).
@@ -145,9 +145,9 @@ Code authored primarily by one vendor/model **MUST** be reviewed by a **differen
 |---|---|
 | Claude wrote it → Codex reviews | `/plugin marketplace add openai/codex-plugin-cc` → `/codex:adversarial-review --base main` (commands current as of 2026-06-02) |
 | Codex/other wrote it → Claude reviews | bundled `/code-review` + `/security-review` (fresh subagent) |
-| High-risk diff (auth, concurrency, data migration, money) | 3-reviewer panel (Claude + Codex + Gemini) + coordinator synthesis + mandatory human sign-off |
+| High-risk diff (auth, concurrency, data migration, money) | 3-reviewer panel (Claude + Codex + Gemini) + coordinator synthesis + operator notification (operator may override/revert) |
 
-Attach the cross-vendor review output to the PR. **AI review is never the merge gate** — a human is the named final approver (branch protection: required deterministic checks + ≥1 human approval).
+Attach the cross-vendor review output to the PR. **The mandatory cross-vendor review gates the merge** (never skipped, never self-performed by the authoring vendor); the **agent is the delegated approver** and merges once that review and the required deterministic checks are green. The **operator retains ultimate authority** and may override or revert any merge. Branch protection requires the deterministic checks; routine human approval is delegated to the agent ([ADR-G005](../decisions/ADR-G005.md)).
 
 ### C.2 Reviewer brief (scope to avoid manufactured findings)
 > Report **only** defects in correctness, security, spec/requirements conformance, and the Multiview typing & TDD guardrails. Do **not** report style, naming, or speculative defense-in-depth. Ignore lockfiles/generated/minified files. If you find nothing, name the highest-residual-risk area and why it's acceptable.
@@ -195,6 +195,6 @@ Propagate with `?`; never swallow (no empty `catch`, no `let _ = <Result>` witho
 - [ ] New behavior tests written test-first; whole suite + held-out suite green (evidence shown).
 - [ ] Lints + types clean, **zero new suppressions**.
 - [ ] `cargo mutants --in-diff` shows no missed mutants in changed code.
-- [ ] Adversarial cross-vendor review passed; human approved.
+- [ ] Adversarial cross-vendor review passed; agent approved + merged (operator override retained, ADR-G005).
 - [ ] `cargo deny check` + gitleaks clean; lockfiles committed.
 - [ ] Docs/ADRs updated; diff minimal and in-scope.
