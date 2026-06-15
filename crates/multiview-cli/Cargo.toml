@@ -376,7 +376,23 @@ youtube = ["ffmpeg", "multiview-input/youtube"]
 # runs with `all-features = false` so this opt-in obligation never enters the
 # default LGPL-clean deny graph. LGPL-clean: the SDK is dynamically loaded at run
 # time, not linked.
-ndi = ["multiview-input/ndi", "ffmpeg"]
+#
+# Forwards `multiview-output/ndi` too (OUT-4b / NDI-L2): the NDI *output* sink
+# seam (canvas→UYVY→send + the license gate) so a configured `ndi` output is
+# wired off the hot path. The live SDK function table (`SdkNdiApi`) needs the
+# build-time `bindgen` over the licensed header — that is the separate
+# `ndi-bindings` escalation below; plain `ndi` carries the seam (CI-buildable,
+# SDK-free) and refuses an NDI output honestly until `ndi-bindings` + a runtime.
+ndi = ["multiview-input/ndi", "multiview-output/ndi", "ffmpeg"]
+
+# The LIVE NDI binding (ADR-0028 / NDI-L2): turns on `multiview-output`'s
+# `ndi-bindings` (which builds `multiview-ndi-sys`'s `bindings` over the licensed
+# SDK header) so the CLI can construct the real `SdkNdiApi` and actually send the
+# composited canvas to the NDI network. Implies `ndi`. A box/operator concern
+# (needs the SDK header at build time + a resolvable runtime at run time); plain
+# `--features ndi` stays SDK-free and CI-buildable. The default build remains
+# LGPL-clean (nothing linked — the runtime is dynamically loaded).
+ndi-bindings = ["ndi", "multiview-output/ndi-bindings"]
 
 # License-escalating: forwards the GPL software encoders (libx264/libx265) so a
 # `run --features ffmpeg,gpl-codecs` may target H.264/H.265. Enabling this makes
@@ -516,10 +532,10 @@ full = [
     # capability marker — it links no native lib in-tree today and degrades ASS/SSA
     # to the pure-Rust text fallback when absent). LGPL/ISC, never GPL.
     "multiview-overlay/libass",
-    # NDI I/O: the cli `ndi` feature wires NDI *ingest* (and forwards
-    # `multiview-input/ndi`); `multiview-output/ndi` adds the NDI *output* sink.
+    # NDI I/O: the cli `ndi` feature wires NDI *ingest* AND *output* (it forwards
+    # both `multiview-input/ndi` and `multiview-output/ndi`). The live SDK binding
+    # (`ndi-bindings`) stays a separate box/operator opt-in (licensed SDK header).
     "ndi",
-    "multiview-output/ndi",
     "multiview-control/embed-web",
     "multiview-control/openapi",
     # Live WHEP preview egress over real DTLS/SRTP, with audio, TURN-enabled

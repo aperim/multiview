@@ -92,6 +92,8 @@ use multiview_ffmpeg::{
     DecodedVideoFrame, EncodedPacket, ScaleSpec, Scaler, StreamCodecParameters, StreamVideoDecoder,
 };
 use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
+#[cfg(any(feature = "ndi-bindings", test))]
+use multiview_output::ndi::NdiOutput;
 use multiview_output::sink::{
     EncodeConfig, PacketMuxOutcome, PacketMuxSink, PacketSource, ProgramEncoder, PushProtocol,
 };
@@ -906,6 +908,32 @@ enum RunnableOutput {
         /// A short label (`webrtc`/`whip_push`) + the output id for the report.
         label: String,
     },
+    /// An NDI program output (OUT-4b / NDI-L2): a **raw-canvas** sink that sends
+    /// the composited pre-encode NV12 canvas (converted NV12→UYVY at the
+    /// host-copy boundary, ADR-0004) to a single NDI source — a distinct canvas
+    /// consumer, NOT a packet sink (it never joins the encode-once fan-out, like
+    /// the display head). The live sender is gated by an **accepted** NDI license
+    /// by construction (`NdiOutput::new`), so this variant only exists once the
+    /// `[system.ndi] accept_license` gate has passed. The engine publishes each
+    /// canvas into the paired wait-free mailbox; this runner reads the
+    /// newest-wins slot, so a slow/absent NDI consumer drops at the tap and can
+    /// never back-pressure the engine (invariants #1 + #10). Built only under
+    /// `ndi-bindings` (the live `SdkNdiApi` over the licensed SDK table).
+    #[cfg(feature = "ndi-bindings")]
+    Ndi {
+        /// The output's stable config id (ADR-0060 `output` resource scope).
+        id: String,
+        /// The live, license-gated NDI sender (host-memory canvas frames only).
+        sink: NdiOutput<multiview_output::ndi::SdkNdiApi>,
+        /// The sink-side reader of the wait-free canvas tap the engine publishes
+        /// into; newest-wins (drop-oldest), so the engine never blocks here.
+        reader: multiview_output::display::FrameReader<NdiCanvasFrame>,
+        /// The output cadence (exact rational) the NDI 100 ns timecode + the
+        /// frame-rate descriptor are derived from (invariant #3).
+        cadence: Rational,
+        /// The advertised NDI source name (for the run report).
+        name: String,
+    },
 }
 
 impl RunnableOutput {
@@ -917,6 +945,8 @@ impl RunnableOutput {
             Self::File { id, .. } | Self::Hls { id, .. } | Self::Push { id, .. } => id,
             #[cfg(feature = "webrtc-native")]
             Self::WebRtc { id, .. } => id,
+            #[cfg(feature = "ndi-bindings")]
+            Self::Ndi { id, .. } => id,
         }
     }
 }
@@ -1078,6 +1108,14 @@ pub struct Pipeline {
     /// (and started) once at stream start; the sinks live for the run.
     #[cfg(feature = "display-kms")]
     display_plans: Vec<DisplayOutputPlan>,
+    /// The engine-side canvas-tap publishers for the configured NDI outputs
+    /// (OUT-4b / NDI-L2, feature `ndi-bindings`): the hot loop publishes the
+    /// shared pre-encode NV12 canvas `Arc` into each (wait-free, newest-wins),
+    /// exactly like the display heads — the matching `FrameReader` lives inside
+    /// the `RunnableOutput::Ndi` in [`Self::outputs`]. Taken at stream start and
+    /// fed in the per-tick projection; the engine never blocks here (inv #1/#10).
+    #[cfg(feature = "ndi-bindings")]
+    ndi_publishers: Vec<multiview_output::display::FramePublisher<NdiCanvasFrame>>,
     /// Per-input elementary-stream inventories, keyed (and id-sorted) by source
     /// id (RT-3, ADR-0034 §9). Probed **once at build time** — off the
     /// output-clock thread — from each path-backed source's demuxer (the
@@ -1448,6 +1486,8 @@ impl Pipeline {
             &epoch,
             #[cfg(feature = "webrtc-native")]
             &egress_sinks,
+            config.system.as_ref().and_then(|s| s.ndi.as_ref()),
+            cadence,
         )?;
         #[cfg(feature = "display-kms")]
         let has_display = !built.display.is_empty();
@@ -1537,6 +1577,8 @@ impl Pipeline {
             outputs,
             #[cfg(feature = "display-kms")]
             display_plans: built.display,
+            #[cfg(feature = "ndi-bindings")]
+            ndi_publishers: built.ndi_publishers,
             #[cfg(feature = "overlay")]
             subtitles: None,
             #[cfg(feature = "overlay")]
@@ -2337,6 +2379,15 @@ impl Pipeline {
             publishers: display_audio_publishers,
         };
 
+        // OUT-4b / NDI-L2: take the engine-side canvas-tap publishers for the
+        // configured NDI outputs. The hot loop publishes the SAME pre-encode
+        // canvas `Arc` into each (wait-free, newest-wins) exactly like the display
+        // heads; the paired `FrameReader` rides inside each `RunnableOutput::Ndi`
+        // sink (which the egress spawns below). The engine never blocks on an NDI
+        // send (inv #1/#10). Empty when no NDI output is configured/licensed.
+        #[cfg(feature = "ndi-bindings")]
+        let ndi_publishers = std::mem::take(&mut self.ndi_publishers);
+
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
         // encoded WHILE the engine keeps ticking (streaming, not batch — ADR-0025).
@@ -2492,6 +2543,17 @@ impl Pipeline {
             #[cfg(feature = "display-kms")]
             for display in &display_publishers {
                 display.publish(CanvasFrame(Arc::clone(&canvas)));
+            }
+            // The NDI outputs ride the SAME pre-encode canvas `Arc` through their
+            // wait-free mailboxes (newest-wins drop-oldest) — one lock-free swap
+            // each, off the hot path; the NDI sink thread converts NV12→UYVY and
+            // sends. The engine never awaits the SDK send (OUT-4b, inv #1/#10).
+            #[cfg(feature = "ndi-bindings")]
+            for ndi in &ndi_publishers {
+                ndi.publish(NdiCanvasFrame {
+                    canvas: Arc::clone(&canvas),
+                    tick_index: frame.tick.index,
+                });
             }
             let item = StreamItem {
                 canvas: Arc::clone(&canvas),
@@ -3815,6 +3877,19 @@ fn run_one_output(
         RunnableOutput::WebRtc { id: _, sink, label } => {
             Ok(run_webrtc_output(&sink, &label, rx, time_base))
         }
+        // NDI is a raw-canvas consumer (NV12→UYVY → send), NOT a packet sink: it
+        // ignores the coded-packet fan-out and instead reads the latest tapped
+        // canvas. The packet `rx` is used purely as the shared end-of-program
+        // pulse (one item per emitted tick; it closes at end-of-program), which
+        // also paces the send at the output cadence (invariants #1/#3/#10).
+        #[cfg(feature = "ndi-bindings")]
+        RunnableOutput::Ndi {
+            id: _,
+            mut sink,
+            reader,
+            cadence,
+            name,
+        } => Ok(run_ndi_output(&mut sink, &reader, rx, cadence, &name)),
     }
 }
 
@@ -3897,6 +3972,138 @@ fn run_webrtc_output(
         line: format!("{label}: {delivered} packet(s) fanned to WebRTC egress"),
         playlist: None,
         frames: delivered,
+    }
+}
+
+/// One composited program canvas tapped for the NDI output sink (OUT-4b /
+/// NDI-L2): an `Arc` clone of the **same** pre-encode NV12 canvas the encode
+/// fan-out + preview slot + display heads share (no extra pixel copy on the hot
+/// loop), plus the tick index its NDI 100 ns timecode is re-stamped from
+/// (invariant #3). Published into a wait-free single-slot mailbox (drop-oldest:
+/// newest-wins), so the engine never blocks on — and is never back-pressured by —
+/// a slow/absent NDI consumer (invariants #1 + #10), exactly like the display
+/// head canvas tap (ADR-0044).
+#[cfg(any(feature = "ndi-bindings", test))]
+#[derive(Debug, Clone)]
+pub(crate) struct NdiCanvasFrame {
+    /// The shared pre-encode NV12 canvas (one `Arc` clone, no copy).
+    pub(crate) canvas: Arc<Nv12Image>,
+    /// The output-clock tick index this canvas was produced on (invariant #3 —
+    /// the NDI timecode is derived from this, never a wall clock / input PTS).
+    pub(crate) tick_index: u64,
+}
+
+/// Derive the NDI 100 ns timecode for output `tick_index` at the exact-rational
+/// output `cadence` (invariant #3 — tick-derived, never wall clock or a raw input
+/// PTS; never float fps). The NDI timecode unit is 100 ns, so one tick is
+/// `den/num` seconds = `tick * den * 10_000_000 / num` (100 ns units), computed
+/// in `i128` to stay overflow-free over an unbounded run, then clamped to the
+/// `i64` the descriptor carries. A non-positive denominator/numerator (never
+/// produced by a validated cadence) degrades to `0` rather than dividing by zero.
+#[cfg(any(feature = "ndi-bindings", test))]
+fn ndi_timecode_100ns(tick_index: u64, cadence: Rational) -> i64 {
+    if cadence.num <= 0 || cadence.den <= 0 {
+        return 0;
+    }
+    // 100 ns units per second = 10_000_000. `i128` keeps the product exact for
+    // any realistic tick count + cadence before the divide.
+    let units = i128::from(tick_index)
+        .saturating_mul(i128::from(cadence.den))
+        .saturating_mul(10_000_000)
+        / i128::from(cadence.num);
+    i64::try_from(units).unwrap_or(i64::MAX)
+}
+
+/// Drive the NDI output sink (OUT-4b / NDI-L2): publish the latest tapped program
+/// canvas to the live NDI sender as each end-of-program pulse arrives, converting
+/// NV12→UYVY at the host-copy boundary and stamping the tick-derived NDI 100 ns
+/// timecode (invariant #3). **Off the hot path** — the engine's projection only
+/// ever does a wait-free `publish` into the canvas mailbox; this runner reads the
+/// newest-wins slot, so a slow/wedged NDI send drops older canvases at the tap
+/// rather than back-pressuring the engine (invariants #1 + #10).
+///
+/// `eop` is the end-of-program signal: the per-sink fan-out [`Receiver`] the
+/// egress hands every sink. The NDI sink consumes **no packets** (it sends the
+/// raw canvas, not the encode-once AUs — a distinct canvas consumer, like the
+/// display head), so the receiver is used purely as the shared lifecycle pulse:
+/// one item per emitted tick, ending when the channel closes (end-of-program),
+/// which also paces the send at the output cadence. A send error from the SDK
+/// (e.g. the sender was torn down) is logged and the loop ends — it never panics
+/// and never fails the program (the file/HLS/push outputs keep producing).
+///
+/// **Infallible** by design (returns a [`SinkRunOutcome`], never an error): an NDI
+/// output that cannot send must not fail the run.
+#[cfg(any(feature = "ndi-bindings", test))]
+fn run_ndi_output<A, T>(
+    out: &mut NdiOutput<A>,
+    reader: &multiview_output::display::FrameReader<NdiCanvasFrame>,
+    eop: Receiver<T>,
+    cadence: Rational,
+    label: &str,
+) -> SinkRunOutcome
+where
+    A: multiview_output::ndi::NdiApi,
+{
+    let frame_rate_n = u32::try_from(cadence.num.max(0)).unwrap_or(0);
+    let frame_rate_d = u32::try_from(cadence.den.max(1)).unwrap_or(1);
+    let mut sent = 0usize;
+    let mut last_seq = 0u64;
+    let mut send_errors = 0u64;
+    // Block on each end-of-program pulse (one per emitted tick): the iterator ends
+    // when the channel closes, consuming `eop` so it is dropped here. Each pulse,
+    // sample the newest-wins canvas slot and send it if it advanced — older
+    // canvases between pulses were already dropped at the single-slot tap.
+    for _pulse in eop {
+        let Some((frame, seq)) = reader.latest() else {
+            continue; // no canvas published yet (pre-roll); nothing to send.
+        };
+        if seq == last_seq {
+            continue; // no newer canvas since the last send (drop-oldest, idle).
+        }
+        last_seq = seq;
+        // Borrow the shared canvas planes for the conversion; a malformed canvas
+        // is a typed refusal from the seam, never a panic (invariant #1).
+        let image: &Nv12Image = &frame.canvas;
+        let canvas = match multiview_output::ndi::Nv12Canvas::new(
+            image.width(),
+            image.height(),
+            image.y_plane(),
+            image.uv_plane(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                send_errors = send_errors.saturating_add(1);
+                tracing::warn!(output = label, error = %e, "ndi canvas rejected; skipping frame");
+                continue;
+            }
+        };
+        let timecode = ndi_timecode_100ns(frame.tick_index, cadence);
+        match out.send_canvas(&canvas, timecode, frame_rate_n, frame_rate_d) {
+            Ok(()) => sent = sent.saturating_add(1),
+            Err(e) => {
+                // A send failure (sender torn down, runtime error) ends the NDI
+                // sink, never the program: log + stop. The file/HLS/push outputs
+                // keep producing (invariants #1/#10).
+                tracing::warn!(output = label, error = %e, "ndi send failed; stopping NDI output");
+                send_errors = send_errors.saturating_add(1);
+                break;
+            }
+        }
+    }
+    // End-of-program (or send fault): close the sender so the SDK handle is freed
+    // off the hot path. Idempotent; `Drop` would also close it.
+    out.close();
+    if send_errors > 0 {
+        tracing::debug!(
+            output = label,
+            send_errors,
+            "ndi output finished with send faults"
+        );
+    }
+    SinkRunOutcome {
+        line: format!("{label}: {sent} canvas frame(s) sent to NDI"),
+        playlist: None,
+        frames: sent,
     }
 }
 
@@ -5103,11 +5310,21 @@ fn output_codec(output: &Output) -> Option<&str> {
 /// two disjoint paths by design (ADR-0044: a display sink consumes the
 /// pre-encode canvas and never joins the packet fan-out).
 struct BuiltOutputs {
-    /// File/HLS/push sinks fed the one encoded packet stream (invariant #7).
+    /// File/HLS/push sinks fed the one encoded packet stream (invariant #7). The
+    /// `ndi-bindings` NDI sink also lives here (as `RunnableOutput::Ndi`) so it
+    /// shares the existing per-sink thread + end-of-program lifecycle — but it
+    /// consumes the canvas tap below, never the packets.
     packet: Vec<RunnableOutput>,
     /// DRM/KMS display heads, started as raw-frame sinks at stream start.
     #[cfg(feature = "display-kms")]
     display: Vec<DisplayOutputPlan>,
+    /// The engine-side wait-free publishers of each NDI output's canvas tap
+    /// (paired with the `FrameReader` inside its `RunnableOutput::Ndi`). The hot
+    /// loop publishes the shared pre-encode canvas `Arc` into each, exactly like
+    /// the display head publishers — newest-wins, so the engine never blocks
+    /// (invariants #1 + #10). Built only under `ndi-bindings`.
+    #[cfg(feature = "ndi-bindings")]
+    ndi_publishers: Vec<multiview_output::display::FramePublisher<NdiCanvasFrame>>,
 }
 
 /// One configured display head (feature `display-kms`): everything
@@ -5554,6 +5771,25 @@ fn build_hls_output(
     })
 }
 
+/// Build a live push sink ([`RunnableOutput::Push`]) for an RTMP/SRT output: the
+/// muxer targeting `url` over `protocol`, carrying the output's declarative
+/// metadata (ADR-0088), fed the SAME encode-once packets as every other transport
+/// (invariant #7).
+fn build_push_output(
+    output: &Output,
+    protocol: PushProtocol,
+    url: &str,
+    label: &'static str,
+) -> RunnableOutput {
+    let (meta, matrix) = output_mux_meta(output);
+    RunnableOutput::Push {
+        id: output.id(),
+        sink: PacketMuxSink::push(protocol, url.to_owned()).with_output_metadata(meta, matrix),
+        label,
+        url: url.to_owned(),
+    }
+}
+
 /// Build the runnable sinks from the config outputs.
 ///
 /// HLS/LL-HLS segment to disk; **RTMP and SRT push outputs are run** via the
@@ -5561,11 +5797,13 @@ fn build_hls_output(
 /// invariant #7 — only the muxer targets a network URL). A **display** output
 /// (DEV-B1 / ADR-0044) is built as a raw-frame DRM/KMS plan in a `display-kms`
 /// build and is a hard error otherwise (never silently skipped — the gate in
-/// [`crate::outputs`]). The RTSP *server* and NDI out are genuinely not
-/// implemented (an RTSP server is its own RTP/RTSP protocol stack; NDI is the
-/// proprietary runtime-loaded SDK), so they are honestly skipped with a log
-/// line rather than pretended-runnable — a config mixing one with a supported
-/// output still produces that supported output.
+/// [`crate::outputs`]). NDI out (OUT-4b) is a raw-canvas sink built under the
+/// live `ndi-bindings` binding (an accepted `[system.ndi]` license gates it by
+/// construction); a seam-only `ndi` build or an unaccepted/absent runtime is an
+/// honest skip. The RTSP *server* is genuinely not implemented (its own
+/// RTP/RTSP protocol stack) and is honestly skipped with a log line rather than
+/// pretended-runnable — a config mixing an unsupported output with a supported
+/// one still produces that supported output.
 fn build_outputs(
     outputs: &[Output],
     epoch: &multiview_output::SharedEpoch,
@@ -5573,6 +5811,16 @@ fn build_outputs(
         String,
         multiview_webrtc::egress::EgressSink,
     >,
+    // The `[system.ndi]` license-acceptance settings (OUT-4b / NDI-L2): the live
+    // NDI sender is gated by an accepted license by construction. Unused without
+    // the `ndi-bindings` live binding.
+    #[cfg_attr(not(feature = "ndi-bindings"), allow(unused_variables))] ndi_system: Option<
+        &multiview_config::NdiSystemConfig,
+    >,
+    // The output cadence (exact rational): the NDI sink derives its tick-stamped
+    // 100 ns timecode + frame-rate descriptor from it (invariant #3). Unused
+    // without `ndi-bindings`.
+    #[cfg_attr(not(feature = "ndi-bindings"), allow(unused_variables))] cadence: Rational,
 ) -> Result<BuiltOutputs, PipelineError> {
     // A display output in a non-display-kms build is a configuration the
     // binary cannot honour: fail the build clearly, never skip (DEV-B1).
@@ -5585,6 +5833,8 @@ fn build_outputs(
     let mut runnable = Vec::new();
     #[cfg(feature = "display-kms")]
     let mut display_plans = Vec::new();
+    #[cfg(feature = "ndi-bindings")]
+    let mut ndi_publishers = Vec::new();
     for output in outputs {
         match output {
             Output::Display { .. } => {
@@ -5600,24 +5850,10 @@ fn build_outputs(
                 runnable.push(build_hls_output(output, path, epoch)?);
             }
             Output::Rtmp { url, .. } => {
-                let (meta, matrix) = output_mux_meta(output);
-                runnable.push(RunnableOutput::Push {
-                    id: output.id(),
-                    sink: PacketMuxSink::push(PushProtocol::Rtmp, url.clone())
-                        .with_output_metadata(meta, matrix),
-                    label: "rtmp",
-                    url: url.clone(),
-                });
+                runnable.push(build_push_output(output, PushProtocol::Rtmp, url, "rtmp"));
             }
             Output::Srt { url, .. } => {
-                let (meta, matrix) = output_mux_meta(output);
-                runnable.push(RunnableOutput::Push {
-                    id: output.id(),
-                    sink: PacketMuxSink::push(PushProtocol::Srt, url.clone())
-                        .with_output_metadata(meta, matrix),
-                    label: "srt",
-                    url: url.clone(),
-                });
+                runnable.push(build_push_output(output, PushProtocol::Srt, url, "srt"));
             }
             // RIST push (ADR-0095): the open-standard sibling of the SRT push.
             // The typed options lower to the `rist://…?…` AVIO URL (the PSK
@@ -5669,10 +5905,38 @@ fn build_outputs(
                      RTP/RTSP protocol stack); skipping"
                 );
             }
+            // NDI output (OUT-4b / NDI-L2): a raw-canvas sink, license-gated by
+            // construction. Built only with the live `ndi-bindings` binding (the
+            // real `SdkNdiApi` over the licensed SDK table); plain `--features
+            // ndi` carries the seam but no live API, so it refuses honestly. An
+            // unaccepted license / absent runtime is an honest skip inside the
+            // helper (logged; the run continues without it — inv #1/#10).
+            #[cfg(feature = "ndi-bindings")]
+            Output::Ndi { name, .. } => {
+                push_ndi_output(
+                    output,
+                    name,
+                    ndi_system,
+                    cadence,
+                    &mut runnable,
+                    &mut ndi_publishers,
+                );
+            }
+            // Without the live binding, the NDI *sink* cannot be constructed (no
+            // `SdkNdiApi`): an honest skip, exactly like the seam-only paths above
+            // — never a silent pretend-run.
+            #[cfg(all(feature = "ndi", not(feature = "ndi-bindings")))]
             Output::Ndi { .. } => {
                 tracing::warn!(
-                    "ndi output is not implemented (the NDI SDK is runtime-loaded and \
-                     not yet wired); skipping"
+                    "ndi output requires the `ndi-bindings` feature + a resolvable NDI runtime \
+                     (the live SDK function table); the seam-only `ndi` build cannot send. Skipping"
+                );
+            }
+            #[cfg(not(feature = "ndi"))]
+            Output::Ndi { .. } => {
+                tracing::warn!(
+                    "ndi output requires the `ndi` feature (off by default; runtime-loaded SDK); \
+                     skipping"
                 );
             }
             // `Output` is `#[non_exhaustive]`; an unrecognized future kind is
@@ -5691,7 +5955,115 @@ fn build_outputs(
         packet: runnable,
         #[cfg(feature = "display-kms")]
         display: display_plans,
+        #[cfg(feature = "ndi-bindings")]
+        ndi_publishers,
     })
+}
+
+/// Build one live NDI output sink (OUT-4b / NDI-L2): enforce the
+/// `[system.ndi] accept_license` gate, load the runtime, create the sender, and
+/// return the [`RunnableOutput::Ndi`] (carrying the sink + the canvas-tap reader)
+/// paired with the engine-side [`FramePublisher`] the hot loop publishes into.
+///
+/// The license gate is checked FIRST (ADR-0008 §7.5): an unaccepted/incomplete
+/// `accept_license` is refused BEFORE the runtime is touched, so an unaccepted
+/// operator never loads the proprietary SDK — mirroring the ingest gate
+/// ([`connect_ndi_receiver`]). The accepted [`NdiLicense`] then gates
+/// `NdiOutput::new` by construction: there is no way to build a sender without it.
+///
+/// # Errors
+/// A human-readable reason string when the license is not accepted, the runtime
+/// cannot be loaded, or the sender cannot be created — the caller logs it and
+/// **skips this output** (the run continues; invariants #1/#10). Never panics.
+#[cfg(feature = "ndi-bindings")]
+fn build_ndi_output(
+    output: &Output,
+    name: &str,
+    ndi_system: Option<&multiview_config::NdiSystemConfig>,
+    cadence: Rational,
+) -> Result<
+    (
+        RunnableOutput,
+        multiview_output::display::FramePublisher<NdiCanvasFrame>,
+    ),
+    String,
+> {
+    use multiview_output::ndi::license::LicenseAcceptance;
+    use multiview_output::ndi::{NdiCapability, NdiLicense, SdkNdiApi};
+
+    // License gate FIRST (ADR-0008 §7.5): refuse with the typed reason before any
+    // runtime load. Absent `[system.ndi]` ⇒ not accepted (empty audit fields).
+    let (accept_license, acceptance) = ndi_system.map_or_else(
+        || {
+            (
+                false,
+                LicenseAcceptance {
+                    accepted_by: String::new(),
+                    accepted_at: String::new(),
+                },
+            )
+        },
+        |s| {
+            (
+                s.accept_license,
+                LicenseAcceptance {
+                    accepted_by: s.accepted_by.clone().unwrap_or_default(),
+                    accepted_at: s.accepted_at.clone().unwrap_or_default(),
+                },
+            )
+        },
+    );
+    let license = NdiLicense::from_setting(accept_license, acceptance)
+        .map_err(|_| "ndi_unlicensed: [system.ndi] accept_license is not accepted".to_owned())?;
+
+    // Runtime load (only AFTER the gate passes). An absent/unusable runtime is a
+    // typed status, surfaced as the skip reason — never a panic, never a block.
+    let capability =
+        NdiCapability::load().map_err(|status| format!("NDI runtime unavailable ({status:?})"))?;
+
+    // The accepted license gates `NdiOutput::new` by construction.
+    let sink = NdiOutput::new(license, SdkNdiApi::new(capability), name.to_owned())
+        .map_err(|e| format!("NDI sender create failed: {e}"))?;
+
+    // The wait-free canvas tap: the engine publishes into `publisher`, the sink
+    // runner reads `reader` (newest-wins, drop-oldest) — the engine never blocks.
+    let (publisher, reader) = multiview_output::display::frame_mailbox::<NdiCanvasFrame>();
+    Ok((
+        RunnableOutput::Ndi {
+            id: output.id(),
+            sink,
+            reader,
+            cadence,
+            name: name.to_owned(),
+        },
+        publisher,
+    ))
+}
+
+/// Build one NDI output and push it (+ its canvas-tap publisher) into the
+/// accumulators, or log an honest skip reason. The license/runtime/create error
+/// from [`build_ndi_output`] is logged and the output skipped — never a panic,
+/// never a silent pretend-run, never a crash of the other outputs (inv #1/#10).
+#[cfg(feature = "ndi-bindings")]
+fn push_ndi_output(
+    output: &Output,
+    name: &str,
+    ndi_system: Option<&multiview_config::NdiSystemConfig>,
+    cadence: Rational,
+    runnable: &mut Vec<RunnableOutput>,
+    ndi_publishers: &mut Vec<multiview_output::display::FramePublisher<NdiCanvasFrame>>,
+) {
+    match build_ndi_output(output, name, ndi_system, cadence) {
+        Ok((sink, publisher)) => {
+            runnable.push(sink);
+            ndi_publishers.push(publisher);
+        }
+        Err(reason) => tracing::warn!(
+            output = %output.id(),
+            %reason,
+            "ndi output not started; the run continues without it"
+        ),
+    }
 }
 
 /// Optionally derive a single-file `program.ts` container sink from the first HLS
@@ -5715,6 +6087,10 @@ fn maybe_prepend_program_ts(mut runnable: Vec<RunnableOutput>, live: bool) -> Ve
         RunnableOutput::File { .. } | RunnableOutput::Push { .. } => None,
         #[cfg(feature = "webrtc-native")]
         RunnableOutput::WebRtc { .. } => None,
+        // The NDI sink is a raw-canvas consumer, not a packet/disk muxer — it
+        // anchors no `program.ts`.
+        #[cfg(feature = "ndi-bindings")]
+        RunnableOutput::Ndi { .. } => None,
     });
     if let Some(path) = file_path {
         runnable.insert(
@@ -7029,6 +7405,134 @@ mod ndi_license_gate_tests {
                 "an accepted + audited source must pass the license gate"
             ),
         }
+    }
+}
+
+#[cfg(all(test, feature = "ndi"))]
+mod ndi_egress_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use std::sync::Arc;
+
+    use multiview_compositor::pipeline::Nv12Image;
+    use multiview_core::time::Rational;
+    use multiview_output::display::frame_mailbox;
+    use multiview_output::ndi::license::LicenseAcceptance;
+    use multiview_output::ndi::{FakeNdiApi, NdiLicense, NdiOutput};
+
+    use super::{ndi_timecode_100ns, run_ndi_output, NdiCanvasFrame};
+
+    fn accepted() -> NdiLicense {
+        NdiLicense::accept(LicenseAcceptance {
+            accepted_by: "ops".to_owned(),
+            accepted_at: "2026-06-06T00:00:00Z".to_owned(),
+        })
+        .expect("a complete acceptance yields a license")
+    }
+
+    /// A 4x2 NV12 canvas whose Y plane carries a per-pixel ramp keyed by `seed`,
+    /// so a content-aware reader could prove this exact frame survived the
+    /// NV12→UYVY conversion (the live roundtrip asserts that; the offline drive
+    /// asserts the send shape).
+    fn ramp_canvas(seed: u8) -> Nv12Image {
+        let (w, h) = (4u32, 2u32);
+        let y: Vec<u8> = (0..(w * h))
+            .map(|i| seed.wrapping_add(u8::try_from(i % 256).unwrap_or(0)))
+            .collect();
+        let uv = vec![128u8; usize::try_from(w * h / 2).unwrap()];
+        Nv12Image::new(w, h, y, uv, multiview_core::color::ColorInfo::default()).unwrap()
+    }
+
+    /// The NDI 100 ns timecode is derived from the TICK index + the exact-rational
+    /// cadence (invariant #3) — never from wall clock or a raw input PTS.
+    #[test]
+    fn timecode_is_tick_derived_exact_rational() {
+        // 30000/1001 (NTSC): one frame is 1001/30000 s = 333_666.6… (100 ns units).
+        let cadence = Rational {
+            num: 30_000,
+            den: 1_001,
+        };
+        assert_eq!(ndi_timecode_100ns(0, cadence), 0);
+        // tick 3 → 3 * 1001 * 10_000_000 / 30000 = 1_001_000 (integer truncation).
+        assert_eq!(ndi_timecode_100ns(3, cadence), 1_001_000);
+        // A 25 fps cadence: one frame = 400_000 (100 ns units), exact.
+        let p25 = Rational { num: 25, den: 1 };
+        assert_eq!(ndi_timecode_100ns(1, p25), 400_000);
+        assert_eq!(ndi_timecode_100ns(5, p25), 2_000_000);
+    }
+
+    /// The drive loop converts each published canvas (NV12→UYVY) and sends it to
+    /// the NDI sender with the tick-derived timecode, ending when the
+    /// end-of-program signal (the packet receiver) disconnects. No panic, no
+    /// block.
+    #[test]
+    fn drive_loop_converts_and_sends_each_published_canvas() {
+        let cadence = Rational { num: 25, den: 1 };
+        let (publisher, reader) = frame_mailbox::<NdiCanvasFrame>();
+        // The end-of-program signal: a closed packet channel.
+        let (eop_tx, eop_rx) = std::sync::mpsc::sync_channel(4);
+
+        // Publish three distinct canvases BEFORE the loop drains — the loop must
+        // send the latest at each end-signal pulse, never block.
+        let handle = std::thread::spawn(move || {
+            let mut out = NdiOutput::new(accepted(), FakeNdiApi::new(), "Multiview Test").unwrap();
+            let outcome = run_ndi_output(&mut out, &reader, eop_rx, cadence, "ndi-test");
+            (outcome, out.api().sent.clone())
+        });
+
+        for (tick, seed) in [(0u64, 10u8), (1, 20), (2, 30)] {
+            publisher.publish(NdiCanvasFrame {
+                canvas: Arc::new(ramp_canvas(seed)),
+                tick_index: tick,
+            });
+            // One end-signal pulse per published frame.
+            eop_tx.send(()).unwrap();
+            // Give the drain a beat to observe the new sequence + pulse.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(eop_tx); // end-of-program
+
+        let (outcome, sent) = handle.join().unwrap();
+        // At least one frame was sent; every send is the canvas geometry (4x2)
+        // converted to UYVY (the seam validated it) with a tick-derived timecode.
+        assert!(!sent.is_empty(), "the drive loop must send the canvas");
+        assert!(sent.iter().all(|s| s.0 == 4 && s.1 == 2));
+        // Timecodes are tick-derived (multiples of one 25 fps frame = 400_000),
+        // never raw input PTS.
+        assert!(sent.iter().all(|s| s.3 % 400_000 == 0));
+        assert!(outcome.frames >= 1);
+    }
+
+    /// A canvas tap is bounded drop-oldest (the mailbox is single-slot,
+    /// newest-wins): publishing many frames before a single drain pulse sends
+    /// only the LATEST — older frames are dropped, never queued (invariant #10).
+    #[test]
+    fn canvas_tap_is_bounded_drop_oldest() {
+        let cadence = Rational { num: 25, den: 1 };
+        let (publisher, reader) = frame_mailbox::<NdiCanvasFrame>();
+        let (eop_tx, eop_rx) = std::sync::mpsc::sync_channel(1);
+
+        // Publish FIVE canvases with no drain in between, then a SINGLE pulse:
+        // the latest (tick 4) is the only one the loop can observe.
+        for (tick, seed) in [(0u64, 1u8), (1, 2), (2, 3), (3, 4), (4, 5)] {
+            publisher.publish(NdiCanvasFrame {
+                canvas: Arc::new(ramp_canvas(seed)),
+                tick_index: tick,
+            });
+        }
+        let handle = std::thread::spawn(move || {
+            let mut out = NdiOutput::new(accepted(), FakeNdiApi::new(), "Multiview Test").unwrap();
+            run_ndi_output(&mut out, &reader, eop_rx, cadence, "ndi-test");
+            out.api().sent.clone()
+        });
+        eop_tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        drop(eop_tx);
+
+        let sent = handle.join().unwrap();
+        // Exactly the latest canvas was sent (tick 4 → timecode 4*400_000), the
+        // four older ones were dropped at the single-slot tap (drop-oldest).
+        assert_eq!(sent.len(), 1, "only the latest canvas survives the tap");
+        assert_eq!(sent[0].3, 4 * 400_000);
     }
 }
 
@@ -9475,6 +9979,8 @@ buffer_ms = 700
             &epoch,
             #[cfg(feature = "webrtc-native")]
             &egress_sinks,
+            config.system.as_ref().and_then(|s| s.ndi.as_ref()),
+            Rational { num: 25, den: 1 },
         )
         .expect("rist push output builds");
         let push_count = built
