@@ -783,7 +783,12 @@ pub fn topic_for_event(event: &Event) -> Topic {
         // High-rate whole-system metrics (cpu/gpu/encoder) ride the conflated
         // `system` lane the footer subscribes to — NOT the control firehose.
         Event::SystemMetrics(_) => Topic::System,
-        Event::OutputStatus(_) => Topic::Outputs,
+        // Output sink status AND RIST link-health stats ride the `outputs` lane:
+        // a RIST link's retransmit/RTT/quality telemetry (ADR-0095 Tier-1) is an
+        // output-sink concern. `rist.link.stats` is conflated latest-wins
+        // (`Event::is_conflated`), so the session pump excludes it from the
+        // lossless replay ring exactly like the other conflated samples (inv #10).
+        Event::OutputStatus(_) | Event::RistLinkStats(_) => Topic::Outputs,
         // Operator alerts AND health warnings (SA-0) AND shed-load decisions ride
         // the existing `alerts` lane — a health warning is a richer sibling of an
         // alert (ADR-0035), and a shed-load is a discrete, lossless
@@ -1105,7 +1110,36 @@ mod topic_routing_tests {
 
     use super::topic_for_event;
     use multiview_core::stream::StreamInventory;
-    use multiview_events::{AudioLoudness, Event, InputStreams, SystemMetrics, Topic};
+    use multiview_events::{
+        AudioLoudness, Event, InputStreams, RistLinkRole, RistLinkStats, SystemMetrics, Topic,
+    };
+
+    /// A RIST link-stats sample MUST ride the `outputs` lane (a RIST egress
+    /// link's health is an output-sink concern) — never the `$control`
+    /// catch-all — and be a conflated latest-wins telemetry sample (excluded
+    /// from the lossless replay ring; pushed, never polled — inv #10).
+    #[test]
+    fn rist_link_stats_routes_to_the_outputs_topic_and_is_conflated() {
+        let event = Event::RistLinkStats(RistLinkStats {
+            link_id: "out-rist".to_owned(),
+            role: RistLinkRole::Sender,
+            flow_id: 1,
+            cname: "egress".to_owned(),
+            peer_count: 1,
+            rtt_ms: 40,
+            quality: 99.0,
+            bandwidth_bps: 1_000_000,
+            retry_bandwidth_bps: 1_000,
+            sent: 100,
+            received: 0,
+            retransmitted: 2,
+            lost: 0,
+            recovered: 2,
+            since: 1,
+        });
+        assert_eq!(topic_for_event(&event), Topic::Outputs);
+        assert!(event.is_conflated(), "rist link stats is latest-wins");
+    }
 
     /// The `input.streams` inventory-discovery event MUST ride the existing
     /// `inputs` lane (RT-3) — a delta on re-probe / PMT-version bump, not a new

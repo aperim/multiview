@@ -47,6 +47,7 @@ pub mod auth;
 pub mod command;
 pub mod concurrency;
 pub mod config_lock;
+pub mod cors;
 pub mod devices;
 pub mod error;
 pub mod is07;
@@ -211,6 +212,15 @@ pub use whip::{no_whip, NoWhip, SharedWhip, WhipAnswer, WhipAuth, WhipProvider, 
 /// The returned router carries `AppState`, so it is ready to serve.
 pub fn router(state: AppState) -> Router {
     let api = routes::api_router()
+        // The WebRTC media-signalling routes, wrapped with their own CORS layer
+        // (ADR-0048 §9): `webrtc.cors_allow_origins` applies **only** here — to
+        // WHIP / WHEP-serve / preview-WHEP / capabilities — so a browser served
+        // from a web origin can publish and play cross-origin, while the resource
+        // CRUD and realtime surfaces stay outside the media-CORS scope.
+        .merge(cors::with_signalling_cors(
+            routes::signalling_router(),
+            state.clone(),
+        ))
         .route("/ws", get(realtime::ws_handler))
         .route("/events", get(realtime::sse_handler))
         // Unauthenticated auth-mode discovery: the SPA reads this before it has a

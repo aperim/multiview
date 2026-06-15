@@ -345,8 +345,17 @@ ffmpeg = [
 # gate only, NOT a license-escalating one. The deployed FFmpeg must be built
 # `--enable-librist`; without it a `rist://` open fails at run time and the tile
 # rides NO_SIGNAL (it never crashes). Tier-1 stats / Tier-2 bonding (the
-# `multiview-rist-sys` FFI leaf) are deferred and gated by this SAME flag.
+# `multiview-rist-sys` FFI leaf) are gated by the separate `rist-stats` flag.
 rist = ["ffmpeg"]
+
+# RIST link STATISTICS (ADR-0095 Tier-1 / RIST-5): turns on the direct-librist
+# stats surface (`multiview-output/rist-stats` → the `multiview-rist-sys` FFI
+# leaf, runtime-loaded). FFmpeg's `rist://` protocol exposes no stats, so this is
+# the only path that observes a RIST link's retransmit/RTT/quality/bandwidth on
+# telemetry + the realtime `rist.link.stats` event + the `rist-link-loss` health
+# warning. Implies `rist` (the transport it instruments). Off by default; librist
+# is runtime-loaded (never linked), BSD-2-Clause — LGPL-clean.
+"rist-stats" = ["rist", "multiview-output/rist-stats"]
 
 # YouTube live ingest (ADR-0015): resolve a `youtube` source's watch URL to a
 # time-limited `*.googlevideo.com` HLS master via a runtime-discovered `yt-dlp`

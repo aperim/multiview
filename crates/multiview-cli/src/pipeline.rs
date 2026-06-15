@@ -814,8 +814,56 @@ mod admission_target_tests {
 
 #[cfg(test)]
 mod encoder_format_tests {
-    use super::encoder_input_format;
+    use super::{encoder_input_format, output_codec};
     use ffmpeg_next::format::Pixel;
+    use multiview_config::Output;
+
+    /// Deserialize a JSON `[[outputs]]` fragment into an [`Output`] (the
+    /// `#[non_exhaustive]`, `#[serde(tag = "kind")]` enum has no cross-crate
+    /// struct literal).
+    fn output(json: serde_json::Value) -> Output {
+        serde_json::from_value::<Output>(json).expect("output fragment parses")
+    }
+
+    #[test]
+    fn webrtc_output_codec_drives_the_program_encoder() {
+        // ADR-0049: a WHEP-serve `webrtc` output consumes the encode-once program
+        // rendition, which MUST be the codec it names (default h264). The program
+        // encoder is resolved from the first output naming a codec — so a
+        // webrtc-only config must select h264, not silently fall back to mpeg2video
+        // (which the SRTP packetizer cannot carry). This is the live-path defect.
+        let whep = output(serde_json::json!({
+            "kind": "webrtc", "label": "Program WHEP", "codec": "h264"
+        }));
+        assert_eq!(
+            output_codec(&whep),
+            Some("h264"),
+            "a webrtc output names its codec for the program encoder"
+        );
+        // The default codec (field omitted) is also surfaced as h264.
+        let whep_default = output(serde_json::json!({
+            "kind": "webrtc", "label": "Program WHEP"
+        }));
+        assert_eq!(
+            output_codec(&whep_default),
+            Some("h264"),
+            "a webrtc output's default codec (h264) drives the program encoder"
+        );
+    }
+
+    #[test]
+    fn whip_push_output_codec_drives_the_program_encoder() {
+        // ADR-0049: a whip_push output likewise consumes the encoded program; its
+        // named codec (default h264) must select the program encoder.
+        let push = output(serde_json::json!({
+            "kind": "whip_push", "url": "https://[2001:db8::1]:8443/whip/p", "codec": "h264"
+        }));
+        assert_eq!(
+            output_codec(&push),
+            Some("h264"),
+            "a whip_push output names its codec for the program encoder"
+        );
+    }
 
     #[test]
     fn nvenc_encoders_are_fed_nv12_to_skip_the_per_tick_swscale() {
@@ -5298,7 +5346,13 @@ fn output_codec(output: &Output) -> Option<&str> {
         | Output::LlHls { codec, .. }
         | Output::Hls { codec, .. }
         | Output::Rtmp { codec, .. }
-        | Output::Srt { codec, .. } => Some(codec.as_str()),
+        | Output::Srt { codec, .. }
+        // WebRTC outputs consume the encode-once program rendition (invariant #7,
+        // ADR-0049) — they spawn no encoder, so the program MUST be encoded as the
+        // codec they name (default h264). A webrtc-only config therefore selects
+        // h264, not the mpeg2video fallback the SRTP packetizer cannot carry.
+        | Output::Webrtc { codec, .. }
+        | Output::WhipPush { codec, .. } => Some(codec.as_str()),
         // NDI carries no codec token; a future output kind names none here until
         // explicitly wired (`Output` is `#[non_exhaustive]`).
         Output::Ndi { .. } | _ => None,

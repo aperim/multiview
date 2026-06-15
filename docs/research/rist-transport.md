@@ -481,8 +481,14 @@ verified conclusion the SRT brief reached, applied to RIST's specifics.
 - Honest capability reporting: a non-empty `bonding` list on a Tier-0-only build is **rejected with a
   clear error**, never silently dropped.
 
-**Tier-1 (own-what-FFmpeg-can't, built next as a complete slice):** `multiview-rist-sys` FFI leaf +
-`rist_stats_callback_set` → telemetry/HealthWarning, behind the same `rist` feature.
+**Tier-1 (own-what-FFmpeg-can't) — SHIPPED (RIST-5):** `multiview-rist-sys` FFI leaf
+(runtime-loaded librist, BSD-2, never linked at build time) + `rist_stats_callback_set` on an
+**owned** librist context → the `multiview-telemetry` metric series + a conflated `rist.link.stats`
+realtime event + the `rist-link-loss` HealthWarning, behind a dedicated off-by-default `rist-stats`
+feature. **Honest boundary:** because FFmpeg owns its `rist://` context privately, the stats-bearing
+egress is a direct-librist **sender** (leaf-sized, a sink consuming already-encoded packets, inv #7);
+the direct-librist **receiver** with stats (a new `Source` owning the receive+demux loop) is the
+Tier-2-shaped follow-up — not built, but the decode + bridge already handle the receiver role.
 
 **Deferred, only-if-required (Tier-2):** bonding / load-sharing / seamless switching (multiple
 `rist_peer_create`) + DTLS/EAP-SRP, on the same FFI leaf. Documented as a clean seam; **not** built

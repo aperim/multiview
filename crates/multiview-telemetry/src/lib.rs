@@ -63,6 +63,7 @@ pub mod log_capture;
 pub mod metrics;
 pub mod placement;
 pub mod retention;
+pub mod rist;
 #[cfg(feature = "snmp")]
 pub mod snmp;
 pub mod syslog;
@@ -83,5 +84,6 @@ pub use retention::{
     ShedReason, UtilisationBucket, UtilisationSample, UtilisationSummary, BUCKET_SECONDS,
     MAX_EVENTS_PER_BUCKET, RETENTION_BUCKETS,
 };
+pub use rist::{RistLinkAssessment, RistLinkGauges, RistLinkRole, RistLinkSample};
 pub use syslog::{Facility, SdElement, Severity, SyslogMessage};
 pub use tracing_init::{Output, SubscriberBuilder};

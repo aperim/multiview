@@ -125,6 +125,16 @@ pub mod guarded;
 #[cfg(feature = "ndi")]
 pub mod ndi;
 
+/// RIST link statistics (ADR-0095 Tier-1 / RIST-5): the bridge that drives a
+/// direct-librist sender egress link, drains its stats callback, and lowers each
+/// sample into the telemetry metric series + a `rist.link.stats` wire event +
+/// the `rist-link-loss` health warning. Behind the off-by-default `rist-stats`
+/// feature; all raw librist FFI lives in the `multiview-rist-sys` leaf crate so
+/// this crate stays `forbid(unsafe_code)`. `FFmpeg`'s Tier-0 `rist://` transport
+/// exposes no stats — this is the only path that observes a RIST link's health.
+#[cfg(feature = "rist-stats")]
+pub mod rist;
+
 pub use epoch::SharedEpoch;
 pub use error::{Error, Result};
 pub use metadata::{
