@@ -869,12 +869,48 @@ pub fn api_router() -> Router<AppState> {
                 .put(tally::put_profile)
                 .delete(tally::delete_profile),
         )
-        // Preview transport capabilities (WHEP vs the JPEG ladder, ADR-P006).
-        .route("/preview/capabilities", get(preview::capabilities))
-        // Live preview snapshots (program + per-input JPEG stills).
+        // Live preview snapshots (program + per-input JPEG stills). These are
+        // the JPEG-ladder fallback, NOT WebRTC media signalling — they stay
+        // outside the media-signalling CORS scope (ADR-0048 §9). The WebRTC
+        // media-signalling routes (capabilities + WHIP + WHEP-serve +
+        // preview-WHEP) live in `signalling_router`, which `crate::router` merges
+        // **with its CORS layer** so the allow-list applies only to them.
         .route("/preview/program.jpg", get(preview::program_jpeg))
         .route("/preview/inputs", get(preview::list_input_ids))
         .route("/preview/inputs/{id}", get(preview::input_jpeg))
+        // Read-only change audit log.
+        .route("/audit", get(audit::list_audit))
+        // (The Conspect account / licensing / telemetry / support routes are
+        // merged from `conspect_router()` above.)
+        // Config-as-code export: the live stores rendered as multiview.toml.
+        .route("/config/export", get(config::export_config))
+        // The config-file watch status (ADR-W020): read-only, honest
+        // "not watched" default. A static segment, so it never collides with
+        // the `{target}` capture below (axum prefers static matches).
+        .route("/config/watch-status", get(config::watch_status))
+        // Config versioning: history + commit, single revision, diff, rollback.
+        .route(
+            "/config/{target}",
+            get(config::list_history).put(config::commit_revision),
+        )
+        .route("/config/{target}/rev/{revision}", get(config::get_revision))
+        .route("/config/{target}/diff", get(config::diff_revisions))
+        .route(
+            "/config/{target}/rollback",
+            post(config::rollback_revision),
+        )
+}
+
+/// Build the **WebRTC media-signalling** routes (without their CORS layer, which
+/// [`crate::router`] applies). These are the routes ADR-0048 §9 scopes
+/// `webrtc.cors_allow_origins` to: preview transport capabilities, the
+/// preview-WHEP focus routes, WHIP ingest, and WHEP-serve output — the surface a
+/// browser served from a web origin negotiates against. Kept separate from
+/// [`api_router`] so the CORS allow-list applies **only** here.
+pub fn signalling_router() -> Router<AppState> {
+    Router::new()
+        // Preview transport capabilities (WHEP vs the JPEG ladder, ADR-P006).
+        .route("/preview/capabilities", get(preview::capabilities))
         // WHEP focus sessions (sub-second WebRTC preview) per scope: SDP offer
         // in -> 201 + answer SDP + Location; DELETE the resource to release.
         .route("/preview/program/whep", post(preview::program_whep_open))
@@ -917,26 +953,5 @@ pub fn api_router() -> Router<AppState> {
         .route(
             "/whep/{output_id}/sessions/{session_id}",
             axum::routing::delete(whep_output::whep_delete).patch(whep_output::whep_patch),
-        )
-        // Read-only change audit log.
-        .route("/audit", get(audit::list_audit))
-        // (The Conspect account / licensing / telemetry / support routes are
-        // merged from `conspect_router()` above.)
-        // Config-as-code export: the live stores rendered as multiview.toml.
-        .route("/config/export", get(config::export_config))
-        // The config-file watch status (ADR-W020): read-only, honest
-        // "not watched" default. A static segment, so it never collides with
-        // the `{target}` capture below (axum prefers static matches).
-        .route("/config/watch-status", get(config::watch_status))
-        // Config versioning: history + commit, single revision, diff, rollback.
-        .route(
-            "/config/{target}",
-            get(config::list_history).put(config::commit_revision),
-        )
-        .route("/config/{target}/rev/{revision}", get(config::get_revision))
-        .route("/config/{target}/diff", get(config::diff_revisions))
-        .route(
-            "/config/{target}/rollback",
-            post(config::rollback_revision),
         )
 }
