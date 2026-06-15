@@ -153,6 +153,7 @@ pub use ptp::{PtpSample, PtpServo, ServoConfig};
 pub use route::{resolve_selector, RouteApplier, RouteIntent, RouteResolution};
 pub use runtime::{
     CooperativePacer, EngineRuntime, Pacer, RealtimePacer, RunOutcome, RunStop, StopSignal,
+    MAX_REPEATS_PER_TICK,
 };
 pub use salvo::{Salvo, SalvoBatch, SalvoChange, SalvoPhase};
 pub use scheduler::{EventKind, ScheduledAction, Scheduler, TriggerEvent};

@@ -46,6 +46,20 @@ use crate::clock::{OutputClock, Tick, TimeSource};
 use crate::drive::{CompositedFrame, CompositorDrive};
 use crate::isolation::EnginePublisher;
 
+/// The maximum number of last-good **repeats** the drive loop emits in a single
+/// iteration before it gives up frame-by-frame catch-up and **resyncs** the clock
+/// to wall-clock in one [`OutputClock::skip_to`] step (ADR-T018).
+///
+/// Sustained moderate overload (the common contended-host case) falls only a few
+/// ticks behind per iteration, far under this cap, so it is backfilled with a
+/// **contiguous** run of last-good repeats — no PTS gap. Only a *pathological*
+/// one-off time jump (a multi-second deschedule, a VM pause/migration where
+/// `CLOCK_MONOTONIC` leaps) exceeds the cap; there the loop emits at most this
+/// many repeats then jumps the counter to the wall-clock index, accepting one
+/// bounded discontinuity rather than an unbounded burst (and never spinning).
+/// 120 ticks is ~4 s at 30 fps / ~2 s at 60 fps of held last-good before resync.
+pub const MAX_REPEATS_PER_TICK: u32 = 120;
+
 /// How the runtime waits for a tick's wall-clock deadline.
 ///
 /// The runtime computes the absolute deadline (on the [`TimeSource`] timeline)
@@ -185,6 +199,12 @@ pub struct EngineRuntime<P> {
     seed_nanos: i64,
     /// Cumulative count of ticks emitted across all `run`/`run_for` calls.
     ticks_emitted: Arc<AtomicU64>,
+    /// Cumulative count of last-good **repeats** emitted under overload (ADR-T018):
+    /// ticks where the loop re-published the held last-good frame (under a fresh,
+    /// strictly-increasing pts) instead of composing, to hold wall-clock cadence.
+    /// Mirrors `ticks_emitted`; the overload signal for telemetry / the
+    /// degradation loop (a rising rate means compose is not fitting the budget).
+    frames_repeated: Arc<AtomicU64>,
 }
 
 impl<P: Pacer> EngineRuntime<P> {
@@ -205,6 +225,7 @@ impl<P: Pacer> EngineRuntime<P> {
             pacer,
             seed_nanos,
             ticks_emitted: Arc::new(AtomicU64::new(0)),
+            frames_repeated: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -243,6 +264,23 @@ impl<P: Pacer> EngineRuntime<P> {
     #[must_use]
     pub fn ticks_counter(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.ticks_emitted)
+    }
+
+    /// Total last-good **repeats** emitted under overload so far (ADR-T018).
+    ///
+    /// Zero whenever compose keeps up with the tick budget; a rising value is the
+    /// engine telling you the host is contended and the output is **holding
+    /// cadence by repeating rather than slipping**. Read wait-free from any thread.
+    #[must_use]
+    pub fn frames_repeated(&self) -> u64 {
+        self.frames_repeated.load(Ordering::Acquire)
+    }
+
+    /// A clone of the wait-free cumulative-repeats counter, for an off-thread
+    /// telemetry/degradation sampler (mirrors [`EngineRuntime::ticks_counter`]).
+    #[must_use]
+    pub fn frames_repeated_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.frames_repeated)
     }
 
     /// Run the tick loop **forever**, until `stop` is raised.
