@@ -11,6 +11,14 @@
 //! These types are used **only** to describe the schema in the generated
 //! `OpenAPI` document — the handlers serialise the real core types. A round-trip
 //! test (`tests/alarms.rs`) pins the two shapes together so they cannot drift.
+// `large_stack_arrays`: the `utoipa::ToSchema` derive on a large tagged enum
+// (`OutputBodyDoc` — every output kind × its fields, including the OUTMETA
+// `metadata`/`orientation` mirrors) expands to a const array of schema entries
+// that crosses clippy's 16 KiB stack-array threshold. Every type in this module
+// is an OpenAPI documentation mirror evaluated once at spec generation
+// (`xtask gen-openapi`), never on a request/data path — the array lives in the
+// derive's generated builder, not runtime code. Scoped to this doc-only module.
+#![allow(clippy::large_stack_arrays)]
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -1079,6 +1087,114 @@ pub struct OutputAudioDoc {
     pub tracks: Vec<String>,
 }
 
+/// `OpenAPI` mirror of `multiview_config::OutputTimedMetadata` (ADR-0088 §4):
+/// the HLS/TS now-playing/cue timed-metadata carrier opt-ins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct OutputTimedMetadataDoc {
+    /// Emit in-band ID3 metadata frames as MPEG-TS PES.
+    #[serde(default)]
+    pub id3: bool,
+    /// Emit out-of-band `EXT-X-DATERANGE` playlist tags.
+    #[serde(default)]
+    pub daterange: bool,
+}
+
+/// `OpenAPI` mirror of `multiview_config::OutputMetadata` (ADR-0088): per-output
+/// declarative metadata intent, projected onto whatever the transport can carry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct OutputMetadataDoc {
+    /// Service/program title (TS SDT `service_name`, RTMP `onMetaData` title,
+    /// container `title`, SDP `s=`).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Service provider (TS SDT `provider_name`). No carrier on most transports.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Primary program language, ISO-639-2 (three lowercase ASCII letters).
+    #[serde(default)]
+    pub language: Option<String>,
+    /// DVB / MPEG-TS service id (program number), `1..=65535`.
+    #[serde(default)]
+    pub service_id: Option<u32>,
+    /// Free-text description / comment (container `comment`, SDT free-text).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Timed-metadata opt-ins (HLS/TS now-playing/cue side stream).
+    #[serde(default)]
+    pub timed: Option<OutputTimedMetadataDoc>,
+}
+
+/// `OpenAPI` mirror of `multiview_config::OrientationMode` (ADR-0089 §2.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+#[non_exhaustive]
+pub enum OrientationModeDoc {
+    /// Prefer the display-rotation tag where the transport carries one, else
+    /// rotate the pixels. The default.
+    #[default]
+    Auto,
+    /// Emit the display-rotation tag only (rejected on tag-less transports).
+    Tag,
+    /// Produce a rotated-canvas rendition (real pixels).
+    Pixels,
+}
+
+/// `OpenAPI` mirror of `multiview_config::OutputFlip` (ADR-0089 §2.2). A flip is
+/// pixel-only (no container "flip" tag), so it forces the pixels path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+#[non_exhaustive]
+pub enum OutputFlipDoc {
+    /// No flip.
+    #[default]
+    None,
+    /// Mirror horizontally.
+    Horizontal,
+    /// Mirror vertically.
+    Vertical,
+}
+
+/// `OpenAPI` mirror of `multiview_core::layout::QuarterTurn` for the output
+/// orientation turn (`none`/`cw90`/`cw180`/`cw270`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+#[non_exhaustive]
+pub enum QuarterTurnDoc {
+    /// No rotation (0°).
+    #[default]
+    None,
+    /// 90° clockwise.
+    Cw90,
+    /// 180°.
+    Cw180,
+    /// 270° clockwise.
+    Cw270,
+}
+
+/// `OpenAPI` mirror of `multiview_config::OutputOrientation` (ADR-0089):
+/// per-output presentation orientation (quarter-turn + mechanism + flip).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct OutputOrientationDoc {
+    /// The clockwise quarter-turn. Defaults to `none`.
+    #[serde(default)]
+    pub turn: QuarterTurnDoc,
+    /// The orientation mechanism. Defaults to `auto`.
+    #[serde(default)]
+    pub mode: OrientationModeDoc,
+    /// Optional flip (forces the pixels path). Defaults to `none`.
+    #[serde(default)]
+    pub flip: OutputFlipDoc,
+}
+
 /// `OpenAPI` mirror of `multiview_config::audio::AudioChannels` (tagged by
 /// `kind`, `snake_case`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1179,6 +1295,12 @@ pub enum OutputBodyDoc {
         /// Per-output audio selection.
         #[serde(default)]
         audio: Option<OutputAudioDoc>,
+        /// Per-output declarative metadata intent (ADR-0088).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<OutputMetadataDoc>,
+        /// Per-output presentation orientation (ADR-0089).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orientation: Option<OutputOrientationDoc>,
     },
     /// Low-latency HLS packager.
     LlHls {
@@ -1204,6 +1326,12 @@ pub enum OutputBodyDoc {
         /// Per-output audio selection.
         #[serde(default)]
         audio: Option<OutputAudioDoc>,
+        /// Per-output declarative metadata intent (ADR-0088).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<OutputMetadataDoc>,
+        /// Per-output presentation orientation (ADR-0089).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orientation: Option<OutputOrientationDoc>,
     },
     /// HLS packager.
     Hls {
@@ -1223,6 +1351,12 @@ pub enum OutputBodyDoc {
         /// Per-output audio selection.
         #[serde(default)]
         audio: Option<OutputAudioDoc>,
+        /// Per-output declarative metadata intent (ADR-0088).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<OutputMetadataDoc>,
+        /// Per-output presentation orientation (ADR-0089).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orientation: Option<OutputOrientationDoc>,
     },
     /// NDI output.
     Ndi {
@@ -1237,6 +1371,12 @@ pub enum OutputBodyDoc {
         /// Per-output audio selection.
         #[serde(default)]
         audio: Option<OutputAudioDoc>,
+        /// Per-output declarative metadata intent (ADR-0088).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<OutputMetadataDoc>,
+        /// Per-output presentation orientation (ADR-0089).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orientation: Option<OutputOrientationDoc>,
     },
     /// RTMP push.
     Rtmp {
@@ -1253,6 +1393,12 @@ pub enum OutputBodyDoc {
         /// Per-output audio selection.
         #[serde(default)]
         audio: Option<OutputAudioDoc>,
+        /// Per-output declarative metadata intent (ADR-0088).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<OutputMetadataDoc>,
+        /// Per-output presentation orientation (ADR-0089).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orientation: Option<OutputOrientationDoc>,
     },
     /// SRT push.
     Srt {
@@ -1269,6 +1415,12 @@ pub enum OutputBodyDoc {
         /// Per-output audio selection.
         #[serde(default)]
         audio: Option<OutputAudioDoc>,
+        /// Per-output declarative metadata intent (ADR-0088).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<OutputMetadataDoc>,
+        /// Per-output presentation orientation (ADR-0089).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orientation: Option<OutputOrientationDoc>,
     },
     /// RIST push — the open-standard sibling of the SRT push (ADR-0095).
     Rist {
@@ -1285,6 +1437,12 @@ pub enum OutputBodyDoc {
         /// Per-output audio selection.
         #[serde(default)]
         audio: Option<OutputAudioDoc>,
+        /// Per-output declarative metadata intent (ADR-0088).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<OutputMetadataDoc>,
+        /// Per-output presentation orientation (ADR-0089).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orientation: Option<OutputOrientationDoc>,
         /// Optional typed RIST options (profile, buffer, PSK encryption, …).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rist: Option<RistOptionsDoc>,
@@ -1313,6 +1471,12 @@ pub enum OutputBodyDoc {
         /// Per-output audio selection.
         #[serde(default)]
         audio: Option<OutputAudioDoc>,
+        /// Per-output declarative metadata intent (ADR-0088).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<OutputMetadataDoc>,
+        /// Per-output presentation orientation (ADR-0089).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        orientation: Option<OutputOrientationDoc>,
     },
 }
 

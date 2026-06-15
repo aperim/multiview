@@ -171,6 +171,7 @@ codec = "h264"
             codec,
             gpu_pin,
             audio,
+            ..
         } => {
             assert_eq!(id.as_deref(), Some("pgm-whep"));
             assert_eq!(label, "Program WHEP");
@@ -321,6 +322,7 @@ token = "push-secret"
             codec,
             gpu_pin,
             audio,
+            ..
         } => {
             assert_eq!(id.as_deref(), Some("origin-push"));
             assert_eq!(url, "https://[2001:db8::15]:8443/whip/pgm1");

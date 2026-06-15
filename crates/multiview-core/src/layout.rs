@@ -27,7 +27,13 @@ pub enum FitMode {
 /// landscape source fill a portrait tile (and vice versa). Only quarter turns
 /// are offered so the rotation is lossless and GPU-cheap (a sampling transform,
 /// no resampling artefacts). `#[non_exhaustive]` for forward compatibility.
+///
+/// Serializes in **`snake_case`** (`none`/`cw90`/`cw180`/`cw270`) — the
+/// project-wide serde convention and the authoring spelling the config schema
+/// documents for per-cell `rotation` and per-output `orientation.turn`
+/// (ADR-0089 §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum QuarterTurn {
     /// No rotation (0°).
