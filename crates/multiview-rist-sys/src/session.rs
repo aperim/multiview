@@ -101,10 +101,11 @@ struct RistApi {
     destroy: unsafe extern "C" fn(*mut RistCtx) -> c_int,
 }
 
-/// `struct rist_data_block` (the leading, sender-relevant fields). Only the
-/// fields `rist_sender_data_write` reads are populated; the rest are zeroed. The
-/// trailing receiver-only fields are represented by padding so the struct size
-/// matches librist's (a short struct would let librist read past our allocation).
+/// `struct rist_data_block` (verbatim librist 0.2.x field order). Only the
+/// leading fields `rist_sender_data_write` reads (`payload`/`payload_len`/
+/// `ts_ntp`/`virt_src_port`) are populated; the trailing receiver/output fields
+/// are zeroed but **present in full** so the struct ABI-matches librist's exactly
+/// (a short struct could let librist read or write past our allocation).
 #[repr(C)]
 struct RistDataBlock {
     payload: *const c_void,
@@ -112,12 +113,14 @@ struct RistDataBlock {
     ts_ntp: u64,
     virt_src_port: u16,
     virt_dst_port: u16,
-    // Receiver-populated / output fields (`peer`, `flow_id`, `seq`, `flags`) —
-    // not used by the sender write, but present so the struct ABI-matches.
+    // Receiver-populated / output fields — not used by the sender write, but
+    // present so the struct ABI-matches `struct rist_data_block` byte-for-byte.
     peer: *mut c_void,
     flow_id: u32,
     seq: u64,
     flags: u32,
+    /// `struct rist_ref *ref` — librist's internal refcount handle (output only).
+    rist_ref: *mut c_void,
 }
 
 /// The shared callback context handed to librist's stats callback as `void *arg`.
@@ -282,6 +285,7 @@ impl RistSenderSession {
             flow_id: 0,
             seq: 0,
             flags: 0,
+            rist_ref: ptr::null_mut(),
         };
         // SAFETY: `ctx` is the live sender ctx; `block` is a fully-initialised
         // `rist_data_block` whose `payload`/`payload_len` reference the caller's
@@ -390,15 +394,17 @@ impl RistApi {
         // fn pointer out and keep `lib` mapped for the session lifetime so the
         // pointers stay valid.
         unsafe {
+            // libloading's `get` reads the name as a C string, so each must be
+            // NUL-terminated (mirrors `multiview-ndi-sys`'s `b"…\0"`).
             Ok(Self {
-                sender_create: *resolve(lib, b"rist_sender_create")?,
-                parse_address2: *resolve(lib, b"rist_parse_address2")?,
-                peer_create: *resolve(lib, b"rist_peer_create")?,
-                peer_config_free2: *resolve(lib, b"rist_peer_config_free2")?,
-                stats_callback_set: *resolve(lib, b"rist_stats_callback_set")?,
-                start: *resolve(lib, b"rist_start")?,
-                sender_data_write: *resolve(lib, b"rist_sender_data_write")?,
-                destroy: *resolve(lib, b"rist_destroy")?,
+                sender_create: *resolve(lib, b"rist_sender_create\0")?,
+                parse_address2: *resolve(lib, b"rist_parse_address2\0")?,
+                peer_create: *resolve(lib, b"rist_peer_create\0")?,
+                peer_config_free2: *resolve(lib, b"rist_peer_config_free2\0")?,
+                stats_callback_set: *resolve(lib, b"rist_stats_callback_set\0")?,
+                start: *resolve(lib, b"rist_start\0")?,
+                sender_data_write: *resolve(lib, b"rist_sender_data_write\0")?,
+                destroy: *resolve(lib, b"rist_destroy\0")?,
             })
         }
     }
@@ -407,20 +413,20 @@ impl RistApi {
 /// Resolve a single symbol, mapping a missing symbol to a typed error.
 ///
 /// # Safety
-/// The declared `T` must match the C symbol's ABI signature.
+/// The declared `T` must match the C symbol's ABI signature. `name` must be a
+/// NUL-terminated byte string (libloading reads it as a C string).
 unsafe fn resolve<'lib, T>(
     lib: &'lib Library,
     name: &'static [u8],
 ) -> Result<libloading::Symbol<'lib, T>, SessionError> {
-    // SAFETY: caller guarantees `T` matches the symbol ABI; `name` is a NUL-free
-    // byte string naming a librist export.
+    // SAFETY: caller guarantees `T` matches the symbol ABI; `name` is a
+    // NUL-terminated byte string naming a librist export.
     unsafe {
         lib.get(name).map_err(|_| {
-            // Strip the trailing NUL the caller did not include (names below have
-            // none), so the error names the symbol cleanly.
-            let sym = std::str::from_utf8(name).unwrap_or("<symbol>");
-            // The &'static lifetime is satisfied because all call sites pass a
-            // literal; map to the matching catalogued name.
+            // Trim the trailing NUL so the error names the symbol cleanly.
+            let sym = std::str::from_utf8(name)
+                .unwrap_or("<symbol>")
+                .trim_end_matches('\0');
             SessionError::MissingSymbol(static_name(sym))
         })
     }
@@ -446,23 +452,44 @@ fn static_name(sym: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    /// Live FFI roundtrip (RIST-5 capstone): `dlopen` the real librist, resolve
+    /// every symbol, open a sender to a loopback listener, write a TS-sized
+    /// payload, and drain the stats channel — proving the whole binding (the
+    /// hand fn-table, the peer-config parse, the stats callback registration, the
+    /// data write) works against the installed librist with no panic and no UB.
+    /// `#[ignore]`: needs `librist.so` present (the CI box / the deploy image
+    /// built `--enable-librist`).
+    ///
+    /// ```text
+    /// cargo test -p multiview-rist-sys --features session --lib -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires librist.so present (run on a librist-equipped host)"]
+    fn live_sender_session_opens_writes_and_drains_stats() {
+        // A high loopback port so a transient listener is not required for the
+        // sender to construct (a RIST sender connects lazily / tolerates no peer).
+        let session = RistSenderSession::open("live-test", "rist://[::1]:8099", 0, 250)
+            .expect("librist present: a sender session opens against loopback");
+
+        // Writing a TS-aligned payload must not error or panic (librist buffers it).
+        let payload = [0_u8; 1316];
+        session
+            .write(&payload)
+            .expect("a sender data write succeeds");
+
+        // Draining stats is non-blocking and bounded; it may be empty this early
+        // (the stats interval is 250 ms and we do not sleep), which is fine — the
+        // point is that the binding round-trips without UB.
+        let _ = session.drain_stats();
+
+        // Dropping the session destroys the librist ctx cleanly (no panic, no
+        // double-free); the test ending exercises `Drop`.
+    }
+
     #[test]
     fn static_name_is_stable_for_known_symbols() {
         assert_eq!(static_name("rist_start"), "rist_start");
         assert_eq!(static_name("rist_destroy"), "rist_destroy");
         assert_eq!(static_name("nope"), "<librist symbol>");
-    }
-
-    /// Opening a session must surface a typed error (Load or a librist Call
-    /// status) rather than panic when librist is absent or the URL has no peer.
-    /// This exercises the `open()` error path without a live peer; it is `#[ignore]`
-    /// by default because the result depends on whether librist is installed.
-    #[test]
-    #[ignore = "requires librist.so present; result depends on host"]
-    fn open_to_an_unroutable_url_does_not_panic() {
-        let result = RistSenderSession::open("t", "rist://[::1]:1", 0, 1000);
-        // Either librist is absent (Load) or it accepted/failed the peer — never a
-        // panic. We only assert it returns a typed Result.
-        let _ = result.map(|_s| ()).map_err(|e| e.to_string());
     }
 }
