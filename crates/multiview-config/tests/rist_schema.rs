@@ -147,6 +147,7 @@ buffer_ms = 700
             gpu_pin,
             audio,
             rist,
+            ..
         } => {
             assert_eq!(id.as_deref(), Some("rist_out"));
             assert_eq!(url, "rist://[2001:db8::20]:6000");

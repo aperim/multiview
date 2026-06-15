@@ -50,6 +50,7 @@ use multiview_ffmpeg::{
 use crate::epoch::SharedEpoch;
 use crate::error::{Error, Result};
 use crate::hls::{LivePlaylist, MediaPlaylist, Segment, SegmentType};
+use crate::metadata::{DisplayMatrix, MetadataScope, MuxMetadata};
 
 /// Nanoseconds in one second (the internal timeline unit, invariant #3).
 const NANOS_PER_SEC: i64 = 1_000_000_000;
@@ -1208,6 +1209,21 @@ impl SingleTarget {
 /// consumer, never the engine (invariants #1/#10).
 pub struct PacketMuxSink {
     kind: PacketMuxKind,
+    /// Per-output container/stream metadata (OUTMETA, ADR-0088): the validated
+    /// `(scope, key, value)` dictionary entries applied to the muxer **before**
+    /// `write_header` (TS SDT `service_name`/`service_provider`, PMT `language`,
+    /// container `title`/`comment`, RTMP `onMetaData` keys, …). Empty ⇒ no
+    /// metadata to apply (every existing call site is unchanged). For the
+    /// segmented HLS paths the same metadata is re-applied to **each** segment
+    /// muxer (the codec/stream layout is fixed for the run, invariant #7).
+    metadata: MuxMetadata,
+    /// The tag-path display-rotation matrix (OUTMETA, ADR-0089 mechanism *a*)
+    /// for the **video** stream (index 0), written into the container's `tkhd` /
+    /// `DISPLAYMATRIX` side data before `write_header`. `None` ⇒ no tag (the
+    /// orientation is identity, or it took the pixels path upstream in the
+    /// compositor). MPEG-TS carries no rotation tag, so this is only ever set on
+    /// a tag-capable container (validated at config time).
+    display_matrix: Option<DisplayMatrix>,
 }
 
 /// The two `PacketMuxSink` flavours (private; the public surface is the
@@ -1248,6 +1264,8 @@ impl PacketMuxSink {
     pub fn file(path: impl Into<PathBuf>) -> Self {
         Self {
             kind: PacketMuxKind::Single(SingleTarget::File(path.into())),
+            metadata: MuxMetadata::new(),
+            display_matrix: None,
         }
     }
 
@@ -1260,6 +1278,8 @@ impl PacketMuxSink {
                 url: url.into(),
                 muxer_name: protocol.muxer_name(),
             }),
+            metadata: MuxMetadata::new(),
+            display_matrix: None,
         }
     }
 
@@ -1277,6 +1297,8 @@ impl PacketMuxSink {
                 dir: dir.into(),
                 prefix: prefix.into(),
             },
+            metadata: MuxMetadata::new(),
+            display_matrix: None,
         }
     }
 
@@ -1307,7 +1329,51 @@ impl PacketMuxSink {
                 window,
                 epoch,
             },
+            metadata: MuxMetadata::new(),
+            display_matrix: None,
         }
+    }
+
+    /// Attach OUTMETA per-output metadata + an optional tag-path display-rotation
+    /// matrix (ADR-0088 / ADR-0089) to this sink. The metadata entries are
+    /// applied to the output container/streams and the display matrix to the
+    /// video stream — both **before** `write_header` — in every mux path
+    /// (single, and each segment of the HLS paths). A builder so existing call
+    /// sites stay unchanged.
+    #[must_use]
+    pub fn with_output_metadata(
+        mut self,
+        metadata: MuxMetadata,
+        display_matrix: Option<DisplayMatrix>,
+    ) -> Self {
+        self.metadata = metadata;
+        self.display_matrix = display_matrix;
+        self
+    }
+
+    /// Apply this sink's OUTMETA metadata + display matrix to a freshly-opened
+    /// `muxer` whose streams are already registered, **before** `write_header`
+    /// (ADR-0088 §3 / ADR-0089 §2.3). `video_index` is the video stream the
+    /// display-rotation tag targets; format-scoped entries hit the container and
+    /// stream-scoped entries their stream. Shared by the single-mux and the
+    /// per-segment paths so every container of a run carries the same metadata.
+    fn apply_metadata(&self, muxer: &mut Muxer, video_index: usize) -> Result<()> {
+        for entry in self.metadata.entries() {
+            match entry.scope {
+                MetadataScope::Format => muxer
+                    .set_format_metadata(&entry.key, &entry.value)
+                    .map_err(ff)?,
+                MetadataScope::Stream { index } => muxer
+                    .set_stream_metadata(index, &entry.key, &entry.value)
+                    .map_err(ff)?,
+            }
+        }
+        if let Some(matrix) = self.display_matrix {
+            muxer
+                .set_stream_display_matrix(video_index, matrix)
+                .map_err(ff)?;
+        }
+        Ok(())
     }
 
     /// Mux the whole `source` packet stream, seeding every muxer stream from
@@ -1366,6 +1432,9 @@ impl PacketMuxSink {
                     ),
                     None => None,
                 };
+                // OUTMETA: tag the container/streams + the display-rotation
+                // matrix before the header is written (ADR-0088/0089).
+                self.apply_metadata(&mut muxer, video_index)?;
                 muxer.write_header().map_err(ff)?;
                 let driven =
                     drive_packets_to_single_muxer(&mut muxer, video_index, audio_index, source);
@@ -1381,6 +1450,7 @@ impl PacketMuxSink {
                     dir,
                     prefix,
                 );
+                state.set_meta(&self.metadata, self.display_matrix);
                 let driven = state.drive_from_packets(source);
                 finish_segments(state, driven, video.time_base)
                     .map(|result| PacketMuxOutcome::Segment(Box::new(result)))
@@ -1399,6 +1469,7 @@ impl PacketMuxSink {
                     dir,
                     prefix,
                 );
+                state.set_meta(&self.metadata, self.display_matrix);
                 // The rolling-live driver: each closed segment is published into a
                 // windowed `.m3u8` on disk (atomic) and the evicted `.ts` pruned,
                 // PDT-stamped from the shared outbound epoch (ADR-M010).
@@ -1476,6 +1547,12 @@ struct SegmentState<'a> {
     /// segment. Unused (and stays `0`) for the batch flavour, which keeps its
     /// historical `done.len()`-derived names.
     seg_index: u64,
+    /// OUTMETA (ADR-0088/0089): the per-output metadata + tag-path display
+    /// matrix to apply to **every** segment muxer before its header is written
+    /// (the codec/stream layout is fixed for the run, invariant #7). `None`
+    /// (the default, and always for the encoder-fed `SegmentSink`) ⇒ no metadata
+    /// to apply, byte-identical to before this field existed.
+    meta: Option<(&'a MuxMetadata, Option<DisplayMatrix>)>,
 }
 
 /// An in-progress segment: its muxer, registered stream index, file path, and
@@ -1521,7 +1598,39 @@ impl<'a> SegmentState<'a> {
             stats: EncodeStats::default(),
             live: None,
             seg_index: 0,
+            meta: None,
         }
+    }
+
+    /// Attach OUTMETA per-output metadata + an optional tag-path display matrix
+    /// to apply to every segment muxer (ADR-0088/0089). A no-op when the borrow
+    /// carries an empty `MuxMetadata` and a `None` matrix.
+    fn set_meta(&mut self, metadata: &'a MuxMetadata, display_matrix: Option<DisplayMatrix>) {
+        self.meta = Some((metadata, display_matrix));
+    }
+
+    /// Apply the attached OUTMETA metadata + display matrix to a freshly-opened
+    /// segment `muxer` (streams already registered), before `write_header`.
+    fn apply_segment_meta(&self, muxer: &mut Muxer, video_index: usize) -> Result<()> {
+        let Some((metadata, display_matrix)) = self.meta else {
+            return Ok(());
+        };
+        for entry in metadata.entries() {
+            match entry.scope {
+                MetadataScope::Format => muxer
+                    .set_format_metadata(&entry.key, &entry.value)
+                    .map_err(ff)?,
+                MetadataScope::Stream { index } => muxer
+                    .set_stream_metadata(index, &entry.key, &entry.value)
+                    .map_err(ff)?,
+            }
+        }
+        if let Some(matrix) = display_matrix {
+            muxer
+                .set_stream_display_matrix(video_index, matrix)
+                .map_err(ff)?;
+        }
+        Ok(())
     }
 
     /// Run the encode/segment drive loop: pull frames from `source`, convert and
@@ -1672,6 +1781,10 @@ impl<'a> SegmentState<'a> {
             ),
             None => None,
         };
+        // OUTMETA: tag every segment's container/streams (SDT/PMT, …) before its
+        // header (ADR-0088 §3); the display matrix is `None` for MPEG-TS (no
+        // rotation tag — validated at config time) so it is a no-op here.
+        self.apply_segment_meta(&mut muxer, stream_index)?;
         muxer.write_header().map_err(ff)?;
         self.current = Some(OpenSegment {
             muxer,
