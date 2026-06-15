@@ -91,8 +91,8 @@ fn re_polling_a_cumulative_total_is_idempotent_not_double_counted() {
 
 #[test]
 fn clean_link_does_not_raise_a_loss_warning() {
-    let mut gauges = RistLinkGauges::register(&MetricsRegistry::new(), "l", RistLinkRole::Sender);
-    let assessment = gauges.update(&clean_sample("l"));
+    let mut gauges = RistLinkGauges::register(&MetricsRegistry::new(), "link-7", RistLinkRole::Sender);
+    let assessment = gauges.update(&clean_sample("link-7"));
     assert!(
         !assessment.loss_warning_active(),
         "a high-quality link is healthy"
@@ -101,11 +101,11 @@ fn clean_link_does_not_raise_a_loss_warning() {
 
 #[test]
 fn sustained_low_quality_raises_then_clears_the_loss_warning() {
-    let mut gauges = RistLinkGauges::register(&MetricsRegistry::new(), "l", RistLinkRole::Sender);
+    let mut gauges = RistLinkGauges::register(&MetricsRegistry::new(), "link-7", RistLinkRole::Sender);
 
     // A single dip below the quality floor is NOT yet a warning (hysteresis:
     // transient blips are expected — bad-inputs-are-the-purpose).
-    let mut bad = clean_sample("l");
+    let mut bad = clean_sample("link-7");
     bad.quality = 60.0;
     bad.lost = 50;
     let a1 = gauges.update(&bad);
@@ -113,10 +113,13 @@ fn sustained_low_quality_raises_then_clears_the_loss_warning() {
 
     // Sustained: a second consecutive low-quality sample raises the warning.
     let a2 = gauges.update(&bad);
-    assert!(a2.loss_warning_active(), "sustained low quality is a warning");
-    assert!(a2.message().contains("l"), "names the link");
+    assert!(
+        a2.loss_warning_active(),
+        "sustained low quality is a warning"
+    );
+    assert!(a2.message().contains("link-7"), "names the link");
 
     // Recovery clears it.
-    let a3 = gauges.update(&clean_sample("l"));
+    let a3 = gauges.update(&clean_sample("link-7"));
     assert!(!a3.loss_warning_active(), "recovery clears the warning");
 }

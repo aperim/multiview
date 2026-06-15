@@ -188,7 +188,8 @@ impl RistSenderSession {
         // SAFETY: `sender_create` is the resolved librist symbol; we pass a valid
         // out-pointer for the ctx, the profile int, flow_id 0 (librist assigns),
         // and a null logging-settings pointer (librist uses its global default).
-        let rc = unsafe { (api.sender_create)(ptr::from_mut(&mut ctx), profile, 0, ptr::null_mut()) };
+        let rc =
+            unsafe { (api.sender_create)(ptr::from_mut(&mut ctx), profile, 0, ptr::null_mut()) };
         if rc != 0 || ctx.is_null() {
             return Err(SessionError::Call {
                 call: "rist_sender_create",
@@ -212,12 +213,7 @@ impl RistSenderSession {
         // points at the `Arc<CallbackCtx>` we keep alive for the session lifetime
         // (`_cb`), so it is valid for every callback invocation.
         let rc = unsafe {
-            (session.api.stats_callback_set)(
-                session.ctx,
-                interval_ms,
-                Some(stats_trampoline),
-                arg,
-            )
+            (session.api.stats_callback_set)(session.ctx, interval_ms, Some(stats_trampoline), arg)
         };
         if rc != 0 {
             return Err(SessionError::Call {

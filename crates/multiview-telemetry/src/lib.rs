@@ -79,11 +79,11 @@ pub use metrics::{
     SeriesDescriptor,
 };
 pub use placement::{PlacementCounters, SuppressReason};
-pub use rist::{RistLinkAssessment, RistLinkGauges, RistLinkRole, RistLinkSample};
 pub use retention::{
     IncidentKind, IncidentMarker, ReconnectEvent, RetentionStore, RetentionWindow, ShedEvent,
     ShedReason, UtilisationBucket, UtilisationSample, UtilisationSummary, BUCKET_SECONDS,
     MAX_EVENTS_PER_BUCKET, RETENTION_BUCKETS,
 };
+pub use rist::{RistLinkAssessment, RistLinkGauges, RistLinkRole, RistLinkSample};
 pub use syslog::{Facility, SdElement, Severity, SyslogMessage};
 pub use tracing_init::{Output, SubscriberBuilder};
