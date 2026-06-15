@@ -55,6 +55,17 @@ axum = { version = "0.8.9", default-features = false, features = ["tokio"] }
 # (`all-features = false`) never scans it.
 multiview-ndi-sys = { workspace = true, optional = true }
 
+# Off-by-default `rist-stats` path ONLY (ADR-0095 Tier-1 / RIST-5): the direct
+# librist FFI leaf (`multiview-rist-sys`, runtime-loaded — NEVER linked/vendored
+# at build time, BSD-2-Clause) plus the telemetry + wire-event types the decoded
+# stats lower into. All raw librist FFI lives in `multiview-rist-sys`, so
+# `multiview-output` stays `forbid(unsafe_code)`. Pulled in ONLY by the
+# `rist-stats` feature, so the default build never links librist and `cargo deny`
+# (`all-features = false`) never scans it.
+multiview-rist-sys = { workspace = true, optional = true }
+multiview-telemetry = { workspace = true, optional = true }
+multiview-events = { workspace = true, optional = true }
+
 # Off-by-default `rtsp-server` path ONLY (OUT-2 / ADR-0006): the in-process RTSP
 # server. These are the SAFE Rust bindings over GStreamer/GLib; this crate writes
 # NO `unsafe` and stays `forbid(unsafe_code)`. The GStreamer/GLib C libraries are
@@ -188,6 +199,21 @@ multiview-input = { workspace = true }
 # is what CI tests. Building this feature needs Mesa's libgbm development
 # files present (libgbm-dev); the binary then dynamically links libgbm.
 "display-kms" = ["dep:drm", "dep:drm-ffi", "dep:gbm", "dep:rustix", "dep:alsa"]
+# RIST link statistics (ADR-0095 Tier-1 / RIST-5). OFF by default and NOT in any
+# preset. Wires the direct-librist sender session (`multiview-rist-sys`'s
+# `session` feature) into a `rist::RistStatsBridge` that drives a real RIST
+# egress link, drains its librist stats callback, lowers each sample into the
+# telemetry metric series + a `rist.link.stats` wire event, and raises/clears the
+# `rist-link-loss` health warning. librist is runtime-loaded (never linked), so a
+# `rist-stats` build links nothing at build time and stays LGPL-clean (librist is
+# BSD-2-Clause). The default `FFmpeg` `rist://` Tier-0 transport has NO stats; this
+# feature is the only path that observes a RIST link's health.
+"rist-stats" = [
+    "dep:multiview-rist-sys",
+    "multiview-rist-sys/session",
+    "dep:multiview-telemetry",
+    "dep:multiview-events",
+]
 
 [lints]
 workspace = true

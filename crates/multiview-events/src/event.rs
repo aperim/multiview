@@ -396,6 +396,92 @@ pub enum WarningCode {
     /// The watcher retries the whole (idempotent) apply on its next poll and
     /// clears this warning when the apply completes.
     ConfigFileApplyIncomplete,
+    /// A RIST link is recovering far below clean-link quality — sustained packet
+    /// loss has pushed the link-quality metric under the health threshold for
+    /// long enough that the ARQ recovery window is at risk (ADR-0095 Tier-1 /
+    /// RIST-5). Carries the affected link in the warning `subsystem`/`message`.
+    /// Raised by the RIST stats surface and **cleared** automatically when the
+    /// link's quality recovers — a transient blip self-clears (never latched).
+    /// Remediation: investigate the network path (loss/RTT) or raise `buffer_ms`.
+    RistLinkLoss,
+}
+
+/// Which end of a RIST link a [`RistLinkStats`] sample describes.
+///
+/// librist reports **sender-peer** stats on the egress (send) side and
+/// **receiver-flow** stats on the ingress (receive) side; the two share most
+/// fields (rtt/bandwidth/retransmits/quality) but not all, so the role names the
+/// origin. Serialised **`snake_case`** (the stable wire label the UI keys on);
+/// `#[non_exhaustive]` is intentionally **omitted** — RIST has exactly two ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RistLinkRole {
+    /// Egress: `rist_stats_sender_peer` (we are pushing the flow to a peer).
+    Sender,
+    /// Ingress: `rist_stats_receiver_flow` (we are receiving the flow).
+    Receiver,
+}
+
+impl RistLinkRole {
+    /// The stable lower-case wire label for this role (matches `serde`).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sender => "sender",
+            Self::Receiver => "receiver",
+        }
+    }
+}
+
+/// A RIST link-health telemetry sample (ADR-0095 Tier-1 / RIST-5).
+///
+/// The wire mirror of librist's periodic `rist_stats` callback — the link
+/// statistics `FFmpeg`'s `rist://` protocol structurally cannot expose (it
+/// registers no stats callback), which is why RIST-5 owns a direct-librist FFI
+/// leaf (`multiview-rist-sys`) to obtain them. Carried by [`Event::RistLinkStats`]
+/// on [`crate::topic::Topic::Outputs`] (a RIST egress link's health is an
+/// output-sink concern) and emitted through the same conflated, drop-oldest
+/// publisher as every other telemetry sample — the engine never blocks on it
+/// (inv #10). [`Event::is_conflated`] returns `true` for it: it is a latest-wins
+/// snapshot, excluded from the lossless replay ring (a re-snapshot heals it).
+///
+/// All counters are **cumulative since the link opened** (librist's model);
+/// rates are derived downstream by differencing successive samples. Fields the
+/// reporting role does not populate are `0` (e.g. `received` is sender-side `0`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RistLinkStats {
+    /// The configured RIST source/output id this link belongs to (the label the
+    /// metrics + UI scope on).
+    pub link_id: String,
+    /// Which end of the link reported these stats.
+    pub role: RistLinkRole,
+    /// The RIST flow id (set by the sender; identifies the flow on the wire).
+    pub flow_id: u32,
+    /// The peer canonical name(s) librist reported for this link.
+    pub cname: String,
+    /// The number of active peers on this link (`1` for a single-link Tier-0/1
+    /// session; `>1` only on a Tier-2 bonded session).
+    pub peer_count: u32,
+    /// Current round-trip time to the peer, milliseconds.
+    pub rtt_ms: u32,
+    /// librist link-quality metric (0–100; 100 = no loss needing recovery).
+    pub quality: f64,
+    /// Average measured throughput, bits per second.
+    pub bandwidth_bps: u64,
+    /// Throughput devoted to ARQ retransmissions, bits per second.
+    pub retry_bandwidth_bps: u64,
+    /// Cumulative packets sent on this link.
+    pub sent: u64,
+    /// Cumulative packets received on this link (receiver role; `0` for sender).
+    pub received: u64,
+    /// Cumulative packets retransmitted (the ARQ recovery traffic).
+    pub retransmitted: u64,
+    /// Cumulative packets lost (could not be recovered within the buffer window).
+    pub lost: u64,
+    /// Cumulative packets recovered by the ARQ retransmission machinery.
+    pub recovered: u64,
+    /// When this link first reported stats (engine monotonic nanoseconds).
+    pub since: i64,
 }
 
 /// An actionable health warning — a richer *sibling* of [`Alert`].
@@ -448,6 +534,7 @@ impl WarningCode {
             Self::ConfigFileInvalid => "config-file-invalid",
             Self::ConfigFileRequiresRestart => "config-file-requires-restart",
             Self::ConfigFileApplyIncomplete => "config-file-apply-incomplete",
+            Self::RistLinkLoss => "rist-link-loss",
         }
     }
 }
@@ -1224,6 +1311,13 @@ pub enum Event {
     /// Output sink status (topic `outputs`).
     #[serde(rename = "output.status")]
     OutputStatus(OutputStatus),
+    /// A RIST link-health telemetry sample (topic `outputs`): retransmits / RTT /
+    /// link-quality / bandwidth / lost / recovered for a RIST source or output
+    /// link, obtained via the direct-librist FFI stats callback `FFmpeg`'s
+    /// `rist://` protocol cannot expose (ADR-0095 Tier-1). Conflated latest-wins
+    /// + drop-oldest; pushed, never polled (inv #10).
+    #[serde(rename = "rist.link.stats")]
+    RistLinkStats(RistLinkStats),
     /// An operator alert raised (topic `alerts`).
     #[serde(rename = "alert.raised")]
     AlertRaised(Alert),
@@ -1342,6 +1436,7 @@ impl Event {
             Self::AudioLoudness(_) => "audio.loudness",
             Self::SystemMetrics(_) => "system.metrics",
             Self::OutputStatus(_) => "output.status",
+            Self::RistLinkStats(_) => "rist.link.stats",
             Self::AlertRaised(_) => "alert.raised",
             Self::AlertCleared(_) => "alert.cleared",
             Self::HealthWarningRaised(_) => "health.warning.raised",
@@ -1396,6 +1491,7 @@ impl Event {
                 | Self::SystemMetrics(_)
                 | Self::DeviceStatus(_)
                 | Self::TimingStatus(_)
+                | Self::RistLinkStats(_)
         )
     }
 

@@ -83,7 +83,8 @@ Default features build a **pure-Rust, LGPL-clean, no-native-deps** check (CI gre
 - **Codec backends (per stage, auto-negotiated at runtime):** `cuda` (NVDEC/NVENC), `videotoolbox`, `vaapi`, `qsv`, `software` (always on).
 - **Compositor backends:** `wgpu` (default, cross-platform), `metal`, `cuda`.
 - **Media engine:** `ffmpeg` (links libav for demux/decode/encode).
-- **RIST transport:** `rist` (Reliable Internet Stream Transport — VSF TR-06 — input + output; **off by default**; permissive/LGPL-clean: librist is BSD-2-Clause, see §7). Tier-0 single-link rides the FFmpeg `rist://` protocol; the same flag gates the deferred `multiview-rist-sys` FFI leaf for stats + bonding ([ADR-0095](../decisions/ADR-0095.md)).
+- **RIST transport:** `rist` (Reliable Internet Stream Transport — VSF TR-06 — input + output; **off by default**; permissive/LGPL-clean: librist is BSD-2-Clause, see §7). Tier-0 single-link rides the FFmpeg `rist://` protocol ([ADR-0095](../decisions/ADR-0095.md)).
+- **RIST link statistics:** `rist-stats` (Tier-1, **off by default**; permissive/LGPL-clean). The `multiview-rist-sys` FFI leaf **runtime-loads** librist (`dlopen`, never linked/vendored at build time) and wires `rist_stats_callback_set` → telemetry metric series + the `rist.link.stats` realtime event + the `rist-link-loss` health warning. Required because FFmpeg's `rist://` protocol exposes **no** stats callback (it owns its librist context privately); the leaf-sized egress path is a direct-librist sender. Bonding remains the deferred Tier-2 piece on the same leaf ([ADR-0095](../decisions/ADR-0095.md)).
 - **Codecs licensing:** `gpl-codecs` (x264/x265 → makes the build GPL; **off by default**).
 - **NDI:** `ndi` (proprietary SDK; **off by default**, runtime-loaded; see §7).
 - **Subtitles:** `libass`.
