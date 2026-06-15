@@ -68,7 +68,10 @@ fn options(path: &str) -> Request<Body> {
         .uri(path)
         .header(header::ORIGIN, ORIGIN)
         .header("access-control-request-method", "POST")
-        .header("access-control-request-headers", "authorization,content-type")
+        .header(
+            "access-control-request-headers",
+            "authorization,content-type",
+        )
         .body(Body::empty())
         .expect("request builds")
 }

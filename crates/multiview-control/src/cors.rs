@@ -55,7 +55,6 @@ const MAX_AGE: HeaderValue = HeaderValue::from_static("600");
 /// Wrap `router` with the media-signalling CORS middleware, driven by the
 /// `AppState`'s `cors_allow_origins`. Apply this **only** to the signalling
 /// subtree (WHIP / WHEP-serve / preview-WHEP / capabilities).
-#[must_use]
 pub(crate) fn with_signalling_cors(router: Router<AppState>, state: AppState) -> Router<AppState> {
     router.layer(axum::middleware::from_fn_with_state(state, signalling_cors))
 }
