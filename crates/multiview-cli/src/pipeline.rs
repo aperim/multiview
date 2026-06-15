@@ -5906,37 +5906,22 @@ fn build_outputs(
                 );
             }
             // NDI output (OUT-4b / NDI-L2): a raw-canvas sink, license-gated by
-            // construction. Built only with the live `ndi-bindings` binding (the
-            // real `SdkNdiApi` over the licensed SDK table); plain `--features
-            // ndi` carries the seam but no live API, so it refuses honestly. An
-            // unaccepted license / absent runtime is an honest skip inside the
-            // helper (logged; the run continues without it — inv #1/#10).
-            #[cfg(feature = "ndi-bindings")]
-            Output::Ndi { name, .. } => {
-                push_ndi_output(
+            // construction. Delegated to `handle_ndi_output`, which (under the live
+            // `ndi-bindings` binding) builds the real `SdkNdiApi` sender behind the
+            // `[system.ndi] accept_license` gate, or honestly skips with a logged
+            // reason (seam-only `ndi`, no live binding, or an unaccepted/absent
+            // runtime) — never a silent pretend-run, never a panic (inv #1/#10).
+            Output::Ndi { .. } => {
+                handle_ndi_output(
                     output,
-                    name,
+                    #[cfg(feature = "ndi-bindings")]
                     ndi_system,
+                    #[cfg(feature = "ndi-bindings")]
                     cadence,
+                    #[cfg(feature = "ndi-bindings")]
                     &mut runnable,
+                    #[cfg(feature = "ndi-bindings")]
                     &mut ndi_publishers,
-                );
-            }
-            // Without the live binding, the NDI *sink* cannot be constructed (no
-            // `SdkNdiApi`): an honest skip, exactly like the seam-only paths above
-            // — never a silent pretend-run.
-            #[cfg(all(feature = "ndi", not(feature = "ndi-bindings")))]
-            Output::Ndi { .. } => {
-                tracing::warn!(
-                    "ndi output requires the `ndi-bindings` feature + a resolvable NDI runtime \
-                     (the live SDK function table); the seam-only `ndi` build cannot send. Skipping"
-                );
-            }
-            #[cfg(not(feature = "ndi"))]
-            Output::Ndi { .. } => {
-                tracing::warn!(
-                    "ndi output requires the `ndi` feature (off by default; runtime-loaded SDK); \
-                     skipping"
                 );
             }
             // `Output` is `#[non_exhaustive]`; an unrecognized future kind is
@@ -6040,29 +6025,60 @@ fn build_ndi_output(
     ))
 }
 
-/// Build one NDI output and push it (+ its canvas-tap publisher) into the
-/// accumulators, or log an honest skip reason. The license/runtime/create error
-/// from [`build_ndi_output`] is logged and the output skipped — never a panic,
-/// never a silent pretend-run, never a crash of the other outputs (inv #1/#10).
-#[cfg(feature = "ndi-bindings")]
-fn push_ndi_output(
+/// Handle one `Output::Ndi` in [`build_outputs`], dispatching on the NDI feature
+/// set so the `build_outputs` match stays a single arm (OUT-4b / NDI-L2):
+///
+/// - With the live `ndi-bindings` binding: build the license-gated
+///   [`RunnableOutput::Ndi`] via [`build_ndi_output`] and push it (+ its
+///   canvas-tap publisher) into the accumulators, or log an honest skip reason
+///   (unaccepted license / absent runtime / create failure) and continue.
+/// - With seam-only `ndi` (no live binding): an honest skip — the `SdkNdiApi`
+///   cannot be constructed without the SDK function table.
+/// - Without `ndi`: an honest skip — the runtime-loaded SDK is not built in.
+///
+/// Never a panic, never a silent pretend-run, never a crash of the other outputs
+/// (invariants #1/#10).
+fn handle_ndi_output(
     output: &Output,
-    name: &str,
-    ndi_system: Option<&multiview_config::NdiSystemConfig>,
-    cadence: Rational,
-    runnable: &mut Vec<RunnableOutput>,
-    ndi_publishers: &mut Vec<multiview_output::display::FramePublisher<NdiCanvasFrame>>,
+    #[cfg(feature = "ndi-bindings")] ndi_system: Option<&multiview_config::NdiSystemConfig>,
+    #[cfg(feature = "ndi-bindings")] cadence: Rational,
+    #[cfg(feature = "ndi-bindings")] runnable: &mut Vec<RunnableOutput>,
+    #[cfg(feature = "ndi-bindings")] ndi_publishers: &mut Vec<
+        multiview_output::display::FramePublisher<NdiCanvasFrame>,
+    >,
 ) {
-    match build_ndi_output(output, name, ndi_system, cadence) {
-        Ok((sink, publisher)) => {
-            runnable.push(sink);
-            ndi_publishers.push(publisher);
+    #[cfg(feature = "ndi-bindings")]
+    {
+        let Output::Ndi { name, .. } = output else {
+            return;
+        };
+        match build_ndi_output(output, name, ndi_system, cadence) {
+            Ok((sink, publisher)) => {
+                runnable.push(sink);
+                ndi_publishers.push(publisher);
+            }
+            Err(reason) => tracing::warn!(
+                output = %output.id(),
+                %reason,
+                "ndi output not started; the run continues without it"
+            ),
         }
-        Err(reason) => tracing::warn!(
-            output = %output.id(),
-            %reason,
-            "ndi output not started; the run continues without it"
-        ),
+    }
+    #[cfg(all(feature = "ndi", not(feature = "ndi-bindings")))]
+    {
+        let _ = output;
+        tracing::warn!(
+            "ndi output requires the `ndi-bindings` feature + a resolvable NDI runtime \
+             (the live SDK function table); the seam-only `ndi` build cannot send. Skipping"
+        );
+    }
+    #[cfg(not(feature = "ndi"))]
+    {
+        let _ = output;
+        tracing::warn!(
+            "ndi output requires the `ndi` feature (off by default; runtime-loaded SDK); \
+             skipping"
+        );
     }
 }
 
