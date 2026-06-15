@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use multiview_compositor::pipeline::Nv12Image;
+use multiview_core::time::MediaTime;
 
 use crate::clock::{OutputClock, Tick, TimeSource};
 use crate::drive::{CompositedFrame, CompositorDrive};
@@ -439,6 +440,11 @@ impl<P: Pacer> EngineRuntime<P> {
         FC: FnMut(&mut CompositorDrive<Nv12Image>),
     {
         let mut emitted: u64 = 0;
+        // The last fresh composite, held so the loop can re-emit it (under a fresh
+        // pts) for any tick whose wall-clock deadline already passed while a slow
+        // compose ran — holding 1.0× cadence instead of slipping (ADR-T018, inv
+        // #1/#2/#3). `None` only before the very first frame is composed.
+        let mut last_good: Option<CompositedFrame> = None;
         loop {
             if stop.is_stopped() {
                 return Ok(RunOutcome {
@@ -455,7 +461,7 @@ impl<P: Pacer> EngineRuntime<P> {
                 }
             }
 
-            // 1. Pace to this tick's absolute deadline (the only `.await` that
+            // 1. Pace to the due tick's absolute deadline (the only `.await` that
             //    gates the loop — and it gates only on the clock, never on an
             //    input or a consumer).
             let index = self.clock.next_index();
@@ -464,7 +470,81 @@ impl<P: Pacer> EngineRuntime<P> {
                 .wait_until(deadline, self.time_source.as_ref())
                 .await;
 
-            // 2. Advance the clock (pure `out_pts = f(tick)`).
+            // 1.5 DROP/REPEAT-TO-CADENCE (ADR-T018). If compose has fallen behind
+            //     wall-clock (a CPU/GPU-contended host), re-emit the held last-good
+            //     frame for each whole tick-period that has ALREADY elapsed, each
+            //     under a fresh strictly-increasing pts — so the emitted tick tracks
+            //     wall-clock at 1.0× rather than the loop free-running at compose
+            //     speed and slipping (the frigate 84-minute-lag failure). Off the
+            //     overload path the predicate below is false on the first check and
+            //     this is a no-op — byte-identical to composing one fresh frame per
+            //     tick. Entered only once a last-good frame exists (the first tick
+            //     always composes fresh, never repeats an absent frame).
+            if last_good.is_some() {
+                let mut repeats: u32 = 0;
+                loop {
+                    if stop.is_stopped() {
+                        return Ok(RunOutcome {
+                            ticks: emitted,
+                            stop: RunStop::Stopped,
+                        });
+                    }
+                    if let Some(max) = max_ticks {
+                        if emitted >= max {
+                            return Ok(RunOutcome {
+                                ticks: emitted,
+                                stop: RunStop::Completed,
+                            });
+                        }
+                    }
+                    let next = self.clock.next_index();
+                    let now = self.time_source.now_nanos();
+                    // `next` is the freshest due tick exactly when the tick AFTER it
+                    // is not yet due. Gate strictly on the exact deadline (never a
+                    // rounded wall-index): on a healthy sub-period-late wake this is
+                    // true immediately, so we compose `next` fresh below rather than
+                    // composing it ahead of its deadline (the floor-not-nearest fix).
+                    if now
+                        < self
+                            .clock
+                            .deadline_nanos(next.saturating_add(1), self.seed_nanos)
+                    {
+                        break;
+                    }
+                    if repeats >= MAX_REPEATS_PER_TICK {
+                        // Pathological one-off jump (a multi-second deschedule / VM
+                        // pause where CLOCK_MONOTONIC leaps): stop emitting a
+                        // per-frame burst and resync the counter to wall-clock in one
+                        // `skip_to` step, accepting one bounded discontinuity rather
+                        // than unbounded catch-up work. Never spins.
+                        let elapsed = now.saturating_sub(self.seed_nanos);
+                        let wall = MediaTime::from_nanos(elapsed).to_tick(self.clock.cadence());
+                        self.clock.skip_to(u64::try_from(wall).unwrap_or(0));
+                        break;
+                    }
+                    // Re-emit last-good under the fresh tick: the held canvas is
+                    // reused IN PLACE (only the tick/pts changes), so a repeat is not
+                    // a multi-MB plane copy on the hot loop — the downstream
+                    // `state_of` fan-out clones the canvas once, exactly as it does
+                    // for a fresh frame (inv #3: a repeat carries a NEW pts, never a
+                    // duplicate/rewound one).
+                    let repeat_tick: Tick = self.clock.tick();
+                    let Some(last) = last_good.as_mut() else {
+                        break;
+                    };
+                    last.tick = repeat_tick;
+                    publisher.publish_state(state_of(&*last));
+                    if let Some(event) = event_of(&*last) {
+                        publisher.publish_event(event);
+                    }
+                    emitted = emitted.saturating_add(1);
+                    self.ticks_emitted.fetch_add(1, Ordering::AcqRel);
+                    self.frames_repeated.fetch_add(1, Ordering::AcqRel);
+                    repeats = repeats.saturating_add(1);
+                }
+            }
+
+            // 2. Advance the clock for the fresh tick (pure `out_pts = f(tick)`).
             let tick: Tick = self.clock.tick();
 
             // 2.5 Apply any pending control-plane reconfiguration AT THE FRAME
@@ -489,6 +569,11 @@ impl<P: Pacer> EngineRuntime<P> {
             if let Some(event) = event_of(&frame) {
                 publisher.publish_event(event);
             }
+
+            // Hold this fresh composite as last-good for the cadence-hold repeat
+            // path above (cheap: the frame moves in; the canvas pixels are not
+            // copied here).
+            last_good = Some(frame);
 
             emitted = emitted.saturating_add(1);
             self.ticks_emitted.fetch_add(1, Ordering::AcqRel);

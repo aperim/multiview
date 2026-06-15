@@ -598,7 +598,16 @@ async fn control_hook_runs_every_tick_and_its_layout_swap_drives_the_composed_fr
         ts,
         CooperativePacer,
     );
-    time_source.set(runtime.seed_nanos() + 1_000_000_000);
+    // Pace deterministically by advancing the manual clock exactly one tick period
+    // per fresh compose (inside the control hook below) — so the loop runs at 1.0×
+    // wall-clock and composes one fresh frame per tick. (The earlier "freeze the
+    // clock 1 s ahead" trick is incompatible with ADR-T018: a clock a full second
+    // ahead of media-time is, correctly, read as overload and backfilled with
+    // last-good repeats — which do NOT run the control hook — so it would observe
+    // far fewer than TICKS hook calls. Per-period pacing keeps one fresh frame per
+    // tick, exactly the inv-#11 contract this test asserts.)
+    let period = oracle_pts_ns(1, Rational::FPS_60);
+    let advance_clock = Arc::clone(&time_source);
 
     // Swap to cam-b at tick index 5 (a frame boundary). Count hook invocations.
     let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -617,6 +626,9 @@ async fn control_hook_runs_every_tick_and_its_layout_swap_drives_the_composed_fr
             // control: on the 6th invocation, hot-swap the layout to cam-b.
             move |drive: &mut CompositorDrive<Nv12Image>| {
                 let n = calls_in_hook.fetch_add(1, Ordering::AcqRel);
+                // Advance wall-clock one tick period per fresh compose → the next
+                // tick's deadline is met exactly, one fresh frame per tick.
+                advance_clock.advance(Duration::from_nanos(u64::try_from(period).unwrap_or(0)));
                 if n == 5 {
                     drive
                         .set_layout(Arc::clone(&swap_to_b))
@@ -627,6 +639,14 @@ async fn control_hook_runs_every_tick_and_its_layout_swap_drives_the_composed_fr
         .await
         .expect("control run completes");
 
+    // The loop composed a FRESH frame every tick — no last-good cadence repeats
+    // fired under this 1.0× pacing — which is precisely what makes "one hook call
+    // per tick" hold (a repeat does not run the control hook; ADR-T018).
+    assert_eq!(
+        runtime.frames_repeated(),
+        0,
+        "healthy 1.0× pacing must not trigger any cadence repeat"
+    );
     // The hook ran exactly once per tick.
     assert_eq!(
         calls.load(Ordering::Acquire),
