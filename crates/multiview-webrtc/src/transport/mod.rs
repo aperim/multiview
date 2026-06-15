@@ -24,6 +24,7 @@
 //! the consumer lanes. A wedged peer loses only its own session's media.
 
 mod ingest;
+mod local_addr;
 pub(crate) mod relay_io;
 mod unified;
 pub(crate) mod whep_serve;
@@ -31,6 +32,7 @@ pub(crate) mod whip_endpoint;
 pub(crate) mod whip_push;
 
 pub use ingest::{RtpRing, RtpRingEngine, MAX_INGRESS_RTP};
+pub use local_addr::resolve_local_destination;
 pub use unified::{UnifiedBuilder, UnifiedEndpoint};
 pub use whep_serve::{WhepNegotiated, WhepServeEndpoint, WhepServeHandle};
 pub use whip_endpoint::{WhipEndpoint, WhipHandle, WhipNegotiated};

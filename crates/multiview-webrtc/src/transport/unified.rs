@@ -57,6 +57,10 @@ pub struct UnifiedEndpoint {
     endpoint: WebRtcEndpoint,
     /// The single TURN relay driver shared by every role (one allocation set).
     config: EndpointConfig,
+    /// The concrete host candidates str0m gathered (IPv6-first), shared by every
+    /// role. Inbound datagrams' local destination is resolved onto one of these so
+    /// str0m's STUN matching accepts them (box-validation defect #3).
+    host_candidates: Vec<SocketAddr>,
     /// The WHIP ingest lane (registered when the config has `webrtc` sources).
     ingest: Option<IngestLane>,
     /// The WHEP output-serve lane (registered when the config has `webrtc` outputs).
@@ -109,6 +113,7 @@ impl UnifiedEndpoint {
             endpoint: Self {
                 endpoint,
                 config,
+                host_candidates: host_candidates.clone(),
                 ingest: None,
                 serve: None,
                 preview: None,
@@ -229,6 +234,15 @@ impl UnifiedEndpoint {
     pub async fn run(self, stop: Arc<AtomicBool>) -> Result<()> {
         let bind_addr = self.endpoint.config().bind_addr();
         let local_addr = self.endpoint.local_addr()?;
+        // The concrete candidates an inbound datagram's local destination may be
+        // resolved onto — the gathered host candidates with the unspecified `[::]`
+        // bind addr removed (str0m never gathers it and discards STUN to it).
+        let concrete_candidates: Vec<SocketAddr> = self
+            .host_candidates
+            .iter()
+            .copied()
+            .filter(|a| !a.ip().is_unspecified())
+            .collect();
         let mut turn = TurnRelayDriver::from_config(&self.config, Instant::now());
 
         let std_socket = self.endpoint.into_socket();
@@ -243,6 +257,17 @@ impl UnifiedEndpoint {
                 addr: bind_addr,
                 source,
             })?;
+        // Ask the kernel to report each datagram's concrete destination IP via
+        // `IPV6_PKTINFO` / `IP_PKTINFO` so the unspecified-bound socket can still
+        // tell str0m the local candidate the packet arrived on (defect #3). A
+        // failure here is fatal: without PKTINFO every inbound STUN would be
+        // discarded as "unknown interface" and ICE could never complete.
+        crate::transport::local_addr::enable_pktinfo(&socket2::SockRef::from(&socket)).map_err(
+            |source| WebRtcError::Socket {
+                addr: bind_addr,
+                source,
+            },
+        )?;
 
         let mut ingest = self.ingest;
         let mut serve = self.serve;
@@ -261,21 +286,46 @@ impl UnifiedEndpoint {
             // drained non-blocking each pass so one closed channel never wedges the
             // others (each role lane is independent on the one socket).
             tokio::select! {
-                recv = socket.recv_from(&mut buf) => {
+                ready = socket.readable() => {
                     let now = Instant::now();
-                    if let Ok((len, src)) = recv {
-                        if let Some(payload) = buf.get(..len) {
-                            Self::route_inbound(
-                                &mut turn,
-                                ingest.as_mut(),
-                                serve.as_mut(),
-                                preview.as_ref(),
-                                &mut push,
-                                src,
-                                local_addr,
-                                payload,
-                                now,
-                            );
+                    if ready.is_ok() {
+                        // Read every queued datagram (the socket is non-blocking;
+                        // `recvmsg` returns `WouldBlock` when drained). Each read
+                        // recovers the CONCRETE local destination via PKTINFO and
+                        // resolves it onto a gathered candidate so str0m's STUN
+                        // matching accepts the check (defect #3).
+                        loop {
+                            let read = socket.try_io(tokio::io::Interest::READABLE, || {
+                                crate::transport::local_addr::recv_from_with_local(
+                                    &socket2::SockRef::from(&socket),
+                                    &mut buf,
+                                    local_addr,
+                                )
+                            });
+                            match read {
+                                Ok((len, src, arrival)) => {
+                                    let dst = crate::transport::resolve_local_destination(
+                                        arrival,
+                                        &concrete_candidates,
+                                    );
+                                    if let Some(payload) = buf.get(..len) {
+                                        Self::route_inbound(
+                                            &mut turn,
+                                            ingest.as_mut(),
+                                            serve.as_mut(),
+                                            preview.as_ref(),
+                                            &mut push,
+                                            src,
+                                            dst,
+                                            payload,
+                                            now,
+                                        );
+                                    }
+                                }
+                                // Socket drained (WouldBlock) or a transient error:
+                                // stop reading this wake and pump.
+                                Err(_) => break,
+                            }
                         }
                     }
                     Self::pump_all(
@@ -342,13 +392,16 @@ impl UnifiedEndpoint {
         preview: Option<&Arc<crate::whep_egress::WhepEgress>>,
         push: &mut [PushLane],
         src: SocketAddr,
-        local_addr: SocketAddr,
+        local_dst: SocketAddr,
         payload: &[u8],
         now: Instant,
     ) {
         // Classify once: a relayed Data indication decapsulates to media arriving
-        // on the relay addr; a TURN control reply feeds the relay driver; anything
-        // else is media from `src` on the local socket addr (defect C).
+        // on the RELAY candidate addr (so str0m's relay candidate pair validates);
+        // a TURN control reply feeds the relay driver; anything else is media from
+        // `src` arriving on `local_dst` — the CONCRETE local candidate the caller
+        // resolved from the datagram's PKTINFO destination, never the unspecified
+        // `[::]` bind (defect #3 / defect C).
         let (route_src, route_dst, bytes): (SocketAddr, SocketAddr, Vec<u8>) =
             match crate::transport::relay_io::classify_inbound(turn, src, payload, now) {
                 crate::transport::relay_io::Inbound::Relayed {
@@ -357,7 +410,7 @@ impl UnifiedEndpoint {
                     payload,
                 } => (peer, relay, payload),
                 crate::transport::relay_io::Inbound::TurnControl => return,
-                crate::transport::relay_io::Inbound::Media => (src, local_addr, payload.to_vec()),
+                crate::transport::relay_io::Inbound::Media => (src, local_dst, payload.to_vec()),
             };
 
         // Fan the (decapsulated) datagram to every registered role; str0m's demux
