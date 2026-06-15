@@ -95,6 +95,7 @@ multiview-telemetry = { path = "crates/multiview-telemetry" }
 multiview-ntpsys = { path = "crates/multiview-ntpsys" }
 multiview-i915pmu = { path = "crates/multiview-i915pmu" }
 multiview-ndi-sys = { path = "crates/multiview-ndi-sys" }
+multiview-rist-sys = { path = "crates/multiview-rist-sys" }
 multiview-cli = { path = "crates/multiview-cli" }
 
 [profile.release]

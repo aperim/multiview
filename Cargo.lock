@@ -3229,10 +3229,13 @@ dependencies = [
  "http-body-util",
  "multiview-audio",
  "multiview-core",
+ "multiview-events",
  "multiview-ffmpeg",
  "multiview-framestore",
  "multiview-input",
  "multiview-ndi-sys",
+ "multiview-rist-sys",
+ "multiview-telemetry",
  "proptest",
  "rustix 0.38.44",
  "tempfile",
@@ -3272,6 +3275,15 @@ dependencies = [
  "tokio",
  "tracing",
  "zune-jpeg",
+]
+
+[[package]]
+name = "multiview-rist-sys"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "multiview-telemetry",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

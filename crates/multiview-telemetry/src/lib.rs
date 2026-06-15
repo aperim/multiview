@@ -63,6 +63,7 @@ pub mod log_capture;
 pub mod metrics;
 pub mod placement;
 pub mod retention;
+pub mod rist;
 #[cfg(feature = "snmp")]
 pub mod snmp;
 pub mod syslog;
@@ -78,6 +79,7 @@ pub use metrics::{
     SeriesDescriptor,
 };
 pub use placement::{PlacementCounters, SuppressReason};
+pub use rist::{RistLinkAssessment, RistLinkGauges, RistLinkRole, RistLinkSample};
 pub use retention::{
     IncidentKind, IncidentMarker, ReconnectEvent, RetentionStore, RetentionWindow, ShedEvent,
     ShedReason, UtilisationBucket, UtilisationSample, UtilisationSummary, BUCKET_SECONDS,
