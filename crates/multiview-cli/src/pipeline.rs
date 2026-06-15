@@ -92,7 +92,7 @@ use multiview_ffmpeg::{
     DecodedVideoFrame, EncodedPacket, ScaleSpec, Scaler, StreamCodecParameters, StreamVideoDecoder,
 };
 use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
-#[cfg(any(feature = "ndi-bindings", test))]
+#[cfg(all(feature = "ndi", any(feature = "ndi-bindings", test)))]
 use multiview_output::ndi::NdiOutput;
 use multiview_output::sink::{
     EncodeConfig, PacketMuxOutcome, PacketMuxSink, PacketSource, ProgramEncoder, PushProtocol,
@@ -4031,7 +4031,7 @@ fn run_webrtc_output(
 /// newest-wins), so the engine never blocks on — and is never back-pressured by —
 /// a slow/absent NDI consumer (invariants #1 + #10), exactly like the display
 /// head canvas tap (ADR-0044).
-#[cfg(any(feature = "ndi-bindings", test))]
+#[cfg(all(feature = "ndi", any(feature = "ndi-bindings", test)))]
 #[derive(Debug, Clone)]
 pub(crate) struct NdiCanvasFrame {
     /// The shared pre-encode NV12 canvas (one `Arc` clone, no copy).
@@ -4048,7 +4048,7 @@ pub(crate) struct NdiCanvasFrame {
 /// in `i128` to stay overflow-free over an unbounded run, then clamped to the
 /// `i64` the descriptor carries. A non-positive denominator/numerator (never
 /// produced by a validated cadence) degrades to `0` rather than dividing by zero.
-#[cfg(any(feature = "ndi-bindings", test))]
+#[cfg(all(feature = "ndi", any(feature = "ndi-bindings", test)))]
 fn ndi_timecode_100ns(tick_index: u64, cadence: Rational) -> i64 {
     if cadence.num <= 0 || cadence.den <= 0 {
         return 0;
@@ -4081,7 +4081,7 @@ fn ndi_timecode_100ns(tick_index: u64, cadence: Rational) -> i64 {
 ///
 /// **Infallible** by design (returns a [`SinkRunOutcome`], never an error): an NDI
 /// output that cannot send must not fail the run.
-#[cfg(any(feature = "ndi-bindings", test))]
+#[cfg(all(feature = "ndi", any(feature = "ndi-bindings", test)))]
 fn run_ndi_output<A, T>(
     out: &mut NdiOutput<A>,
     reader: &multiview_output::display::FrameReader<NdiCanvasFrame>,
