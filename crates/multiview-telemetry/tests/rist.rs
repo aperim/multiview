@@ -91,7 +91,8 @@ fn re_polling_a_cumulative_total_is_idempotent_not_double_counted() {
 
 #[test]
 fn clean_link_does_not_raise_a_loss_warning() {
-    let mut gauges = RistLinkGauges::register(&MetricsRegistry::new(), "link-7", RistLinkRole::Sender);
+    let mut gauges =
+        RistLinkGauges::register(&MetricsRegistry::new(), "link-7", RistLinkRole::Sender);
     let assessment = gauges.update(&clean_sample("link-7"));
     assert!(
         !assessment.loss_warning_active(),
@@ -101,7 +102,8 @@ fn clean_link_does_not_raise_a_loss_warning() {
 
 #[test]
 fn sustained_low_quality_raises_then_clears_the_loss_warning() {
-    let mut gauges = RistLinkGauges::register(&MetricsRegistry::new(), "link-7", RistLinkRole::Sender);
+    let mut gauges =
+        RistLinkGauges::register(&MetricsRegistry::new(), "link-7", RistLinkRole::Sender);
 
     // A single dip below the quality floor is NOT yet a warning (hysteresis:
     // transient blips are expected — bad-inputs-are-the-purpose).
