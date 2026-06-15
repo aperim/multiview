@@ -812,8 +812,56 @@ mod admission_target_tests {
 
 #[cfg(test)]
 mod encoder_format_tests {
-    use super::encoder_input_format;
+    use super::{encoder_input_format, output_codec};
     use ffmpeg_next::format::Pixel;
+    use multiview_config::Output;
+
+    /// Deserialize a JSON `[[outputs]]` fragment into an [`Output`] (the
+    /// `#[non_exhaustive]`, `#[serde(tag = "kind")]` enum has no cross-crate
+    /// struct literal).
+    fn output(json: serde_json::Value) -> Output {
+        serde_json::from_value::<Output>(json).expect("output fragment parses")
+    }
+
+    #[test]
+    fn webrtc_output_codec_drives_the_program_encoder() {
+        // ADR-0049: a WHEP-serve `webrtc` output consumes the encode-once program
+        // rendition, which MUST be the codec it names (default h264). The program
+        // encoder is resolved from the first output naming a codec — so a
+        // webrtc-only config must select h264, not silently fall back to mpeg2video
+        // (which the SRTP packetizer cannot carry). This is the live-path defect.
+        let whep = output(serde_json::json!({
+            "kind": "webrtc", "label": "Program WHEP", "codec": "h264"
+        }));
+        assert_eq!(
+            output_codec(&whep),
+            Some("h264"),
+            "a webrtc output names its codec for the program encoder"
+        );
+        // The default codec (field omitted) is also surfaced as h264.
+        let whep_default = output(serde_json::json!({
+            "kind": "webrtc", "label": "Program WHEP"
+        }));
+        assert_eq!(
+            output_codec(&whep_default),
+            Some("h264"),
+            "a webrtc output's default codec (h264) drives the program encoder"
+        );
+    }
+
+    #[test]
+    fn whip_push_output_codec_drives_the_program_encoder() {
+        // ADR-0049: a whip_push output likewise consumes the encoded program; its
+        // named codec (default h264) must select the program encoder.
+        let push = output(serde_json::json!({
+            "kind": "whip_push", "url": "https://[2001:db8::1]:8443/whip/p", "codec": "h264"
+        }));
+        assert_eq!(
+            output_codec(&push),
+            Some("h264"),
+            "a whip_push output names its codec for the program encoder"
+        );
+    }
 
     #[test]
     fn nvenc_encoders_are_fed_nv12_to_skip_the_per_tick_swscale() {
@@ -1197,6 +1245,25 @@ struct IngestPlan {
     /// ([`connect_ndi_receiver`]). Empty fields when unaccepted.
     #[cfg(feature = "ndi")]
     ndi_acceptance: multiview_input::ndi::license::LicenseAcceptance,
+    /// The **swappable resolved-URL slot** for a `YouTube` source (IN-5b): the
+    /// lock-free cell the **proactive** re-resolution loop ([`run_reresolve_loop`])
+    /// publishes each freshly resolved `*.googlevideo.com` HLS master into, ahead
+    /// of the active URL's `expire` deadline (make-before-break, ADR-0015 P2–P4).
+    /// [`open_and_stream`] reads it on every (re)open and prefers a fresh URL over
+    /// resolving inline — so when the active manifest ages out and the reconnect
+    /// bracket re-enters, the next-up URL is already in hand and the tile reopens
+    /// without waiting on a cold `yt-dlp` resolve (it rides last-good across the
+    /// brief reopen rather than degrading on a synchronous resolve at the boundary).
+    ///
+    /// The loop runs on its **own supervised thread** (a sibling of the decode
+    /// thread, off the data plane); it only ever *writes* this lock-free slot, so
+    /// it can neither pace nor stall the output clock (invariant #1) nor
+    /// back-pressure the engine (invariant #10). `None` for every non-`YouTube`
+    /// source / build (the slot is allocated per youtube plan in
+    /// [`ingest_plan_for`]). The bridge thread is spawned in
+    /// [`IngestSupervisor::start`].
+    #[cfg(feature = "youtube")]
+    youtube_url_slot: Option<Arc<arc_swap::ArcSwapOption<String>>>,
 }
 
 /// The in-container subtitle decode route stashed on an [`IngestPlan`]: which
@@ -4528,6 +4595,44 @@ impl IngestSupervisor {
             let stop = Arc::new(AtomicBool::new(false));
             let id = plan.id.clone();
             crate::live_sources::register_stop(registry, &id, &stop);
+            // IN-5b: spawn the PROACTIVE youtube re-resolution loop as a supervised
+            // SIBLING of this source's decode thread (before the decode thread takes
+            // ownership of `plan`). It shares the plan's lock-free swappable-URL slot
+            // and publishes a fresh `*.googlevideo.com` master into it AHEAD of the
+            // active URL's expiry (make-before-break), so the decode loop's reconnect
+            // picks up the next-up URL without a cold resolve at the boundary. It is
+            // registered under the derived `{id}/youtube-reresolve` key (ADR-W018) so
+            // a live remove/edit of the source raises every `{id}`-rooted flag and
+            // stops it too. Off the data plane — only ever WRITES the slot (inv
+            // #1/#10). Only under the off-by-default `youtube` feature.
+            #[cfg(feature = "youtube")]
+            if let SourceLocation::Youtube { watch_url } = &plan.location {
+                if let Some(slot) = plan.youtube_url_slot.clone() {
+                    let watch_url = watch_url.clone();
+                    let rr_stop = Arc::new(AtomicBool::new(false));
+                    crate::live_sources::register_stop(
+                        registry,
+                        &format!("{id}/youtube-reresolve"),
+                        &rr_stop,
+                    );
+                    let rr_thread_stop = Arc::clone(&rr_stop);
+                    let rr_builder =
+                        std::thread::Builder::new().name(format!("multiview-yt-reresolve-{id}"));
+                    match rr_builder.spawn(move || {
+                        youtube_reresolve_thread(&watch_url, &slot, &rr_thread_stop);
+                    }) {
+                        Ok(handle) => producers.push((rr_stop, handle)),
+                        Err(e) => {
+                            // The proactive loop is an optimisation: if its thread
+                            // cannot spawn, the decode thread's inline
+                            // resolve-on-reconnect (IN-5) still keeps the tile alive
+                            // across expiry (briefly degrading at the boundary). Log
+                            // + continue — never fail the run (invariant #1).
+                            tracing::error!(error = %e, source = %id, "could not spawn youtube re-resolution thread; falling back to resolve-on-reconnect");
+                        }
+                    }
+                }
+            }
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-ingest-{id}"));
             match builder.spawn(move || ingest_loop(&plan, &thread_stop)) {
@@ -5034,7 +5139,13 @@ fn output_codec(output: &Output) -> Option<&str> {
         | Output::LlHls { codec, .. }
         | Output::Hls { codec, .. }
         | Output::Rtmp { codec, .. }
-        | Output::Srt { codec, .. } => Some(codec.as_str()),
+        | Output::Srt { codec, .. }
+        // WebRTC outputs consume the encode-once program rendition (invariant #7,
+        // ADR-0049) — they spawn no encoder, so the program MUST be encoded as the
+        // codec they name (default h264). A webrtc-only config therefore selects
+        // h264, not the mpeg2video fallback the SRTP packetizer cannot carry.
+        | Output::Webrtc { codec, .. }
+        | Output::WhipPush { codec, .. } => Some(codec.as_str()),
         // NDI carries no codec token; a future output kind names none here until
         // explicitly wired (`Output` is `#[non_exhaustive]`).
         Output::Ndi { .. } | _ => None,
@@ -5879,6 +5990,23 @@ fn build_input_inventories(
     std::collections::BTreeMap::new()
 }
 
+/// Allocate the **swappable resolved-URL slot** for a `YouTube` source (IN-5b),
+/// or `None` for every other source kind.
+///
+/// The slot starts **empty**: the first (re)open resolves inline (cold start) and
+/// the proactive re-resolution loop (spawned in [`IngestSupervisor::start`])
+/// publishes the next-up `*.googlevideo.com` master into it `lead` seconds before
+/// the active URL's `expire` deadline — so the reconnect that follows expiry finds
+/// a fresh URL already in hand (make-before-break), no cold resolve at the boundary
+/// (ADR-0015 P2–P4). Lock-free, written only by the loop (invariants #1/#10).
+#[cfg(feature = "youtube")]
+fn youtube_url_slot_for(location: &SourceLocation) -> Option<Arc<arc_swap::ArcSwapOption<String>>> {
+    match location {
+        SourceLocation::Youtube { .. } => Some(Arc::new(arc_swap::ArcSwapOption::empty())),
+        _ => None,
+    }
+}
+
 /// Resolve a config [`Source`] into a streaming [`IngestPlan`] (it does **not**
 /// decode anything — the plan is consumed later by an ingest thread).
 ///
@@ -6010,6 +6138,11 @@ fn ingest_plan_for(
         }
     };
 
+    // A YouTube source gets an empty swappable-URL slot (IN-5b); every other kind
+    // has none. Computed before the struct literal moves `location`.
+    #[cfg(feature = "youtube")]
+    let youtube_url_slot = youtube_url_slot_for(&location);
+
     Ok(IngestPlan {
         id: source.id.clone(),
         location,
@@ -6044,6 +6177,8 @@ fn ingest_plan_for(
             accepted_by: String::new(),
             accepted_at: String::new(),
         },
+        #[cfg(feature = "youtube")]
+        youtube_url_slot,
     })
 }
 
@@ -7265,6 +7400,111 @@ fn resolve_youtube_master(watch_url: &str) -> Result<String, String> {
     Ok(ingest_url(&master).to_owned())
 }
 
+/// Pick the `*.googlevideo.com` HLS master URL to open for a `YouTube` source on a
+/// (re)connect, **preferring the proactive re-resolution slot** (IN-5b) over an
+/// inline `yt-dlp` resolve.
+///
+/// The proactive [`run_reresolve_loop`](multiview_input::youtube::reresolve::run_reresolve_loop)
+/// bridge thread publishes a freshly resolved master into `slot` `lead` seconds
+/// before the active URL's `expire` deadline. So when the active manifest ages out
+/// and 403s, the reconnect bracket re-enters and finds the **next-up** URL already
+/// in hand — the tile reopens onto it without waiting on a cold synchronous resolve
+/// at the boundary (make-before-break: the new URL was resolved ahead of need).
+///
+/// `slot` is `None` only when the `youtube` plan carries no slot (it always does);
+/// an **empty** slot (cold start before the loop's first publish, or no loop) falls
+/// back to a synchronous inline resolve via `resolve_inline`, so the very first
+/// open never waits on the loop and a source with no running loop still works.
+///
+/// This is a pure selection over an injected `resolve_inline` closure so it is
+/// unit-testable with no network/subprocess (the live resolve is gated separately).
+#[cfg(feature = "youtube")]
+fn youtube_open_url<F>(
+    slot: Option<&arc_swap::ArcSwapOption<String>>,
+    resolve_inline: F,
+) -> Result<String, String>
+where
+    F: FnOnce() -> Result<String, String>,
+{
+    if let Some(fresh) = slot.and_then(arc_swap::ArcSwapOption::load_full) {
+        // The proactive loop has a fresh, make-before-break-resolved URL in hand.
+        return Ok((*fresh).clone());
+    }
+    // Cold start (slot empty) or no loop: resolve inline this once.
+    resolve_inline()
+}
+
+/// Run the supervised **proactive** `YouTube` re-resolution loop on this thread
+/// (IN-5b): the async↔sync bridge that keeps a long-running tile's
+/// `*.googlevideo.com` HLS URL fresh ahead of its `expire` deadline.
+///
+/// This is the CLI seam onto
+/// [`run_reresolve_loop`](multiview_input::youtube::reresolve::run_reresolve_loop):
+/// it builds a small current-thread Tokio runtime (the loop's only `await`s are its
+/// own hard-timeout-bounded resolves + an interruptible sleep) and drives the loop,
+/// publishing each freshly resolved master into the lock-free `slot` via a swap
+/// closure. [`open_and_stream`] reads that slot on every (re)open
+/// ([`youtube_open_url`]), so the active manifest is replaced make-before-break.
+///
+/// It runs on its **own supervised `std::thread`** (a sibling of the decode thread,
+/// off the data plane), carries its own `stop` flag, and only ever *writes* the
+/// lock-free slot — so it can neither pace nor stall the output clock (invariant
+/// #1) nor back-pressure the engine (invariant #10). A hung `yt-dlp` is killed by
+/// the resolver's hard timeout, never awaited (invariant #10); an extraction
+/// failure degrades the tile and backs off inside the loop, never panicking. The
+/// thread returns when `stop` is observed.
+#[cfg(feature = "youtube")]
+fn youtube_reresolve_thread(
+    watch_url: &str,
+    slot: &Arc<arc_swap::ArcSwapOption<String>>,
+    stop: &AtomicBool,
+) {
+    use multiview_input::youtube::reresolve::{
+        run_reresolve_loop, ProcessResolver, ReresolveConfig, SystemUnixClock,
+    };
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            // No runtime ⇒ no proactive refresh, but the source still works: the
+            // decode thread's inline resolve-on-reconnect (the IN-5 fallback) keeps
+            // the tile alive across expiry (it briefly degrades at the boundary).
+            // Never panics, never fails the run (invariant #1).
+            tracing::warn!(
+                %watch_url,
+                error = %e,
+                "youtube re-resolution runtime unavailable; falling back to resolve-on-reconnect"
+            );
+            return;
+        }
+    };
+
+    let resolver = ProcessResolver::default();
+    let clock = SystemUnixClock;
+    let swap_slot = Arc::clone(slot);
+    let outcome = runtime.block_on(run_reresolve_loop(
+        watch_url,
+        ReresolveConfig::default(),
+        &resolver,
+        &clock,
+        stop,
+        move |url: String| {
+            // Lock-free publish of the next-up master; the decode thread reads it on
+            // its next (re)open. Cheap + non-blocking — the loop holds no lock.
+            swap_slot.store(Some(Arc::new(url)));
+        },
+    ));
+    if let Err(e) = outcome {
+        // The loop never returns `Err` for an extraction failure (those degrade the
+        // tile + back off inside it); a returned error is a fatal-config fault.
+        // Log it — the tile rides the decode thread's inline resolve fallback.
+        tracing::warn!(%watch_url, error = %e, "youtube re-resolution loop ended with error");
+    }
+}
+
 /// Open `plan.location`, decode its best video stream to NV12 scaled to the tile
 /// size, and publish each frame into `plan.store` paced to wall-clock by PTS.
 ///
@@ -7286,18 +7526,26 @@ fn open_and_stream(
 ) -> Result<(), String> {
     multiview_ffmpeg::ensure_initialized().map_err(|e| e.to_string())?;
 
-    // A YouTube source resolves its watch URL to a FRESH `*.googlevideo.com` HLS
-    // master here, on every (re)connect (ADR-0015): the resolved master is
-    // time-limited and 403s at its `expire` deadline, so re-resolving on each open
-    // — driven by the existing reconnect bracket in `ingest_loop` — is what keeps
-    // the tile alive across the ~6 h expiry. Resolution runs on THIS ingest thread
-    // (the control/IO plane) under a hard timeout (a hung `yt-dlp` is killed, never
+    // A YouTube source picks its `*.googlevideo.com` HLS master here, on every
+    // (re)connect (ADR-0015), PREFERRING the proactive re-resolution slot (IN-5b):
+    // the supervised `youtube_reresolve_thread` publishes a freshly resolved master
+    // into `plan.youtube_url_slot` `lead` seconds AHEAD of the active URL's `expire`
+    // deadline (make-before-break), so when the active manifest 403s and the
+    // reconnect bracket in `ingest_loop` re-enters, the next-up URL is already in
+    // hand — the tile reopens onto it without waiting on a cold synchronous resolve.
+    // When the slot is empty (cold start before the loop's first publish, or no
+    // loop) it falls back to an inline `yt-dlp` resolve, on THIS ingest thread (the
+    // control/IO plane) under a hard timeout (a hung `yt-dlp` is killed, never
     // awaited); it never touches the output data plane (invariants #1/#10). A
     // resolve failure returns `Err`, which the reconnect bracket backs off and
     // retries while the tile rides last-good → NO_SIGNAL.
     #[cfg(feature = "youtube")]
     let resolved_youtube_url = match &plan.location {
-        SourceLocation::Youtube { watch_url } => Some(resolve_youtube_master(watch_url)?),
+        SourceLocation::Youtube { watch_url } => {
+            Some(youtube_open_url(plan.youtube_url_slot.as_deref(), || {
+                resolve_youtube_master(watch_url)
+            })?)
+        }
         _ => None,
     };
 
@@ -8797,7 +9045,7 @@ mod youtube_tests {
     use multiview_core::time::Rational;
     use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
 
-    use super::{ingest_open_options, ingest_plan_for, SourceLocation};
+    use super::{ingest_open_options, ingest_plan_for, youtube_open_url, SourceLocation};
 
     /// Build a `youtube` `Source` via serde (the type is `#[non_exhaustive]`, so a
     /// struct literal is not available cross-crate — config is produced by
@@ -8850,6 +9098,233 @@ mod youtube_tests {
         assert_eq!(
             opts.get("rw_timeout"),
             Some(super::INGEST_RW_TIMEOUT.as_micros().to_string().as_str()),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // IN-5b: the proactive re-resolution wiring — the swappable-URL slot on the
+    // plan, the open-URL selection that prefers it (make-before-break), and the
+    // bridge that runs `run_reresolve_loop` over the slot off the data plane.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn youtube_plan_carries_a_swappable_url_slot() {
+        // IN-5b: the proactive re-resolution loop needs a lock-free slot on the
+        // plan to publish each fresh master into; a youtube plan must allocate one
+        // (empty at build — filled by the loop ahead of expiry).
+        let source = youtube_source("yt-live", "https://www.youtube.com/watch?v=abcdEFGH123");
+        let store = Arc::new(TileStore::new(
+            source.id.clone(),
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let plan = ingest_plan_for(
+            &source,
+            320,
+            180,
+            Arc::clone(&store),
+            CanvasColor::default(),
+            Rational::new(30, 1),
+        )
+        .expect("youtube source plans without failing the build");
+
+        let slot = plan
+            .youtube_url_slot
+            .as_ref()
+            .expect("a youtube plan must carry a swappable-url slot");
+        // Empty at build: the first open resolves inline; the loop fills it ahead
+        // of expiry (make-before-break).
+        assert!(
+            slot.load().is_none(),
+            "the slot starts empty (cold start resolves inline)"
+        );
+    }
+
+    #[test]
+    fn open_url_prefers_the_proactive_slot_over_inline_resolve() {
+        // IN-5b make-before-break: when the proactive loop has published a fresh
+        // master into the slot, the (re)open uses IT and NEVER calls the inline
+        // resolver — the tile reopens onto the next-up URL without a cold resolve.
+        let slot = arc_swap::ArcSwapOption::empty();
+        slot.store(Some(Arc::new(
+            "https://r1.googlevideo.com/fresh.m3u8?expire=9999".to_owned(),
+        )));
+
+        let inline_called = std::cell::Cell::new(false);
+        let chosen = youtube_open_url(Some(&slot), || {
+            inline_called.set(true);
+            Ok("https://INLINE.example/should-not-be-used.m3u8".to_owned())
+        })
+        .expect("a populated slot yields its url");
+
+        assert_eq!(chosen, "https://r1.googlevideo.com/fresh.m3u8?expire=9999");
+        assert!(
+            !inline_called.get(),
+            "a populated slot must NOT trigger an inline resolve (make-before-break)"
+        );
+    }
+
+    #[test]
+    fn open_url_falls_back_to_inline_resolve_when_slot_is_empty() {
+        // Cold start (slot empty, before the loop's first publish) OR no loop: the
+        // (re)open resolves inline this once, so the very first open never waits on
+        // the loop and a source with no running loop still works (IN-5 fallback).
+        let slot = arc_swap::ArcSwapOption::<String>::empty();
+        let inline_called = std::cell::Cell::new(false);
+        let chosen = youtube_open_url(Some(&slot), || {
+            inline_called.set(true);
+            Ok("https://r2.googlevideo.com/cold.m3u8?expire=8888".to_owned())
+        })
+        .expect("an empty slot falls back to the inline resolve");
+
+        assert_eq!(chosen, "https://r2.googlevideo.com/cold.m3u8?expire=8888");
+        assert!(
+            inline_called.get(),
+            "an empty slot must fall back to the inline resolve"
+        );
+    }
+
+    #[test]
+    fn open_url_propagates_an_inline_resolve_failure() {
+        // When the slot is empty AND the inline resolve fails (binary absent /
+        // extraction broke), the error propagates so the reconnect bracket backs
+        // off and the tile degrades — never a panic, never a silent success.
+        let slot = arc_swap::ArcSwapOption::<String>::empty();
+        let err = youtube_open_url(Some(&slot), || Err("yt-dlp unavailable".to_owned()))
+            .expect_err("an empty slot with a failing inline resolve must error");
+        assert_eq!(err, "yt-dlp unavailable");
+    }
+
+    /// A scripted fake resolver for driving the bridge over the slot with no
+    /// network/subprocess — returns canned results in order, recording call count.
+    struct FakeResolver {
+        results: std::sync::Mutex<std::collections::VecDeque<Result<ResolvedHls, YoutubeError>>>,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl multiview_input::youtube::reresolve::Resolver for FakeResolver {
+        async fn resolve(&self, _url: &str) -> Result<ResolvedHls, YoutubeError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.results
+                .lock()
+                .expect("lock")
+                .pop_front()
+                .unwrap_or(Err(YoutubeError::Unavailable("exhausted".to_owned())))
+        }
+    }
+
+    use multiview_input::youtube::reresolve::{run_reresolve_loop, ManualClock, ReresolveConfig};
+    use multiview_input::youtube::{LiveStatus, ResolvedHls, YoutubeError};
+
+    fn resolved(tag: &str, expire_unix: i64) -> ResolvedHls {
+        ResolvedHls::new(
+            format!("https://{tag}.googlevideo.com/index.m3u8?expire={expire_unix}"),
+            LiveStatus::Live,
+            Some(expire_unix),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reresolve_loop_publishes_fresh_urls_into_the_plan_slot() {
+        // IN-5b end-to-end (offline): the bridge's swap closure — the SAME closure
+        // shape `youtube_reresolve_thread` installs — writes each freshly resolved
+        // master into the plan's lock-free slot, make-before-break. With `expire`
+        // below the injected clock the deadline is already past, so the second
+        // resolve fires WITHOUT a timed wait, exercising the slot-publish wiring
+        // (the lead-time math is covered by the pure schedule tests in
+        // multiview-input). The slot ends holding the LATEST master.
+        let first = resolved("r1", 0);
+        let second = resolved("r2", 0);
+        let resolver = FakeResolver {
+            results: std::sync::Mutex::new(
+                vec![Ok(first.clone()), Ok(second.clone())]
+                    .into_iter()
+                    .collect(),
+            ),
+            calls: std::sync::atomic::AtomicU32::new(0),
+        };
+
+        // The plan slot the decode thread reads via `youtube_open_url`.
+        let slot: Arc<arc_swap::ArcSwapOption<String>> = Arc::new(arc_swap::ArcSwapOption::empty());
+        let swap_slot = Arc::clone(&slot);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_loop = Arc::clone(&stop);
+        let clock = ManualClock::new(1000);
+        let cfg = ReresolveConfig {
+            lead: std::time::Duration::from_secs(1),
+            ttl_guard: std::time::Duration::from_secs(10),
+            error_burst_threshold: 100,
+        };
+
+        let handle = tokio::spawn(async move {
+            run_reresolve_loop(
+                "https://youtube.com/watch?v=v",
+                cfg,
+                &resolver,
+                &clock,
+                &stop_loop,
+                move |url: String| {
+                    // The exact swap-into-slot closure the CLI bridge installs.
+                    swap_slot.store(Some(Arc::new(url)));
+                },
+            )
+            .await
+        });
+
+        // Let both resolves land (deadline already past → no wait), then stop.
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        handle.await.expect("loop joins").expect("loop ok");
+
+        // The slot holds the LATEST master — the decode thread's next (re)open uses
+        // it (make-before-break); the loop only ever wrote the lock-free slot
+        // (bounded, non-blocking — inv #10).
+        let held = slot.load_full().expect("slot holds the latest master");
+        assert_eq!(*held, second.manifest_url);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reresolve_loop_leaves_slot_empty_when_resolution_fails() {
+        // A first-resolve failure must publish NOTHING into the slot (the decode
+        // thread then falls back to its inline resolve / the tile degrades) and
+        // must never panic — the loop backs off and stops cleanly (inv #1/#10).
+        let resolver = FakeResolver {
+            results: std::sync::Mutex::new(
+                vec![Err(YoutubeError::Resolve("n-sig rotated".to_owned()))]
+                    .into_iter()
+                    .collect(),
+            ),
+            calls: std::sync::atomic::AtomicU32::new(0),
+        };
+        let slot: Arc<arc_swap::ArcSwapOption<String>> = Arc::new(arc_swap::ArcSwapOption::empty());
+        let swap_slot = Arc::clone(&slot);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_loop = Arc::clone(&stop);
+        let clock = ManualClock::new(1000);
+
+        let handle = tokio::spawn(async move {
+            run_reresolve_loop(
+                "https://youtube.com/watch?v=dead",
+                ReresolveConfig::default(),
+                &resolver,
+                &clock,
+                &stop_loop,
+                move |url: String| {
+                    swap_slot.store(Some(Arc::new(url)));
+                },
+            )
+            .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        handle.await.expect("loop joins").expect("loop ok");
+
+        assert!(
+            slot.load().is_none(),
+            "a failed resolve publishes no url; the slot stays empty"
         );
     }
 }

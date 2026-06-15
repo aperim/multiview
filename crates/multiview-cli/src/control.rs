@@ -198,6 +198,10 @@ where
     let mut state = state
     .with_device_pollers(device_poller_registry(delivery.as_ref()))
     .with_auth_disabled(auth_disabled)
+    // The CORS allow-list for the WebRTC media-signalling routes (ADR-0048 §9):
+    // map `[webrtc].cors_allow_origins` (default `["*"]`) onto the control plane
+    // so a browser served from a web origin can WHIP-publish / WHEP-play.
+    .with_cors_allow_origins(config.webrtc.cors_allow_origins.clone())
     .with_live_apply(live_apply)
     // The `[discovery]` browse configuration: the operator-configured
     // zowietek-control service type (the vendor's type is unverified — only a
