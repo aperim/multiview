@@ -5139,7 +5139,13 @@ fn output_codec(output: &Output) -> Option<&str> {
         | Output::LlHls { codec, .. }
         | Output::Hls { codec, .. }
         | Output::Rtmp { codec, .. }
-        | Output::Srt { codec, .. } => Some(codec.as_str()),
+        | Output::Srt { codec, .. }
+        // WebRTC outputs consume the encode-once program rendition (invariant #7,
+        // ADR-0049) — they spawn no encoder, so the program MUST be encoded as the
+        // codec they name (default h264). A webrtc-only config therefore selects
+        // h264, not the mpeg2video fallback the SRTP packetizer cannot carry.
+        | Output::Webrtc { codec, .. }
+        | Output::WhipPush { codec, .. } => Some(codec.as_str()),
         // NDI carries no codec token; a future output kind names none here until
         // explicitly wired (`Output` is `#[non_exhaustive]`).
         Output::Ndi { .. } | _ => None,
