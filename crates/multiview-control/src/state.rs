@@ -561,6 +561,16 @@ pub struct AppState {
     /// [`Principal::local_admin`](crate::auth::Principal::local_admin) without a
     /// token, so the whole API + WS/SSE are open.
     pub auth_disabled: bool,
+    /// The CORS allow-list applied to the **WebRTC media-signalling routes**
+    /// (WHIP ingest, WHEP-serve output, the preview-WHEP focus routes, and
+    /// preview capabilities — ADR-0048 §9). Each entry is an allowed `Origin`,
+    /// or the wildcard `"*"` (the default) which reflects any `Origin`. A
+    /// cross-origin request carrying a listed origin gets it reflected in
+    /// `Access-Control-Allow-Origin`; an unlisted origin gets none (the browser
+    /// blocks it). It applies **only** to those routes — never the resource CRUD
+    /// or realtime surfaces — and only to requests that carry an `Origin` (a
+    /// non-browser publisher/player sees no CORS headers). Default `["*"]`.
+    pub cors_allow_origins: Arc<Vec<String>>,
     /// The complete configuration document loaded at startup (serialized
     /// verbatim), used as the baseline for `GET /api/v1/config/export` so
     /// sections the resource stores do not carry (control, placement, audio,
@@ -720,6 +730,10 @@ impl AppState {
             // Secure default: authentication is REQUIRED. An operator opts out
             // explicitly via `with_auth_disabled` (config/env), never silently.
             auth_disabled: false,
+            // Wildcard CORS on the media-signalling routes by default (ADR-0048
+            // §9): a browser served from any web origin can WHIP-publish /
+            // WHEP-play. The binary narrows this from `webrtc.cors_allow_origins`.
+            cors_allow_origins: Arc::new(vec!["*".to_owned()]),
             // Empty + unpinned by default: the licence resource reports
             // unlicensed data and the install path refuses until the binary
             // pins an issuer key + wires a store (CONSPECT-10). Never off air.
@@ -852,6 +866,16 @@ impl AppState {
     #[must_use]
     pub fn with_whip(mut self, whip: crate::whip::SharedWhip) -> Self {
         self.whip = whip;
+        self
+    }
+
+    /// Set the CORS allow-list for the WebRTC media-signalling routes
+    /// (`webrtc.cors_allow_origins`, ADR-0048 §9). Each entry is an allowed
+    /// `Origin`, or the wildcard `"*"`. The binary maps the `[webrtc]` config
+    /// section through here; the default is `["*"]`.
+    #[must_use]
+    pub fn with_cors_allow_origins(mut self, origins: Vec<String>) -> Self {
+        self.cors_allow_origins = Arc::new(origins);
         self
     }
 
