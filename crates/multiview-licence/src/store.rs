@@ -314,11 +314,13 @@ impl LeaseStore {
         self.instance_binding_id.read().ok().and_then(|g| g.clone())
     }
 
-    /// Record the server-issued `instanceBindingId` of the currently-active lease.
-    /// The heartbeat client calls this **only on a genuine install** so the
-    /// device's instance identity is durable for the cross-instance-replay guard.
-    /// A poisoned lock is recovered by replacing the inner value (the store is a
-    /// single-value cache; there is no invariant to lose).
+    /// Record the server-issued `instanceBindingId` of the currently-active lease
+    /// directly. The primary anchor path is [`LeaseStore::install_binding`], which
+    /// records the binding id carried on the [`LeaseBinding`] **atomically with the
+    /// install** (the single chokepoint every install surface converges on); this
+    /// method is the explicit-record primitive for a caller that holds the id out
+    /// of band. A poisoned lock is recovered by replacing the inner value (the
+    /// store is a single-value cache; there is no invariant to lose).
     pub fn record_binding_id(&self, instance_binding_id: &str) {
         match self.instance_binding_id.write() {
             Ok(mut guard) => *guard = Some(instance_binding_id.to_owned()),
@@ -422,6 +424,21 @@ impl LeaseStore {
         match self.fingerprint_score.write() {
             Ok(mut guard) => *guard = Some(binding.fingerprint_score),
             Err(poisoned) => *poisoned.into_inner() = Some(binding.fingerprint_score),
+        }
+        // Anchor the device's durable instance identity ATOMICALLY with the
+        // install, when the binding carries one. This is the single chokepoint
+        // behind the cross-instance-replay guard: EVERY install surface (the
+        // heartbeat client, the control-route + offline file-drop uploads, the
+        // mesh relay) converges here, so `current_binding_id()` reflects the
+        // installed lease regardless of which path installed it — a device that
+        // already holds a lease is never "fresh" on the activate path. A
+        // binding-less producer (`None`) simply does not anchor identity, exactly
+        // as before. Same poisoned-lock recovery as above (a single-value cache).
+        if let Some(binding_id) = binding.instance_binding_id.clone() {
+            match self.instance_binding_id.write() {
+                Ok(mut guard) => *guard = Some(binding_id),
+                Err(poisoned) => *poisoned.into_inner() = Some(binding_id),
+            }
         }
         Ok(lease)
     }

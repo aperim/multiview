@@ -1062,6 +1062,27 @@ pub struct HeartbeatClient<S: LicenceServer> {
     /// again at lease-acceptance, so a signer that expires (or is revoked) during
     /// an arbitrarily-stalled network call is rejected at acceptance (no TOCTOU).
     now_ms: NowMs,
+    /// The retry-stable `Idempotency-Key` state for the CURRENT logical operation.
+    /// A key is minted ONCE per logical operation and reused on every retry; it
+    /// rotates ONLY after a successful contact (install / stale-no-op / withheld),
+    /// so a lost-response retry replays the SAME key (the server dedupes — never a
+    /// duplicate binding/lease) while a genuinely-new operation gets a fresh key.
+    /// Derived from a monotonic per-client counter + the device identity — NEVER
+    /// the wall clock (a fresh-per-call wall-clock key defeats dedup). Control-plane
+    /// only; the loop is the sole accessor, so a plain `Mutex` is correct.
+    idempotency: std::sync::Mutex<IdempotencyState>,
+}
+
+/// The retry-stable idempotency-key state for [`HeartbeatClient`]. `counter` only
+/// advances when a fresh key is minted (i.e. after a success rotates `current` to
+/// `None`), so each logical operation owns one stable key across its retries.
+#[derive(Debug, Default)]
+struct IdempotencyState {
+    /// Monotonic per-client mint counter (advances once per logical operation).
+    counter: u64,
+    /// The key for the in-flight logical operation, or `None` before the first
+    /// mint and after a success rotates it.
+    current: Option<String>,
 }
 
 impl<S: LicenceServer> HeartbeatClient<S> {
@@ -1106,6 +1127,39 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             identity,
             learned_binding_id,
             now_ms,
+            idempotency: std::sync::Mutex::new(IdempotencyState::default()),
+        }
+    }
+
+    /// The `Idempotency-Key` for the CURRENT logical operation — minted once and
+    /// REPLAYED on every retry until a success rotates it. Derived from a
+    /// monotonic per-client counter + the device machine id (stable, never the
+    /// wall clock), so a lost-response retry carries the SAME key (the server
+    /// dedupes) while a genuinely-new operation gets a distinct key. A poisoned
+    /// lock recovers by minting a fresh key (never a panic).
+    fn idempotency_key(&self) -> String {
+        let mut guard = match self.idempotency.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(existing) = guard.current.clone() {
+            return existing;
+        }
+        let counter = guard.counter.wrapping_add(1);
+        guard.counter = counter;
+        let key = format!("mv-{}-{counter}", self.identity.machine_id);
+        guard.current = Some(key.clone());
+        key
+    }
+
+    /// Rotate the idempotency key after a SUCCESSFUL contact, so the NEXT logical
+    /// operation mints a fresh key. Called only on a positive outcome (install /
+    /// stale-no-op / withheld lease) — never on a failure, so a failure's retry
+    /// replays the same key. A poisoned lock recovers by clearing the inner value.
+    fn rotate_idempotency(&self) {
+        match self.idempotency.lock() {
+            Ok(mut g) => g.current = None,
+            Err(poisoned) => poisoned.into_inner().current = None,
         }
     }
 
@@ -1151,9 +1205,10 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// (the loop) treats every error as "keep last-good and back off".
     pub async fn run_once(&self) -> Result<HeartbeatOutcome, HeartbeatError> {
         // 1. Fetch + verify the key-trust chain (fail closed on trust). This is a
-        //    pre-network fast-fail; trust is RE-EVALUATED with a fresh clock read
-        //    at lease-acceptance time (step 4) so a signer that expires/revokes
-        //    during a stalled call cannot validate the returned lease (no TOCTOU).
+        //    pre-network fast-fail only; trust is RE-EVALUATED at lease-acceptance
+        //    time (step 4) against a FRESHLY RE-FETCHED key document, so a signer
+        //    that is revoked OR whose validity window elapses DURING a stalled call
+        //    cannot validate the returned lease (no TOCTOU).
         let keys = self.server.fetch_keys().await?;
         let now_ms = (self.now_ms)();
         let _ = TrustedKeys::verify(&keys, &self.pinned, now_ms)?;
@@ -1171,12 +1226,17 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             .binding_id()
             .or_else(|| self.store.current_binding_id());
 
+        // One retry-stable Idempotency-Key for this whole logical operation: the
+        // activate/heartbeat mutation replays the SAME key on a retry (the server
+        // dedupes — never a duplicate binding/lease on a lost response), and it
+        // rotates only after a successful contact below.
+        let idempotency_key = self.idempotency_key();
         let (lease, state, next_due) = if established_binding.is_none() {
             // No binding known yet → activate (free auto-issue when no claim code).
             let req = self.build_activate_request();
             let resp = self
                 .server
-                .activate(&self.config.org_id, req, &idempotency_key())
+                .activate(&self.config.org_id, req, &idempotency_key)
                 .await?;
             (resp.lease, resp.enforcement_state, next_due_default(now_ms))
         } else {
@@ -1187,14 +1247,16 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             );
             let resp = self
                 .server
-                .heartbeat(&self.config.org_id, req, &idempotency_key())
+                .heartbeat(&self.config.org_id, req, &idempotency_key)
                 .await?;
             (resp.lease, resp.enforcement_state, resp.next_due)
         };
 
         // 3. A withheld lease (revocation by non-reissue) is a normal outcome:
-        //    keep last-good, never tighten.
+        //    keep last-good, never tighten. The contact succeeded, so the logical
+        //    operation is done — rotate the idempotency key for the next cycle.
         let Some(server_lease) = lease else {
+            self.rotate_idempotency();
             return Ok(HeartbeatOutcome::LeaseWithheld { state, next_due });
         };
 
@@ -1203,31 +1265,44 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         //    SUCCESSFUL install do we learn the binding id — a rejected
         //    (expired/stale/cross-instance) lease must never mutate the learned
         //    identity (no reject-path poisoning).
-        // Re-evaluate the key-trust chain with a FRESH clock read at lease
-        // ACCEPTANCE time (not the pre-network instant). A signer whose signed
-        // validity window elapsed — or that was revoked — DURING an arbitrarily
-        // stalled network call must not validate the returned lease (no TOCTOU).
-        // The revocation list is re-read from the SAME fetched document; the
-        // time-sensitive validity window is what a stall can cross, and it is now
-        // evaluated against `now()` at acceptance.
+        // Re-establish trust at lease ACCEPTANCE time against FRESHLY RE-FETCHED
+        // key/revocation material — NOT the pre-network document. Revocation is
+        // set-membership over the signed key document, so a fresh clock against the
+        // STALE document cannot observe a signer added to the revocation list
+        // during an arbitrarily-stalled call; only a re-fetch can. The re-fetched
+        // document is itself fully re-verified (`TrustedKeys::verify` re-checks the
+        // root match, the root-attested revocation signature, every intermediate's
+        // `root_sig`, the signed validity window at the fresh `now()`, and the
+        // revocation set), so BOTH a newly-revoked signer AND an elapsed validity
+        // window are caught. A signer that is no longer trusted is dropped from the
+        // re-fetched `trusted` set, so `verify_signed_lease_chain` cannot resolve
+        // `signerKeyId` and rejects the lease (no TOCTOU). The re-fetch fails closed
+        // on a transport error (keep last-good, never off air).
         let accept_now_ms = (self.now_ms)();
-        let trusted = TrustedKeys::verify(&keys, &self.pinned, accept_now_ms)?;
+        let fresh_keys = self.server.fetch_keys().await?;
+        let trusted = TrustedKeys::verify(&fresh_keys, &self.pinned, accept_now_ms)?;
         let body = verify_signed_lease_chain(&server_lease, &trusted)?;
         // Install ANCHORED to this device's identity. `remember_binding_id` fires
         // ONLY on a GENUINE install — never on the stale no-op (a Stale outcome
         // means the store kept a newer lease; nothing was installed, so learning a
-        // binding from it would poison identity with a non-installed lease).
-        match self.install(&server_lease, &body, established_binding.as_deref())? {
+        // binding from it would poison identity with a non-installed lease). Any
+        // install rejection propagates via `?` WITHOUT rotating the idempotency key
+        // (the mutation already landed on the server under that key; a retry must
+        // replay it so the server dedupes, never mint a fresh key that could
+        // duplicate the binding).
+        let serial = match self.install(&server_lease, &body, established_binding.as_deref())? {
             InstallOutcome::Installed { serial } => {
                 self.remember_binding_id(&body.instance_binding_id);
-                Ok(HeartbeatOutcome::Installed { serial, next_due })
+                serial
             }
-            InstallOutcome::StaleNoop { serial } => {
-                // The store already holds a newer lease — a benign no-op, never off
-                // air. Do NOT learn the binding (nothing was installed).
-                Ok(HeartbeatOutcome::Installed { serial, next_due })
-            }
-        }
+            // The store already holds a newer lease — a benign no-op, never off
+            // air. Do NOT learn the binding (nothing was installed).
+            InstallOutcome::StaleNoop { serial } => serial,
+        };
+        // The logical operation succeeded end-to-end — rotate the idempotency key
+        // so the NEXT cycle is a fresh logical operation.
+        self.rotate_idempotency();
+        Ok(HeartbeatOutcome::Installed { serial, next_due })
     }
 
     /// Translate a verified server lease into a [`LeaseBinding`] and drive
@@ -1312,11 +1387,11 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         {
             Ok(installed) => {
                 let _ = server;
-                // Record the installed binding id in the store so the device's
-                // identity is durable across heartbeat-client instances within this
-                // process (the activate-path anchor reads it back). Recorded ONLY on
-                // a genuine install — never on the stale no-op below.
-                self.store.record_binding_id(&body.instance_binding_id);
+                // The store recorded the device's instance binding id ATOMICALLY
+                // inside `install_binding` (the single binding-anchor chokepoint
+                // every install surface converges on), so the activate-path anchor
+                // reads it back without a second write here. Recording happens ONLY
+                // on a genuine install — the stale no-op below installs nothing.
                 Ok(InstallOutcome::Installed {
                     serial: installed.serial,
                 })
@@ -1430,13 +1505,6 @@ fn unix_millis_now() -> i64 {
         .ok()
         .and_then(|d| i64::try_from(d.as_millis()).ok())
         .unwrap_or(0)
-}
-
-/// A fresh idempotency key for a mutation (a retry must replay, not re-issue).
-/// Derived from a monotonic-ish wall sample; the cli may override with a stored,
-/// retry-stable key per logical attempt.
-fn idempotency_key() -> String {
-    format!("mv-{}", unix_millis_now())
 }
 
 /// The default next-due (epoch ms) when the server does not return one (activate
