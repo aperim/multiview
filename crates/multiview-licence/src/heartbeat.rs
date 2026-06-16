@@ -394,18 +394,19 @@ impl TrustedKeys {
             // Attested — but attestation is PURPOSE-BOUND. Only a key whose
             // root-signed pre-image declared `key_type == "lease"` is a lease
             // signer; a root-attested key minted for any other purpose (e.g. an
-            // update/signing key) must NOT be accepted to sign leases. Likewise
-            // only the dual-pin `current`/`next` rotation statuses are live signers
-            // (a `retired`/unknown status is excluded). These are SKIPS, not hard
-            // rejects: an unrelated non-lease key in the document does not poison
-            // the whole keyset, it is simply never trusted as a lease signer.
+            // update/signing key) must NOT be accepted to sign leases. `key_type`
+            // IS in the signed pre-image, so this gate is cryptographically bound.
+            // A SKIP, not a hard reject: an unrelated non-lease key in the document
+            // does not poison the whole keyset, it is simply never a lease signer.
             if ik.key_type != "lease" {
                 continue;
             }
-            if ik.status != "current" && ik.status != "next" {
-                continue;
-            }
-            // Attested. Add to the trusted set only if in-validity and not revoked.
+            // The trust decision rests ONLY on signed fields. `ik.status` is NOT in
+            // the root-signed pre-image (a MITM / compromised well-known doc can
+            // flip a retired key's status to "current" without breaking root_sig),
+            // so it is a non-binding operational hint and MUST NOT gate trust.
+            // Retirement is expressed via the SIGNED revocation list and the SIGNED
+            // validity window — both checked below.
             if revoked.iter().any(|r| r == &ik.kid) {
                 continue;
             }
@@ -669,7 +670,21 @@ fn parse_lease_body(bytes: &[u8]) -> Result<LeaseBody, SignedLeaseError> {
     let instance_binding_id = required_text("instance_binding_id")?;
     let serial = required_text("serial")?;
     let not_after = integer("not_after").ok_or(SignedLeaseError::MalformedBody)?;
-    let gpu_limit = integer("gpu_limit").and_then(|g| u32::try_from(g).ok());
+    // gpu_limit fails CLOSED: ABSENT means Unlimited, but a value that is PRESENT
+    // and out of range for a u32 GPU count (negative, non-integer, or > u32::MAX)
+    // is MalformedBody — never silently folded to `Unlimited` (the LEAST
+    // restrictive), which would let a malformed-but-signed lease grant unlimited
+    // GPUs. `as_conversions` is denied, so the bound is an explicit `u32::try_from`.
+    let gpu_limit = match get("gpu_limit") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_integer()
+                .and_then(|i| i64::try_from(i).ok())
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or(SignedLeaseError::MalformedBody)?,
+        ),
+    };
     let hardware_class = get("hardware_class")
         .and_then(ciborium::value::Value::as_text)
         .map(str::to_owned);
@@ -906,6 +921,17 @@ pub enum HeartbeatError {
     /// rejected, never installed as a fresh term. The last-good lease is kept.
     #[error("signed lease is already expired (not_after in the past); keeping last-good")]
     LeaseExpired,
+    /// The signed lease's `instance_binding_id` does not match this device's
+    /// established binding — a valid lease minted for ANOTHER device cannot be
+    /// replayed onto this one (cross-instance replay defence). The last-good lease
+    /// is kept; nothing is installed.
+    #[error("signed lease binds a different instance; refusing cross-instance install")]
+    BindingMismatch,
+    /// The device's salted hardware fingerprint does not match the lease's machine
+    /// (the store's fingerprint-continuity gate rejected the install). The
+    /// last-good lease is kept; nothing is installed.
+    #[error("device fingerprint does not match; keeping last-good")]
+    FingerprintMismatch,
 }
 
 /// The device identity material the requests carry — salted digests + opaque ids
@@ -1077,11 +1103,13 @@ impl<S: LicenceServer> HeartbeatClient<S> {
 
         // 2. Heartbeat (or activate when no binding is known yet). The binding is
         //    addressed by the server-issued instanceBindingId — NEVER the lease
-        //    serial (a different object).
+        //    serial (a different object). `established_binding` is this device's
+        //    locally-anchored identity (configured, or learned from a prior
+        //    install); it is the gate install() enforces against a returned body.
         let held_serial = self.store.current().map(|e| e.lease.serial);
-        let binding_id = self.binding_id();
+        let established_binding = self.binding_id();
 
-        let (lease, state, next_due) = if binding_id.is_none() {
+        let (lease, state, next_due) = if established_binding.is_none() {
             // No binding known yet → activate (free auto-issue when no claim code).
             let req = self.build_activate_request();
             let resp = self
@@ -1090,7 +1118,11 @@ impl<S: LicenceServer> HeartbeatClient<S> {
                 .await?;
             (resp.lease, resp.enforcement_state, next_due_default(now_ms))
         } else {
-            let req = Self::build_heartbeat_request_for(&self.identity, held_serial, binding_id);
+            let req = Self::build_heartbeat_request_for(
+                &self.identity,
+                held_serial,
+                established_binding.clone(),
+            );
             let resp = self
                 .server
                 .heartbeat(&self.config.org_id, req, &idempotency_key())
@@ -1104,12 +1136,14 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             return Ok(HeartbeatOutcome::LeaseWithheld { state, next_due });
         };
 
-        // 4. Verify the returned signed lease against the trusted intermediates.
-        //    Learn the server-issued instanceBindingId from the SIGNED body (so
-        //    the next renewal addresses the binding by id), then install.
+        // 4. Verify the returned signed lease against the trusted intermediates,
+        //    then install it ANCHORED TO THIS DEVICE'S IDENTITY. Only after a
+        //    SUCCESSFUL install do we learn the binding id — a rejected
+        //    (expired/stale/cross-instance) lease must never mutate the learned
+        //    identity (no reject-path poisoning).
         let body = verify_signed_lease_chain(&server_lease, &trusted)?;
+        let serial = self.install(&server_lease, &body, established_binding.as_deref())?;
         self.remember_binding_id(&body.instance_binding_id);
-        let serial = self.install(&server_lease, &body)?;
         Ok(HeartbeatOutcome::Installed { serial, next_due })
     }
 
@@ -1119,11 +1153,35 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// file-drop and mesh-relay paths) re-verifies it uniformly; the
     /// authoritative Conspect signature was already checked in step 4.
     ///
+    /// `established_binding` is this device's locally-anchored instance binding
+    /// (configured, or learned from a prior successful install), or `None` before
+    /// the first activation. When `Some`, a returned body whose
+    /// `instance_binding_id` differs is rejected as a cross-instance replay (a
+    /// valid lease minted for another device must not install here); the
+    /// fingerprint-strong stamp is only applied to a binding-matched body.
+    ///
     /// # Errors
+    /// [`HeartbeatError::BindingMismatch`] for a cross-instance lease;
+    /// [`HeartbeatError::LeaseExpired`] for an expired/replayed signed lease;
     /// [`HeartbeatError::SignedLease`] if the local re-verification (which cannot
-    /// fail for a body we just signed) rejects it; a stale grant is folded into a
+    /// fail for a body we just signed) rejects it. A stale grant is folded into a
     /// successful no-op (the store keeps the newer lease — never off air).
-    fn install(&self, server: &ServerLease, body: &LeaseBody) -> Result<String, HeartbeatError> {
+    fn install(
+        &self,
+        server: &ServerLease,
+        body: &LeaseBody,
+        established_binding: Option<&str>,
+    ) -> Result<String, HeartbeatError> {
+        // CROSS-INSTANCE REPLAY DEFENCE: once this device has an established
+        // binding, a returned lease MUST bind that same instance. A valid
+        // Conspect-signed lease minted for another device's binding is refused
+        // here (and never reaches the fingerprint-strong stamp below). Before the
+        // first activation (`None`) the body's binding is what establishes us.
+        if let Some(local) = established_binding {
+            if body.instance_binding_id != local {
+                return Err(HeartbeatError::BindingMismatch);
+            }
+        }
         let granted_at = system_now();
         // The installed lease's expiry IS the cryptographically-signed `not_after`
         // (NOT system_now()+35d): a short-lived or replayed-old signed lease must
@@ -1151,8 +1209,13 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         );
         // Re-sign the install envelope with an ephemeral key the store verifies
         // against the matching pinned key. The Conspect signature is already
-        // verified; this envelope is the crate's internal install contract.
-        let (binding, install_pinned) = seal_for_install(&entitlement);
+        // verified; this envelope is the crate's internal install contract. Stamp
+        // the device's ACTUAL local fingerprint score (NOT an unconditional
+        // STRONG): the store's fingerprint-continuity gate then does real work —
+        // a machine whose salted fingerprint does not match (score below the
+        // threshold) is rejected rather than silently installed.
+        let (binding, install_pinned) =
+            seal_for_install(&entitlement, self.identity.fingerprint_score);
         match self
             .store
             .install_binding(&binding, &install_pinned, granted_at)
@@ -1164,12 +1227,16 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             // A stale grant means the store already holds a newer lease — that is
             // a benign no-op, never an error that could take the machine off air.
             Err(crate::store::InstallError::Stale { .. }) => Ok(body.serial.clone()),
-            Err(
-                crate::store::InstallError::FingerprintMismatch { .. }
-                | crate::store::InstallError::SignatureInvalid,
-            ) => {
-                // Cannot happen for a body we just sealed with a strong score +
-                // matching key; surface as a verification error rather than panic.
+            // The device's fingerprint did not clear the store's continuity gate
+            // (the score we stamped is below threshold) — a real keep-last-good
+            // outcome now that the score is the device's actual one, not a
+            // hardcoded STRONG.
+            Err(crate::store::InstallError::FingerprintMismatch { .. }) => {
+                Err(HeartbeatError::FingerprintMismatch)
+            }
+            // The envelope signature cannot fail for a binding we just sealed with
+            // the matching pinned key; surface as a verification error, not a panic.
+            Err(crate::store::InstallError::SignatureInvalid) => {
                 Err(HeartbeatError::SignedLease(SignedLeaseError::BadSignature))
             }
         }
@@ -1296,7 +1363,7 @@ fn sleep_until_due(next_due: i64, min: Duration) -> Duration {
 /// convergence re-checks uniformly across all producers (file-drop, mesh relay,
 /// heartbeat). The signing key is ephemeral and per-call — it never leaves this
 /// function and authenticates nothing externally.
-fn seal_for_install(entitlement: &Entitlement) -> (LeaseBinding, PinnedKey) {
+fn seal_for_install(entitlement: &Entitlement, fingerprint_score: u8) -> (LeaseBinding, PinnedKey) {
     use ed25519_dalek::{Signer as _, SigningKey};
     // A deterministic per-process signer derived from nothing secret — its only
     // job is to satisfy the store's internal re-verification of a binding this
@@ -1307,11 +1374,10 @@ fn seal_for_install(entitlement: &Entitlement) -> (LeaseBinding, PinnedKey) {
     let msg = SignedLease::signing_bytes(&entitlement.lease);
     let sig = envelope_signer.sign(&msg);
     let signed_lease = SignedLease::new(entitlement.lease.clone(), sig.to_bytes());
-    let binding = LeaseBinding::new(
-        signed_lease,
-        entitlement.clone(),
-        crate::constants::FINGERPRINT_MATCH_STRONG,
-    );
+    // The device's ACTUAL local fingerprint score — NOT an unconditional STRONG.
+    // The store's fingerprint-continuity gate then genuinely rejects a machine
+    // whose salted fingerprint does not match (score below threshold).
+    let binding = LeaseBinding::new(signed_lease, entitlement.clone(), fingerprint_score);
     (binding, pinned)
 }
 
