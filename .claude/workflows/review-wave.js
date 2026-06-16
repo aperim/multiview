@@ -45,17 +45,20 @@ function reviewItem(it) {
     () => single('Lens: security & authorization (BOLA/per-object authz) & input hardening.', '-b'),
     () => single('Lens: spec-conformance & the Multiview invariants (#1 output-clock, #10 isolation) & data-plane bounded-queue discipline.', '-c'),
   ]).then((panel) => {
-    // Deterministic code-aggregation. An LLM aggregator over the embedded panel JSON is
-    // fragile — its StructuredOutput call can fail to parse and lose the whole verdict.
-    // A defect from ANY lens stands; blocked if any lens blocked or raised a blocker/major;
-    // ranOk only if every lens actually ran (fail-closed otherwise).
+    // Deterministic code-aggregation, FAIL-CLOSED. An LLM aggregator over the embedded panel
+    // JSON is fragile — its StructuredOutput call can fail to parse and lose the whole verdict.
+    // A defect from ANY lens stands; a MISSING/failed lens (a falsy panel entry — a lens that
+    // died or emitted unparseable output — or one with ranOk=false) means the panel is
+    // INCOMPLETE: ranOk=false AND blocked=true, never a clear verdict from the survivors alone.
+    // Also blocked if any present lens blocked or raised a blocker/major.
     const vs = panel.filter(Boolean)
+    const allLensesRan = panel.length > 0 && panel.every(Boolean) && vs.every((x) => x.ranOk !== false)
     const defects = vs.flatMap((x) => x.defects || [])
-    const blocked = vs.some((x) => x.blocked) || defects.some((d) => d.severity === 'blocker' || d.severity === 'major')
+    const blocked = !allLensesRan || vs.some((x) => x.blocked) || defects.some((d) => d.severity === 'blocker' || d.severity === 'major')
     return {
       id: it.id,
       reviewer: 'codex+panel',
-      ranOk: vs.length > 0 && vs.every((x) => x.ranOk !== false),
+      ranOk: allLensesRan,
       defects,
       highestResidualRisk: vs.map((x) => x.highestResidualRisk).filter(Boolean).join('  ||  ') || 'panel produced no residual-risk statement',
       blocked,
