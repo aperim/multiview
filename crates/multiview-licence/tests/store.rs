@@ -267,30 +267,39 @@ fn the_store_retains_the_verified_fingerprint_score_for_support_context() {
 }
 
 #[test]
-fn the_store_records_and_reports_the_instance_binding_id() {
-    // The heartbeat client records the server-issued instanceBindingId on a
-    // genuine install so the device's instance identity is durable (the
-    // cross-instance-replay guard reads it back). `None` until one is recorded.
+fn the_store_records_and_reports_the_instance_binding_id_from_an_install() {
+    // The server-issued instanceBindingId is anchored ATOMICALLY by a genuine
+    // install (the binding carries the SIGNED id; install_binding publishes it with
+    // the lease), so the device's instance identity is durable (the
+    // cross-instance-replay guard reads it back). `None` until a lease installs.
+    let (key, pinned) = keypair();
     let now = epoch();
     let store = LeaseStore::with_clock(Arc::new(move || now));
     assert_eq!(
         store.current_binding_id(),
         None,
-        "no binding recorded yet → None (the device is genuinely fresh)"
+        "no lease installed yet → None (the device is genuinely fresh)"
     );
-    store.record_binding_id("ib_device_0001");
+    let lease1 = lease_at("serial-BIND01", now);
+    store
+        .install_binding(&binding_with_id(&key, &lease1, 100, "ib_device_0001"), &pinned, now)
+        .expect("the first binding installs");
     assert_eq!(
         store.current_binding_id(),
         Some("ib_device_0001".to_owned()),
-        "the store reports the recorded instance binding id"
+        "the store reports the installed instance binding id"
     );
-    // A later genuine install of a different binding (same device, re-bound)
-    // overwrites it — the store is a single-value cache of the current identity.
-    store.record_binding_id("ib_device_0002");
+    // A later genuine install with a NEWER grant + a different binding id (same
+    // device, re-bound) overwrites it — the store is a single-value cache of the
+    // current identity, published atomically with the lease.
+    let lease2 = lease_at("serial-BIND02", now + Duration::seconds(1));
+    store
+        .install_binding(&binding_with_id(&key, &lease2, 100, "ib_device_0002"), &pinned, now)
+        .expect("the newer binding installs");
     assert_eq!(
         store.current_binding_id(),
         Some("ib_device_0002".to_owned()),
-        "recording overwrites — the store holds the current binding identity"
+        "a newer install overwrites — the store holds the current binding identity"
     );
 }
 
