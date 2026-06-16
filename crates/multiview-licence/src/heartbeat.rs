@@ -917,6 +917,13 @@ pub enum HeartbeatError {
     /// last-good lease is kept; nothing is installed.
     #[error("device fingerprint does not match; keeping last-good")]
     FingerprintMismatch,
+    /// The durable idempotency-nonce store could not be trusted (a present-but-
+    /// corrupt load, or a commit that did not persist), so the retry-stable key
+    /// could not be durably minted. The mutation is NOT sent this cycle (it could
+    /// carry a colliding key across a restart); the last-good lease is kept and the
+    /// cycle retries. A nonce-store I/O failure never tightens output (inv #1/#10).
+    #[error("durable idempotency nonce unavailable; not sending a mutation: {0}")]
+    NonceStore(#[from] NonceError),
 }
 
 /// The device identity material — salted digests + opaque ids only (data
@@ -1092,15 +1099,49 @@ pub struct HeartbeatClient<S: LicenceServer> {
 /// operation never reuses a prior lifetime's key (cross-restart duplicate-mutation
 /// defence). It is a SEAM (like the clock): the leaf crate does no I/O, so the cli
 /// implements it on a small file beside the lease state; tests back it with a
-/// shared cell to simulate a restart. `load` returns the highest committed counter
-/// (0 when none); `commit` persists the new high-water counter at mint time, so
-/// even a crash mid-operation cannot let the next process reuse an in-flight value.
+/// shared cell to simulate a restart.
+///
+/// **Fail closed (round-6 panel).** Both operations return a [`Result`]: a store
+/// that cannot be *trusted* (a present-but-corrupt/unreadable `load`, or a `commit`
+/// that does not durably persist) **must** surface an error rather than a silent
+/// fallback. The mint is gated on a trustworthy `load` + a successful durable
+/// `commit` BEFORE the mutation is sent, so a store failure makes the heartbeat
+/// keep last-good and send nothing (never a colliding-key mutation, never off air).
+/// An **absent** durable value is NOT an error: a fresh device legitimately starts
+/// at `0` (`load` returns `Ok(0)`); only a *present-but-untrustworthy* value errors.
 pub trait NonceStore: Send + Sync {
-    /// The highest committed mint counter (0 when nothing is persisted yet).
-    fn load(&self) -> u64;
-    /// Persist `value` as the new high-water mint counter (called at mint time, so
-    /// the durable counter only ever increases — never reused across a restart).
-    fn commit(&self, value: u64);
+    /// The highest committed mint counter, or `Ok(0)` when nothing is persisted yet
+    /// (a fresh device). Returns [`Err`] when a value IS present but cannot be
+    /// trusted (corrupt/unreadable) — never a silent `0` that would reset the
+    /// high-water and re-mint a colliding key after a restart.
+    ///
+    /// # Errors
+    /// [`NonceError`] when a present durable value cannot be read/parsed.
+    fn load(&self) -> Result<u64, NonceError>;
+    /// Persist `value` as the new high-water mint counter (called at mint time,
+    /// before the mutation). Returns [`Err`] when the value was not durably
+    /// persisted, so the caller can refuse to send a possibly-colliding mutation.
+    ///
+    /// # Errors
+    /// [`NonceError`] when the value could not be durably written.
+    fn commit(&self, value: u64) -> Result<(), NonceError>;
+}
+
+/// A durable-nonce store failure (a present-but-corrupt load, or a commit that did
+/// not persist). It is an opaque message: the I/O detail lives at the cli boundary;
+/// the leaf crate only needs "the durable store could not be trusted" so the mint
+/// fails closed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("durable idempotency nonce store failure: {0}")]
+pub struct NonceError(String);
+
+impl NonceError {
+    /// Build a [`NonceError`] from a human-readable cause (the cli passes the I/O
+    /// error text).
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
 }
 
 /// The default in-process [`NonceStore`]: holds the counter in memory only.
@@ -1108,19 +1149,21 @@ pub trait NonceStore: Send + Sync {
 /// This survives nothing across a restart, so a deployment that needs
 /// cross-restart idempotency (the cli) supplies a durable, file-backed
 /// implementation. The in-memory default is used only where no durable store is
-/// wired (e.g. a process that never restarts within an idempotency window).
+/// wired (e.g. a process that never restarts within an idempotency window). Its
+/// operations are infallible (an in-memory cell never fails), so they return `Ok`.
 #[derive(Debug, Default)]
 pub struct InMemoryNonceStore {
     counter: std::sync::atomic::AtomicU64,
 }
 
 impl NonceStore for InMemoryNonceStore {
-    fn load(&self) -> u64 {
-        self.counter.load(std::sync::atomic::Ordering::SeqCst)
+    fn load(&self) -> Result<u64, NonceError> {
+        Ok(self.counter.load(std::sync::atomic::Ordering::SeqCst))
     }
-    fn commit(&self, value: u64) {
+    fn commit(&self, value: u64) -> Result<(), NonceError> {
         self.counter
             .store(value, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -1245,27 +1288,46 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// monotonic per-client counter + the device machine id (stable, never the
     /// wall clock), so a lost-response retry carries the SAME key (the server
     /// dedupes) while a genuinely-new operation gets a distinct key. A poisoned
-    /// lock recovers by minting a fresh key (never a panic).
-    fn idempotency_key(&self) -> String {
+    /// lock recovers (it is an in-process invariant, not a durable-store failure).
+    ///
+    /// **Fails closed (round-6 panel).** The mint is gated on a trustworthy durable
+    /// state: it reads the durable high-water (`load`) and durably persists the new
+    /// high-water (`commit`) BEFORE returning the key. If `load` is untrustworthy or
+    /// `commit` does not persist, it returns [`HeartbeatError::NonceStore`] and
+    /// advances NOTHING — so `run_once` sends no mutation this cycle (a key that was
+    /// not durably committed could collide across a restart). A retry next cycle
+    /// re-attempts the mint cleanly from the unchanged counter base.
+    ///
+    /// # Errors
+    /// [`HeartbeatError::NonceStore`] when the durable nonce store cannot be trusted
+    /// (a present-but-corrupt load, or a non-persisting commit).
+    fn idempotency_key(&self) -> Result<String, HeartbeatError> {
         let mut guard = match self.idempotency.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
         if let Some(existing) = guard.current.clone() {
-            return existing;
+            return Ok(existing);
         }
+        // Read the durable high-water FIRST — a present-but-corrupt value fails
+        // closed (we never reset to 0 and re-mint a colliding key after a restart).
+        let durable = self.nonce_store.load()?;
         // Mint a NEW counter strictly above BOTH this process's in-memory high-water
         // AND the durable high-water — so a restart (in-memory resets to 0, durable
         // persists) never reuses a prior lifetime's value. `saturating_add` (not
         // `wrapping_add`) so the monotonic guarantee never wraps back to a reused
-        // low value. Commit the new high-water durably AT MINT (before the request),
-        // so even a crash mid-operation cannot let the next process reuse it.
-        let counter = guard.counter.max(self.nonce_store.load()).saturating_add(1);
+        // low value.
+        let counter = guard.counter.max(durable).saturating_add(1);
+        // Commit the new high-water DURABLY before exposing the key: only on a
+        // successful persist do we advance in-process state and return. A commit
+        // failure leaves `guard` untouched and propagates, so the cycle sends no
+        // mutation and a retry re-mints cleanly (no un-persisted, possibly-colliding
+        // key ever reaches the server).
+        self.nonce_store.commit(counter)?;
         guard.counter = counter;
-        self.nonce_store.commit(counter);
         let key = format!("mv-{}-{counter}", self.identity.machine_id);
         guard.current = Some(key.clone());
-        key
+        Ok(key)
     }
 
     /// Rotate the idempotency key after a SUCCESSFUL contact, so the NEXT logical
@@ -1366,9 +1428,13 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         // 3. RENEW the held lease. One retry-stable Idempotency-Key for this whole
         //    logical operation: the heartbeat mutation replays the SAME key on a
         //    retry (the server dedupes — never a duplicate lease on a lost
-        //    response), and it rotates only after a successful contact below.
+        //    response), and it rotates only after a successful contact below. The
+        //    mint is GATED on a durable commit (fail closed): if the durable nonce
+        //    store cannot be trusted, `?` propagates BEFORE the heartbeat call, so
+        //    NO mutation is sent (a non-persisted key could collide across a
+        //    restart) — keep last-good, retry next cycle (inv #1/#10).
         let held_serial = self.store.current().map(|e| e.lease.serial);
-        let idempotency_key = self.idempotency_key();
+        let idempotency_key = self.idempotency_key()?;
         let req = Self::build_heartbeat_request_for(
             &self.identity,
             held_serial,

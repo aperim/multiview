@@ -317,10 +317,23 @@ impl EntitlementPlane {
                 return;
             }
         };
-        let server = std::sync::Arc::new(ConspectHttpServer::new(
+        // Fail closed: if the HTTPS-only client cannot be built, do NOT fall back
+        // to a plaintext-capable client that would leak the bearer JWT — the
+        // heartbeat stays OFF (the entitlement plane keeps last-good).
+        let server = match ConspectHttpServer::new(
             settings.api_base.clone(),
             settings.bearer_token.clone(),
-        ));
+        ) {
+            Ok(server) => std::sync::Arc::new(server),
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    "Conspect heartbeat is OFF: could not build the HTTPS-only client — \
+                     running unlicensed-honest (never a plaintext credential-carrying client)"
+                );
+                return;
+            }
+        };
         // Durable idempotency nonce beside the lease state (the same dir the
         // offline file-drop watcher reads), so a restart never reuses a prior
         // lifetime's Idempotency-Key (cross-restart duplicate-mutation defence).
@@ -548,11 +561,16 @@ fn non_empty_env(key: &str) -> Option<String> {
 /// never reuses a prior lifetime's key. The leaf crate does no I/O; this is the
 /// cli-boundary implementation it injects via `with_clock_and_nonce`.
 ///
-/// `load` reads the persisted high-water counter (0 when absent/unreadable —
-/// fail-open: a fresh device legitimately starts at 0, and the in-process monotone
-/// guard still prevents same-lifetime reuse; a read error is logged, never a
-/// crash, never off air). `commit` writes the new high-water counter via
-/// write-temp-then-rename so a torn write cannot leave a truncated value.
+/// `load` reads the persisted high-water counter and **fails closed**: an ABSENT
+/// file is `Ok(0)` (a fresh device legitimately starts at 0), but a PRESENT file
+/// that is corrupt/unparseable or unreadable for any other reason returns an
+/// `Err` — never a silent 0 that would reset the high-water and re-mint a colliding
+/// key after a restart. `commit` writes the new high-water via
+/// write-temp-then-rename (so a torn write cannot leave a truncated value) and
+/// **propagates** a write OR rename failure as an `Err` — an un-persisted key must
+/// block the mutation, not continue best-effort. The heartbeat client gates the
+/// mint on these, so a nonce-store failure keeps last-good (never off air, never a
+/// colliding-key mutation).
 #[cfg(feature = "heartbeat")]
 struct FileNonceStore {
     path: std::path::PathBuf,
@@ -570,47 +588,48 @@ impl FileNonceStore {
 
 #[cfg(feature = "heartbeat")]
 impl multiview_licence::heartbeat::NonceStore for FileNonceStore {
-    fn load(&self) -> u64 {
+    fn load(&self) -> Result<u64, multiview_licence::heartbeat::NonceError> {
+        use multiview_licence::heartbeat::NonceError;
         match std::fs::read_to_string(&self.path) {
-            Ok(s) => s.trim().parse::<u64>().unwrap_or_else(|_| {
-                tracing::warn!(
-                    path = %self.path.display(),
-                    "idempotency nonce file is unparseable — restarting the counter at 0 \
-                     (bounded: the server idempotency window is short; never off air)"
-                );
-                0
+            // A PRESENT value that does not parse is NOT trustworthy — fail closed
+            // (never a silent 0 that resets the high-water and re-mints a colliding
+            // key after a restart).
+            Ok(s) => s.trim().parse::<u64>().map_err(|_| {
+                NonceError::new(format!(
+                    "idempotency nonce file {} is present but unparseable",
+                    self.path.display()
+                ))
             }),
-            // Absent on a fresh device (the common case) — start at 0 silently.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(e) => {
-                tracing::warn!(
-                    path = %self.path.display(),
-                    error = %e,
-                    "could not read the idempotency nonce file — restarting the counter at 0"
-                );
-                0
-            }
+            // Absent on a fresh device (the common case) — a trusted start at 0.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            // Present-but-unreadable (permissions, I/O error) is untrustworthy too.
+            Err(e) => Err(NonceError::new(format!(
+                "could not read the idempotency nonce file {}: {e}",
+                self.path.display()
+            ))),
         }
     }
 
-    fn commit(&self, value: u64) {
+    fn commit(&self, value: u64) -> Result<(), multiview_licence::heartbeat::NonceError> {
+        use multiview_licence::heartbeat::NonceError;
         // Write-temp-then-rename for atomicity: a crash mid-write leaves either the
-        // old value or the new one, never a truncated counter.
+        // old value or the new one, never a truncated counter. BOTH steps fail
+        // closed — an un-persisted high-water must block the mutation (the caller
+        // refuses to send a possibly-colliding key), never continue best-effort.
         let tmp = self.path.with_extension("tmp");
-        if let Err(e) = std::fs::write(&tmp, value.to_string()) {
-            tracing::warn!(
-                path = %tmp.display(), error = %e,
-                "could not persist the idempotency nonce (continuing; in-memory monotone holds \
-                 this lifetime, but a restart may reuse a key)"
-            );
-            return;
-        }
-        if let Err(e) = std::fs::rename(&tmp, &self.path) {
-            tracing::warn!(
-                path = %self.path.display(), error = %e,
-                "could not finalise the idempotency nonce file (continuing best-effort)"
-            );
-        }
+        std::fs::write(&tmp, value.to_string()).map_err(|e| {
+            NonceError::new(format!(
+                "could not persist the idempotency nonce to {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| {
+            NonceError::new(format!(
+                "could not finalise the idempotency nonce file {}: {e}",
+                self.path.display()
+            ))
+        })?;
+        Ok(())
     }
 }
 
@@ -629,19 +648,35 @@ struct ConspectHttpServer {
 
 #[cfg(feature = "heartbeat")]
 impl ConspectHttpServer {
-    fn new(mut api_base: String, bearer_token: String) -> Self {
+    /// Build the HTTPS-only transport. **Fails closed (round-6 panel):** the
+    /// `https_only(true)` client is propagated with `?` — NOT `unwrap_or_default()`,
+    /// which would silently fall back to a DEFAULT (non-HTTPS-only) client while
+    /// every request still attaches the bearer JWT, leaking the account credential
+    /// over plaintext `http://`. A failed build disables the heartbeat (the caller
+    /// keeps last-good), never a credential-carrying non-HTTPS client.
+    ///
+    /// # Errors
+    /// [`HeartbeatError::Transport`] if the HTTPS-only `reqwest` client cannot be
+    /// built.
+    fn new(
+        mut api_base: String,
+        bearer_token: String,
+    ) -> Result<Self, multiview_licence::heartbeat::HeartbeatError> {
+        use multiview_licence::heartbeat::HeartbeatError;
         let client = reqwest::Client::builder()
             .user_agent(concat!("multiview/", env!("CARGO_PKG_VERSION")))
             .https_only(true)
             .build()
-            .unwrap_or_default();
+            .map_err(|e| {
+                HeartbeatError::Transport(format!("could not build the HTTPS-only client: {e}"))
+            })?;
         // Normalise the base URL in place (consume the owned String — no realloc).
         api_base.truncate(api_base.trim_end_matches('/').len());
-        Self {
+        Ok(Self {
             client,
             api_base,
             bearer_token,
-        }
+        })
     }
 
     /// `GET` + JSON-decode against `url`, mapping every failure to a
