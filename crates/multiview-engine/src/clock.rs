@@ -170,7 +170,11 @@ impl OutputClock {
     /// strictly increasing (invariant #3) and the cadence-hold wall-clock resync
     /// (ADR-T018) has an exact floor.
     pub fn new(cadence: Rational) -> Result<Self> {
-        if !cadence.is_valid() || cadence.num <= 0 || cadence.den <= 0 {
+        if !cadence.is_valid()
+            || cadence.num <= 0
+            || cadence.den <= 0
+            || cadence.has_subnanosecond_period()
+        {
             return Err(Error::invalid_cadence(cadence));
         }
         Ok(Self {

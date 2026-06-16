@@ -254,6 +254,18 @@ impl Canvas {
                 self.fps_num, self.fps_den
             )));
         }
+        // The per-tick period must be at least 1 ns (i.e. fps <= 1 GHz, far above
+        // any real video rate). A sub-nanosecond period collapses consecutive ticks
+        // onto the same nanosecond, which breaks strictly-increasing output PTS
+        // (invariant #3) and defeats the output clock's exact-floor wall-clock resync
+        // (ADR-T018). Reject it here rather than silently degrade.
+        if self.cadence().has_subnanosecond_period() {
+            return Err(Error::Config(format!(
+                "canvas cadence {}/{} is too fast: the per-tick period is under 1 ns \
+                 (fps must be <= 1 GHz)",
+                self.fps_num, self.fps_den
+            )));
+        }
         Ok(())
     }
 }

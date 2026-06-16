@@ -628,23 +628,26 @@ impl<P: Pacer> EngineRuntime<P> {
     /// skipped ticks rather than grinding them out frame-by-frame.
     ///
     /// **O(1) and provably bounded** on the output-clock hot path — no loop whose
-    /// length would depend on the cadence (which `Canvas::validate` only constrains
-    /// to `num > 0 && den > 0`, no upper bound).
+    /// length would depend on the cadence.
     ///
     /// The estimate is the floor against the **exact rational** period — a tick
     /// spans `den/num` seconds, so `floor(elapsed_ns / period) =
     /// elapsed_ns · num / (NANOS_PER_SEC · den)` in i128 (no overflow, no period
-    /// rounding, no `/0`: the divisor is `den`, never `pts_at(1)` which can itself
-    /// round to 0 for a sub-nanosecond period). Dividing by the *rounded* `pts_at(1)`
-    /// would diverge from the true floor without bound as the index grows on a
-    /// non-integer cadence (`idx·round(period)` vs `round(idx·period)`), so a fixed
-    /// correction could not recover it and the resync would collapse to `next` —
-    /// grinding the backlog. The exact-rational form has no such drift.
+    /// rounding, no `/0`: the divisor is `den`, never `pts_at(1)`). Dividing by the
+    /// *rounded* `pts_at(1)` would diverge from the true floor without bound as the
+    /// index grows on a non-integer cadence (`idx·round(period)` vs `round(idx·period)`),
+    /// so a fixed correction could not recover it and the resync would collapse to
+    /// `next` — grinding the backlog. The exact-rational form has no such drift.
     ///
     /// The clock's actual `deadline_nanos(idx) = seed + pts_at(idx)` rounds `pts_at`
     /// to the nearest ns, so the floor against the *rounded* deadlines is the exact
     /// floor ±1. One O(1) up-step and one O(1) down-step (mutually exclusive)
-    /// reconcile that boundary against the real `deadline_nanos`. The result is
+    /// reconcile that boundary against the real `deadline_nanos`. **The ±1 step is
+    /// provably sufficient** because the exact per-tick period is `>= 1 ns`: both
+    /// `Canvas::validate` and `OutputClock::new` reject a cadence with a
+    /// sub-nanosecond period (`fps > 1 GHz`, see `Rational::has_subnanosecond_period`),
+    /// so consecutive ticks have strictly increasing rounded deadlines and the rounded
+    /// floor cannot diverge from the exact floor by more than one. The result is
     /// always `>= next + 1` with `deadline_nanos(result) <= now` — it never composes
     /// a tick ahead of its deadline (inv #1) — because the caller only enters the cap
     /// path after the break predicate failed (`now >= deadline_nanos(next + 1)`), so
