@@ -53,8 +53,11 @@ function reviewItem(it) {
     // INCOMPLETE: ranOk=false AND blocked=true, never a clear verdict from the survivors alone.
     // Also blocked if any present lens blocked or raised a blocker/major.
     const vs = panel.filter(Boolean)
-    // Require the FULL expected count present AND ran — a dropped/omitted lens fails closed.
-    const allLensesRan = panel.length === lenses.length && panel.every(Boolean) && vs.every((x) => x.ranOk === true)
+    // Fail closed by EXPECTED INDEX, not by iterating present elements: check every expected
+    // lens slot directly (Array.every/filter SKIP holes, so a sparse array could otherwise pass).
+    // A hole, null, undefined, short array, or a present-but-malformed verdict (ranOk!==true) at
+    // any lens index fails the check.
+    const allLensesRan = panel.length === lenses.length && lenses.every((_, i) => panel[i] != null && panel[i].ranOk === true)
     const defects = vs.flatMap((x) => x.defects || [])
     const blocked = !allLensesRan || vs.some((x) => x.blocked) || defects.some((d) => d.severity === 'blocker' || d.severity === 'major')
     return {
