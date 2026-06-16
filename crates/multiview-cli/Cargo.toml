@@ -100,6 +100,15 @@ ffmpeg-next = { version = "8.1", optional = true }
 # all-features=false so it never sees this opt-in dependency.
 tempfile = { version = "3", optional = true }
 
+# Used ONLY by the `heartbeat` feature to take a non-blocking advisory `flock`
+# (`rustix::fs::flock`, a SAFE wrapper — no `unsafe` in this crate) on the durable
+# idempotency-nonce lock file, so a SECOND `multiview` process pointed at the same
+# lease-state dir cannot concurrently mint colliding Idempotency-Keys (it fails
+# closed: that process's heartbeat declines to start). Already in the workspace
+# graph (the engine's `ptp` feature); MIT/Apache-2.0/BSD, `cargo deny`-clean.
+# Optional + gated so the default build never pulls the `fs` surface.
+rustix = { workspace = true, features = ["fs"], optional = true }
+
 # Used by the control bridge (the compact per-tick engine state snapshot the
 # control plane republishes is a `serde_json::Value`) and by the `overlay`
 # pipeline (reading kind-specific `[[overlays]]` params out of
@@ -322,7 +331,7 @@ mesh-mdns = ["multiview-mesh/mdns"]
 # `rustls-tls` backend (NEVER OpenSSL/native-tls) so the graph stays native-lib-
 # free; `cargo deny` runs `all-features = false` so this opt-in dep is not in the
 # scanned default graph. LGPL-clean.
-heartbeat = ["multiview-licence/heartbeat", "dep:reqwest", "reqwest?/json"]
+heartbeat = ["multiview-licence/heartbeat", "dep:reqwest", "reqwest?/json", "dep:rustix"]
 
 # Sample a PTP Hardware Clock (`[timing] ptp_phc`, e.g. /dev/ptp0) to discipline
 # the outbound presentation epoch's wall estimate (DEV-C1 / ADR-M010): PTP then

@@ -320,20 +320,19 @@ impl EntitlementPlane {
         // Fail closed: if the HTTPS-only client cannot be built, do NOT fall back
         // to a plaintext-capable client that would leak the bearer JWT — the
         // heartbeat stays OFF (the entitlement plane keeps last-good).
-        let server = match ConspectHttpServer::new(
-            settings.api_base.clone(),
-            settings.bearer_token.clone(),
-        ) {
-            Ok(server) => std::sync::Arc::new(server),
-            Err(err) => {
-                tracing::warn!(
-                    %err,
-                    "Conspect heartbeat is OFF: could not build the HTTPS-only client — \
-                     running unlicensed-honest (never a plaintext credential-carrying client)"
-                );
-                return;
-            }
-        };
+        let server =
+            match ConspectHttpServer::new(settings.api_base.clone(), settings.bearer_token.clone())
+            {
+                Ok(server) => std::sync::Arc::new(server),
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        "Conspect heartbeat is OFF: could not build the HTTPS-only client — \
+                         running unlicensed-honest (never a plaintext credential-carrying client)"
+                    );
+                    return;
+                }
+            };
         // Durable idempotency nonce beside the lease state (the same dir the
         // offline file-drop watcher reads), so a restart never reuses a prior
         // lifetime's Idempotency-Key (cross-restart duplicate-mutation defence).
@@ -341,8 +340,22 @@ impl EntitlementPlane {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_LEASE_DIR.to_owned());
+        // Fail closed: if the nonce lock cannot be taken (another `multiview` owns
+        // this lease dir, or the dir is unwritable) do NOT start a second minter
+        // that could issue colliding Idempotency-Keys — the heartbeat stays OFF
+        // (the entitlement plane keeps last-good).
         let nonce_store: multiview_licence::heartbeat::SharedNonceStore =
-            std::sync::Arc::new(FileNonceStore::in_dir(&lease_dir));
+            match FileNonceStore::in_dir(&lease_dir) {
+                Ok(store) => std::sync::Arc::new(store),
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        "Conspect heartbeat is OFF: could not take the durable idempotency-nonce \
+                         lock (a second heartbeat owner on this lease dir?) — keeping last-good"
+                    );
+                    return;
+                }
+            };
         let client = HeartbeatClient::with_nonce(
             server,
             std::sync::Arc::clone(&self.store),
@@ -574,15 +587,65 @@ fn non_empty_env(key: &str) -> Option<String> {
 #[cfg(feature = "heartbeat")]
 struct FileNonceStore {
     path: std::path::PathBuf,
+    /// The exclusive advisory lock holder for the whole process lifetime. Held so
+    /// a SECOND `multiview` process pointed at the same lease-state dir cannot
+    /// concurrently mint colliding Idempotency-Keys: that process's
+    /// [`FileNonceStore::in_dir`] fails to take the lock and its heartbeat declines
+    /// to start (fail closed). The OS releases the lock when this `File` is dropped
+    /// (process exit or `EntitlementPlane` teardown), so a crashed owner never
+    /// strands the lock. `_lock` is never read — its lifetime IS the guarantee.
+    _lock: std::fs::File,
 }
 
 #[cfg(feature = "heartbeat")]
 impl FileNonceStore {
-    /// The nonce file lives in `dir` (the lease-state dir) as `idempotency-nonce`.
-    fn in_dir(dir: &str) -> Self {
-        Self {
-            path: std::path::Path::new(dir).join("idempotency-nonce"),
-        }
+    /// Open the durable nonce store in `dir` (the lease-state dir), taking a
+    /// **non-blocking exclusive advisory lock** on `<dir>/idempotency-nonce.lock`
+    /// so this process is the sole minter of the nonce file. The data lives in
+    /// `<dir>/idempotency-nonce`.
+    ///
+    /// # Errors
+    /// [`NonceError`](multiview_licence::heartbeat::NonceError) when the lock dir
+    /// cannot be created/opened, or when ANOTHER process already holds the lock
+    /// (a second heartbeat owner on the same lease dir) — the caller then keeps the
+    /// heartbeat OFF (fail closed; the entitlement plane keeps last-good).
+    fn in_dir(dir: &str) -> Result<Self, multiview_licence::heartbeat::NonceError> {
+        use multiview_licence::heartbeat::NonceError;
+        let dir_path = std::path::Path::new(dir);
+        // Ensure the lease-state dir exists so the lock/data files can be created
+        // (the offline file-drop watcher tolerates an absent dir; the nonce owner
+        // must materialise it to hold the lock).
+        std::fs::create_dir_all(dir_path).map_err(|e| {
+            NonceError::new(format!("could not create the lease-state dir {dir}: {e}"))
+        })?;
+        let lock_path = dir_path.join("idempotency-nonce.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| {
+                NonceError::new(format!(
+                    "could not open the idempotency-nonce lock {}: {e}",
+                    lock_path.display()
+                ))
+            })?;
+        // Non-blocking exclusive lock: if a second owner holds it, fail closed
+        // rather than block the spawn. Released automatically when `lock` drops.
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
+            |e| {
+                NonceError::new(format!(
+                    "another process holds the idempotency-nonce lock {} \
+                     (a second heartbeat owner on this lease dir?): {e}",
+                    lock_path.display()
+                ))
+            },
+        )?;
+        Ok(Self {
+            path: dir_path.join("idempotency-nonce"),
+            _lock: lock,
+        })
     }
 }
 
@@ -836,9 +899,12 @@ mod tests {
         // reuse and there is no prior lifetime to collide with.
         use multiview_licence::heartbeat::NonceStore as _;
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"));
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
         assert_eq!(
-            store.load().expect("an absent nonce file loads as a trusted 0"),
+            store
+                .load()
+                .expect("an absent nonce file loads as a trusted 0"),
             0
         );
     }
@@ -853,7 +919,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("idempotency-nonce");
         std::fs::write(&path, "not-a-number").expect("seed corrupt nonce");
-        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"));
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
         assert!(
             store.load().is_err(),
             "a present-but-corrupt nonce file must load as an Error, never a silent 0"
@@ -864,16 +931,18 @@ mod tests {
     #[test]
     fn file_nonce_store_commit_errors_when_unwritable() {
         // commit() must PROPAGATE a write/rename failure (not log-and-continue): an
-        // un-persisted high-water is exactly the cross-restart collision risk. Point
-        // the store at a path whose parent is a FILE (so write fails), and assert
-        // commit returns an Error.
+        // un-persisted high-water is exactly the cross-restart collision risk. After
+        // a clean open, make the data path unwritable by replacing the nonce-file
+        // location with a DIRECTORY (so write to it fails), and assert commit errors.
         use multiview_licence::heartbeat::NonceStore as _;
         let dir = tempfile::tempdir().expect("tempdir");
-        let not_a_dir = dir.path().join("a-file");
-        std::fs::write(&not_a_dir, "x").expect("seed a file");
-        // `not_a_dir` is a file; using it as the lease-state dir makes the nonce
-        // path `<file>/idempotency-nonce`, whose write must fail.
-        let store = FileNonceStore::in_dir(not_a_dir.to_str().expect("utf8 path"));
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
+        // Replace the would-be nonce data file with a directory of the same name:
+        // write-temp succeeds but the rename onto a non-empty directory fails.
+        std::fs::create_dir(dir.path().join("idempotency-nonce")).expect("dir in the way");
+        std::fs::create_dir(dir.path().join("idempotency-nonce").join("busy"))
+            .expect("make the dir non-empty so rename-onto-it fails");
         assert!(
             store.commit(1).is_err(),
             "an unwritable nonce path must make commit() return an Error"
@@ -886,9 +955,33 @@ mod tests {
         // The happy path still works: a committed value reloads exactly.
         use multiview_licence::heartbeat::NonceStore as _;
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"));
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
         store.commit(7).expect("commit persists");
         assert_eq!(store.load().expect("reload"), 7);
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn a_second_nonce_owner_on_the_same_dir_is_refused_fail_closed() {
+        // INTERPROCESS GUARD (round-6 residual): two minters sharing one lease-state
+        // dir could load the same high-water and mint COLLIDING keys. The first owner
+        // holds a non-blocking exclusive advisory lock; a second `in_dir` on the SAME
+        // dir is refused, so its heartbeat declines to start (fail closed). Releasing
+        // the first (drop) then lets a new owner acquire it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf8 path");
+        let first = FileNonceStore::in_dir(path).expect("first owner takes the lock");
+        assert!(
+            FileNonceStore::in_dir(path).is_err(),
+            "a second owner on the same lease dir must be refused (no colliding minters)"
+        );
+        drop(first);
+        // Once the first owner releases the lock, a fresh owner can take it.
+        assert!(
+            FileNonceStore::in_dir(path).is_ok(),
+            "after the first owner drops, the lock is available again"
+        );
     }
 
     // --- Round-6 MAJOR: the HTTP transport is HTTPS-only and FAILS CLOSED. -------
@@ -901,9 +994,7 @@ mod tests {
         // constructor FAILS CLOSED (no unwrap_or_default fallback that would drop
         // https_only), so a heartbeat against an http:// base is rejected at the
         // transport with NO plaintext request leaving the host.
-        use multiview_licence::heartbeat::{
-            DeviceIdentity, HeartbeatClient, LicenceServer as _,
-        };
+        use multiview_licence::heartbeat::{DeviceIdentity, HeartbeatClient, LicenceServer as _};
         let server = ConspectHttpServer::new(
             "http://insecure.example.invalid/v0".to_owned(),
             "super-secret-bearer".to_owned(),

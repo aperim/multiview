@@ -2955,6 +2955,7 @@ dependencies = [
  "multiview-telemetry",
  "multiview-webrtc",
  "reqwest",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "tempfile",
