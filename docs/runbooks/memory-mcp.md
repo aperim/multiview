@@ -15,8 +15,11 @@ Decision: [ADR-G006](../decisions/ADR-G006.md).
 - **MCP server name:** `memory` (stdio), configured in [`/.mcp.json`](../../.mcp.json).
 - **Server package:** `mcp-server-qdrant@0.8.1`, run via `uvx` (no global install).
 - **Runner:** `uv` / `uvx` (Astral) at `~/.local/bin` — installed **0.11.21**, verified 2026-06-16.
-- **Store path:** `${CLAUDE_PROJECT_DIR}/.memory/qdrant` (collection `memory`).
-- **Embedding-model cache:** `${CLAUDE_PROJECT_DIR}/.memory/fastembed_cache`.
+- **Store path:** `.memory/qdrant` (collection `memory`) — a **relative** path the
+  qdrant client resolves against the MCP server's CWD, which Claude Code sets to the
+  project root. (Was `${CLAUDE_PROJECT_DIR}/.memory/qdrant`; see the substrate-fix
+  note below for why that broke — ADR-G007.)
+- **Embedding-model cache:** `.memory/fastembed_cache` (same relative-path rule).
 - **Tools exposed:** `qdrant-find`, `qdrant-store` (descriptions overridden via
   `TOOL_FIND_DESCRIPTION` / `TOOL_STORE_DESCRIPTION` so the agent recalls/stores
   proactively).
@@ -59,13 +62,46 @@ warm it once with network access first.
 - **No delete tool** for individual memories: store a correcting entry stating both
   the old claim and the correction.
 
+## Substrate fix — relative store path (2026-06-16, ADR-G007)
+
+`.mcp.json` previously set `QDRANT_LOCAL_PATH=${CLAUDE_PROJECT_DIR}/.memory/qdrant`.
+This Claude Code build (2.1.178) does **not** interpolate `${CLAUDE_PROJECT_DIR}` in
+`.mcp.json` `env` values, so the qdrant client received the **literal** string and
+created its store in a directory literally named `${CLAUDE_PROJECT_DIR}/` at the repo
+root — 97 MB, **untracked and not gitignored** (at risk of being committed), while the
+canonical `.memory/` never existed and `qdrant-find` returned empty. Fix: use a
+**relative** path (`.memory/qdrant`), which the client resolves against the server's
+CWD (the project root) with no variable expansion required. `.gitignore` now also
+guards `/${CLAUDE_PROJECT_DIR}/` so the stray dir can never be committed.
+
+**Migration (one-time, per clone that hit the bug):** with all sessions stopped (so
+nothing holds the qdrant lock), copy any real collection data across and delete the
+stray dir:
+
+```bash
+# stop every Claude Code session on this clone first (releases the qdrant lock)
+mkdir -p .memory
+[ -d '${CLAUDE_PROJECT_DIR}/.memory' ] && cp -an '${CLAUDE_PROJECT_DIR}/.memory/.' .memory/ || true
+rm -rf '${CLAUDE_PROJECT_DIR}'      # the literal-named dir, NOT the env var
+```
+
+Then restart and run the Verify steps. The 97 MB is mostly the re-downloadable
+FastEmbed model; the actual `memory` collection is small, so a clean re-init is also
+acceptable if the copy is awkward.
+
 ## Gotchas
 
-- **Single-process lock:** only one session per repo clone can hold the store. A
-  second concurrent session's `memory` server fails to connect — that is the lock,
-  not corruption. The lock belongs to the **root** session (`.mcp.json` paths point
-  at the root checkout's `.memory/`); worktree sessions don't get it.
+- **Single-process lock:** only one process per repo clone can hold the embedded
+  qdrant store; a second concurrent `memory` server fails to connect (that is the
+  lock, not corruption). Under the single-orchestrator model (ADR-G007) the
+  **Conductor is the sole `memory` client**, so this contention does not arise in
+  normal operation — but a stray second session (or a leftover process) will still
+  block. If `qdrant-find` errors with a lock/connection failure, find and stop the
+  other holder; do not delete the store.
 - `~/.local/bin` must be on the PATH the Claude Code process sees, or the `uvx`
   command in `.mcp.json` fails to launch the server.
-- `${CLAUDE_PROJECT_DIR}` is expanded by Claude Code to the project root; if a
-  future host doesn't expand it, substitute the absolute repo path in `.mcp.json`.
+- The store path is **relative to the server CWD**. Claude Code launches stdio MCP
+  servers with CWD = project root, so `.memory/qdrant` lands at the repo root. If a
+  future host launches the server with a different CWD, the store would land
+  elsewhere — pin an absolute repo path in `.mcp.json` for that host rather than
+  reintroducing `${CLAUDE_PROJECT_DIR}` (which this client does not expand).
