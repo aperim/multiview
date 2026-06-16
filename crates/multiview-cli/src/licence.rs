@@ -275,10 +275,10 @@ impl EntitlementPlane {
     ///
     /// Reads the heartbeat settings from the environment ([`HeartbeatSettings`]):
     /// the organisation id (config-driven, O4), the pinned ECDSA-P256 **root**
-    /// key, the Conspect base URL, the account JWT bearer, an optional claim code,
-    /// and the salted device identity. When the essential settings are unset, the
-    /// loop is **not** started (logged) — the machine runs unlicensed-honest, the
-    /// same fail-toward-leniency posture as the rest of the plane.
+    /// key, the Conspect base URL, the account JWT bearer, and the salted device
+    /// identity. When the essential settings are unset, the loop is **not** started
+    /// (logged) — the machine runs unlicensed-honest, the same fail-toward-leniency
+    /// posture as the rest of the plane.
     ///
     /// When configured, it `tokio::spawn`s a [`HeartbeatClient`] loop that renews
     /// the lease against conspect.studio and drives the shared
@@ -446,23 +446,20 @@ pub fn refresh_signal(store: &LeaseStore, signal: &WatermarkSignal) {
 /// [`HeartbeatClient`]. Read from the process environment so the pinned root, the
 /// account token, and the salted device identity never live in the binary
 /// (secret hygiene; mirrors [`PUBKEY_ENV`]). The **organisation id is
-/// config-driven** (ADR-0096 O4): the paid/claim path is fully clear, and the
-/// free auto-issue default org is an external-doc residual, so the operator sets
-/// it explicitly here — there is no hard-coded guess.
+/// config-driven** (ADR-0096 O4): the operator sets it explicitly (the free
+/// auto-issue default org is an external-doc residual), so there is no hard-coded
+/// guess.
 #[cfg(feature = "heartbeat")]
 #[derive(Debug, Clone)]
 pub struct HeartbeatSettings {
-    /// The organisation id the device activates/heartbeats against (`{orgId}`).
+    /// The organisation id the device heartbeats against (`{orgId}`).
     pub org_id: String,
     /// The pinned ECDSA-P256 **root** key, base64url uncompressed point.
     pub pinned_root_b64url: String,
     /// The Conspect API base URL (e.g. `https://api.conspect.studio/v0`).
     pub api_base: String,
-    /// The account JWT bearer token (Engineer role for activate / operator for
-    /// heartbeat). Never logged.
+    /// The account JWT bearer token (operator role for heartbeat). Never logged.
     pub bearer_token: String,
-    /// The optional 6-char claim code (paid order); absent ⇒ free auto-issue.
-    pub claim_code: Option<String>,
     /// The salted device identity the requests carry (no raw identifiers).
     pub identity: DeviceIdentity,
 }
@@ -477,8 +474,6 @@ impl HeartbeatSettings {
     pub const API_ENV: &'static str = "MULTIVIEW_LICENCE_API";
     /// The env var the account JWT bearer token is read from (never logged).
     pub const TOKEN_ENV: &'static str = "MULTIVIEW_LICENCE_TOKEN";
-    /// The env var the optional claim code is read from.
-    pub const CLAIM_ENV: &'static str = "MULTIVIEW_LICENCE_CLAIM";
     /// The env var the salted hardware-fingerprint digest is read from (hex).
     pub const FP_DIGEST_ENV: &'static str = "MULTIVIEW_LICENCE_FP_DIGEST";
     /// The env var the fingerprint score is read from (0–100).
@@ -527,7 +522,6 @@ impl HeartbeatSettings {
             pinned_root_b64url,
             api_base,
             bearer_token,
-            claim_code: non_empty_env(Self::CLAIM_ENV),
             identity,
         })
     }
@@ -537,7 +531,6 @@ impl HeartbeatSettings {
     pub fn heartbeat_config(&self) -> HeartbeatConfig {
         HeartbeatConfig {
             org_id: self.org_id.clone(),
-            claim_code: self.claim_code.clone(),
             ..HeartbeatConfig::default()
         }
     }
@@ -724,23 +717,6 @@ impl multiview_licence::heartbeat::LicenceServer for ConspectHttpServer {
             .map_or(self.api_base.as_str(), |(h, _)| h);
         self.get_json(format!("{host}/.well-known/conspect-licensing-keys.json"))
             .await
-    }
-
-    async fn activate(
-        &self,
-        org: &str,
-        req: multiview_licence::heartbeat::ActivateRequest,
-        idempotency_key: &str,
-    ) -> Result<
-        multiview_licence::heartbeat::ActivateResponse,
-        multiview_licence::heartbeat::HeartbeatError,
-    > {
-        self.post_json(
-            format!("{}/organisations/{org}/activate", self.api_base),
-            &req,
-            idempotency_key,
-        )
-        .await
     }
 
     async fn heartbeat(

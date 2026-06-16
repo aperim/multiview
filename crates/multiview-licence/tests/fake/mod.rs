@@ -36,9 +36,9 @@ use ed25519_dalek::{Signer as _, SigningKey as EdKey};
 use p256::ecdsa::{Signature as P256Sig, SigningKey as P256Key};
 
 use multiview_licence::heartbeat::{
-    canonical_key_preimage, canonical_revocation_preimage, ActivateRequest, ActivateResponse,
-    EnforcementState, HeartbeatError, HeartbeatRequest, HeartbeatResponse, LeaseBodyFields,
-    LicenceServer, LicensingKeys, PinnedRoot, ServerLease, TrustedKeys,
+    canonical_key_preimage, canonical_revocation_preimage, EnforcementState, HeartbeatError,
+    HeartbeatRequest, HeartbeatResponse, LeaseBodyFields, LicenceServer, LicensingKeys, PinnedRoot,
+    ServerLease, TrustedKeys,
 };
 
 /// The live production root verifying key (ECDSA P-256, base64url uncompressed),
@@ -719,25 +719,6 @@ impl LicenceServer for FakeLicenceServer {
             return Ok(self.kit.keys_with_signer_revoked("current"));
         }
         Ok(self.kit.keys())
-    }
-
-    async fn activate(
-        &self,
-        _org: &str,
-        _req: ActivateRequest,
-        idempotency_key: &str,
-    ) -> Result<ActivateResponse, HeartbeatError> {
-        self.maybe_block().await;
-        if let Some(err) = self.record_idempotency_then_maybe_fail(idempotency_key) {
-            return Err(err);
-        }
-        if self.fail.load(Ordering::SeqCst) {
-            return Err(HeartbeatError::Transport("fake offline".to_owned()));
-        }
-        Ok(ActivateResponse::new(
-            Some(self.served_lease()),
-            EnforcementState::Compliant,
-        ))
     }
 
     async fn heartbeat(

@@ -312,7 +312,8 @@ async fn an_installed_lease_then_renews_on_the_next_cycle() {
 
     // A lease arrives via an install surface (control-upload / file-drop / relay) —
     // it anchors this device's binding in the store.
-    let (binding, upload_pinned) = fake::upload_binding_for(server.kit(), server.kit().binding_id());
+    let (binding, upload_pinned) =
+        fake::upload_binding_for(server.kit(), server.kit().binding_id());
     store
         .install_binding(&binding, &upload_pinned, store.now())
         .expect("an install surface installs the binding");
@@ -513,54 +514,14 @@ async fn replaying_an_older_signed_lease_does_not_re_extend_entitlement() {
     );
 }
 
-// --- Blocker #5: the server's instanceBindingId is captured + used, not the serial
-
-#[tokio::test]
-async fn the_renewal_addresses_the_binding_by_id_never_the_lease_serial() {
-    // After an activation that has no prior binding id, the renewal heartbeat must
-    // address the binding by the server's instanceBindingId (carried in the signed
-    // lease body), NEVER by the lease serial. We start with an identity that has
-    // no binding id; the first cycle activates + installs (the body carries the
-    // binding id); the next heartbeat's request must use that binding id.
-    let server = shared_fake();
-    let store = Arc::new(LeaseStore::new());
-    let mut identity = test_identity();
-    identity.binding_id = None; // no binding known yet → activation path
-    let pinned = server.pinned_root();
-    let client = HeartbeatClient::new(
-        Arc::clone(&server),
-        Arc::clone(&store),
-        pinned,
-        test_config(),
-        identity,
-    );
-
-    // Cycle 1: activate + install (the signed body carries the binding id).
-    tokio::time::timeout(Duration::from_secs(5), client.run_once())
-        .await
-        .unwrap()
-        .expect("activation installs the verified lease");
-
-    // Cycle 2: a heartbeat. Capture the bindingId the server received.
-    server.clear_last_binding_id();
-    tokio::time::timeout(Duration::from_secs(5), client.run_once())
-        .await
-        .unwrap()
-        .expect("the renewal heartbeat succeeds");
-    let seen = server
-        .last_binding_id()
-        .expect("the heartbeat must send a binding id");
-    assert_eq!(
-        seen,
-        server.kit().binding_id(),
-        "the renewal must address the binding by the server's instanceBindingId"
-    );
-    assert_ne!(
-        seen,
-        server.kit().lease_serial(),
-        "the heartbeat must NEVER address the binding by the lease serial"
-    );
-}
+// NOTE: the round-1 "the renewal addresses the binding by id, never the serial"
+// test seeded the binding via the device ACTIVATE path (binding_id = None → cycle
+// 1 activated). Activate is now DEFERRED (renew-only, ADR-I006 decision point 11),
+// so that seeding no longer exists. The same property — a renewal addresses the
+// binding by the server's instanceBindingId, never the lease serial — is covered
+// by `an_installed_lease_then_renews_on_the_next_cycle` (a lease installed via an
+// install surface, then renewed) above, which asserts the same
+// `last_binding_id() == kit().binding_id()`.
 
 // --- Round-2 #1: cross-instance lease replay is rejected -----------------------
 
@@ -676,20 +637,23 @@ async fn a_signed_lease_with_an_absolute_past_not_after_is_rejected_lease_expire
     );
 }
 
-// --- Round-3 BLOCKER 1: a STALE FOREIGN lease on the activate path with a
-//     pre-existing local store lease does NOT poison the learned binding id, and
-//     is rejected. The Stale->Ok fold must not be treated as "installed". --------
+// --- Round-3 BLOCKER 1 (renew-only): a STALE FOREIGN lease, addressed against a
+//     binding the device learned from its STORE (no configured binding), does NOT
+//     poison the learned binding id and is rejected. The Stale->Ok fold must not
+//     be treated as "installed". (Renew-only: the device anchors identity from the
+//     store, never the removed activate path.) --------------------------------
 
 #[tokio::test]
-async fn a_stale_foreign_lease_on_the_activate_path_does_not_poison_identity() {
+async fn a_stale_foreign_lease_against_a_store_anchored_binding_does_not_poison_identity() {
     use multiview_licence::heartbeat::HeartbeatError;
     let server = shared_fake();
     let store = Arc::new(LeaseStore::new());
 
-    // The device has NO configured/learned heartbeat binding (activate path), but
-    // its local store ALREADY HOLDS a newer lease for THIS device (a prior
-    // heartbeat install). Seed that by installing a genuine local lease first via
-    // a client whose identity IS this device's binding.
+    // The device has NO configured/learned heartbeat binding, but its local store
+    // ALREADY HOLDS a newer lease for THIS device (a prior install). Seed that by
+    // installing a genuine local lease first via a client whose identity IS this
+    // device's binding. After this, a renew client with no configured binding
+    // anchors to `store.current_binding_id()` — it is NEVER "fresh".
     let seed_client = {
         let mut id = test_identity();
         id.binding_id = Some(server.kit().binding_id().to_owned());
@@ -711,11 +675,11 @@ async fn a_stale_foreign_lease_on_the_activate_path_does_not_poison_identity() {
         "the store holds a newer local lease"
     );
 
-    // A FRESH client with NO binding (activate path). The server now replays a
-    // STALE (older granted_at) lease minted for a FOREIGN binding. It is
-    // crypto-valid, so verify passes; the store returns Stale (keeps last-good).
-    // The fold-of-Stale-to-Ok must NOT learn the foreign binding, and the device
-    // identity must remain the seeded one.
+    // A FRESH client with NO configured binding — it anchors to the store's binding
+    // (renew-only). The server now replays a STALE (older granted_at) lease minted
+    // for a FOREIGN binding. It is crypto-valid, so verify passes; the binding
+    // anchored from the store rejects the foreign body BEFORE the stale check. The
+    // device identity must remain the seeded one.
     let attack_client = HeartbeatClient::new(
         Arc::clone(&server),
         Arc::clone(&store),
@@ -723,7 +687,7 @@ async fn a_stale_foreign_lease_on_the_activate_path_does_not_poison_identity() {
         test_config(),
         {
             let mut id = test_identity();
-            id.binding_id = None; // activate path
+            id.binding_id = None; // unconfigured: anchors to the store's binding
             id
         },
     );
@@ -866,19 +830,23 @@ async fn a_signer_revoked_during_the_call_is_rejected_at_acceptance() {
     );
 }
 
-// --- Round-4 BLOCKER 2: BINDING-ANCHOR GAP. A lease installed via the file-drop /
-//     upload surface (a LeaseBinding installed DIRECTLY into the store) must make
-//     the device non-fresh, so a subsequent foreign activate lease is rejected.
+// --- Round-4 BLOCKER 2 (renew-only): BINDING-ANCHOR GAP. A lease installed via
+//     the file-drop / upload surface (a LeaseBinding installed DIRECTLY into the
+//     store) must make the device non-fresh, so a subsequent foreign RENEW lease
+//     is rejected. This is the renew-only onboarding flow: a lease arrives via an
+//     install surface (here upload/file-drop) and the client then renews it; a
+//     foreign lease cannot hijack that anchored identity.
 
 #[tokio::test]
-async fn a_lease_installed_via_the_upload_surface_anchors_identity_against_a_foreign_activate() {
+async fn a_lease_installed_via_the_upload_surface_anchors_identity_against_a_foreign_renew() {
     use multiview_licence::heartbeat::HeartbeatError;
     let server = shared_fake();
     let store = Arc::new(LeaseStore::new());
 
     // Simulate the offline-upload / file-drop surface: install a LeaseBinding for
     // THIS device's binding DIRECTLY into the store (NOT via the heartbeat path),
-    // exactly as control/routes/licence.rs and watcher.rs do.
+    // exactly as control/routes/licence.rs and watcher.rs do. This is the renew-only
+    // onboarding path — the operator/portal lease reaches the device this way.
     let (binding, pinned) = fake::upload_binding_for(server.kit(), server.kit().binding_id());
     store
         .install_binding(&binding, &pinned, store.now())
@@ -888,9 +856,10 @@ async fn a_lease_installed_via_the_upload_surface_anchors_identity_against_a_for
         "an upload/file-drop install must establish the device's binding identity"
     );
 
-    // A FRESH heartbeat client with NO configured/learned binding (activate path).
-    // The server returns a FOREIGN-binding lease. The device is NOT fresh (it holds
-    // an upload-installed lease), so the foreign lease must be rejected.
+    // A FRESH heartbeat client with NO configured binding — it anchors to the
+    // store's binding (renew-only). The server returns a FOREIGN-binding lease. The
+    // device is NOT fresh (it holds an upload-installed lease), so the foreign lease
+    // must be rejected.
     let attack = HeartbeatClient::new(
         Arc::clone(&server),
         Arc::clone(&store),
@@ -908,7 +877,7 @@ async fn a_lease_installed_via_the_upload_surface_anchors_identity_against_a_for
         .expect("run_once must not hang");
     assert!(
         matches!(res, Err(HeartbeatError::BindingMismatch)),
-        "a foreign activate lease must be rejected when an upload lease already anchors identity, got {res:?}"
+        "a foreign renew lease must be rejected when an upload lease already anchors identity, got {res:?}"
     );
 }
 

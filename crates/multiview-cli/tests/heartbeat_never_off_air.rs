@@ -35,8 +35,8 @@ use multiview_cli::run::SoftwareEngine;
 use multiview_config::MultiviewConfig;
 use multiview_engine::{CooperativePacer, ManualTimeSource};
 use multiview_licence::heartbeat::{
-    ActivateRequest, ActivateResponse, DeviceIdentity, HeartbeatClient, HeartbeatConfig,
-    HeartbeatError, HeartbeatRequest, HeartbeatResponse, LicenceServer, LicensingKeys, PinnedRoot,
+    DeviceIdentity, HeartbeatClient, HeartbeatConfig, HeartbeatError, HeartbeatRequest,
+    HeartbeatResponse, LicenceServer, LicensingKeys, PinnedRoot,
 };
 use multiview_licence::{EnforcementLevel, LeaseStore};
 
@@ -120,15 +120,6 @@ impl HostileServer {
 
 impl LicenceServer for HostileServer {
     async fn fetch_keys(&self) -> Result<LicensingKeys, HeartbeatError> {
-        self.maybe_stall().await;
-        Err(HeartbeatError::Transport("partitioned".to_owned()))
-    }
-    async fn activate(
-        &self,
-        _org: &str,
-        _req: ActivateRequest,
-        _idem: &str,
-    ) -> Result<ActivateResponse, HeartbeatError> {
         self.maybe_stall().await;
         Err(HeartbeatError::Transport("partitioned".to_owned()))
     }

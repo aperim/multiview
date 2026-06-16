@@ -9,6 +9,20 @@
 //! convergence so the rest of the machine (S1/S2/S3, the control routes, the web
 //! screens) reads the renewed lease with no extra wiring.
 //!
+//! # Renew-only (online-activate deferred)
+//!
+//! The client is **renew-only**: its job is to RENEW a lease the device already
+//! holds. Device-side online-activate is **deferred** (ADR-I006 decision point 11)
+//! — the Conspect server does not yet issue the `serverNonce` (the per-instance
+//! lease-chain freshness anchor; part of the device-credential mechanism the spec
+//! marks "deferred to ADR-0036"), so the device cannot mint a valid activation
+//! request today. Onboarding therefore does **not** go through this client: the
+//! operator activates in the Conspect portal, and the signed lease reaches the
+//! device via the three existing install surfaces — control-upload, the offline
+//! file-drop watcher, and the mesh relay — all of which feed `install_binding`.
+//! With no lease/binding yet, [`HeartbeatClient::run_once`] makes **no** server
+//! call ([`HeartbeatOutcome::NoBinding`]) and waits for one of those surfaces.
+//!
 //! # Never off air (invariants #1 / #10)
 //!
 //! The client only ever **tightens** on a positively-verified signed lease.
@@ -470,19 +484,21 @@ pub enum KeyTrustError {
 // The signed server lease (bare Ed25519 over deterministic-CBOR leaseBytes).
 // ===========================================================================
 
-/// A signed lease as returned by `activate`/`heartbeat` (the shared shape;
-/// `licenceId`/`instanceBindingId` are present only on activation). The
-/// `leaseBytes` are the authoritative signed body; the scalar fields are a
-/// convenience subset.
+/// A signed lease as returned by `heartbeat` (the authoritative renewal artifact).
+/// The `leaseBytes` are the authoritative signed body; the scalar fields are a
+/// convenience subset. `licenceId`/`instanceBindingId` are optional on the
+/// envelope (the install path reads them from the signed body, not these mirrors).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerLease {
     /// The signer-minted lease serial (`UUIDv7`).
     pub serial: String,
-    /// The licence this lease was issued against (activation only).
+    /// The licence this lease was issued against (envelope mirror; authoritative
+    /// value is in the signed body).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub licence_id: Option<String>,
-    /// The instance binding the lease is bound to (activation only).
+    /// The instance binding the lease is bound to (envelope mirror; authoritative
+    /// value is in the signed body).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_binding_id: Option<String>,
     /// The lease expiry (epoch milliseconds) — the convenience subset of the
@@ -753,60 +769,36 @@ pub enum EnforcementState {
     Revoked,
 }
 
-/// The `POST /organisations/{orgId}/activate` request body (verbatim field
-/// names). Carries salted digests + opaque ids only — never a raw identifier.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[non_exhaustive]
-pub struct ActivateRequest {
-    /// The registered machine id this instance runs on.
-    pub machine_id: String,
-    /// The 6-char single-use claim code (paid order); **omitted** to auto-issue a
-    /// free non-commercial licence (the free tier is itself a licence).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub claim_code: Option<String>,
-    /// The salted hardware-fingerprint digest (lower-case hex SHA-256).
-    pub fingerprint_digest: String,
-    /// The weighted fingerprint match score (0–100; ≥70 to activate).
-    pub fingerprint_score: u8,
-    /// The salted hardware digest shared by sibling instances on one machine.
-    pub hardware_digest: String,
-    /// The instance id (the seat-consuming, lease-bearing unit).
-    pub instance_id: String,
-    /// The instance discriminator hash (`SHA-256(salt ‖ instance_slug)`).
-    pub instance_discriminator_hash: String,
-    /// The instance discriminator digest (lower-case hex SHA-256).
-    pub instance_discriminator_digest: String,
-    /// The instance's Ed25519 device proof-of-possession **public** key (captured
-    /// + stored; not used to authenticate requests yet — ADR-0096 D2).
-    pub device_public_key: String,
-    /// The server-issued lease nonce (lower-case hex) carried in the signed body.
-    pub server_nonce: String,
-}
+// NOTE: device-side online-activate is DEFERRED (ADR-I006 decision point 11).
+// The activation request carried a server-issued `serverNonce` (the per-instance
+// lease-chain freshness anchor) which the Conspect server does not yet issue (it
+// is part of the device-credential mechanism the spec marks "deferred to
+// ADR-0036 §Deferred / not yet available"), so the device cannot obtain a valid
+// activate nonce today — a real server `422`s the empty value. Per rule 6 (never
+// ship a stub/scaffold), the `ActivateRequest`/`ActivateResponse` wire types and
+// the activate call path are NOT shipped. Onboarding is via the operator/portal:
+// the operator activates in the Conspect portal and the signed lease reaches the
+// device through the three existing install surfaces (control-upload, the
+// offline file-drop watcher, the mesh relay) that all feed
+// `LeaseStore::install_binding`; this client's job is to RENEW that lease. The
+// activate slice is re-added when the server-nonce issuance flow lands.
 
-/// The `POST …/activate` response.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[non_exhaustive]
-pub struct ActivateResponse {
-    /// The freshly-signed lease (absent when a renewal is withheld).
-    #[serde(default)]
-    pub lease: Option<ServerLease>,
-    /// The enforcement-ladder rung (data inside the 200).
-    pub enforcement_state: EnforcementState,
-}
-
-impl ActivateResponse {
-    /// Assemble an activation response. A constructor is provided because the
-    /// type is `#[non_exhaustive]` (a versioned wire response): the in-process
-    /// fake server + the cli's transport build it explicitly.
-    #[must_use]
-    pub fn new(lease: Option<ServerLease>, enforcement_state: EnforcementState) -> Self {
-        Self {
-            lease,
-            enforcement_state,
-        }
-    }
+/// The channel a heartbeat arrives on — a **closed** enum over the exact set the
+/// Conspect `/v0` wire accepts (`direct`/`relay`/`file`). It is the full,
+/// exhaustive vocabulary by design: modelling it as a closed enum (not an open
+/// `String`) makes an out-of-enum value structurally impossible to send, so a
+/// future server `422` for an unknown transport label cannot occur. The device
+/// phone-home always reports [`Transport::Direct`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transport {
+    /// A direct device→server heartbeat (the phone-home channel).
+    #[default]
+    Direct,
+    /// Relayed through a local-mesh peer (Conspect mesh relay).
+    Relay,
+    /// Carried via an offline file drop.
+    File,
 }
 
 /// The `POST /organisations/{orgId}/heartbeat` request body (verbatim field
@@ -826,8 +818,9 @@ pub struct HeartbeatRequest {
     pub fingerprint_digest: String,
     /// The engine version reporting in.
     pub app_version: String,
-    /// The channel the heartbeat arrived on (`direct`/`relay`/`file`).
-    pub transport: String,
+    /// The channel the heartbeat arrived on (a closed enum — never an open
+    /// string, so an out-of-vocabulary value cannot be sent).
+    pub transport: Transport,
 }
 
 /// The `POST …/heartbeat` response.
@@ -882,14 +875,6 @@ pub trait LicenceServer: Send + Sync {
         &self,
     ) -> impl std::future::Future<Output = Result<LicensingKeys, HeartbeatError>> + Send;
 
-    /// `POST /organisations/{org}/activate` with a required `Idempotency-Key`.
-    fn activate(
-        &self,
-        org: &str,
-        req: ActivateRequest,
-        idempotency_key: &str,
-    ) -> impl std::future::Future<Output = Result<ActivateResponse, HeartbeatError>> + Send;
-
     /// `POST /organisations/{org}/heartbeat` with a required `Idempotency-Key`.
     fn heartbeat(
         &self,
@@ -934,47 +919,61 @@ pub enum HeartbeatError {
     FingerprintMismatch,
 }
 
-/// The device identity material the requests carry — salted digests + opaque ids
-/// only (data minimisation, brief §8). The cli assembles this from the
-/// fingerprint subsystem; this crate never gathers raw identifiers.
+/// The device identity material — salted digests + opaque ids only (data
+/// minimisation, brief §8). The cli assembles this from the fingerprint
+/// subsystem; this crate never gathers raw identifiers.
+///
+/// The RENEW (heartbeat) path uses `machine_id` (the idempotency-key anchor),
+/// `binding_id`, `fingerprint_digest`/`fingerprint_score`, and `app_version`. The
+/// remaining fields (`instance_id`, `hardware_digest`, the discriminator
+/// hash/digest, `device_public_key_b64url`) are the device-credential material
+/// that device-side **online-activate** carried; activate is DEFERRED (ADR-I006
+/// decision point 11 — the server does not yet issue the `serverNonce`). They are
+/// retained on the identity (the cli's `MULTIVIEW_LICENCE_*` config contract) so
+/// the activate slice re-adds without re-plumbing the device config when the
+/// server-nonce flow lands — **forward-compat**, not sent today.
 #[derive(Debug, Clone)]
 pub struct DeviceIdentity {
-    /// The registered machine id.
+    /// The registered machine id (the idempotency-key anchor; sent on renew).
     pub machine_id: String,
-    /// The instance id (seat-consuming, lease-bearing unit).
-    pub instance_id: String,
-    /// The instance binding id, once known (from a prior activation/lease).
-    pub binding_id: Option<String>,
-    /// The salted hardware-fingerprint digest (lower-case hex SHA-256).
+    /// The salted hardware-fingerprint digest (lower-case hex SHA-256; sent on
+    /// renew).
     pub fingerprint_digest: String,
-    /// The weighted fingerprint score (0–100).
+    /// The weighted fingerprint score (0–100; stamped on the install seal).
     pub fingerprint_score: u8,
-    /// The salted hardware digest (sibling-instance grouping).
+    /// The instance binding id, once known (the renewal addresses the binding by
+    /// this id, learned from a prior signed lease body / install surface).
+    pub binding_id: Option<String>,
+    /// The engine app version (sent on renew).
+    pub app_version: String,
+    /// The instance id (seat-consuming, lease-bearing unit). **Forward-compat:**
+    /// device-credential material for the deferred activate slice; not sent today.
+    pub instance_id: String,
+    /// The salted hardware digest (sibling-instance grouping). **Forward-compat:**
+    /// device-credential material for the deferred activate slice; not sent today.
     pub hardware_digest: String,
-    /// The instance discriminator hash.
+    /// The instance discriminator hash. **Forward-compat:** device-credential
+    /// material for the deferred activate slice; not sent today.
     pub instance_discriminator_hash: String,
     /// The instance discriminator digest (lower-case hex SHA-256).
+    /// **Forward-compat:** device-credential material for the deferred activate
+    /// slice; not sent today.
     pub instance_discriminator_digest: String,
-    /// The engine app version.
-    pub app_version: String,
     /// The device Ed25519 proof-of-possession public key, base64url (captured +
-    /// stored; not used to authenticate requests yet — ADR-0096 D2).
+    /// stored). **Forward-compat:** device-credential material for the deferred
+    /// activate slice + the deferred device-PoP request-signing (ADR-0096 D2); not
+    /// sent today.
     pub device_public_key_b64url: String,
 }
 
 /// The heartbeat-client configuration.
 #[derive(Debug, Clone)]
 pub struct HeartbeatConfig {
-    /// The organisation id the device activates/heartbeats against. **Config
-    /// driven** (ADR-0096 O4): the paid/claim path is fully clear; the free
-    /// auto-issue default org is an external-doc residual, so the cli exposes
-    /// this as a named config field with a clearly-named placeholder default
-    /// rather than a hard-coded guess.
+    /// The organisation id the device heartbeats against (`{orgId}`). **Config
+    /// driven** (ADR-0096 O4): the operator sets it explicitly (the free
+    /// auto-issue default org is an external-doc residual), with a clearly-named
+    /// placeholder default rather than a hard-coded guess.
     pub org_id: String,
-    /// The optional 6-char claim code (paid order). `None` ⇒ free auto-issue.
-    pub claim_code: Option<String>,
-    /// The transport label the heartbeat reports (`direct` for a phone-home).
-    pub transport: String,
     /// The minimum sleep between contacts when the server does not dictate a
     /// `nextDue` (or on the backoff floor).
     pub min_interval: Duration,
@@ -989,8 +988,6 @@ impl Default for HeartbeatConfig {
             // surfaces this as a config field; an unset value means "no free
             // default configured" (ADR-0096 O4).
             org_id: "org-unset".to_owned(),
-            claim_code: None,
-            transport: "direct".to_owned(),
             min_interval: Duration::from_secs(60),
             max_backoff: Duration::from_secs(3600),
         }
@@ -1014,6 +1011,17 @@ pub enum HeartbeatOutcome {
         /// The enforcement rung the server reported.
         state: EnforcementState,
         /// When the next heartbeat is due (epoch milliseconds).
+        next_due: i64,
+    },
+    /// No binding is established yet (an empty store **and** no configured/learned
+    /// binding), so there is nothing to RENEW. The client is renew-only —
+    /// device-side online-activate is deferred (ADR-I006 decision point 11) — so it
+    /// makes **no** server call this cycle and installs nothing (keeps last-good,
+    /// output stays on air). A lease arrives via an install surface (control-upload
+    /// / offline file-drop / mesh relay), and the next cycle renews it. Carries the
+    /// `nextDue` the loop sleeps to before re-checking.
+    NoBinding {
+        /// When to re-check for an installed binding to renew (epoch milliseconds).
         next_due: i64,
     },
 }
@@ -1054,9 +1062,10 @@ pub struct HeartbeatClient<S: LicenceServer> {
     config: HeartbeatConfig,
     identity: DeviceIdentity,
     /// The server-issued `instanceBindingId` learned from a verified lease body
-    /// (or the configured identity). Renewals address the binding by THIS id —
-    /// **never** the lease serial (a different object). Control-plane only; the
-    /// loop is the sole writer/reader, so a plain `Mutex` is correct (no hot path).
+    /// (or the configured identity, or — via `store.current_binding_id()` — an
+    /// install surface). Renewals address the binding by THIS id — **never** the
+    /// lease serial (a different object). Control-plane only; the loop is the sole
+    /// writer/reader, so a plain `Mutex` is correct (no hot path).
     learned_binding_id: std::sync::Mutex<Option<String>>,
     /// The wall-clock seam (epoch ms). Read FRESH at key-trust evaluation AND
     /// again at lease-acceptance, so a signer that expires (or is revoked) during
@@ -1298,20 +1307,54 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             lease_serial,
             fingerprint_digest: identity.fingerprint_digest.clone(),
             app_version: identity.app_version.clone(),
-            transport: "direct".to_owned(),
+            transport: Transport::Direct,
         }
     }
 
-    /// Run one heartbeat cycle: fetch + verify the key-trust chain, send a
-    /// heartbeat (or activate if no binding is held yet), verify the returned
-    /// signed lease, and on success drive `store.install_binding`. On any failure
-    /// the store is left untouched (never off air).
+    /// Run one RENEW cycle. The client is **renew-only**: device-side
+    /// online-activate is deferred (ADR-I006 decision point 11 — the server does
+    /// not yet issue the `serverNonce`). So:
+    ///
+    /// * **No established binding** (an empty store **and** no configured/learned
+    ///   binding) → there is nothing to renew. The client makes **no** server call,
+    ///   installs nothing, keeps last-good, and returns
+    ///   [`HeartbeatOutcome::NoBinding`]. A lease arrives via an install surface
+    ///   (control-upload / offline file-drop / mesh relay), and a later cycle
+    ///   renews it.
+    /// * **A binding exists** → fetch + verify the key-trust chain, send the
+    ///   heartbeat, verify the returned signed lease, and drive
+    ///   `store.install_binding`. On any failure the store is left untouched (never
+    ///   off air).
     ///
     /// # Errors
     /// [`HeartbeatError`] on transport / trust / verification failure. The caller
     /// (the loop) treats every error as "keep last-good and back off".
     pub async fn run_once(&self) -> Result<HeartbeatOutcome, HeartbeatError> {
-        // 1. Fetch + verify the key-trust chain (fail closed on trust). This is a
+        // 1. Resolve the binding to RENEW *before* any network call. The binding is
+        //    addressed by the server-issued instanceBindingId — NEVER the lease
+        //    serial (a different object). `established_binding` is this device's
+        //    locally-anchored identity: the configured/learned heartbeat binding,
+        //    OR — when neither is set but a local lease already exists — the store's
+        //    current lease binding. A device that already holds a lease is NEVER
+        //    "fresh": a foreign-binding lease is rejected because it has an identity
+        //    to violate.
+        let established_binding = self
+            .binding_id()
+            .or_else(|| self.store.current_binding_id());
+
+        // RENEW-ONLY: with no binding there is nothing to renew and the device
+        // cannot self-activate (activate is deferred — the server-issued nonce is
+        // unavailable). No fetch, no idempotency key, no mutation — a benign no-op
+        // that keeps last-good (output stays on air). A lease arrives via an install
+        // surface; a later cycle renews it.
+        let Some(established_binding) = established_binding else {
+            let now_ms = (self.now_ms)();
+            return Ok(HeartbeatOutcome::NoBinding {
+                next_due: next_due_default(now_ms),
+            });
+        };
+
+        // 2. Fetch + verify the key-trust chain (fail closed on trust). This is a
         //    pre-network fast-fail only; trust is RE-EVALUATED at lease-acceptance
         //    time (step 4) against a FRESHLY RE-FETCHED key document, so a signer
         //    that is revoked OR whose validity window elapses DURING a stalled call
@@ -1320,44 +1363,22 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         let now_ms = (self.now_ms)();
         let _ = TrustedKeys::verify(&keys, &self.pinned, now_ms)?;
 
-        // 2. Heartbeat (or activate when no binding is known yet). The binding is
-        //    addressed by the server-issued instanceBindingId — NEVER the lease
-        //    serial (a different object). `established_binding` is this device's
-        //    locally-anchored identity: the configured/learned heartbeat binding,
-        //    OR — when neither is set but a local lease already exists — the
-        //    store's current lease binding. So a device that already holds a lease
-        //    is NEVER "fresh": a foreign-binding lease is rejected even on the
-        //    activate path (it has an identity to violate).
+        // 3. RENEW the held lease. One retry-stable Idempotency-Key for this whole
+        //    logical operation: the heartbeat mutation replays the SAME key on a
+        //    retry (the server dedupes — never a duplicate lease on a lost
+        //    response), and it rotates only after a successful contact below.
         let held_serial = self.store.current().map(|e| e.lease.serial);
-        let established_binding = self
-            .binding_id()
-            .or_else(|| self.store.current_binding_id());
-
-        // One retry-stable Idempotency-Key for this whole logical operation: the
-        // activate/heartbeat mutation replays the SAME key on a retry (the server
-        // dedupes — never a duplicate binding/lease on a lost response), and it
-        // rotates only after a successful contact below.
         let idempotency_key = self.idempotency_key();
-        let (lease, state, next_due) = if established_binding.is_none() {
-            // No binding known yet → activate (free auto-issue when no claim code).
-            let req = self.build_activate_request();
-            let resp = self
-                .server
-                .activate(&self.config.org_id, req, &idempotency_key)
-                .await?;
-            (resp.lease, resp.enforcement_state, next_due_default(now_ms))
-        } else {
-            let req = Self::build_heartbeat_request_for(
-                &self.identity,
-                held_serial,
-                established_binding.clone(),
-            );
-            let resp = self
-                .server
-                .heartbeat(&self.config.org_id, req, &idempotency_key)
-                .await?;
-            (resp.lease, resp.enforcement_state, resp.next_due)
-        };
+        let req = Self::build_heartbeat_request_for(
+            &self.identity,
+            held_serial,
+            Some(established_binding.clone()),
+        );
+        let resp = self
+            .server
+            .heartbeat(&self.config.org_id, req, &idempotency_key)
+            .await?;
+        let (lease, state, next_due) = (resp.lease, resp.enforcement_state, resp.next_due);
 
         // 3. A withheld lease (revocation by non-reissue) is a normal outcome:
         //    keep last-good, never tighten. The contact succeeded, so the logical
@@ -1397,7 +1418,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         // (the mutation already landed on the server under that key; a retry must
         // replay it so the server dedupes, never mint a fresh key that could
         // duplicate the binding).
-        let serial = match self.install(&server_lease, &body, established_binding.as_deref())? {
+        let serial = match self.install(&server_lease, &body, Some(established_binding.as_str()))? {
             InstallOutcome::Installed { serial } => {
                 self.remember_binding_id(&body.instance_binding_id);
                 serial
@@ -1419,11 +1440,14 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// authoritative Conspect signature was already checked in step 4.
     ///
     /// `established_binding` is this device's locally-anchored instance binding
-    /// (configured, or learned from a prior successful install), or `None` before
-    /// the first activation. When `Some`, a returned body whose
-    /// `instance_binding_id` differs is rejected as a cross-instance replay (a
-    /// valid lease minted for another device must not install here); the
-    /// fingerprint-strong stamp is only applied to a binding-matched body.
+    /// (configured, or learned from a prior install / the store's current lease).
+    /// On the renew-only path this is **always** `Some` (a binding must exist for
+    /// a renew to run); a returned body whose `instance_binding_id` differs is
+    /// rejected as a cross-instance replay (a valid lease minted for another device
+    /// must not install here). The `Option` is retained so the deferred activate
+    /// slice — which establishes the first binding from the signed body — can pass
+    /// `None` without re-shaping this method; the fingerprint-strong stamp is only
+    /// applied to a binding-matched body.
     ///
     /// Returns an [`InstallOutcome`] distinguishing a GENUINE install from the
     /// benign stale no-op (the store already held a newer lease). The caller learns
@@ -1441,11 +1465,12 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         body: &LeaseBody,
         established_binding: Option<&str>,
     ) -> Result<InstallOutcome, HeartbeatError> {
-        // CROSS-INSTANCE REPLAY DEFENCE: once this device has an established
-        // binding, a returned lease MUST bind that same instance. A valid
-        // Conspect-signed lease minted for another device's binding is refused
-        // here (and never reaches the fingerprint-strong stamp below). Before the
-        // first activation (`None`) the body's binding is what establishes us.
+        // CROSS-INSTANCE REPLAY DEFENCE: this device has an established binding, so
+        // a returned lease MUST bind that same instance. A valid Conspect-signed
+        // lease minted for another device's binding is refused here (and never
+        // reaches the fingerprint-strong stamp below). The `None` arm exists for the
+        // deferred activate slice (a first binding establishes from the body); on
+        // the renew path `established_binding` is always `Some`.
         if let Some(local) = established_binding {
             if body.instance_binding_id != local {
                 return Err(HeartbeatError::BindingMismatch);
@@ -1496,9 +1521,9 @@ impl<S: LicenceServer> HeartbeatClient<S> {
                 let _ = server;
                 // The store recorded the device's instance binding id ATOMICALLY
                 // inside `install_binding` (the single binding-anchor chokepoint
-                // every install surface converges on), so the activate-path anchor
-                // reads it back without a second write here. Recording happens ONLY
-                // on a genuine install — the stale no-op below installs nothing.
+                // every install surface converges on), so the renew anchor reads it
+                // back without a second write here. Recording happens ONLY on a
+                // genuine install — the stale no-op below installs nothing.
                 Ok(InstallOutcome::Installed {
                     serial: installed.serial,
                 })
@@ -1524,16 +1549,18 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         }
     }
 
-    /// Run the heartbeat loop forever: sleep to the server-dictated `nextDue` (or
-    /// the backoff floor), run a cycle, repeat. Best-effort and cancellation-safe
-    /// — abort it at any await point and the store's last-good lease is untouched.
+    /// Run the renew loop forever: sleep to the server-dictated `nextDue` (or, with
+    /// no binding to renew yet, the no-binding re-check interval / backoff floor),
+    /// run a cycle, repeat. Best-effort and cancellation-safe — abort it at any
+    /// await point and the store's last-good lease is untouched.
     pub async fn run_forever(&self) {
         let mut backoff = self.config.min_interval;
         loop {
             match self.run_once().await {
                 Ok(
                     HeartbeatOutcome::Installed { next_due, .. }
-                    | HeartbeatOutcome::LeaseWithheld { next_due, .. },
+                    | HeartbeatOutcome::LeaseWithheld { next_due, .. }
+                    | HeartbeatOutcome::NoBinding { next_due },
                 ) => {
                     backoff = self.config.min_interval;
                     let sleep = sleep_until_due(next_due, self.config.min_interval);
@@ -1551,24 +1578,6 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         }
     }
 
-    fn build_activate_request(&self) -> ActivateRequest {
-        ActivateRequest {
-            machine_id: self.identity.machine_id.clone(),
-            claim_code: self.config.claim_code.clone(),
-            fingerprint_digest: self.identity.fingerprint_digest.clone(),
-            fingerprint_score: self.identity.fingerprint_score,
-            hardware_digest: self.identity.hardware_digest.clone(),
-            instance_id: self.identity.instance_id.clone(),
-            instance_discriminator_hash: self.identity.instance_discriminator_hash.clone(),
-            instance_discriminator_digest: self.identity.instance_discriminator_digest.clone(),
-            device_public_key: self.identity.device_public_key_b64url.clone(),
-            // The server issues + binds the nonce; an empty placeholder until the
-            // activation flow threads a server-issued nonce through (the field is
-            // required by the wire shape).
-            server_nonce: String::new(),
-        }
-    }
-
     fn build_heartbeat_request_for(
         identity: &DeviceIdentity,
         held_serial: Option<String>,
@@ -1579,7 +1588,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             lease_serial: held_serial,
             fingerprint_digest: identity.fingerprint_digest.clone(),
             app_version: identity.app_version.clone(),
-            transport: "direct".to_owned(),
+            transport: Transport::Direct,
         }
     }
 }
@@ -1614,8 +1623,8 @@ fn unix_millis_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// The default next-due (epoch ms) when the server does not return one (activate
-/// path): `now + 30 days`.
+/// The default next-due (epoch ms) when no server-dictated `nextDue` applies — the
+/// no-binding re-check interval (no lease to renew yet): `now + 30 days`.
 fn next_due_default(now_ms: i64) -> i64 {
     now_ms.saturating_add(30 * 86_400_000)
 }
