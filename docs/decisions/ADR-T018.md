@@ -74,6 +74,20 @@ frame. The fix is to **never compute a rounded index**: gate each repeat strictl
   degradation loop still sheds tiles/res/fps so compose fits the budget (repeats become rare);
   skip-to-cadence is the in-loop last-resort guaranteeing 1.0× in the gap before/under exhausted
   degradation.
+- **Shutdown must survive the pacer park (correctness fix).** The loop's single `.await` is
+  `Pacer::wait_until` on the *next* tick's deadline; between ticks the loop is parked there. The
+  pacer therefore **must observe the `StopSignal`**, or a stop raised while parked on a deadline the
+  clock has not yet reached — a frozen test clock, or a slow / CPU-contended host where wall-clock
+  has not advanced a whole period — would never be seen and the loop would spin/sleep forever
+  (`CooperativePacer` busy-spinning; `RealtimePacer` sleeping the full remaining duration). This was
+  the CI ~37-minute "hang" (worst under `--features cluster`, whose extra HA tests oversubscribe the
+  cores). `Pacer::wait_until` takes the `StopSignal`: `CooperativePacer` checks it each cooperative
+  yield; `RealtimePacer` caps each sleep at `PACER_STOP_POLL` (10 ms) and re-checks. `run_inner`
+  re-checks stop immediately after pacing and returns without composing an extra tick. With the
+  catch-up loop already checking stop per iteration and bounded by `MAX_REPEATS_PER_TICK`, **no wait
+  or loop on the drive path can spin**: a stop is honoured within ~one poll interval regardless of
+  clock state. The stop flag is a wait-free atomic the engine *reads* — it never awaits a client, so
+  inv #10 is preserved.
 - **Scope honesty:** this relieves **compositor** load (fewer composites under load). Re-emitted
   ticks still flow to the bake/encode consumer, so **encoder** load per tick is unchanged; under
   encode-bound overload the cadence-hold manifests as repeats feeding the existing
@@ -94,6 +108,11 @@ frame. The fix is to **never compute a rounded index**: gate each repeat strictl
 5. `skip_cap_bounds_work_on_a_huge_time_jump`: a far-ahead `set()` publishes ≤cap repeats, no spin.
 6. `first_tick_with_no_last_good_composes_fresh` and the existing soak test
    (`runtime.rs:247-323`) pass unchanged (dormant off the overload path).
+7. `runtime_stops_promptly_while_parked_on_a_future_tick_deadline` (failing-first): freeze the
+   `ManualTimeSource` at the seed so tick 0 composes and the loop parks in the pacer for tick 1's
+   unreachable deadline; confirm it is genuinely parked (no further ticks across a settle window),
+   raise stop, and require a prompt return — the whole test under a bounded wall-clock
+   `tokio::time::timeout` so a stop-blind pacer regression fails in seconds instead of hanging CI.
 
 Plus a CI chaos/soak gate running the engine under synthetic CPU starvation asserting cadence held
 + bounded lag + frames-repeated-not-slipped, and a hardware soak on a deliberately-loaded box.
