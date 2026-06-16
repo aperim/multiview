@@ -306,6 +306,24 @@ ntp = ["multiview-engine/ntp"]
 # best-effort and can never back-pressure the engine (invariant #10).
 mesh-mdns = ["multiview-mesh/mdns"]
 
+# The Conspect device-licensing heartbeat client (CONSPECT-3, ADR-0096): turn on
+# the licence crate's off-by-default `heartbeat` feature (the key-trust verifier
+# + the signed-lease verifier + the `HeartbeatClient` loop) AND pull the live
+# `reqwest` (rustls) HTTP transport the cli implements at this boundary. With this
+# on, a configured device (org id + pinned ECDSA-P256 root + Conspect base URL +
+# account JWT + salted device identity, all read from the environment) runs a
+# supervised control-plane heartbeat loop that renews the lease against
+# conspect.studio and drives the SAME `LeaseStore::install_binding` convergence as
+# the offline file-drop + mesh relay. OFF by default so the baseline build is
+# network-free and `cargo deny`-clean; the shipped deploy presets turn it on
+# (mirrors `mesh-mdns`). Control-plane only; the loop holds no engine handle and
+# can never back-pressure the engine, and only ever tightens on a positively-
+# verified signed lease (invariants #1/#10). `reqwest` is pinned to the
+# `rustls-tls` backend (NEVER OpenSSL/native-tls) so the graph stays native-lib-
+# free; `cargo deny` runs `all-features = false` so this opt-in dep is not in the
+# scanned default graph. LGPL-clean.
+heartbeat = ["multiview-licence/heartbeat", "dep:reqwest", "reqwest?/json"]
+
 # Sample a PTP Hardware Clock (`[timing] ptp_phc`, e.g. /dev/ptp0) to discipline
 # the outbound presentation epoch's wall estimate (DEV-C1 / ADR-M010): PTP then
 # outranks the system clock while disciplined (ADR-T012). Off by default; pulls
@@ -468,6 +486,9 @@ nvidia = [
     # Live local-mesh discovery (Conspect, ADR-0051 §6): the shipped deploy image
     # runs the real mDNS announce/browse loop.
     "mesh-mdns",
+    # Conspect device-licensing heartbeat client (CONSPECT-3, ADR-0096): the
+    # shipped deploy image runs the supervised heartbeat loop (when configured).
+    "heartbeat",
 ]
 
 # Apple Silicon / Intel macOS: VideoToolbox codecs + Metal compositor + FFmpeg.
@@ -491,6 +512,8 @@ apple = [
     "rist",
     # Live local-mesh discovery (Conspect, ADR-0051 §6).
     "mesh-mdns",
+    # Conspect device-licensing heartbeat client (CONSPECT-3, ADR-0096).
+    "heartbeat",
 ]
 
 # Linux VAAPI/QSV: VAAPI + QuickSync codecs + wgpu compositor + FFmpeg.
@@ -521,6 +544,8 @@ linux-vaapi = [
     "rist",
     # Live local-mesh discovery (Conspect, ADR-0051 §6).
     "mesh-mdns",
+    # Conspect device-licensing heartbeat client (CONSPECT-3, ADR-0096).
+    "heartbeat",
 ]
 
 # Everything non-GPL: all codec backends, every compositor backend, FFmpeg,

@@ -26,6 +26,8 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+#[cfg(feature = "heartbeat")]
+use multiview_licence::heartbeat::{DeviceIdentity, HeartbeatClient, HeartbeatConfig};
 use multiview_licence::verify::PinnedKey;
 use multiview_licence::watcher::{LeaseDirectoryWatcher, DEFAULT_LEASE_DIR};
 use multiview_licence::{EnforcementLevel, LeaseStore};
@@ -268,6 +270,88 @@ impl EntitlementPlane {
         );
     }
 
+    /// Spawn the Conspect **device-licensing heartbeat** loop (CONSPECT-3,
+    /// ADR-0096) — the `heartbeat` feature only.
+    ///
+    /// Reads the heartbeat settings from the environment ([`HeartbeatSettings`]):
+    /// the organisation id (config-driven, O4), the pinned ECDSA-P256 **root**
+    /// key, the Conspect base URL, the account JWT bearer, an optional claim code,
+    /// and the salted device identity. When the essential settings are unset, the
+    /// loop is **not** started (logged) — the machine runs unlicensed-honest, the
+    /// same fail-toward-leniency posture as the rest of the plane.
+    ///
+    /// When configured, it `tokio::spawn`s a [`HeartbeatClient`] loop that renews
+    /// the lease against conspect.studio and drives the shared
+    /// [`LeaseStore::install_binding`](multiview_licence::LeaseStore::install_binding)
+    /// convergence — the same path the offline file-drop and mesh relay already
+    /// use, so S1/S2/S3 re-sample with no extra wiring (via the existing
+    /// [`refresh_signal`] poll). **Best-effort, never off air (invariants #1/#10):**
+    /// the task holds only [`Arc<LeaseStore>`](multiview_licence::LeaseStore) + the
+    /// pinned root + the client — **no** engine handle/channel/lock — and only ever
+    /// tightens on a positively-verified signed lease; every failure (or a withheld
+    /// lease) keeps the last-good lease and lets it age.
+    #[cfg(feature = "heartbeat")]
+    pub fn spawn_heartbeat(&self) {
+        let Some(settings) = HeartbeatSettings::from_env() else {
+            tracing::info!(
+                "Conspect heartbeat is OFF (unconfigured): set {} + {} + {} + {} to enable the \
+                 device-licensing phone-home; running unlicensed-honest until then",
+                HeartbeatSettings::ORG_ENV,
+                HeartbeatSettings::ROOT_ENV,
+                HeartbeatSettings::API_ENV,
+                HeartbeatSettings::TOKEN_ENV
+            );
+            return;
+        };
+        let pinned_root = match multiview_licence::heartbeat::PinnedRoot::from_base64url(
+            &settings.pinned_root_b64url,
+        ) {
+            Ok(root) => root,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    "Conspect heartbeat is OFF: {} is not a valid base64url ECDSA-P256 root \
+                     point — running unlicensed-honest",
+                    HeartbeatSettings::ROOT_ENV
+                );
+                return;
+            }
+        };
+        let server = std::sync::Arc::new(ConspectHttpServer::new(
+            settings.api_base.clone(),
+            settings.bearer_token.clone(),
+        ));
+        let client = HeartbeatClient::new(
+            server,
+            std::sync::Arc::clone(&self.store),
+            pinned_root,
+            settings.heartbeat_config(),
+            settings.identity.clone(),
+        );
+        let org = settings.org_id.clone();
+        tokio::spawn(async move {
+            client.run_forever().await;
+        });
+        tracing::info!(
+            org = %org,
+            api = %settings.api_base,
+            "Conspect device heartbeat running (control-plane phone-home; renews the lease via \
+             the shared install convergence; never off air)"
+        );
+    }
+
+    /// No-op when the `heartbeat` feature is off: the entitlement plane is fully
+    /// wired (the offline file-drop install + the read-only heartbeat-status
+    /// surface still work), but no live licence-server loop runs and the default
+    /// build stays network-free + `cargo deny`-clean (ADR-0096).
+    #[cfg(not(feature = "heartbeat"))]
+    pub fn spawn_heartbeat(&self) {
+        tracing::debug!(
+            "Conspect device heartbeat is OFF (build without `heartbeat`); the entitlement \
+             plane serves local lease state only"
+        );
+    }
+
     /// The current sampled enforcement level for the S1 startup gate.
     #[must_use]
     pub fn level(&self) -> Option<EnforcementLevel> {
@@ -341,6 +425,258 @@ pub fn current_level(store: &LeaseStore) -> Option<EnforcementLevel> {
 pub fn refresh_signal(store: &LeaseStore, signal: &WatermarkSignal) {
     let level = current_level(store).unwrap_or(EnforcementLevel::Active);
     signal.set(level);
+}
+
+// ===========================================================================
+// Conspect heartbeat (CONSPECT-3, ADR-0096) — the cli-boundary HTTP transport
+// + environment-driven settings. Feature `heartbeat`, OFF by default.
+// ===========================================================================
+
+/// The environment-driven heartbeat settings the cli assembles for the
+/// [`HeartbeatClient`]. Read from the process environment so the pinned root, the
+/// account token, and the salted device identity never live in the binary
+/// (secret hygiene; mirrors [`PUBKEY_ENV`]). The **organisation id is
+/// config-driven** (ADR-0096 O4): the paid/claim path is fully clear, and the
+/// free auto-issue default org is an external-doc residual, so the operator sets
+/// it explicitly here — there is no hard-coded guess.
+#[cfg(feature = "heartbeat")]
+#[derive(Debug, Clone)]
+pub struct HeartbeatSettings {
+    /// The organisation id the device activates/heartbeats against (`{orgId}`).
+    pub org_id: String,
+    /// The pinned ECDSA-P256 **root** key, base64url uncompressed point.
+    pub pinned_root_b64url: String,
+    /// The Conspect API base URL (e.g. `https://api.conspect.studio/v0`).
+    pub api_base: String,
+    /// The account JWT bearer token (Engineer role for activate / operator for
+    /// heartbeat). Never logged.
+    pub bearer_token: String,
+    /// The optional 6-char claim code (paid order); absent ⇒ free auto-issue.
+    pub claim_code: Option<String>,
+    /// The salted device identity the requests carry (no raw identifiers).
+    pub identity: DeviceIdentity,
+}
+
+#[cfg(feature = "heartbeat")]
+impl HeartbeatSettings {
+    /// The env var the organisation id is read from (config-driven, O4).
+    pub const ORG_ENV: &'static str = "MULTIVIEW_LICENCE_ORG";
+    /// The env var the pinned ECDSA-P256 root key (base64url) is read from.
+    pub const ROOT_ENV: &'static str = "MULTIVIEW_LICENCE_ROOT";
+    /// The env var the Conspect API base URL is read from.
+    pub const API_ENV: &'static str = "MULTIVIEW_LICENCE_API";
+    /// The env var the account JWT bearer token is read from (never logged).
+    pub const TOKEN_ENV: &'static str = "MULTIVIEW_LICENCE_TOKEN";
+    /// The env var the optional claim code is read from.
+    pub const CLAIM_ENV: &'static str = "MULTIVIEW_LICENCE_CLAIM";
+    /// The env var the salted hardware-fingerprint digest is read from (hex).
+    pub const FP_DIGEST_ENV: &'static str = "MULTIVIEW_LICENCE_FP_DIGEST";
+    /// The env var the fingerprint score is read from (0–100).
+    pub const FP_SCORE_ENV: &'static str = "MULTIVIEW_LICENCE_FP_SCORE";
+    /// The env var the registered machine id is read from.
+    pub const MACHINE_ENV: &'static str = "MULTIVIEW_LICENCE_MACHINE_ID";
+    /// The env var the instance id is read from.
+    pub const INSTANCE_ENV: &'static str = "MULTIVIEW_LICENCE_INSTANCE_ID";
+    /// The env var the instance binding id is read from (once known).
+    pub const BINDING_ENV: &'static str = "MULTIVIEW_LICENCE_BINDING_ID";
+    /// The env var the salted hardware digest is read from.
+    pub const HW_DIGEST_ENV: &'static str = "MULTIVIEW_LICENCE_HW_DIGEST";
+    /// The env var the instance discriminator hash is read from.
+    pub const DISC_HASH_ENV: &'static str = "MULTIVIEW_LICENCE_DISC_HASH";
+    /// The env var the instance discriminator digest is read from.
+    pub const DISC_DIGEST_ENV: &'static str = "MULTIVIEW_LICENCE_DISC_DIGEST";
+    /// The env var the device Ed25519 proof-of-possession public key (base64url)
+    /// is read from.
+    pub const DEVICE_KEY_ENV: &'static str = "MULTIVIEW_LICENCE_DEVICE_KEY";
+
+    /// Assemble settings from the process environment, or `None` when the
+    /// essential ones (org id, pinned root, API base, bearer token) are unset —
+    /// the heartbeat then stays off and the machine runs unlicensed-honest.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        let org_id = non_empty_env(Self::ORG_ENV)?;
+        let pinned_root_b64url = non_empty_env(Self::ROOT_ENV)?;
+        let api_base = non_empty_env(Self::API_ENV)?;
+        let bearer_token = non_empty_env(Self::TOKEN_ENV)?;
+        let identity = DeviceIdentity {
+            machine_id: non_empty_env(Self::MACHINE_ENV).unwrap_or_default(),
+            instance_id: non_empty_env(Self::INSTANCE_ENV).unwrap_or_default(),
+            binding_id: non_empty_env(Self::BINDING_ENV),
+            fingerprint_digest: non_empty_env(Self::FP_DIGEST_ENV).unwrap_or_default(),
+            fingerprint_score: non_empty_env(Self::FP_SCORE_ENV)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+            hardware_digest: non_empty_env(Self::HW_DIGEST_ENV).unwrap_or_default(),
+            instance_discriminator_hash: non_empty_env(Self::DISC_HASH_ENV).unwrap_or_default(),
+            instance_discriminator_digest: non_empty_env(Self::DISC_DIGEST_ENV).unwrap_or_default(),
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            device_public_key_b64url: non_empty_env(Self::DEVICE_KEY_ENV).unwrap_or_default(),
+        };
+        Some(Self {
+            org_id,
+            pinned_root_b64url,
+            api_base,
+            bearer_token,
+            claim_code: non_empty_env(Self::CLAIM_ENV),
+            identity,
+        })
+    }
+
+    /// Build the [`HeartbeatConfig`] from these settings.
+    #[must_use]
+    pub fn heartbeat_config(&self) -> HeartbeatConfig {
+        HeartbeatConfig {
+            org_id: self.org_id.clone(),
+            claim_code: self.claim_code.clone(),
+            ..HeartbeatConfig::default()
+        }
+    }
+}
+
+/// Read an environment variable, returning `None` when unset or empty.
+#[cfg(feature = "heartbeat")]
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+/// The live Conspect HTTP transport (the cli-boundary implementation of
+/// [`multiview_licence::heartbeat::LicenceServer`]). Owns the `reqwest` (rustls)
+/// client so the leaf crate stays socket-free; carries the account JWT bearer +
+/// a fresh `Idempotency-Key` on every mutation (ADR-0096 D2: account-JWT auth
+/// today; device-PoP request-signing deferred). IPv6-first via `reqwest`'s
+/// resolver; HTTPS only.
+#[cfg(feature = "heartbeat")]
+struct ConspectHttpServer {
+    client: reqwest::Client,
+    api_base: String,
+    bearer_token: String,
+}
+
+#[cfg(feature = "heartbeat")]
+impl ConspectHttpServer {
+    fn new(mut api_base: String, bearer_token: String) -> Self {
+        let client = reqwest::Client::builder()
+            .user_agent(concat!("multiview/", env!("CARGO_PKG_VERSION")))
+            .https_only(true)
+            .build()
+            .unwrap_or_default();
+        // Normalise the base URL in place (consume the owned String — no realloc).
+        api_base.truncate(api_base.trim_end_matches('/').len());
+        Self {
+            client,
+            api_base,
+            bearer_token,
+        }
+    }
+
+    /// `GET` + JSON-decode against `url`, mapping every failure to a
+    /// [`HeartbeatError`] the loop treats as "keep last-good".
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: String,
+    ) -> Result<T, multiview_licence::heartbeat::HeartbeatError> {
+        use multiview_licence::heartbeat::HeartbeatError;
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.bearer_token)
+            .send()
+            .await
+            .map_err(|e| HeartbeatError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(HeartbeatError::Transport(format!(
+                "{} returned HTTP {}",
+                url,
+                resp.status()
+            )));
+        }
+        resp.json::<T>()
+            .await
+            .map_err(|e| HeartbeatError::Malformed(e.to_string()))
+    }
+
+    /// `POST` `body` as JSON with the required `Idempotency-Key`, JSON-decode the
+    /// response.
+    async fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        url: String,
+        body: &B,
+        idempotency_key: &str,
+    ) -> Result<T, multiview_licence::heartbeat::HeartbeatError> {
+        use multiview_licence::heartbeat::HeartbeatError;
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.bearer_token)
+            .header("Idempotency-Key", idempotency_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| HeartbeatError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(HeartbeatError::Transport(format!(
+                "{} returned HTTP {}",
+                url,
+                resp.status()
+            )));
+        }
+        resp.json::<T>()
+            .await
+            .map_err(|e| HeartbeatError::Malformed(e.to_string()))
+    }
+}
+
+#[cfg(feature = "heartbeat")]
+impl multiview_licence::heartbeat::LicenceServer for ConspectHttpServer {
+    async fn fetch_keys(
+        &self,
+    ) -> Result<
+        multiview_licence::heartbeat::LicensingKeys,
+        multiview_licence::heartbeat::HeartbeatError,
+    > {
+        // The well-known document is served from the API host root, not under the
+        // versioned `/v0` base path.
+        let host = self
+            .api_base
+            .rsplit_once("/v0")
+            .map_or(self.api_base.as_str(), |(h, _)| h);
+        self.get_json(format!("{host}/.well-known/conspect-licensing-keys.json"))
+            .await
+    }
+
+    async fn activate(
+        &self,
+        org: &str,
+        req: multiview_licence::heartbeat::ActivateRequest,
+        idempotency_key: &str,
+    ) -> Result<
+        multiview_licence::heartbeat::ActivateResponse,
+        multiview_licence::heartbeat::HeartbeatError,
+    > {
+        self.post_json(
+            format!("{}/organisations/{org}/activate", self.api_base),
+            &req,
+            idempotency_key,
+        )
+        .await
+    }
+
+    async fn heartbeat(
+        &self,
+        org: &str,
+        req: multiview_licence::heartbeat::HeartbeatRequest,
+        idempotency_key: &str,
+    ) -> Result<
+        multiview_licence::heartbeat::HeartbeatResponse,
+        multiview_licence::heartbeat::HeartbeatError,
+    > {
+        self.post_json(
+            format!("{}/organisations/{org}/heartbeat", self.api_base),
+            &req,
+            idempotency_key,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
