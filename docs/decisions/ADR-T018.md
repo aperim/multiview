@@ -68,11 +68,10 @@ target **must be the floor** — the greatest `idx` with `deadline_nanos(idx) <=
 period-aligned, so the fractional case `elapsed = (N + r)·period, r >= 0.5` is the common one;
 the nearest rounding gives `N+1`, and composing tick `N+1` (deadline in the future) runs ahead
 exactly as D1 described. The cap path (`EngineRuntime::cap_resync_floor`) computes the floor in
-**O(1) on the hot path** — **not** a loop whose length would depend on the (only `> 0`-validated,
-**unbounded**) cadence — from the **exact rational period**, never the rounded `pts_at(1)`: a tick
-spans `den/num` seconds, so `floor_idx = elapsed_ns · num / (1e9 · den)` in i128 (no overflow, no
-period rounding, **no `/0`** — the divisor is `den`, never `pts_at(1)`, which itself rounds to 0 for
-a sub-nanosecond period). Dividing by the *rounded* `pts_at(1)` instead diverges from the true floor
+**O(1) on the hot path** — **not** a loop whose length would depend on the cadence — from the
+**exact rational period**, never the rounded `pts_at(1)`: a tick spans `den/num` seconds, so
+`floor_idx = elapsed_ns · num / (1e9 · den)` in i128 (no overflow, no period rounding, **no `/0`** —
+the divisor is `den`, never `pts_at(1)`). Dividing by the *rounded* `pts_at(1)` instead diverges from the true floor
 **without bound** as the index grows on a non-integer cadence (`idx·round(period)` vs
 `round(idx·period)` — e.g. 23.976 drifts +2 by `idx≈300M`, a degenerate `1.25e9/13` +400 by
 `idx=10k`), so a fixed correction could not recover it and the never-ahead backstop would collapse
@@ -80,15 +79,21 @@ the target to `next` — grinding the backlog frame-by-frame (an unbounded burst
 failure). The exact-rational form has no such drift. The actual `deadline_nanos(idx) = seed +
 pts_at(idx)` still rounds `pts_at`, so the floor against the *rounded* deadlines is the exact floor
 ±1; **one** O(1) up-step (`deadline_nanos(idx+1) <= now`) and **one** O(1) down-step
-(`deadline_nanos(idx) > now`), mutually exclusive, reconcile that boundary. The skip stays a genuine
-forward jump because the cap only fires once `deadline_nanos(next+1) <= now`, so the floor is
-`>= next+1`, and the final `skip_to` target always has `deadline_nanos(target) <= now` (never a
-run-ahead). (Regression risk: an *integer*-period jump test cannot catch either the over-round or
-the rounded-period drift — floor == nearest on an integer — so the guards are a *fractional*-jump
-test asserting no fresh tick is composed ahead of its deadline (with a hard bounded-completion
-assert so a no-run-ahead-but-parks regression also fails) **and** a *non-integer*-cadence
-*large-index* test asserting the resync floors exactly in one bounded step rather than collapsing to
-`next` and grinding.)
+(`deadline_nanos(idx) > now`), mutually exclusive, reconcile that boundary. **The ±1 step is provably
+sufficient** because the cadence is bounded: both `Canvas::validate` and `OutputClock::new` reject a
+sub-nanosecond exact period (`fps > 1 GHz`, `Rational::has_subnanosecond_period`), so distinct ticks
+have distinct rounded deadlines and the rounded floor cannot diverge from the exact floor by more
+than one. (That bound also closes a pre-existing **invariant #3** hole — a sub-ns period rounds
+consecutive ticks to the same nanosecond, so PTS was not strictly increasing regardless of this
+loop.) The skip stays a genuine forward jump because the cap only fires once
+`deadline_nanos(next+1) <= now`, so the floor is `>= next+1`, and the final `skip_to` target always
+has `deadline_nanos(target) <= now` (never a run-ahead). (Regression risk: an *integer*-period jump
+test cannot catch either the over-round or the rounded-period drift — floor == nearest on an integer
+— so the guards are a *fractional*-jump test asserting no fresh tick is composed ahead of its
+deadline (with a hard bounded-completion assert so a no-run-ahead-but-parks regression also fails),
+a *non-integer*-cadence *large-index* test asserting the resync floors exactly in one bounded step
+rather than collapsing to `next` and grinding, and sub-nanosecond-cadence *rejection* tests in both
+`Canvas::validate` and `OutputClock::new` plus a 1 GHz-boundary cadence-hold test.)
 
 ## Consequences
 
@@ -163,6 +168,17 @@ assert so a no-run-ahead-but-parks regression also fails) **and** a *non-integer
    budget with `frames_repeated <= MAX_REPEATS_PER_TICK` (hard). Catches the rounded-`pts_at(1)`
    drift (+2 at this index) that the integer-cadence tests cannot: the old floor collapsed to `next`
    and ground the backlog; the exact-rational floor resyncs in one bounded step.
+10. Sub-nanosecond cadence **rejection** (failing-first), both `multiview-core`
+    `layout::tests::canvas_validate_rejects_subnanosecond_cadence` and `multiview-engine`
+    `clock::tests::rejects_subnanosecond_cadence_but_accepts_the_1ghz_boundary`: `Canvas::validate`
+    and `OutputClock::new` reject `fps > 1 GHz` (exact period < 1 ns) with a clear error and accept
+    the 1 GHz boundary + real cadences. Plus `multiview-core`
+    `time::tests::has_subnanosecond_period_is_exact_not_rounded` pinning the exact-period predicate
+    (so a 1.5 GHz cadence — rounded period 1 ns, exact < 1 ns — is correctly rejected).
+11. `max_accepted_cadence_1ghz_resyncs_one_step_with_postcondition_holding` (cadence-hold): at the
+    fastest accepted cadence (1 GHz, period exactly 1 ns) and a large index, the cap-floor resync is
+    one-step — postcondition `deadline(result+1) <= now` holds, no run-ahead, bounded repeats — the
+    tightest case the ±1 boundary correction must handle.
 
 Plus a CI chaos/soak gate running the engine under synthetic CPU starvation asserting cadence held
 + bounded lag + frames-repeated-not-slipped, and a hardware soak on a deliberately-loaded box.
