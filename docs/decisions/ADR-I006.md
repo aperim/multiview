@@ -69,6 +69,33 @@ mirrors `mesh-mdns`). The implementation makes these concrete decisions:
    material never in the binary. `spawn_heartbeat()` (real under `cfg(heartbeat)`,
    no-op otherwise) is called beside `spawn_mesh_discovery()` at both `main.rs`
    run sites.
+6. **The verified-body → entitlement mapping is fail-closed and purpose-bound**
+   (hardened after the rule-21 Codex panel — the crypto chain is correct, but the
+   guarantees must not be dropped at the mapping). Binding rules:
+   - **Key-purpose binding:** a `root_sig`-attested intermediate is trusted as a
+     lease signer **only** when its signed pre-image declared `key_type == "lease"`
+     **and** its `status ∈ {current, next}` (dual-pin). A root-attested key minted
+     for another purpose (e.g. an `update` key) or in a `retired`/unknown status is
+     never a lease signer (a skip, not a keyset-poisoning reject).
+   - **Signed expiry is authoritative:** the installed lease's `expires_at` is the
+     cryptographically-signed `not_after` (`Lease::new_online_expiring_at`
+     back-derives `granted_at = not_after − 35d`), **never** `system_now() + 35d`.
+     A signed lease already past its `not_after` is rejected
+     (`HeartbeatError::LeaseExpired`, keep last-good) — so a short-lived or
+     replayed-older still-Ed25519-valid lease can never mint a fresh term.
+   - **Decode exactly:** `leaseBytes` is `STANDARD.decode(trim())` (no `=`
+     stripping) — a canonically-padded body (CBOR length % 3 ≠ 0) decodes.
+   - **Required fields fail closed:** `instance_binding_id` / `serial` /
+     `licence_id` must be present **and non-empty** (`ok_or(MalformedBody)`), never
+     `unwrap_or_default()`.
+   - **Address the binding by id:** renewals use the server-issued
+     `instanceBindingId` learned from the verified body
+     (`HeartbeatClient::learned_binding_id`), **never** the lease serial.
+   - **Reject nonsensical timestamps:** a negative `valid_from`/`valid_until` is
+     rejected up front rather than coerced to unsigned 0 by the CBOR encoder.
+   The never-off-air isolation is re-proven with a **genuine in-flight stall**
+   (a black-holed transport call), asserting a concurrent store reader and the
+   output clock are never blocked while a heartbeat call is parked (inv #10).
 
 New deps behind `heartbeat`: `p256`, `base64`, `hex` (all `MIT`/`Apache-2.0`, with
 the ECDSA closure resolving to `MIT`/`Apache-2.0`/`BSD-3-Clause`/`BSD-1-Clause`),
@@ -102,6 +129,9 @@ so none enter the scanned default graph.
 | Re-derive Conspect's canonical lease-body CBOR to re-verify the lease | Unnecessary and fragile: the server returns the exact signed `leaseBytes`; verifying the bare-Ed25519 signature over the received bytes (then parsing fields order-independently) is simpler and cannot drift from the server's encoding. |
 | Put the `reqwest` HTTP transport inside `multiview-licence` | Breaks the leaf crate's "no I/O, no socket" invariant (its CLAUDE.md) and would pull a TLS stack into a pure-data crate. The crypto/verify lives in the testable crate; the socket lives at the cli boundary behind the `LicenceServer` seam. |
 | Hard-code the free auto-issue default org id | The default `{orgId}` for a free self-host is an external-doc residual (ADR-0096 O4, not yet provided). A guessed value would be wrong; the org id is a clearly-named env-driven config field, off unless set. |
+| Mint the installed lease term from `system_now() + 35d` (ignoring the signed `not_after`) | Defeats the licensing crypto: a short-lived or **replayed older** still-Ed25519-valid lease would become a fresh 35-day entitlement (signed-expiry bypass / lease replay). The installed `expires_at` MUST be the signed `not_after`, and an already-expired signed lease is rejected. |
+| Trust any `root_sig`-attested intermediate as a lease signer (ignore `key_type`/`status`) | A root may attest keys for several purposes; accepting a non-lease (e.g. `update`) key — or a `retired` key — as a lease signer is a key-purpose bypass that the signed `key_type` field exists to prevent. Enforce `key_type == "lease"` ∧ `status ∈ {current,next}`. |
+| Default omitted/empty `instance_binding_id`/`serial` to `""` (`unwrap_or_default`) | A signed-but-malformed body would install with an empty id and mis-bind enforcement/renewals. Required identity fields fail closed. |
 
 ## Consequences
 
