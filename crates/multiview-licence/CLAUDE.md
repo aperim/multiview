@@ -29,17 +29,25 @@ tests pin the day boundaries; never weaken them.
 `untagged`); wire resources `#[non_exhaustive]` (use constructors); no `unwrap`/`expect`/`panic`/`as`
 /indexing in non-test code (`?`/`match`/`TryFrom`).
 
-**Out of scope here (later CONSPECT items):** the heartbeat network client (feature-gated), the S1/S2/S3
-engine seams + the never-off-air chaos test (CONSPECT-2), the cli wiring (CONSPECT-10), and the
-control routes/web screens.
+**The heartbeat network client (CONSPECT-3, ADR-0096) lives here** behind the off-by-default
+`heartbeat` feature: [`heartbeat.rs`](src/heartbeat.rs) — the Conspect key-trust verifier
+(pinned ECDSA-P256 root → root-attested dual-pin Ed25519 intermediates + revocation, a hand-rolled
+RFC 8949 §4.2.1 canonical-CBOR pre-image), the bare-Ed25519 signed-lease verifier, and the
+`HeartbeatClient<S: LicenceServer>` loop that drives `store::install_binding` on a positively-verified
+lease and **keeps last-good on every failure/withheld lease** (never off air). The default build stays
+network-free + `cargo deny`-clean; the **live HTTP transport is the cli's** `ConspectHttpServer` (it
+owns `reqwest`), so this leaf crate opens no socket. **Still out of scope here:** the S1/S2/S3 engine
+seams + the never-off-air chaos test (CONSPECT-2), the cli wiring (CONSPECT-10), and the control
+routes/web screens.
 
 Depth: [conspect-account-architecture](../../docs/research/conspect-account-architecture.md) (§2
 constants, §6 ladder, §8 fingerprint, §12 state machines) ·
 [ADR-0050](../../docs/decisions/ADR-0050.md) · [conventions](../../docs/architecture/conventions.md).
 
-**Before the heartbeat client (CONSPECT-3):** read [ADR-0096](../../docs/decisions/ADR-0096.md)
-first — the device licensing wire was finalized by Conspect API v0.6.1 (key-trust via the public
+**Before touching the heartbeat client (CONSPECT-3):** read [ADR-0096](../../docs/decisions/ADR-0096.md)
+(the gate + resolved wire) and [ADR-I006](../../docs/decisions/ADR-I006.md) (the implementation
+decisions) — the device licensing wire was finalized by Conspect API v0.6.1 (key-trust via the public
 `/.well-known/conspect-licensing-keys.json` ECDSA-P256-root → root-attested dual-pin Ed25519
 intermediates; lease = bare Ed25519 hex over standard-base64 `leaseBytes` = RFC 8949 §4.2.1
-deterministic CBOR; auth = account JWT Bearer today, device PoP deferred). Implement against it; do
-not guess or ship a stub (rule 6).
+deterministic CBOR; auth = account JWT Bearer today, device PoP deferred). The canonical-CBOR
+key pre-image is proven byte-exact against the live well-known doc — keep it that way.
