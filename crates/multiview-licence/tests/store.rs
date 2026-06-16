@@ -293,3 +293,87 @@ fn the_store_records_and_reports_the_instance_binding_id() {
         "recording overwrites — the store holds the current binding identity"
     );
 }
+
+/// A binding carrying a SIGNED instance binding id (the signature covers it, so it
+/// installs after the signed-anchor fix). The standard binding-aware install unit.
+fn binding_with_id(key: &SigningKey, lease: &Lease, score: u8, binding_id: &str) -> LeaseBinding {
+    let msg = SignedLease::signing_bytes(lease, Some(binding_id));
+    let sig = key.sign(&msg);
+    LeaseBinding::new(
+        SignedLease::new(lease.clone(), sig.to_bytes()),
+        Entitlement::new(
+            Tier::new("studio".to_owned()),
+            HardwareClass::Standard,
+            HardwareClass::Standard,
+            GpuLimit::Limited(2),
+            lease.clone(),
+            EntitlementFlags::default(),
+        ),
+        score,
+        Some(binding_id.to_owned()),
+    )
+}
+
+#[test]
+fn a_concurrent_reader_never_observes_a_torn_install_lease_present_binding_absent() {
+    // The install must publish the lease AND its binding anchor as ONE atomic
+    // update: a concurrent reader must NEVER observe current().is_some() (a lease
+    // is installed) while current_binding_id() is still None. That torn state would
+    // make a device with a freshly-installed lease look "fresh" to the heartbeat
+    // client (established_binding == None) and SKIP the BindingMismatch guard — a
+    // foreign-binding lease could then install. We exercise the None→Some install
+    // transition across many fresh stores with a concurrent spin-reader and assert
+    // the torn (lease-present, binding-absent) state is observed ZERO times.
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Barrier;
+
+    let (key, pinned) = keypair();
+    let now = epoch();
+    let lease = lease_at("serial-ATOMIC", now);
+    let torn_seen = Arc::new(AtomicBool::new(false));
+    let lease_present_samples = Arc::new(AtomicU64::new(0));
+
+    // Many independent trials so the install's None→Some window is hit repeatedly.
+    for _ in 0..2_000 {
+        let store = Arc::new(LeaseStore::with_clock(Arc::new(move || now)));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let reader_store = Arc::clone(&store);
+        let reader_barrier = Arc::clone(&barrier);
+        let torn = Arc::clone(&torn_seen);
+        let present = Arc::clone(&lease_present_samples);
+        let reader = std::thread::spawn(move || {
+            reader_barrier.wait();
+            // Spin until the lease appears, sampling the (lease, binding) pair. The
+            // instant the lease is visible, the binding MUST be visible too.
+            for _ in 0..200_000 {
+                let lease_present = reader_store.current().is_some();
+                let binding_present = reader_store.current_binding_id().is_some();
+                if lease_present {
+                    present.fetch_add(1, Ordering::Relaxed);
+                    if !binding_present {
+                        torn.store(true, Ordering::SeqCst);
+                    }
+                    break;
+                }
+            }
+        });
+
+        let b = binding_with_id(&key, &lease, 100, "ib_atomic_0001");
+        barrier.wait();
+        store
+            .install_binding(&b, &pinned, now)
+            .expect("the binding installs");
+        reader.join().expect("reader thread joins");
+    }
+
+    assert!(
+        lease_present_samples.load(Ordering::Relaxed) > 0,
+        "the reader must have observed the installed lease at least once (test is live)"
+    );
+    assert!(
+        !torn_seen.load(Ordering::SeqCst),
+        "a concurrent reader observed a TORN install (lease present but binding id absent) — \
+         the install is not atomic"
+    );
+}
