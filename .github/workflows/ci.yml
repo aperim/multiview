@@ -225,6 +225,22 @@ jobs:
           # multiview-hal off-by-default features
           - crate: multiview-hal
             feature: i915-pmu
+          # multiview-licence off-by-default feature: the Conspect device
+          # heartbeat client (CONSPECT-3 / ADR-0096). Pure Rust — p256 + base64 +
+          # hex + tokio, no native deps — so it lints + tests on the bare runner.
+          # This is the key-trust verifier + the signed-lease verifier + the
+          # HeartbeatClient loop + the fake-server tests (incl. the live well-known
+          # golden vectors); the default `lint`/`test` jobs build none of it.
+          - crate: multiview-licence
+            feature: heartbeat
+          # multiview-cli off-by-default feature: the heartbeat wiring +
+          # the live reqwest/rustls transport + the never-off-air chaos gate that
+          # SIGKILLs/stalls/partitions the heartbeat task against the output clock.
+          # `heartbeat` does NOT imply the cli `ffmpeg` feature (reqwest is pure
+          # rustls, no libav), so it lints + tests on the bare runner alongside the
+          # default `software` feature.
+          - crate: multiview-cli
+            feature: heartbeat
           # WebRTC native egress/ingest (str0m + aws-lc-rs). The default `lint`
           # and `test` jobs build none of these, so the wave-1 union (#141↔#147)
           # broke `webrtc-native` silently on main; this leg gates it going
