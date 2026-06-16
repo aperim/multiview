@@ -270,30 +270,63 @@ fn a_lease_signed_by_an_attested_update_key_is_rejected_end_to_end() {
     );
 }
 
+// The `status` field is NOT in the root-signed key pre-image (map(6):
+// key_id,key_type,statement,public_key,valid_from,valid_until), so a MITM /
+// compromised well-known doc can flip a retired key's `status` to "current"
+// WITHOUT breaking root_sig. Trust must therefore NOT rest on `status` — it
+// rests on the SIGNED gates: key_type=="lease" ∧ now∈[valid_from,valid_until] ∧
+// not in the signed revocation list. Retirement is expressed via those.
+
 #[test]
-fn a_root_attested_key_with_an_unknown_status_is_not_trusted() {
-    // Only `current`/`next` (dual-pin) statuses are lease signers; a `retired`
-    // (or any other) status — even root-attested — must be dropped.
+fn a_status_flipped_to_current_is_still_rejected_when_outside_signed_validity() {
+    // An attacker flips a retired key's status to "current" — but its SIGNED
+    // validity window already ended. now > valid_until ⇒ still rejected.
     let kit = FabricatedKeyset::new();
-    let keys = kit.keys_with_signer("lease", "retired");
-    let trusted = TrustedKeys::verify(&keys, &kit.pinned_root(), kit.now_ms()).unwrap();
+    let ended = kit.now_ms() - 10 * 86_400_000; // window ended 10 days ago
+    let keys = kit.keys_with_signer_validity(
+        "lease",
+        "current", // forged operational hint
+        ended - 86_400_000,
+        ended,
+    );
+    let trusted = TrustedKeys::verify(&keys, &kit.pinned_root(), kit.now_ms())
+        .expect("structurally root-attested; verify() still succeeds");
     assert!(
         trusted.lease_key(kit.kid()).is_none(),
-        "a non-current/next status key must not be a trusted lease signer"
+        "a forged-`current` key outside its SIGNED validity window must NOT be trusted"
     );
 }
 
 #[test]
-fn a_next_status_lease_key_is_trusted_dual_pin() {
-    // `next` is the second pin — it MUST be accepted (a rotation never strands a
-    // fielded build). Guards against an over-strict status check.
+fn a_status_flipped_to_current_is_still_rejected_when_revoked() {
+    // An attacker flips a revoked key's status to "current" — but it is named in
+    // the (root-signed) revocation list, so it stays dropped.
     let kit = FabricatedKeyset::new();
-    let keys = kit.keys_with_signer("lease", "next");
-    let trusted = TrustedKeys::verify(&keys, &kit.pinned_root(), kit.now_ms()).unwrap();
+    let keys = kit.keys_with_signer_revoked("current"); // forged hint + revoked
+    let trusted = TrustedKeys::verify(&keys, &kit.pinned_root(), kit.now_ms())
+        .expect("structurally root-attested; verify() still succeeds");
     assert!(
-        trusted.lease_key(kit.kid()).is_some(),
-        "a `next`-status lease key must be trusted (dual-pin)"
+        trusted.lease_key(kit.kid()).is_none(),
+        "a forged-`current` key in the SIGNED revocation list must NOT be trusted"
     );
+}
+
+#[test]
+fn a_lease_key_in_validity_and_unrevoked_is_trusted_regardless_of_status_hint() {
+    // The flip side: trust rests on the SIGNED gates, NOT `status`. A lease key
+    // that is in its signed validity window and not revoked is a valid signer
+    // even if its (unsigned) status hint reads "retired" — retirement that is not
+    // expressed via the signed validity window or revocation list is not binding.
+    // (This documents that `status` is a hint, never a security gate.)
+    let kit = FabricatedKeyset::new();
+    for hint in ["current", "next", "retired", "anything"] {
+        let keys = kit.keys_with_signer("lease", hint);
+        let trusted = TrustedKeys::verify(&keys, &kit.pinned_root(), kit.now_ms()).unwrap();
+        assert!(
+            trusted.lease_key(kit.kid()).is_some(),
+            "an in-validity, unrevoked lease key must be trusted (status hint {hint:?})"
+        );
+    }
 }
 
 // --- Blocker #7: negative timestamps are rejected, never coerced to 0 ----------
@@ -379,6 +412,53 @@ fn a_signed_body_with_an_omitted_serial_is_rejected() {
     assert!(
         matches!(err, SignedLeaseError::MalformedBody),
         "got {err:?}"
+    );
+}
+
+// --- Round-2 #4: a present-but-invalid gpu_limit fails closed, not Unlimited ---
+
+#[test]
+fn a_present_but_negative_gpu_limit_is_rejected_not_unlimited() {
+    // A signed body with gpu_limit:-1 must be MalformedBody — NOT silently folded
+    // to GpuLimit::Unlimited (the LEAST restrictive). A present-but-invalid value
+    // fails closed; only an ABSENT gpu_limit may mean Unlimited.
+    let kit = FabricatedKeyset::new();
+    let trusted = kit.trusted();
+    let lease = kit.sign_body_with_raw_gpu_limit(-1);
+    let err = verify_signed_lease_chain(&lease, &trusted)
+        .expect_err("a present-but-negative gpu_limit must be rejected");
+    assert!(
+        matches!(err, SignedLeaseError::MalformedBody),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_present_but_oversized_gpu_limit_is_rejected_not_unlimited() {
+    // gpu_limit beyond u32::MAX → must be MalformedBody, not Unlimited.
+    let kit = FabricatedKeyset::new();
+    let trusted = kit.trusted();
+    let lease = kit.sign_body_with_raw_gpu_limit(i64::from(u32::MAX) + 1);
+    let err = verify_signed_lease_chain(&lease, &trusted)
+        .expect_err("a present-but-oversized gpu_limit must be rejected");
+    assert!(
+        matches!(err, SignedLeaseError::MalformedBody),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn an_absent_gpu_limit_means_unlimited() {
+    // The contrast case: an ABSENT gpu_limit is legitimately Unlimited (the body
+    // verifies and parses; gpu_limit is None).
+    let kit = FabricatedKeyset::new();
+    let trusted = kit.trusted();
+    let lease = kit.sign_body_omitting("gpu_limit");
+    let body = verify_signed_lease_chain(&lease, &trusted)
+        .expect("a body that simply omits gpu_limit is valid");
+    assert_eq!(
+        body.gpu_limit, None,
+        "absent gpu_limit parses as None (Unlimited)"
     );
 }
 

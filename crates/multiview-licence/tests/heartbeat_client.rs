@@ -453,6 +453,120 @@ async fn the_renewal_addresses_the_binding_by_id_never_the_lease_serial() {
     );
 }
 
+// --- Round-2 #1: cross-instance lease replay is rejected -----------------------
+
+#[tokio::test]
+async fn a_lease_for_another_devices_binding_is_rejected_not_installed() {
+    // A valid Conspect-signed lease minted for ANOTHER device's binding must NOT
+    // install onto this device. Once this device has an established binding (the
+    // configured identity.binding_id), install() rejects a body whose
+    // instance_binding_id != the local binding — cross-instance replay defence.
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    // This device's established binding is the fabricated one; the server will
+    // hand a (correctly-signed) lease whose body binds a DIFFERENT instance.
+    let mut identity = test_identity();
+    identity.binding_id = Some(server.kit().binding_id().to_owned()); // local = ib_fab_0001
+    let pinned = server.pinned_root();
+    let client = HeartbeatClient::new(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        pinned,
+        test_config(),
+        identity,
+    );
+    server.set_foreign_binding(true); // body.instance_binding_id = someone else's
+
+    let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(
+        res.is_err(),
+        "a lease for another device's binding must be rejected, got {res:?}"
+    );
+    assert!(
+        store.status().is_none(),
+        "nothing is installed for a cross-instance (foreign-binding) lease"
+    );
+}
+
+// --- Round-2 #2: a rejected lease must not poison the learned binding id --------
+
+#[tokio::test]
+async fn a_rejected_lease_does_not_poison_the_learned_binding_id() {
+    // remember_binding_id must only fire for a SUCCESSFULLY INSTALLED lease. A
+    // rejected (here: expired) lease must NOT mutate the learned binding id, so the
+    // next renewal still addresses the legitimate binding, not the attacker's.
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let mut identity = test_identity();
+    identity.binding_id = Some(server.kit().binding_id().to_owned());
+    let pinned = server.pinned_root();
+    let client = HeartbeatClient::new(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        pinned,
+        test_config(),
+        identity,
+    );
+
+    // The server hands a lease whose body carries a DIFFERENT (attacker) binding
+    // AND is already expired (so install rejects it). The reject path must not
+    // learn the attacker binding.
+    server.set_foreign_binding(true);
+    server.set_replay_absolute_past(true);
+    let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(res.is_err(), "the expired/foreign lease must be rejected");
+
+    // Now the server behaves: a legitimate lease for THIS binding. The renewal
+    // must still address the device's real binding (proving no poisoning).
+    server.set_foreign_binding(false);
+    server.set_replay_absolute_past(false);
+    server.clear_last_binding_id();
+    tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .unwrap()
+        .expect("a legitimate lease installs");
+    let seen = server
+        .last_binding_id()
+        .expect("the heartbeat sent a binding id");
+    assert_eq!(
+        seen,
+        server.kit().binding_id(),
+        "the renewal addresses the device's real binding — the reject path did not poison it"
+    );
+}
+
+// --- Round-2 #5: a past-not_after lease deterministically hits LeaseExpired -----
+
+#[tokio::test]
+async fn a_signed_lease_with_an_absolute_past_not_after_is_rejected_lease_expired() {
+    // Deterministic LeaseExpired: the server signs a lease whose not_after is an
+    // absolute instant in 1970 (clearly before ANY real system clock the install
+    // path reads), so install() returns HeartbeatError::LeaseExpired — proving the
+    // signed-expiry rejection fires (not InstallError::Stale via a fixed epoch).
+    use multiview_licence::heartbeat::HeartbeatError;
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = client(Arc::clone(&server), Arc::clone(&store));
+
+    server.set_replay_absolute_past(true);
+    let err = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang")
+        .expect_err("a lease whose signed not_after is in the past must be rejected");
+    assert!(
+        matches!(err, HeartbeatError::LeaseExpired),
+        "expected HeartbeatError::LeaseExpired, got {err:?}"
+    );
+    assert!(
+        store.status().is_none(),
+        "nothing is installed for an expired signed lease (keep last-good)"
+    );
+}
+
 /// A deterministic foreign root (different from the fabricated keyset's root) for
 /// the wrong-root rejection test.
 fn foreign_root() -> multiview_licence::heartbeat::PinnedRoot {
