@@ -1,164 +1,106 @@
+@AGENTS.md
+
 # CLAUDE.md — Agent Guide for the Multiview Repository
 
-This is the working guide for Claude Code (and any coding agent) operating **in this repo**.
-It tells you what Multiview is, where things live, how to build/test/lint, the conventions you must
-follow, which deep brief to read before touching a subsystem, and the **safety rules you must never
-break**.
+This is the Claude-Code-specific companion to [`AGENTS.md`](AGENTS.md). **`AGENTS.md`
+governs *how you work*** (the 42 Engineering Rules + the Multiview reference sections) and
+is imported above. **This file orients you in the repo**: the persistent memory, how to
+navigate the monorepo without burning context, which deep brief to read before touching a
+subsystem, and the **safety rules you must never break**.
 
-> **Source of truth:** [`docs/architecture/conventions.md`](docs/architecture/conventions.md) pins
-> the canonical crate names, API paths, feature flags, invariants, and licensing. Where any other
-> doc disagrees, **conventions win**, and the Rust code is the ultimate source of truth. This file
-> summarizes; it does not override conventions.
-
----
-
-## 0. Ownership — you run this
-
-You are the **engineering manager and owner of execution** for this repo, not an assistant waiting
-for instructions. Decide, build, verify, ship. The operator sets direction and priorities; turning
-that direction into shipped, gated, hardware-validated code is **your** job, and you carry it to
-done without parking it.
-
-- **"Pending operator feedback / review / approval" is not a valid state for buildable work.** If a
-  thing is designed and unblocked, build it. The operator reviews via commits, PRs, and the running
-  system — never via a pre-build approval gate you invent. Do **not** stop to ask "should I
-  proceed?" — proceed.
-- **Design-first is a quality step, not a hand-off.** For a non-trivial subsystem, write the
-  brief/ADR first and adversarially verify it — then **implement it yourself**. Finishing the design
-  does not return the work to the operator: a committed, verified design means *start coding*, not
-  *wait*.
-- **Default and move.** When a choice is reversible or has a sensible default, pick it, state it in
-  one line, and continue. Reserve genuine questions for decisions that are (a) hard to reverse or
-  outward-facing **and** (b) would materially change direction **and** cannot be sensibly defaulted —
-  and even then prefer the reversible default over blocking. Each such question is a cost; spend it
-  rarely.
-- **Autonomy does NOT bypass quality.** The three guardrail pillars (absolute typing, TDD-first with
-  real tests, adversarial review), the safety rules (§7), and confirmation for destructive or
-  outward-facing actions (publishing public, deleting infrastructure, external comms) still hold.
-  Autonomy is about **execution pace and decisiveness**, never about lowering the bar or weakening a
-  test.
-- **Drive the loop to the stated finish.** Hold the whole agenda, fan out independent work, then
-  integrate + gate + hardware-validate it **yourself**. Report a thing as done only when it is green
-  and verified. Keep going until the operator's goal is actually met.
-- **NEVER defer, stub, scaffold, or partial-ship.** This is absolute. A thing is "done" only when it
-  is **wired end-to-end and working** — not when a "core" lands with the integration parked for
-  "a later wave", not a `todo!()`/placeholder, not "modelled but the real path isn't built", not
-  "honestly documented as a follow-up". Splitting a unit of work for *parallelism* (e.g. a crate-core
-  + its thin integration) is allowed **only if every part ships in the same push** — never "core now,
-  wiring later". When something required is identified: **(a)** if it is **not documented**, fan out
-  to write the brief/ADR + plan first, then ship it; **(b)** if it **is documented** and the pieces
-  can fan out, parallel-ship **all** of them (core **and** integration) together; **(c)** otherwise
-  ship it now, complete. Deferred/parked work is technical debt — we do not create it. If you
-  genuinely cannot finish a thing this turn (a real external blocker), say so explicitly and name the
-  blocker; "I'll wire it up later" is not a finish.
+> **Source of truth:** [`docs/architecture/conventions.md`](docs/architecture/conventions.md)
+> pins the canonical crate names, API paths, feature flags, invariants, and licensing. Where
+> any other doc disagrees, **conventions win**, and the Rust code is the ultimate source of
+> truth. The technical invariants and crate map live in `AGENTS.md` §F/§C; this file does not
+> repeat them — it points to them.
 
 ---
 
-## Engineering guardrails (non-negotiable)
+## Persistent memory (MCP)
 
-Full standard: [`docs/development/agent-guardrails.md`](docs/development/agent-guardrails.md). Conventions/naming source of truth: [`docs/architecture/conventions.md`](docs/architecture/conventions.md). All three pillars are blocking CI.
+A fully-local vector-RAG memory server (`memory`, `mcp-server-qdrant`) is configured in
+[`.mcp.json`](.mcp.json); data lives under `.memory/` (gitignored). It is the
+**repository-scoped, committed-config, team-shared** memory — decisions, operator feedback,
+gotchas, milestone state.
 
-**1. Absolute typing — no untyped, no escape hatches.**
-- Rust: lint policy is centralized in root `[workspace.lints]`; every crate uses `[lints]` `workspace = true`. **Denied in non-test code:** `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable`, `get_unwrap`, `indexing_slicing`, `as_conversions`, `dbg_macro`, `print_stdout/stderr`, `str_to_string`, `exit`, `mem_forget`. `unsafe_code = forbid` (FFI crates: `deny` + `// SAFETY:`). Prefer `?`/`match`/`unwrap_or`/`let-else` over unwrap/expect. Use newtype+`TryFrom`, typestate, `#[non_exhaustive]`, exhaustive `match`. **Ban `dyn Any`.** Tests relaxed via `clippy.toml allow-*-in-tests`; **every `tests/` file needs `#![allow(clippy::unwrap_used, …)]`** (those options don't cover integration tests).
-- TS: `tsconfig` `strict` **+** `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes` (+ override/returns/switch flags). ESLint `strictTypeChecked` (type-aware) bans `any` + `no-unsafe-*`; `ban-ts-comment` (no `@ts-ignore`/`@ts-nocheck`, `@ts-expect-error` allow-with-description) and `no-non-null-assertion` (no `!`).
-- Gates: `cargo clippy --all-targets --all-features -- -D warnings`, `tsc --noEmit`, `eslint . --max-warnings=0`.
+- Run **`qdrant-find`** at the start of any non-trivial task to recall prior decisions, before
+  re-deriving anything a past session may have settled.
+- **`qdrant-store`** non-obvious decisions, operator corrections, and hard-won gotchas when you
+  learn them — proactively, not on request.
+- Conventions: the [`memory` skill](.claude/skills/memory/SKILL.md). Runbook:
+  [`docs/runbooks/memory-mcp.md`](docs/runbooks/memory-mcp.md). The store is single-process —
+  one session per repo clone at a time.
 
-**2. TDD-first with REAL tests.** Write the failing test FIRST; run it and paste the failing output; **commit failing tests separately**; then implement to green WITHOUT touching tests. **NEVER weaken/delete/skip/`#[ignore]` a test, weaken an assertion, or edit code-under-test to fit a weak test — STOP and ask a human.** No tautological/assertion-free tests. Coverage is a floor; **mutation score is the target**: `cargo mutants --in-diff` on PRs (a MISSED mutant in changed code fails the PR), full run nightly. Property tests required for pure/stateful logic (`proptest`/`proptest-state-machine`, commit `proptest-regressions/`; `fast-check` for TS). Keep a held-out acceptance suite the author never sees.
+> Claude Code also keeps its own per-user file-based memory (under `~/.claude/…`) that it
+> manages automatically. That is complementary and personal; the MCP above is the shared,
+> committed project memory.
 
-**3. Adversarial cross-vendor review (required).** Code authored by one vendor is reviewed by a **different** vendor (Claude ↔ Codex ↔ Gemini) in a **fresh context** seeing only diff + spec + checklist. Reviewer scope: correctness/security/spec/guardrail defects only. Reviewer checks the typing + TDD rules above and that no test was weakened. Unanimous approval is a yellow flag. **The operator has delegated routine final approval + merge to the agent — the cross-vendor review above stays mandatory and the operator retains ultimate authority/override ([ADR-G005](docs/decisions/ADR-G005.md)).**
+## Skills & hooks
 
-**Baseline:** explore→plan→implement→commit; minimal in-scope diffs with a stated out-of-scope boundary; **no silent suppression** (any `#[allow]`/`eslint-disable`/`.skip` needs an inline justification + review; fix root cause); show evidence not assertions; propagate errors with `?`, never swallow; build `--locked` + `npm ci`, commit lockfiles; secrets via 1Password (`op read`→`chmod 600`→`rm -f`), gitleaks pre-commit + CI; `cargo deny check`; Conventional Commits + `Co-Authored-By:` trailer; ADRs in `docs/decisions/` for non-trivial decisions; **no copying proprietary/competitor features, designs, or trademarked terms — build from open standards + original work, keep docs vendor-neutral** ([CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)). Definition of Done in the full doc.
+On-demand skills under [`.claude/skills/`](.claude/skills/) — invoke the relevant one:
+
+- **`worktree-lane`** — create/work-in/integrate/clean-up an isolated worktree lane (rules 8–13).
+- **`adr`** — record a decision in `docs/decisions/` (rule 30).
+- **`memory`** — `qdrant-find`/`qdrant-store` conventions.
+
+A **warn-only** `PreToolUse` hook ([`.claude/hooks/enforce-worktree.mjs`](.claude/hooks/enforce-worktree.mjs))
+reminds when an edit targets the root checkout instead of a lane (it does not block; ADR-G006).
+Don't inline a recurring multi-step procedure into this file — make it a skill (rule 31).
+
+---
+
+## Ownership & quality (see AGENTS.md)
+
+The full working contract is `AGENTS.md` rules 1–42. The load-bearing reminders:
+
+- **You run this** — decide, build, verify, ship; never park buildable work "pending approval"
+  (rules 1–2). **Never defer/stub/scaffold/partial-ship** (rule 6).
+- **The three pillars are blocking** — absolute typing, TDD-first with real tests, adversarial
+  cross-vendor review (rules 17–22; full standard:
+  [`docs/development/agent-guardrails.md`](docs/development/agent-guardrails.md)).
+- **Verify, don't assume; show evidence; validate on real hardware** (rules 23–26).
+- **Bad/contended inputs are the purpose** — bulletproof output from glitchy/dropping inputs and
+  starved/shared hosts is the whole product (rule 26 + safety §7).
 
 ---
 
 ## Working in this monorepo — navigation & context discipline
 
-Multiview is a complex monorepo (16-crate Cargo workspace + `web/` SPA + a large `docs/` tree with
-10 research briefs and 89 ADRs). To work efficiently here without exhausting your context
-window, follow the official Claude Code guidance for large/complex codebases:
-[code.claude.com/docs/en/large-codebases](https://code.claude.com/docs/en/large-codebases).
-The full agent playbook is [`docs/development/working-in-this-monorepo.md`](docs/development/working-in-this-monorepo.md);
+Multiview is a complex monorepo (a large Cargo workspace + `web/` SPA + a large `docs/` tree of
+research briefs and 169 ADRs). To work efficiently here without exhausting your context window,
+follow the official Claude Code guidance for large/complex codebases:
+[code.claude.com/docs/en/large-codebases](https://code.claude.com/docs/en/large-codebases). The
+full agent playbook is [`docs/development/working-in-this-monorepo.md`](docs/development/working-in-this-monorepo.md);
 the one-screen layout is [`docs/development/codebase-map.md`](docs/development/codebase-map.md).
 
 **Layered, on-demand instructions.** Each crate has a short `crates/<crate>/CLAUDE.md` (and the
 SPA has `web/CLAUDE.md`) with that area's invariants and the exact brief(s)+ADRs to read first.
-Per the docs, a subdirectory `CLAUDE.md` **loads automatically when Claude reads a file in that
-directory** — so you pay context only for the crate you're in, not all 16. **Start Claude from
-the crate you're working in** to load just the root file plus that crate's file. (This root
-`CLAUDE.md` is re-injected after `/compact`; nested crate files reload on the next read in that
-crate.)
+A subdirectory `CLAUDE.md` **loads automatically when Claude reads a file in that directory** —
+so you pay context only for the crate you're in. **Start Claude from the crate you're working
+in** to load just the root files plus that crate's file. (This root `CLAUDE.md` + `AGENTS.md`
+are re-injected after `/compact`; nested crate files reload on the next read in that crate.)
 
 **Context discipline.**
 - Work **one crate/area per task**; `/clear` between unrelated tasks.
 - **Fan out searches into subagents** — when a side task means reading many files (find a
- symbol's callers, summarize a brief, audit a diff against invariants), delegate it so the file
- reads stay out of your main thread and you get back only the summary.
+  symbol's callers, summarize a brief, audit a diff against invariants), delegate it so the file
+  reads stay out of your main thread and you get back only the summary.
 - Navigate with `rg` and the crate map, not exhaustive reads. Never open `target/`,
- `node_modules/`, or `.multiview-build/` (git-ignored, excluded from search).
-- Recommended: install a Rust code-intelligence plugin for symbol navigation across the workspace.
+  `node_modules/`, or `.multiview-build/` (git-ignored, excluded from search, and read-denied).
+- **All file-changing work goes in a worktree lane** (`worktree-lane` skill), not the root
+  checkout (rule 8; warn-only hook).
 
 **The core workflow: read the brief before touching subsystem X.** The per-crate `CLAUDE.md`
-files and §6 below name the brief and ADRs for each subsystem — read them (via a subagent) before
-writing code. Always re-check invariants **#1 (output-clock)** and **#10 (isolation)**; a change
-that risks either means stop and write a design note.
-
----
-
-## 1. What Multiview is
-
-Multiview is an efficient, hardware-accelerated, **Rust live video multiview generator**. It ingests many
-live sources (RTSP, HLS/M3U, MPEG-TS, SRT, RTMP, NDI, file/test), composites them into a templated
-multiview **on the GPU**, and serves the result robustly (RTSP, HLS/LL-HLS, NDI, RTMP/SRT push). The
-binary/daemon is **`multiview`**.
-
-Design pillars (see the briefs for depth):
-- **Hybrid engine:** FFmpeg/libav for demux/decode/encode; **custom Rust + GPU** for compositing and
- serving. There is no FFmpeg `xstack_cuda`/LL-HLS muxer to lean on — those are ours.
-- **Zero-copy islands per GPU vendor.** Cross-vendor on-GPU zero-copy does not exist on desktop; we
- budget an explicit copy at every vendor/NDI/CPU boundary.
-- **Bulletproof continuous output** on commodity hardware: the output never stalls, never falters.
-- **Edition:** Rust 2021 (pinned via `rust-toolchain.toml`). **License:** source-available under the **Multiview Source-Available Non-Commercial License** (© Aperim Pty Ltd) — free for non-commercial/home use, commercial licence otherwise.
-- **Platforms:** Linux (x86_64 + aarch64; NVIDIA via Container Toolkit, Intel/AMD via VAAPI) and
- macOS (Apple Silicon + Intel, native). **No Windows.**
-
-> **Repo status:** early stage. The architecture, ADRs, and research briefs are written, and the
-> `crates/`, `web/`, `xtask/`, and workspace `Cargo.toml` exist as a **compiling scaffold**
-> (`cargo check`/`clippy`/`fmt` green) of trait/type stubs being built out against the documented
-> contracts. Match the canonical names and structure below exactly; do not invent alternatives.
-
----
-
-## 2. The canonical invariants (do not violate)
-
-These are load-bearing across every doc and every line of code. Full text:
-[`conventions.md` §5](docs/architecture/conventions.md). One-line each, with the deep source:
-
-| # | Invariant | One-liner | Deep brief / ADR |
-|---|-----------|-----------|------------------|
-| 1 | **Output-clock** | One fixed-cadence monotonic clock emits exactly one valid frame per tick, forever, independent of any input. Inputs are *sampled*, never *pacing*. `out_pts = f(tick)`. | [streaming-gotchas](docs/research/streaming-gotchas.md), [ADR-T001](docs/decisions/ADR-T001.md), [ADR-R001](docs/decisions/ADR-R001.md) |
-| 2 | **Last-good-frame + state machine** | Inputs write lock-free single-slot stores; compositor reads latest (or placeholder), never blocks. Tiles ride LIVE→STALE→RECONNECTING→NO_SIGNAL. | [resilience-and-av](docs/research/resilience-and-av.md), [ADR-T002](docs/decisions/ADR-T002.md) |
-| 3 | **Unified timing model** | Per-input PTS normalized (unwrap 33-bit, genpts fallback, monotonic guard) and rebased to one ns timeline; output re-stamps all PTS/DTS from the tick counter. NTSC `1001` as exact rationals — **never float fps**. | [streaming-gotchas §0,§2](docs/research/streaming-gotchas.md), [ADR-T003](docs/decisions/ADR-T003.md) |
-| 4 | **HLS ingest pacing** | Live/VOD-as-live inputs paced to wall-clock by PTS (custom pacer). `-re` is for files, **not** live ingest. | [streaming-gotchas §3](docs/research/streaming-gotchas.md), [ADR-T004](docs/decisions/ADR-T004.md) |
-| 5 | **NV12-throughout** | Frames stay NV12 (1.5 B/px); never materialize RGBA per tile. YUV→RGB happens in-shader at tile size. | [efficiency](docs/research/efficiency.md), [ADR-E002](docs/decisions/ADR-E002.md) |
-| 6 | **Decode-at-display-resolution** | Decode each source near its displayed size where the backend supports it; budget decode in megapixels/sec. | [efficiency](docs/research/efficiency.md), [ADR-E001](docs/decisions/ADR-E001.md) |
-| 7 | **Encode-once-mux-many** | Composite once, encode the canvas once per rendition, fan the *same* packets to all transports. Separate encode only when codec/res/bitrate differ. | [efficiency](docs/research/efficiency.md), [ADR-E003](docs/decisions/ADR-E003.md), [ADR-E004](docs/decisions/ADR-E004.md) |
-| 8 | **Color pipeline order (never reorder)** | detect 4 axes → range-expand → YUV→RGB matrix → linearize (EOTF) → primaries convert in linear → scale + premultiplied-alpha blend in linear → OETF → RGB→YUV + range compress → **tag output** → verify with ffprobe. | [color-management](docs/research/color-management.md), [ADR-C003](docs/decisions/ADR-C003.md), [ADR-C006](docs/decisions/ADR-C006.md) |
-| 9 | **Resource-adaptive degradation** | Closed control loop (sense→estimate→plan→apply, with hysteresis) sheds load tile-by-tile cheapest-impact-first **before** program output is touched. Bounded queues drop, never grow. | [efficiency](docs/research/efficiency.md), [ADR-E007](docs/decisions/ADR-E007.md) |
-| 10 | **Isolation** | Control plane, preview, realtime are best-effort and **physically incapable of back-pressuring the engine** (watch/broadcast channels; bounded drop-oldest; the engine never awaits a client). CI chaos gate enforces this. | [realtime-api](docs/research/realtime-api.md), [ADR-RT004](docs/decisions/ADR-RT004.md), [ADR-P001](docs/decisions/ADR-P001.md) |
-| 11 | **Live-apply classification** | Every management change is Class-1 (hot/seamless at a frame boundary) vs Class-2 (controlled reset via make-before-break parallel-output migration); the API surfaces which before applying. | [management-capability-matrix](docs/research/management-capability-matrix.md), [ADR-R004](docs/decisions/ADR-R004.md) |
-
-**If a change would break invariant #1 or #10, stop.** Those two — output never falters, control/preview
-never back-pressures the engine — are the heart of the product. Any PR that risks them needs an explicit
-design note and a chaos/soak test.
+files and §6 below name the brief and ADRs for each subsystem — read them (via a subagent)
+before writing code. Always re-check invariants **#1 (output-clock)** and **#10 (isolation)**;
+a change that risks either means stop and write a design note.
 
 ---
 
 ## 3. Crate map — where things live
 
-All crates are prefixed `multiview-` under `crates/`; the library target is `multiview_<area>` (snake).
-Hardware/FFI/GPU code sits **behind off-by-default Cargo features** so the default `cargo check`
-builds the pure-Rust trait/type layer (LGPL-clean, no native deps, GPU-free CI). Canonical list:
-[`conventions.md` §3](docs/architecture/conventions.md).
+Canonical responsibilities and dependency direction: `AGENTS.md` §C / [`conventions §3`](docs/architecture/conventions.md).
+This table is the *navigation* lens — "you touch it when…" + the optional features per crate.
 
 | Crate | You touch it when… | Optional features |
 |-------|--------------------|-------------------|
@@ -180,101 +122,37 @@ builds the pure-Rust trait/type layer (LGPL-clean, no native deps, GPU-free CI).
 | `multiview-cli` | Binary **`multiview`**: wires engine + control plane; config load; run/validate. | aggregates feature flags |
 | `xtask` | Dev automation (build web, gen OpenAPI/AsyncAPI, lint, package). | — |
 
-**Dependency direction:** `core` ← everything; leaf crates depend on `core` (+ `hal`/`ffmpeg`/`events`
-as needed); `engine` depends on the media crates; `control`/`preview` depend on `engine` + `events`;
-`cli` depends on all. **No cycles.**
+Additional crates exist beyond this core set (e.g. `multiview-licence`, `multiview-mesh`,
+`multiview-rist-sys`) — check `crates/` and their `CLAUDE.md`. Some deep briefs use older crate
+names (`multiview-sys`, `multiview-io`, `multiview-server`) — **use the canonical names**, not the
+brief's working names. `.multiview-build/` is a git-ignored transient dir — never commit from it.
 
-> The deep briefs ([core-engine](docs/research/core-engine.md),
-> [management-capability-matrix](docs/research/management-capability-matrix.md)) sometimes use older
-> crate names (`multiview-sys`, `multiview-io`, `multiview-server`). **Use the canonical names above**, not the
-> brief's working names.
+## 4. Build / test / lint — quick reference
 
-Other top-level dirs: `web/` (the React SPA), `examples/` (multiview configs + layout templates),
-`deploy/` (Dockerfile, compose, container assets), `.github/workflows/` (CI). `.multiview-build/` is a
-**git-ignored transient working dir — not part of the product**; do not commit anything from it.
-
----
-
-## 4. Build / test / lint commands
-
-The **default** feature set is pure-Rust and builds GPU-free in CI. Add hardware features explicitly.
+Full command set + CI tiering: `AGENTS.md` §D. Day-to-day:
 
 ```bash
-# Pure-Rust, no native deps — this is the CI-green baseline
-cargo check --workspace
-cargo build --workspace
-cargo test --workspace
-
-# Lint + format (CI runs clippy with -D warnings)
+cargo check --workspace                 # CI-green baseline (no native deps, GPU-free)
+cargo test --workspace                  # software/CPU backends run everywhere
+cargo test -p multiview-<area>          # a single crate
 cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all # write
-cargo fmt --all -- --check # verify (CI)
-
-# Licenses / advisories gate (uses deny.toml)
-cargo deny check
-
-# Feature builds (opt-in native deps; need the toolchains/SDKs installed)
-cargo check -p multiview-cli --features nvidia # cuda + ffmpeg + wgpu
-cargo check -p multiview-cli --features apple # videotoolbox + metal + ffmpeg
-cargo check -p multiview-cli --features linux-vaapi # vaapi + qsv + ffmpeg + wgpu
-cargo check -p multiview-cli --features full # everything non-GPL
-
-# Dev automation (web build, OpenAPI/AsyncAPI codegen, packaging)
-cargo xtask --help
-cargo xtask build-web # build the SPA and stage it for rust-embed
-cargo xtask gen-openapi # regenerate the OpenAPI/AsyncAPI specs
-
-# Web SPA (in web/) — React 19 + TS + Vite
-npm --prefix web ci
-npm --prefix web run dev # Vite dev server (proxies to the API)
-npm --prefix web run build # production build (embedded via rust-embed)
-npm --prefix web run lint
+cargo fmt --all -- --check
+cargo deny check                        # licenses + advisories
+cargo xtask build-web                   # build the SPA + stage for rust-embed
+cargo xtask gen-openapi                 # regenerate OpenAPI/AsyncAPI specs
 ```
 
-Notes:
-- **Worktree builds: `CARGO_TARGET_DIR=<worktree>/target` — NEVER `/tmp`.** The devcontainer's
- global target dir is shared across worktrees (cross-worktree rlib contamination), and per-lane
- `/tmp/*-target` dirs filled the disk with TiB of artifacts (operator directive 2026-06-10).
- Worktree-local `target/` is gitignored, isolated, and removed with `git worktree remove` —
- remove merged lanes' worktrees promptly; reviewers reuse the lane's target dir.
-- **Default `cargo check` must stay green without GPUs.** Never make a hardware feature default-on.
-- Run a single crate's tests with `cargo test -p multiview-<area>`.
-- GPU decode/composite/encode + SSIM/PSNR run only on GPU-tagged self-hosted runners; the software
- backend is the CI enabler. See [efficiency](docs/research/efficiency.md) / core-engine §19 for the
- testing tiers (golden-frame on CPU only; GPU output uses SSIM/PSNR thresholds, never bit-exact).
-- **Feature flags are canonical** — see [`conventions.md` §4](docs/architecture/conventions.md). Codec
- backends: `cuda`, `videotoolbox`, `vaapi`, `qsv`, `software` (always on). Compositor: `wgpu`
- (default), `metal`, `cuda`. Media: `ffmpeg`. License-escalating (off by default): `gpl-codecs`
- (→ GPL), `ndi` (proprietary, runtime-loaded). Web: `openapi` (default), `embed-web`, `webrtc`.
-
----
+- **Default `cargo check` must stay green without GPUs.** Never make a hardware feature
+  default-on. GPU decode/composite/encode + SSIM/PSNR run only on GPU-tagged self-hosted runners
+  (golden-frame on CPU only; GPU output uses SSIM/PSNR thresholds, never bit-exact).
+- Build artifacts stay worktree-local — **never set `CARGO_TARGET_DIR` to `/tmp`** (rule 10).
 
 ## 5. Coding conventions
 
-Full text: [`conventions.md` §9](docs/architecture/conventions.md). The essentials:
-
-- **Naming:** crates `multiview-<area>` (kebab); public types `UpperCamel`; functions/fields `snake_case`;
- features `kebab-case`.
-- **Errors:** per-crate `Error` enum via `thiserror`; app boundaries (`multiview-cli`) may use `anyhow`.
-- **Async:** `tokio`. **Logging/tracing:** `tracing`. **Serialization:** `serde`.
-- **Serde enums:** use **adjacently/internally-tagged** (`#[serde(tag = "kind")]`) for source/overlay/fit
- unions — robust across TOML and JSON. **Never `untagged`.**
-- **Networking — IPv6-first** (see [`conventions.md` §10](docs/architecture/conventions.md), [ADR-0042](docs/decisions/ADR-0042.md)):
- all network-facing surfaces are **IPv6-first**; IPv4 is **legacy-only and on a deprecation path** —
- **never design/document IPv4-only or IPv4-first.** Bind **dual-stack `[::]`** (`IPV6_V6ONLY=false`),
- not `0.0.0.0`; loopback `[::1]`; bracket IPv6 URL literals; SDP `c=IN IP6` (no TTL); IPv6 multicast
- `ff00::/8`+SSM `FF3x::/32` via MLDv2 primary; examples lead IPv6.
-- **Docs:** every public item documented; library crates carry `#![warn(missing_docs)]`.
-- **Formatting:** `rustfmt` (`rustfmt.toml`); clippy-clean under `-D warnings`.
-- **API conventions** (when touching `multiview-control`, see [`conventions.md` §6](docs/architecture/conventions.md)):
- REST base `/api/v1`; long-running ops return `202 Accepted` + operation id (result on the realtime
- stream); RFC 9457 `application/problem+json` errors; `ETag`/`If-Match` + `412`; `Idempotency-Key` on
- start/stop/swap; OpenAPI 3.1 via utoipa (Scalar at `/docs`); WebSocket primary at `/api/v1/ws`, SSE
- fallback at `/api/v1/events`.
-- **Frontend** (`web/`, see [`conventions.md` §8](docs/architecture/conventions.md)): React 19 + TS +
- Vite; shadcn/ui (Radix + Tailwind v4); TanStack Query/Table; **react-konva** + **dnd-kit** for the
- layout editor; API client generated from the OpenAPI spec (`openapi-typescript` + `openapi-fetch`);
- WCAG 2.1 AA.
+Essentials are in `AGENTS.md` §J/§H + [`conventions §6,§8,§9,§10`](docs/architecture/conventions.md):
+naming, per-crate `thiserror` errors, `tokio`/`tracing`/`serde` (adjacently-tagged enums, never
+`untagged`), IPv6-first networking, `#![warn(missing_docs)]`, rustfmt/clippy-clean, the REST/WS API
+conventions, and the React 19 + Vite frontend stack.
 
 ---
 
@@ -303,40 +181,40 @@ Read the relevant one (and its ADRs) **before** writing code:
 | Licensing / build profiles | [core-engine §17,§18](docs/research/core-engine.md), [`conventions.md` §7](docs/architecture/conventions.md), ADR-0011/0012 |
 
 Indexes: all briefs in [`docs/research/`](docs/research/README.md); all decisions in
-[`docs/decisions/`](docs/decisions/README.md) (89 ADRs, grouped by area).
+[`docs/decisions/`](docs/decisions/README.md) (169 ADRs, grouped by area).
 
 ---
 
 ## 7. Safety rules (engine + FFI + process)
 
-These are non-negotiable for code in this repo.
+These are non-negotiable for code in this repo (they make invariants #1 and #10 concrete).
 
 1. **Never break the output-clock invariant.** The output stage emits one valid, correctly-timestamped
- frame per tick forever. No code path on the data plane may block waiting for an input, a client, or a
- lock that an input/client holds. Inputs are sampled; they never pace.
+   frame per tick forever. No code path on the data plane may block waiting for an input, a client, or a
+   lock that an input/client holds. Inputs are sampled; they never pace.
 2. **Preview / control / realtime must never back-pressure the engine.** Use watch/broadcast channels
- and bounded **drop-oldest** queues. The engine **never `.await`s a client** and never sends on a
- channel that a slow consumer can fill. Conflate high-rate telemetry (audio meters ~10–30 Hz). A CI
- chaos gate enforces this — if you add a channel from engine→outside, prove it can't stall the engine.
+   and bounded **drop-oldest** queues. The engine **never `.await`s a client** and never sends on a
+   channel that a slow consumer can fill. Conflate high-rate telemetry (audio meters ~10–30 Hz). A CI
+   chaos gate enforces this — if you add a channel from engine→outside, prove it can't stall the engine.
 3. **No `unwrap`/`expect`/`panic!` on the hot path** (decode→composite→encode→mux, the output clock,
- frame stores). Hot-path code returns/handles errors and **holds last-good** rather than crashing.
- `unwrap` is acceptable only in tests and in clearly non-hot startup/config code with a justification.
+   frame stores). Hot-path code returns/handles errors and **holds last-good** rather than crashing.
+   `unwrap` is acceptable only in tests and in clearly non-hot startup/config code with a justification.
 4. **FFI safety:** all raw libav/CUDA/Metal/Vulkan/NDI FFI lives behind safe wrappers (FFI is owned by
- `multiview-ffmpeg` and the feature-gated backend modules). `unsafe` blocks carry a `// SAFETY:` comment
- stating the invariant upheld. libav context wrappers are `Send + !Sync` (or Mutex-guarded); never
- share one context across threads unsynchronized. `get_format` and other `extern "C"` callbacks run on
- foreign/decoder threads — keep them allocation-light and never let a Rust panic unwind across the FFI
- boundary. Return buffers to pools via `Drop`; never run that `Drop` inside a Tokio async destructor.
+   `multiview-ffmpeg` and the feature-gated backend modules). `unsafe` blocks carry a `// SAFETY:` comment
+   stating the invariant upheld. libav context wrappers are `Send + !Sync` (or Mutex-guarded); never
+   share one context across threads unsynchronized. `get_format` and other `extern "C"` callbacks run on
+   foreign/decoder threads — keep them allocation-light and never let a Rust panic unwind across the FFI
+   boundary. Return buffers to pools via `Drop`; never run that `Drop` inside a Tokio async destructor.
 5. **Bounded memory everywhere on the data plane.** Queues drop, never grow. No unbounded channels into
- the engine. Frame buffers come from per-device pools allocated at start, never per-frame.
+   the engine. Frame buffers come from per-device pools allocated at start, never per-frame.
 6. **Timestamps:** never feed raw input PTS to the encoder/muxer — re-stamp from the tick counter. Carry
- internal time as i64 ns / exact rationals; **never float fps** (drifts ~3.6 s/hour).
+   internal time as i64 ns / exact rationals; **never float fps** (drifts ~3.6 s/hour).
 7. **Color order is fixed** (invariant #8). Range is handled in-shader exactly once. Tagging ≠
- converting — always tag the output and verify with ffprobe.
+   converting — always tag the output and verify with ffprobe.
 8. **Licensing discipline:** keep the default build LGPL-clean. Do scaling/compositing in-house
- (`scale_cuda`, not `scale_npp`). `gpl-codecs` (x264/x265) makes the whole build GPL — opt-in only.
- Never vendor the proprietary NDI SDK; the `ndi` feature is runtime-loaded (`NDIlib_v6_load()`) with
- mandatory attribution. CI `cargo deny` gates this. See [`conventions.md` §7](docs/architecture/conventions.md).
+   (`scale_cuda`, not `scale_npp`). `gpl-codecs` (x264/x265) makes the whole build GPL — opt-in only.
+   Never vendor the proprietary NDI SDK; the `ndi` feature is runtime-loaded (`NDIlib_v6_load()`) with
+   mandatory attribution. CI `cargo deny` gates this. See [`conventions.md` §7](docs/architecture/conventions.md).
 
 ---
 
@@ -344,32 +222,42 @@ These are non-negotiable for code in this repo.
 
 ```
 docs/
-├── architecture/conventions.md # SOURCE OF TRUTH — read this first, always
-├── research/ # deep, verification-hardened design briefs (the "why")
-├── decisions/ # ADRs (the load-bearing decisions; 72, grouped by area)
-├── reference/ # bibliography, example streams
-└── development/ # completeness checklist, process docs
+├── architecture/conventions.md  # SOURCE OF TRUTH — read this first, always
+├── research/                    # deep, verification-hardened design briefs (the "why")
+├── decisions/                   # ADRs (the load-bearing decisions; 169, grouped by area) + TEMPLATE.md
+├── runbooks/                    # operational "how" for provisioned resources (rule 42)
+├── operations/                  # broader operational guides (building, container, devcontainer, …)
+├── stack.md                     # toolchain & platform standards (rules 38–42)
+├── reference/                   # bibliography, example streams
+└── development/                 # agent-guardrails, work-schedule, completeness checklist, process docs
 ```
 
 - Start at [`conventions.md`](docs/architecture/conventions.md) for canonical names/paths/flags.
 - For *why* a subsystem is built a certain way, read its brief in
- [`docs/research/`](docs/research/README.md) (see §6 above for the mapping).
-- For a specific decision and its alternatives/consequences, find the ADR in
- [`docs/decisions/`](docs/decisions/README.md). ADR prefixes track area: `0001`+ core engine,
- `R*` resilience/AV, `E*` efficiency, `C*` color, `T*` streaming/timing, `P*` preview, `RT*`
- realtime API, `M*` management, `W*` web/API stack.
-- Prefer linking to a brief over duplicating it. When code and a brief disagree, the code wins and the
- brief should be updated — flag the drift.
+  [`docs/research/`](docs/research/README.md) (see §6 above for the mapping).
+- For a specific decision + alternatives/consequences, find the ADR in
+  [`docs/decisions/`](docs/decisions/README.md). Prefixes track area: numeric core; `R*`
+  resilience/AV, `E*` efficiency, `C*` color, `T*` streaming/timing, `P*` preview, `RT*` realtime,
+  `M*` management, `MV*` broadcast multiviewer, `G*` guardrails/governance, `DC*` dev-container,
+  `I*` impl build-out, `W*` web/API.
+- Prefer linking to a brief over duplicating it. When code and a brief disagree, the code wins and
+  the brief should be updated — flag the drift.
 
 ---
 
 ## 9. Git & workflow expectations
 
-- Commit or push **only when the user asks**. If on `main`, branch first.
-- End commit messages with: `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
-- End PR bodies with: `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
-- Before proposing a PR that touches the engine, run `cargo fmt --all -- --check`,
- `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and (if
- dependencies changed) `cargo deny check`.
-- Don't add Windows support, per-tile re-encode/ABR-per-tile, or cross-vendor on-GPU zero-copy — these
- are explicit **non-goals** ([core-engine §2](docs/research/core-engine.md)).
+The full workflow is `AGENTS.md` rules 8–16 (worktree lanes, cleanup, Conventional Commits,
+PR-from-open-through-merge ownership). For Claude specifically:
+
+- **Work in a worktree lane, never the root checkout** (`worktree-lane` skill; warn-only hook).
+  Branch in the lane, open a PR, and **own it to green CI + merge** — the agent owns routine
+  review→merge (ADR-G005), the operator retains override. "Commit/push only when asked" is no
+  longer the rule: the operator sets direction, you drive the PR lifecycle (rule 14).
+- End commit messages with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`; end PR
+  bodies with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+- Run the full local gate before every PR (rule 15): `cargo fmt --all -- --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and
+  `cargo deny check` if dependencies changed.
+- Don't add Windows support, per-tile re-encode/ABR-per-tile, or cross-vendor on-GPU zero-copy —
+  explicit **non-goals** ([core-engine §2](docs/research/core-engine.md)).

@@ -45,6 +45,21 @@ dist/
 # Demo/multiview screenshots for manual inspection (not part of the product)
 /demo-output/
 
-# Coding-agent local working directory (sessions, scratch) — never part of the product
-/.claude/
+# Coding-agent working directory. Most of it is local scratch (sessions, locks,
+# worktree lanes, per-host settings) and is NOT part of the product — but the
+# committed governance machinery IS (ADR-G006): settings.json, skills/, hooks/.
+# Ignore the contents, then re-include the three committed paths. (You cannot
+# negate a child if the parent dir itself is ignored, so we ignore `/.claude/*`.)
+/.claude/*
+!/.claude/settings.json
+!/.claude/skills/
+!/.claude/hooks/
+
+# Local persistent memory MCP store (embedded qdrant + embedding-model cache) —
+# never commit (ADR-G006).
+/.memory/
+
+# Manual worktree lanes (alt location to .claude/worktrees/) — disposable.
+/.worktrees/
+
 demo-output/

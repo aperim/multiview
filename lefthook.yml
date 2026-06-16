@@ -1,0 +1,31 @@
+# Local git gate (AGENTS.md rule 15: CI must never be the first run of the gates).
+# Mirrors the CI gate so failures surface before push. OPTIONAL but recommended —
+# install once with a pinned binary:
+#
+#   cargo install lefthook   # or download the pinned release binary
+#   lefthook install         # writes the shared .git/hooks shims
+#
+# Heavy checks (clippy, test) run on pre-push, not pre-commit, to keep commits
+# fast; fast checks (fmt, secret scan) run on pre-commit. CI is authoritative.
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      run: cargo fmt --all -- --check
+    secrets:
+      # Run gitleaks only if installed locally (CI is the authoritative scan).
+      # gitleaks' non-zero exit on a real detection propagates through the branch.
+      run: |
+        if command -v gitleaks >/dev/null 2>&1; then
+          gitleaks git --config .gitleaks.toml --pre-commit --staged --redact --verbose
+        else
+          echo "gitleaks not installed; skipping local scan (CI gitleaks.yml is authoritative)"
+        fi
+
+pre-push:
+  parallel: true
+  commands:
+    clippy:
+      run: cargo clippy --workspace --all-targets -- -D warnings
+    test:
+      run: cargo test --workspace
