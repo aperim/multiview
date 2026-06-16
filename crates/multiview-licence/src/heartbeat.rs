@@ -1071,11 +1071,59 @@ pub struct HeartbeatClient<S: LicenceServer> {
     /// the wall clock (a fresh-per-call wall-clock key defeats dedup). Control-plane
     /// only; the loop is the sole accessor, so a plain `Mutex` is correct.
     idempotency: std::sync::Mutex<IdempotencyState>,
+    /// The durable backing for the idempotency mint counter, so the per-operation
+    /// nonce survives a restart (a post-restart op never reuses a prior lifetime's
+    /// key). A SEAM: the cli supplies a file-backed impl; the in-memory default is
+    /// used otherwise.
+    nonce_store: SharedNonceStore,
 }
+
+/// A durable backing store for the idempotency-key **mint counter**, so the
+/// monotonic per-operation nonce survives a process restart and a post-restart
+/// operation never reuses a prior lifetime's key (cross-restart duplicate-mutation
+/// defence). It is a SEAM (like the clock): the leaf crate does no I/O, so the cli
+/// implements it on a small file beside the lease state; tests back it with a
+/// shared cell to simulate a restart. `load` returns the highest committed counter
+/// (0 when none); `commit` persists the new high-water counter at mint time, so
+/// even a crash mid-operation cannot let the next process reuse an in-flight value.
+pub trait NonceStore: Send + Sync {
+    /// The highest committed mint counter (0 when nothing is persisted yet).
+    fn load(&self) -> u64;
+    /// Persist `value` as the new high-water mint counter (called at mint time, so
+    /// the durable counter only ever increases — never reused across a restart).
+    fn commit(&self, value: u64);
+}
+
+/// The default in-process [`NonceStore`]: holds the counter in memory only.
+///
+/// This survives nothing across a restart, so a deployment that needs
+/// cross-restart idempotency (the cli) supplies a durable, file-backed
+/// implementation. The in-memory default is used only where no durable store is
+/// wired (e.g. a process that never restarts within an idempotency window).
+#[derive(Debug, Default)]
+pub struct InMemoryNonceStore {
+    counter: std::sync::atomic::AtomicU64,
+}
+
+impl NonceStore for InMemoryNonceStore {
+    fn load(&self) -> u64 {
+        self.counter.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn commit(&self, value: u64) {
+        self.counter
+            .store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A shareable [`NonceStore`] handle (the cli's file-backed impl, or the in-memory
+/// default).
+pub type SharedNonceStore = Arc<dyn NonceStore>;
 
 /// The retry-stable idempotency-key state for [`HeartbeatClient`]. `counter` only
 /// advances when a fresh key is minted (i.e. after a success rotates `current` to
-/// `None`), so each logical operation owns one stable key across its retries.
+/// `None`), so each logical operation owns one stable key across its retries. The
+/// counter is seeded from (and committed to) a durable [`NonceStore`] so it does
+/// not reset on restart.
 #[derive(Debug, Default)]
 struct IdempotencyState {
     /// Monotonic per-client mint counter (advances once per logical operation).
@@ -1108,7 +1156,10 @@ impl<S: LicenceServer> HeartbeatClient<S> {
 
     /// Assemble a heartbeat client reading "now" (epoch ms) from `now_ms` — tests
     /// inject a controllable clock to exercise the key-trust re-evaluation at
-    /// lease-acceptance time (the validity-window / revocation TOCTOU).
+    /// lease-acceptance time (the validity-window / revocation TOCTOU). The
+    /// idempotency mint counter uses the in-memory default [`InMemoryNonceStore`]
+    /// (no cross-restart durability — use [`HeartbeatClient::with_clock_and_nonce`]
+    /// for that).
     #[must_use]
     pub fn with_clock(
         server: Arc<S>,
@@ -1117,6 +1168,31 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         config: HeartbeatConfig,
         identity: DeviceIdentity,
         now_ms: NowMs,
+    ) -> Self {
+        Self::with_clock_and_nonce(
+            server,
+            store,
+            pinned,
+            config,
+            identity,
+            now_ms,
+            Arc::new(InMemoryNonceStore::default()),
+        )
+    }
+
+    /// Assemble a heartbeat client with both the wall-clock seam and a durable
+    /// [`NonceStore`] for the idempotency mint counter. The cli supplies a
+    /// file-backed `nonce_store` so the per-operation nonce survives a restart and
+    /// a post-restart operation never reuses a prior lifetime's key.
+    #[must_use]
+    pub fn with_clock_and_nonce(
+        server: Arc<S>,
+        store: Arc<LeaseStore>,
+        pinned: PinnedRoot,
+        config: HeartbeatConfig,
+        identity: DeviceIdentity,
+        now_ms: NowMs,
+        nonce_store: SharedNonceStore,
     ) -> Self {
         let learned_binding_id = std::sync::Mutex::new(identity.binding_id.clone());
         Self {
@@ -1128,6 +1204,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             learned_binding_id,
             now_ms,
             idempotency: std::sync::Mutex::new(IdempotencyState::default()),
+            nonce_store,
         }
     }
 

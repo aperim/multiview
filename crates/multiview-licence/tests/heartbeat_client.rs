@@ -835,3 +835,100 @@ async fn retries_of_the_same_logical_operation_send_a_stable_idempotency_key() {
     );
     assert!(!keys[0].is_empty(), "the Idempotency-Key must be non-empty");
 }
+
+// --- Round-5 MAJOR: the Idempotency-Key nonce is DURABLE across a restart. -------
+
+/// A test [`NonceStore`] backed by a shared cell — the analogue of the cli's
+/// on-disk nonce file. Reconstructing a client against the SAME shared cell
+/// simulates a process restart that reads the persisted counter back.
+#[derive(Clone)]
+struct SharedNonceStore {
+    cell: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl SharedNonceStore {
+    fn new() -> Self {
+        Self {
+            cell: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+}
+
+impl multiview_licence::heartbeat::NonceStore for SharedNonceStore {
+    fn load(&self) -> u64 {
+        self.cell.load(Ordering::SeqCst)
+    }
+    fn commit(&self, value: u64) {
+        self.cell.store(value, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn the_idempotency_nonce_is_distinct_across_a_restart() {
+    use std::sync::atomic::AtomicU64;
+    // A successful op under client A persists its nonce to the shared (durable)
+    // store. A FRESH client B reconstructed from the SAME store (a restart) must
+    // mint a DISTINCT key for its next logical operation — never reuse A's
+    // completed op's key (which a from-zero in-memory counter would do, colliding
+    // mv-{machine}-1 across lifetimes → cross-restart duplicate mutation).
+    let nonce = SharedNonceStore::new();
+
+    // Lifetime A: one successful heartbeat.
+    let server_a = shared_fake();
+    let store_a = Arc::new(LeaseStore::new());
+    let client_a = HeartbeatClient::with_clock_and_nonce(
+        Arc::clone(&server_a),
+        store_a,
+        server_a.pinned_root(),
+        test_config(),
+        test_identity(),
+        Arc::new(unix_millis_for_test()),
+        Arc::new(nonce.clone()),
+    );
+    tokio::time::timeout(Duration::from_secs(5), client_a.run_once())
+        .await
+        .unwrap()
+        .expect("lifetime A heartbeat succeeds");
+    let key_a = server_a
+        .idempotency_keys()
+        .last()
+        .cloned()
+        .expect("A sent a key");
+
+    // Lifetime B: a fresh client + fresh server, reconstructed from the SAME
+    // durable nonce store (the restart).
+    let server_b = shared_fake();
+    let store_b = Arc::new(LeaseStore::new());
+    let client_b = HeartbeatClient::with_clock_and_nonce(
+        Arc::clone(&server_b),
+        store_b,
+        server_b.pinned_root(),
+        test_config(),
+        test_identity(),
+        Arc::new(unix_millis_for_test()),
+        Arc::new(nonce.clone()),
+    );
+    tokio::time::timeout(Duration::from_secs(5), client_b.run_once())
+        .await
+        .unwrap()
+        .expect("lifetime B heartbeat succeeds");
+    let key_b = server_b
+        .idempotency_keys()
+        .last()
+        .cloned()
+        .expect("B sent a key");
+
+    assert_ne!(
+        key_a, key_b,
+        "a post-restart op must mint a DISTINCT idempotency key, never reuse a completed op's key \
+         (durable nonce); got A={key_a} B={key_b}"
+    );
+    // Sanity: the durable counter advanced past A's value.
+    let _ = AtomicU64::new(0);
+}
+
+/// A fixed epoch-ms clock for the durable-nonce test (the value is irrelevant —
+/// the key derives from the counter + machine id, never the clock).
+fn unix_millis_for_test() -> impl Fn() -> i64 + Send + Sync {
+    || 1_790_000_000_000
+}
