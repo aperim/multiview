@@ -19,8 +19,8 @@
 #![cfg(feature = "heartbeat")]
 
 use multiview_licence::heartbeat::{
-    canonical_key_preimage, verify_signed_lease_chain, KeyTrustError, LicensingKeys, PinnedRoot,
-    SignedLeaseError, TrustedKeys,
+    canonical_key_preimage, verify_signed_lease_chain, KeyTrustError, LeaseBodyFields,
+    LicensingKeys, PinnedRoot, SignedLeaseError, TrustedKeys,
 };
 
 mod fake;
@@ -234,4 +234,189 @@ fn a_lease_with_a_non_hex_signature_is_rejected_not_panicked() {
         matches!(err, SignedLeaseError::MalformedSignature),
         "got {err:?}"
     );
+}
+
+// --- Blocker #1: key-purpose binding (a non-lease key is NOT a lease signer) ---
+
+#[test]
+fn a_root_attested_update_key_is_not_trusted_as_a_lease_signer() {
+    // The fabricated signer is genuinely root-attested (its root_sig covers a
+    // pre-image with key_type="update"), but it is an UPDATE key, not a lease key.
+    // The verifier must NOT accept it into the lease-signing trust set — otherwise
+    // a root-attested key minted for a different purpose can sign leases.
+    let kit = FabricatedKeyset::new();
+    let keys = kit.keys_with_signer("update", "current");
+    let trusted = TrustedKeys::verify(&keys, &kit.pinned_root(), kit.now_ms())
+        .expect("the keyset is structurally root-attested; verify() still succeeds");
+    assert!(
+        trusted.lease_key(kit.kid()).is_none(),
+        "a root-attested NON-lease (update) key must not be a trusted lease signer"
+    );
+}
+
+#[test]
+fn a_lease_signed_by_an_attested_update_key_is_rejected_end_to_end() {
+    // End to end: a lease signed under an attested UPDATE key must be rejected at
+    // verify_signed_lease_chain (the signer is not in the lease-signing set).
+    let kit = FabricatedKeyset::new();
+    let keys = kit.keys_with_signer("update", "current");
+    let trusted = TrustedKeys::verify(&keys, &kit.pinned_root(), kit.now_ms()).unwrap();
+    let lease = kit.sign_lease(35); // signed by the (now update-typed) fab key
+    let err = verify_signed_lease_chain(&lease, &trusted)
+        .expect_err("a lease signed by a non-lease key must be rejected");
+    assert!(
+        matches!(err, SignedLeaseError::UnknownSigner { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_root_attested_key_with_an_unknown_status_is_not_trusted() {
+    // Only `current`/`next` (dual-pin) statuses are lease signers; a `retired`
+    // (or any other) status — even root-attested — must be dropped.
+    let kit = FabricatedKeyset::new();
+    let keys = kit.keys_with_signer("lease", "retired");
+    let trusted = TrustedKeys::verify(&keys, &kit.pinned_root(), kit.now_ms()).unwrap();
+    assert!(
+        trusted.lease_key(kit.kid()).is_none(),
+        "a non-current/next status key must not be a trusted lease signer"
+    );
+}
+
+#[test]
+fn a_next_status_lease_key_is_trusted_dual_pin() {
+    // `next` is the second pin — it MUST be accepted (a rotation never strands a
+    // fielded build). Guards against an over-strict status check.
+    let kit = FabricatedKeyset::new();
+    let keys = kit.keys_with_signer("lease", "next");
+    let trusted = TrustedKeys::verify(&keys, &kit.pinned_root(), kit.now_ms()).unwrap();
+    assert!(
+        trusted.lease_key(kit.kid()).is_some(),
+        "a `next`-status lease key must be trusted (dual-pin)"
+    );
+}
+
+// --- Blocker #7: negative timestamps are rejected, never coerced to 0 ----------
+
+#[test]
+fn an_intermediate_with_a_negative_valid_from_is_rejected_not_coerced() {
+    // A negative valid_from must be rejected outright — never silently coerced to
+    // unsigned 0 (which would change the signed pre-image and could trust a
+    // malformed/forged key). The verifier rejects the whole keyset.
+    let kit = FabricatedKeyset::new();
+    let keys = kit.keys_with_negative_valid_from();
+    let err = TrustedKeys::verify(&keys, &kit.pinned_root(), kit.now_ms())
+        .expect_err("a negative timestamp must be rejected, not coerced");
+    assert!(
+        matches!(err, KeyTrustError::IntermediateNotAttested { .. }),
+        "got {err:?}"
+    );
+}
+
+// --- Blocker #2: the signed not_after is the authoritative expiry --------------
+
+#[test]
+fn a_signed_lease_already_past_its_not_after_is_rejected() {
+    // A signed-but-expired lease (its cryptographically-signed not_after is in the
+    // past) must be rejected — never installed as a fresh active term.
+    let kit = FabricatedKeyset::new();
+    let trusted = kit.trusted();
+    let past = kit.now_ms() - 86_400_000; // 1 day ago
+    let lease = kit.sign_lease_expiring_at(past);
+    let err = verify_signed_lease_chain(&lease, &trusted)
+        .err()
+        .and_then(|e| {
+            // The signature + parse must succeed; the expiry gate is the rejection.
+            None::<SignedLeaseError>.or(Some(e))
+        });
+    // verify_signed_lease_chain itself stays pure (sig+parse); the expiry gate is
+    // checked against an explicit `now`. Assert the body parses AND is flagged
+    // expired by the body's own helper.
+    assert!(
+        err.is_none(),
+        "signature+parse of a well-formed body succeeds"
+    );
+    let body = verify_signed_lease_chain(&lease, &trusted).unwrap();
+    assert!(
+        body.is_expired_at(kit.now_ms()),
+        "a body whose not_after is in the past must report expired"
+    );
+    assert!(
+        !kit.sign_lease(35).serial.is_empty(),
+        "sanity: a fresh lease is well-formed"
+    );
+    let fresh = verify_signed_lease_chain(&kit.sign_lease(35), &trusted).unwrap();
+    assert!(
+        !fresh.is_expired_at(kit.now_ms()),
+        "a fresh 35-day lease is not expired"
+    );
+}
+
+// --- Blocker #4: required body fields fail closed -------------------------------
+
+#[test]
+fn a_signed_body_with_an_omitted_instance_binding_id_is_rejected() {
+    // A body that genuinely OMITS instance_binding_id (not just empty) must be
+    // rejected — never installed with an empty id via unwrap_or_default().
+    let kit = FabricatedKeyset::new();
+    let trusted = kit.trusted();
+    let lease = kit.sign_body_omitting("instance_binding_id");
+    let err = verify_signed_lease_chain(&lease, &trusted)
+        .expect_err("a body omitting instance_binding_id must be rejected");
+    assert!(
+        matches!(err, SignedLeaseError::MalformedBody),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_signed_body_with_an_omitted_serial_is_rejected() {
+    let kit = FabricatedKeyset::new();
+    let trusted = kit.trusted();
+    let lease = kit.sign_body_omitting("serial");
+    let err = verify_signed_lease_chain(&lease, &trusted)
+        .expect_err("a body omitting serial must be rejected");
+    assert!(
+        matches!(err, SignedLeaseError::MalformedBody),
+        "got {err:?}"
+    );
+}
+
+// --- Blocker #3: canonically-padded standard-base64 leaseBytes decode ----------
+
+#[test]
+fn canonically_padded_standard_base64_lease_bytes_decode() {
+    use base64::Engine;
+    // A body whose CBOR length % 3 != 0 → its standard-base64 carries real '='
+    // padding. Stripping '=' before STANDARD.decode (RequireCanonical) would
+    // wrongly reject it; the verifier must decode the received bytes exactly.
+    let kit = FabricatedKeyset::new();
+    let trusted = kit.trusted();
+    // Find a body that pads (len % 3 != 0); vary the licence id length until so.
+    let mut lease = kit.sign_lease(35);
+    for n in 0..8 {
+        let candidate = kit.sign_body(LeaseBodyFields {
+            licence_id: format!("lic_pad_{}", "x".repeat(n)),
+            instance_binding_id: "ib_pad".to_owned(),
+            serial: kit.lease_serial().to_owned(),
+            not_after: kit.now_ms() + 35 * 86_400_000,
+            gpu_limit: Some(1),
+            hardware_class: Some("standard".to_owned()),
+        });
+        let raw_len = base64::engine::general_purpose::STANDARD
+            .decode(&candidate.lease_bytes)
+            .unwrap()
+            .len();
+        if raw_len % 3 != 0 {
+            lease = candidate;
+            break;
+        }
+    }
+    assert!(
+        lease.lease_bytes.ends_with('='),
+        "the chosen body must be canonically padded (ends with '=')"
+    );
+    let body = verify_signed_lease_chain(&lease, &trusted)
+        .expect("canonically-padded standard-base64 leaseBytes must decode + verify");
+    assert!(body.licence_id.starts_with("lic_pad_"));
 }

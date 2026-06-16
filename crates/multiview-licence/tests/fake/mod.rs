@@ -104,10 +104,71 @@ impl FabricatedKeyset {
     /// Build a well-formed, root-attested well-known doc with `revoked` listed in
     /// the (root-signed) revocation set.
     pub fn keys_with_revocation(&self, revoked: &[&str]) -> LicensingKeys {
+        self.keys_full(revoked, "lease", "current")
+    }
+
+    /// Build a root-attested well-known doc whose sole `lease_keys` entry carries
+    /// the given `key_type` + `status` — its `root_sig` is computed over the
+    /// pre-image that INCLUDES that `key_type`, so it is genuinely root-attested
+    /// (the attack the verifier must still reject: a root-attested NON-lease key,
+    /// or a non-current/next status, presented as a lease signer).
+    pub fn keys_with_signer(&self, key_type: &str, status: &str) -> LicensingKeys {
+        self.keys_full(&[], key_type, status)
+    }
+
+    /// Build a keyset whose intermediate carries a NEGATIVE `valid_from`. The
+    /// root_sig is computed over the pre-image with that negative value, so the
+    /// entry is structurally root-attested — the rejection must come from the
+    /// negative-timestamp gate, not a signature mismatch.
+    pub fn keys_with_negative_valid_from(&self) -> LicensingKeys {
         let pubkey = self.intermediate.verifying_key().to_bytes().to_vec();
         let pre = canonical_key_preimage(
             FAB_KID,
             "lease",
+            "conspect.key-attestation.v1",
+            &pubkey,
+            -1,
+            FAB_VALID_UNTIL,
+        );
+        let root_sig = self.root_sign(&pre);
+        let rev_pre =
+            canonical_revocation_preimage(FAB_ISSUED_AT, "conspect.key-revocation.v1", &[]);
+        let rev_sig = self.root_sign(&rev_pre);
+        let root_pub = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            p256::ecdsa::VerifyingKey::from(&self.root)
+                .to_encoded_point(false)
+                .as_bytes(),
+        );
+        let json = serde_json::json!({
+            "version": 1,
+            "root": { "kid": "root", "algorithm": "ecdsa-p256-sha256", "public_key": root_pub,
+                "public_key_encoding": "base64url-uncompressed-p256-point" },
+            "attestation_contract": {
+                "key_statement": "conspect.key-attestation.v1",
+                "revocation_statement": "conspect.key-revocation.v1",
+                "encoding": "deterministic-cbor-rfc8949-section-4.2.1",
+                "key_pre_image": ["key_id","key_type","statement","public_key","valid_from","valid_until"],
+                "revocation_pre_image": ["issued_at","statement","revoked_key_ids"],
+                "field_order": "canonical", "signature": "ecdsa-p256-sha256-raw-r-s-base64url",
+                "public_key_encoding": "raw-32-byte-ed25519-point", "time_unit": "epoch-milliseconds" },
+            "lease_keys": [{ "kid": FAB_KID, "key_type": "lease", "algorithm": "ed25519",
+                "public_key": self.intermediate_pub_b64url(), "valid_from": -1,
+                "valid_until": FAB_VALID_UNTIL, "status": "current", "root_sig": root_sig }],
+            "update_keys": [],
+            "revocation": { "statement": "conspect.key-revocation.v1", "issued_at": FAB_ISSUED_AT,
+                "revoked_key_ids": [], "root_revocation_sig": rev_sig }
+        });
+        serde_json::from_value(json).expect("fabricated keyset must parse")
+    }
+
+    fn keys_full(&self, revoked: &[&str], key_type: &str, status: &str) -> LicensingKeys {
+        let pubkey = self.intermediate.verifying_key().to_bytes().to_vec();
+        // The root_sig covers the pre-image that includes key_type, so the entry
+        // is genuinely root-attested for THIS key_type (mirrors how Conspect signs
+        // every intermediate, lease or otherwise).
+        let pre = canonical_key_preimage(
+            FAB_KID,
+            key_type,
             "conspect.key-attestation.v1",
             &pubkey,
             FAB_VALID_FROM,
@@ -148,12 +209,12 @@ impl FabricatedKeyset {
             },
             "lease_keys": [{
                 "kid": FAB_KID,
-                "key_type": "lease",
+                "key_type": key_type,
                 "algorithm": "ed25519",
                 "public_key": self.intermediate_pub_b64url(),
                 "valid_from": FAB_VALID_FROM,
                 "valid_until": FAB_VALID_UNTIL,
-                "status": "current",
+                "status": status,
                 "root_sig": root_sig
             }],
             "update_keys": [],
@@ -172,29 +233,154 @@ impl FabricatedKeyset {
             .expect("the fabricated keyset must verify against its own root")
     }
 
+    /// The default fabricated lease serial (a UUIDv7).
+    pub fn lease_serial(&self) -> &'static str {
+        "01931d4e-7b2a-7c00-9f3a-2b6e1c0e9b41"
+    }
+    pub fn binding_id(&self) -> &'static str {
+        FAB_BINDING
+    }
+
     /// Mint a signed lease (bare Ed25519 over a canonical-CBOR body), `term_days`
     /// out from `now_ms`.
     pub fn sign_lease(&self, term_days: i64) -> ServerLease {
-        let not_after = self.now_ms() + term_days * 86_400_000;
-        let body = LeaseBodyFields {
+        self.sign_lease_expiring_at(self.now_ms() + term_days * 86_400_000)
+    }
+
+    /// Mint a signed lease whose signed `not_after` is exactly `not_after_ms` —
+    /// the cryptographically-signed expiry the installer MUST honour (so a past
+    /// `not_after` exercises the expiry/replay rejection).
+    pub fn sign_lease_expiring_at(&self, not_after_ms: i64) -> ServerLease {
+        self.sign_body(LeaseBodyFields {
             licence_id: FAB_LICENCE.to_owned(),
             instance_binding_id: FAB_BINDING.to_owned(),
-            serial: "01931d4e-7b2a-7c00-9f3a-2b6e1c0e9b41".to_owned(),
-            not_after,
+            serial: self.lease_serial().to_owned(),
+            not_after: not_after_ms,
             gpu_limit: Some(2),
             hardware_class: Some("standard".to_owned()),
-        };
+        })
+    }
+
+    /// Mint a signed lease with a DISTINCT (older) serial expiring at
+    /// `not_after_ms` — the replay-attack lease (a different serial than the
+    /// current one, so installing it is not a serial-collision no-op).
+    pub fn sign_old_lease(&self, not_after_ms: i64) -> ServerLease {
+        self.sign_body(LeaseBodyFields {
+            licence_id: FAB_LICENCE.to_owned(),
+            instance_binding_id: FAB_BINDING.to_owned(),
+            serial: "01930000-0000-7000-8000-000000000001".to_owned(),
+            not_after: not_after_ms,
+            gpu_limit: Some(2),
+            hardware_class: Some("standard".to_owned()),
+        })
+    }
+
+    /// Sign an arbitrary lease body — exactly the bytes the verifier re-checks.
+    /// The signed `not_after` mirror field on the envelope matches the body.
+    pub fn sign_body(&self, body: LeaseBodyFields) -> ServerLease {
         let lease_bytes = body.to_canonical_cbor();
         let sig = self.intermediate.sign(&lease_bytes);
         ServerLease {
             serial: body.serial.clone(),
             licence_id: Some(body.licence_id.clone()),
             instance_binding_id: Some(body.instance_binding_id.clone()),
-            not_after,
+            not_after: body.not_after,
             signature: hex::encode(sig.to_bytes()),
             signer_key_id: FAB_KID.to_owned(),
             lease_bytes: base64::engine::general_purpose::STANDARD.encode(&lease_bytes),
         }
+    }
+
+    /// Sign a canonical-CBOR lease body that genuinely OMITS `omit` (a required
+    /// field) — to prove the verifier fails closed on a missing field rather than
+    /// defaulting it to empty. Builds the map by hand (canonical key order).
+    ///
+    /// The `licence_id` value is padded so the total CBOR length is a multiple of
+    /// 3 (its standard-base64 has NO '=' padding) — this ISOLATES the missing-field
+    /// rejection from the base64-padding decode path, so the test proves blocker #4
+    /// independent of blocker #3.
+    pub fn sign_body_omitting(&self, omit: &str) -> ServerLease {
+        let not_after = self.now_ms() + 35 * 86_400_000;
+        // Search a licence_id length that makes the encoded body len % 3 == 0.
+        for pad in 0..3 {
+            let licence_id = format!("{FAB_LICENCE}{}", "x".repeat(pad));
+            let mut pairs: Vec<(&str, CborScalar)> = vec![
+                (
+                    "instance_binding_id",
+                    CborScalar::Text(FAB_BINDING.to_owned()),
+                ),
+                ("licence_id", CborScalar::Text(licence_id.clone())),
+                ("not_after", CborScalar::Uint(not_after)),
+                ("serial", CborScalar::Text(self.lease_serial().to_owned())),
+            ];
+            pairs.retain(|(k, _)| *k != omit);
+            pairs.sort_by(|a, b| {
+                a.0.len()
+                    .cmp(&b.0.len())
+                    .then(a.0.as_bytes().cmp(b.0.as_bytes()))
+            });
+            let mut bytes = Vec::new();
+            cbor_map_head(&mut bytes, pairs.len());
+            for (k, v) in &pairs {
+                cbor_text(&mut bytes, k);
+                match v {
+                    CborScalar::Text(s) => cbor_text(&mut bytes, s),
+                    CborScalar::Uint(n) => cbor_uint(&mut bytes, *n),
+                }
+            }
+            if bytes.len() % 3 != 0 {
+                continue; // would base64-pad; try a different licence_id length
+            }
+            let sig = self.intermediate.sign(&bytes);
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            assert!(!encoded.ends_with('='), "chosen body must be unpadded");
+            return ServerLease {
+                serial: self.lease_serial().to_owned(),
+                licence_id: Some(licence_id),
+                instance_binding_id: Some(FAB_BINDING.to_owned()),
+                not_after,
+                signature: hex::encode(sig.to_bytes()),
+                signer_key_id: FAB_KID.to_owned(),
+                lease_bytes: encoded,
+            };
+        }
+        panic!("could not build an unpadded omitting body for {omit}");
+    }
+}
+
+/// A CBOR scalar for the hand-built omitting encoder.
+enum CborScalar {
+    Text(String),
+    Uint(i64),
+}
+
+/// Minimal CBOR helpers for `sign_body_omitting` (RFC 8949 §4.2.1 shortest form).
+fn cbor_map_head(out: &mut Vec<u8>, n: usize) {
+    cbor_head(out, 5, n as u64);
+}
+fn cbor_text(out: &mut Vec<u8>, s: &str) {
+    cbor_head(out, 3, s.len() as u64);
+    out.extend_from_slice(s.as_bytes());
+}
+fn cbor_uint(out: &mut Vec<u8>, n: i64) {
+    cbor_head(out, 0, u64::try_from(n).unwrap_or(0));
+}
+fn cbor_head(out: &mut Vec<u8>, major: u8, n: u64) {
+    let mt = major << 5;
+    if n < 24 {
+        out.push(mt | (n as u8));
+    } else if let Ok(b) = u8::try_from(n) {
+        out.push(mt | 0x18);
+        out.push(b);
+    } else if let Ok(b) = u16::try_from(n) {
+        out.push(mt | 0x19);
+        out.extend_from_slice(&b.to_be_bytes());
+    } else if let Ok(b) = u32::try_from(n) {
+        out.push(mt | 0x1a);
+        out.extend_from_slice(&b.to_be_bytes());
+    } else {
+        out.push(mt | 0x1b);
+        out.extend_from_slice(&n.to_be_bytes());
     }
 }
 
@@ -209,6 +395,23 @@ pub struct FakeLicenceServer {
     withhold_lease: AtomicBool,
     /// When true, every call returns a transport error (server unreachable).
     fail: AtomicBool,
+    /// When true, every call **blocks in-flight forever** (awaits `unblock`) — a
+    /// real stalled transport (black hole), NOT an instant error. Used to prove a
+    /// stalled heartbeat call cannot block a concurrent store reader / the output
+    /// clock (invariant #10).
+    block: AtomicBool,
+    /// Notified to release any in-flight blocked call (so the test can tear down).
+    unblock: tokio::sync::Notify,
+    /// Set true once a blocked call is actually in flight (the reader waits for
+    /// this so it observes a genuinely concurrent stall, not a race).
+    in_flight: AtomicBool,
+    /// When true, `heartbeat` replays an OLDER, already-expired (but still
+    /// Ed25519-valid) signed lease — the replay-attack case: the installer must
+    /// not re-extend entitlement from the replay instant.
+    replay_expired: AtomicBool,
+    /// The `bindingId` the most recent heartbeat request carried (so a test can
+    /// assert the renewal addresses the binding by id, never the lease serial).
+    last_binding_id: std::sync::Mutex<Option<String>>,
     /// Counts heartbeat calls (the loop test asserts it advances).
     pub heartbeats: AtomicU64,
     /// The `nextDue` (epoch ms) the server returns — the loop sleeps to it.
@@ -221,6 +424,11 @@ impl FakeLicenceServer {
             kit: FabricatedKeyset::new(),
             withhold_lease: AtomicBool::new(false),
             fail: AtomicBool::new(false),
+            block: AtomicBool::new(false),
+            unblock: tokio::sync::Notify::new(),
+            in_flight: AtomicBool::new(false),
+            replay_expired: AtomicBool::new(false),
+            last_binding_id: std::sync::Mutex::new(None),
             heartbeats: AtomicU64::new(0),
             next_due_ms: AtomicU64::new(FAB_NOW_MS as u64 + 30 * 86_400_000),
         }
@@ -238,13 +446,58 @@ impl FakeLicenceServer {
     pub fn set_fail(&self, on: bool) {
         self.fail.store(on, Ordering::SeqCst);
     }
+    /// Make every server call BLOCK in-flight forever (until [`release`]) — a real
+    /// stalled transport for the isolation gate.
+    pub fn set_block(&self, on: bool) {
+        self.block.store(on, Ordering::SeqCst);
+    }
+    /// True once a blocked call is genuinely in flight (await this before probing
+    /// concurrency so the stall is real, not a race).
+    pub fn is_in_flight(&self) -> bool {
+        self.in_flight.load(Ordering::SeqCst)
+    }
+    /// Release any in-flight blocked call (test teardown).
+    pub fn release(&self) {
+        self.block.store(false, Ordering::SeqCst);
+        self.unblock.notify_waiters();
+    }
     pub fn set_next_due_ms(&self, ms: u64) {
         self.next_due_ms.store(ms, Ordering::SeqCst);
+    }
+    /// Make `heartbeat` replay an OLDER, already-expired (but still-signed) lease.
+    pub fn set_replay_expired(&self, on: bool) {
+        self.replay_expired.store(on, Ordering::SeqCst);
+    }
+    /// The bindingId the most recent heartbeat request carried.
+    pub fn last_binding_id(&self) -> Option<String> {
+        self.last_binding_id.lock().expect("poisoned").clone()
+    }
+    pub fn clear_last_binding_id(&self) {
+        *self.last_binding_id.lock().expect("poisoned") = None;
+    }
+
+    /// Block in-flight (mark in_flight, await the unblock) when the block knob is
+    /// set — the shared body each server method runs first.
+    async fn maybe_block(&self) {
+        if self.block.load(Ordering::SeqCst) {
+            self.in_flight.store(true, Ordering::SeqCst);
+            // Park until released. `notify_waiters` only wakes current waiters, so
+            // register interest, then re-check the flag to avoid a lost wakeup.
+            while self.block.load(Ordering::SeqCst) {
+                let fut = self.unblock.notified();
+                if !self.block.load(Ordering::SeqCst) {
+                    break;
+                }
+                fut.await;
+            }
+            self.in_flight.store(false, Ordering::SeqCst);
+        }
     }
 }
 
 impl LicenceServer for FakeLicenceServer {
     async fn fetch_keys(&self) -> Result<LicensingKeys, HeartbeatError> {
+        self.maybe_block().await;
         if self.fail.load(Ordering::SeqCst) {
             return Err(HeartbeatError::Transport("fake offline".to_owned()));
         }
@@ -257,6 +510,7 @@ impl LicenceServer for FakeLicenceServer {
         _req: ActivateRequest,
         _idempotency_key: &str,
     ) -> Result<ActivateResponse, HeartbeatError> {
+        self.maybe_block().await;
         if self.fail.load(Ordering::SeqCst) {
             return Err(HeartbeatError::Transport("fake offline".to_owned()));
         }
@@ -269,15 +523,30 @@ impl LicenceServer for FakeLicenceServer {
     async fn heartbeat(
         &self,
         _org: &str,
-        _req: HeartbeatRequest,
+        req: HeartbeatRequest,
         _idempotency_key: &str,
     ) -> Result<HeartbeatResponse, HeartbeatError> {
+        self.maybe_block().await;
         if self.fail.load(Ordering::SeqCst) {
             return Err(HeartbeatError::Transport("fake offline".to_owned()));
         }
+        // Record the bindingId the client addressed us by (the renewal must use
+        // the server's instanceBindingId, never the lease serial).
+        *self.last_binding_id.lock().expect("poisoned") = Some(req.binding_id.clone());
         self.heartbeats.fetch_add(1, Ordering::SeqCst);
         let (lease, state) = if self.withhold_lease.load(Ordering::SeqCst) {
             (None, EnforcementState::Revoked)
+        } else if self.replay_expired.load(Ordering::SeqCst) {
+            // A replay: an OLDER lease with a DISTINCT (older) serial, still
+            // Ed25519-valid, whose signed not_after is already in the past
+            // (expired 5 days ago). A distinct serial means the install is NOT a
+            // benign serial-collision no-op — the ONLY thing that can keep it from
+            // re-extending entitlement is honouring the signed (past) not_after.
+            let past = self.kit.now_ms() - 5 * 86_400_000;
+            (
+                Some(self.kit.sign_old_lease(past)),
+                EnforcementState::Compliant,
+            )
         } else {
             (Some(self.kit.sign_lease(35)), EnforcementState::Compliant)
         };

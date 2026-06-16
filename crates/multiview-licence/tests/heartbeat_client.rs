@@ -273,10 +273,13 @@ async fn aborting_the_heartbeat_task_leaves_the_store_untouched() {
 }
 
 #[tokio::test]
-async fn a_stalled_server_call_cannot_block_a_store_reader() {
+async fn an_in_flight_stalled_heartbeat_cannot_block_a_store_reader() {
     // A reader sampling the store (the wait-free path the engine uses) must never
-    // be blocked by an in-flight (stalled) heartbeat. We start a heartbeat whose
-    // server call we make slow, and assert the store stays readable throughout.
+    // be blocked by a GENUINELY IN-FLIGHT (black-holed) heartbeat call. We start a
+    // heartbeat whose server call blocks FOREVER (a real stall, not an instant
+    // error), wait until it is actually parked in flight, then read the store from
+    // a concurrent task and assert that read completes promptly under a tight
+    // timeout while the heartbeat is still stalled (invariant #10).
     let server = shared_fake();
     let store = Arc::new(LeaseStore::new());
     let client = client(Arc::clone(&server), Arc::clone(&store));
@@ -285,25 +288,170 @@ async fn a_stalled_server_call_cannot_block_a_store_reader() {
         .unwrap()
         .unwrap();
 
-    // Simulate a partition: the next call will fail after a delay. Spawn it and,
-    // while it is "in flight", hammer the store reader; it must return promptly
-    // every time (the store read is wait-free and the task holds no shared lock).
-    server.set_fail(true);
+    // The next server call black-holes (awaits forever until released).
+    server.set_block(true);
     let client2 = client;
-    let probe = tokio::spawn(async move {
+    let hb = tokio::spawn(async move {
         let _ = client2.run_once().await;
     });
-    for _ in 0..1000 {
-        // Each of these is a wait-free read; if the heartbeat could back-pressure
-        // it, the overall timeout below would trip.
-        let _ = store.status();
-        let _ = store.current();
-    }
-    tokio::time::timeout(Duration::from_secs(5), probe)
+
+    // Wait until the heartbeat call is genuinely parked in flight (not a race).
+    let waited = tokio::time::timeout(Duration::from_secs(5), async {
+        while !server.is_in_flight() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(
+        waited.is_ok(),
+        "the heartbeat call must reach an in-flight stall"
+    );
+    assert!(
+        !hb.is_finished(),
+        "the heartbeat is stalled in flight (it has NOT returned)"
+    );
+
+    // WHILE the heartbeat is stalled, a concurrent store reader must complete
+    // promptly. If the stall could back-pressure the reader, this trips.
+    let reader_store = Arc::clone(&store);
+    let reader = tokio::spawn(async move {
+        for _ in 0..10_000 {
+            let _ = reader_store.status();
+            let _ = reader_store.current();
+        }
+        reader_store.current().is_some()
+    });
+    let still_present = tokio::time::timeout(Duration::from_secs(2), reader)
         .await
-        .expect("the probe task must finish; the store reader was never blocked")
+        .expect("a concurrent store reader must NOT be blocked by an in-flight stall")
         .unwrap();
+    assert!(
+        still_present,
+        "last-good lease still present during the stall"
+    );
+    assert!(
+        !hb.is_finished(),
+        "the heartbeat is STILL stalled while the reader sailed through"
+    );
+
+    // Tear down: release the stall and join.
+    server.release();
+    let _ = tokio::time::timeout(Duration::from_secs(5), hb).await;
     assert!(store.current().is_some(), "last-good lease still present");
+}
+
+// --- Blocker #2: the installed expiry IS the signed not_after (no replay/extend)-
+
+#[tokio::test]
+async fn the_installed_lease_expiry_is_the_signed_not_after() {
+    // The installed lease's expiry MUST come from the cryptographically-signed
+    // not_after — NOT system_now()+35d. The fake signs a fixed-epoch not_after
+    // (year ~2026, distinct from the real wall clock), so an installer that minted
+    // a fresh now()+35d term would land far from the signed instant.
+    use chrono::{TimeZone, Utc};
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = client(Arc::clone(&server), Arc::clone(&store));
+    tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .unwrap()
+        .unwrap();
+    let lease = store.current().unwrap().lease;
+    let signed_not_after = Utc
+        .timestamp_millis_opt(server.kit().sign_lease(35).not_after)
+        .single()
+        .unwrap();
+    assert_eq!(
+        lease.expires_at, signed_not_after,
+        "the installed expiry must equal the SIGNED not_after, not system_now()+35d"
+    );
+}
+
+#[tokio::test]
+async fn replaying_an_older_signed_lease_does_not_re_extend_entitlement() {
+    // Install a current 35-day lease (expiry = signed not_after). Then the server
+    // replays an OLDER lease (distinct serial, still Ed25519-valid, signed
+    // not_after already in the PAST). It must NOT re-extend entitlement — the
+    // installer rejects an expired signed lease (or keeps the newer last-good), so
+    // the live expiry never moves backward to the replay's past window.
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = client(Arc::clone(&server), Arc::clone(&store));
+    tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .unwrap()
+        .unwrap();
+    let good_expiry = store.current().unwrap().lease.expires_at;
+
+    server.set_replay_expired(true);
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+    let after_expiry = store.current().unwrap().lease.expires_at;
+    assert_eq!(
+        after_expiry, good_expiry,
+        "a replayed older signed lease must NOT change the installed expiry"
+    );
+    // The replay's signed not_after is 5 days in the past relative to the fake's
+    // epoch; the live lease must still be the GOOD (future-of-epoch) one.
+    use chrono::{TimeZone, Utc};
+    let replay_not_after = Utc
+        .timestamp_millis_opt(server.kit().now_ms() - 5 * 86_400_000)
+        .single()
+        .unwrap();
+    assert!(
+        after_expiry > replay_not_after,
+        "the live lease must never be replaced by the expired replay"
+    );
+}
+
+// --- Blocker #5: the server's instanceBindingId is captured + used, not the serial
+
+#[tokio::test]
+async fn the_renewal_addresses_the_binding_by_id_never_the_lease_serial() {
+    // After an activation that has no prior binding id, the renewal heartbeat must
+    // address the binding by the server's instanceBindingId (carried in the signed
+    // lease body), NEVER by the lease serial. We start with an identity that has
+    // no binding id; the first cycle activates + installs (the body carries the
+    // binding id); the next heartbeat's request must use that binding id.
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let mut identity = test_identity();
+    identity.binding_id = None; // no binding known yet → activation path
+    let pinned = server.pinned_root();
+    let client = HeartbeatClient::new(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        pinned,
+        test_config(),
+        identity,
+    );
+
+    // Cycle 1: activate + install (the signed body carries the binding id).
+    tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .unwrap()
+        .expect("activation installs the verified lease");
+
+    // Cycle 2: a heartbeat. Capture the bindingId the server received.
+    server.clear_last_binding_id();
+    tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .unwrap()
+        .expect("the renewal heartbeat succeeds");
+    let seen = server
+        .last_binding_id()
+        .expect("the heartbeat must send a binding id");
+    assert_eq!(
+        seen,
+        server.kit().binding_id(),
+        "the renewal must address the binding by the server's instanceBindingId"
+    );
+    assert_ne!(
+        seen,
+        server.kit().lease_serial(),
+        "the heartbeat must NEVER address the binding by the lease serial"
+    );
 }
 
 /// A deterministic foreign root (different from the fabricated keyset's root) for

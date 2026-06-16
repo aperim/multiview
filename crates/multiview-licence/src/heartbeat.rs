@@ -493,6 +493,17 @@ pub struct LeaseBody {
     pub hardware_class: Option<String>,
 }
 
+impl LeaseBody {
+    /// Whether the signed lease is already expired at `now_ms` (epoch ms): its
+    /// cryptographically-signed `not_after` is at or before `now_ms`. The
+    /// installer rejects such a lease (a signed-but-expired or replayed-old lease
+    /// must never become a fresh active term).
+    #[must_use]
+    pub fn is_expired_at(&self, now_ms: i64) -> bool {
+        self.not_after <= now_ms
+    }
+}
+
 /// The test/fabrication mirror of [`LeaseBody`] with a deterministic-CBOR encoder
 /// (so a fake server can mint a body and sign exactly the bytes the verifier
 /// re-checks). Field order is the canonical map order used on the wire.
