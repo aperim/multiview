@@ -67,19 +67,28 @@ target **must be the floor** — the greatest `idx` with `deadline_nanos(idx) <=
 `to_tick(elapsed)`. A real jump (VM pause / `CLOCK_MONOTONIC` leap) is arbitrary, never
 period-aligned, so the fractional case `elapsed = (N + r)·period, r >= 0.5` is the common one;
 the nearest rounding gives `N+1`, and composing tick `N+1` (deadline in the future) runs ahead
-exactly as D1 described. The cap path computes the floor in **O(1) on the hot path** — integer
-division `elapsed / period_nanos` (`period_nanos = pts_at(1)`), **not a decrement loop** whose
-length would depend on the (only `> 0`-validated, unbounded) cadence. Because `deadline_nanos`
-recomputes `pts_at` with rounding rather than a strict `idx·period`, the estimate can sit ±1 off
-the exact floor for a non-integer cadence, so a **single** exact down-correction (one comparison)
-drops it to a truly-passed deadline, and a **single** exact backstop (one comparison) falls back to
-`next` should the estimate ever be >1 high (unreachable at any real `idx` — u64 ticks span ~9.7
-billion years at 60 fps — but never depended on). The skip stays a genuine forward jump because the
-cap only fires once `deadline_nanos(next+1) <= now`, so the floor is `>= next+1`, and the final
-`skip_to` target always has `deadline_nanos(target) <= now` (never a run-ahead). (Regression risk:
-an *integer*-period jump test cannot catch the over-round — floor == nearest on an integer — so the
-guard is a *fractional*-jump test asserting no fresh tick is published ahead of its compose-instant
-deadline, with a hard bounded-completion assert so a no-run-ahead-but-parks regression also fails.)
+exactly as D1 described. The cap path (`EngineRuntime::cap_resync_floor`) computes the floor in
+**O(1) on the hot path** — **not** a loop whose length would depend on the (only `> 0`-validated,
+**unbounded**) cadence — from the **exact rational period**, never the rounded `pts_at(1)`: a tick
+spans `den/num` seconds, so `floor_idx = elapsed_ns · num / (1e9 · den)` in i128 (no overflow, no
+period rounding, **no `/0`** — the divisor is `den`, never `pts_at(1)`, which itself rounds to 0 for
+a sub-nanosecond period). Dividing by the *rounded* `pts_at(1)` instead diverges from the true floor
+**without bound** as the index grows on a non-integer cadence (`idx·round(period)` vs
+`round(idx·period)` — e.g. 23.976 drifts +2 by `idx≈300M`, a degenerate `1.25e9/13` +400 by
+`idx=10k`), so a fixed correction could not recover it and the never-ahead backstop would collapse
+the target to `next` — grinding the backlog frame-by-frame (an unbounded burst, the boundedness
+failure). The exact-rational form has no such drift. The actual `deadline_nanos(idx) = seed +
+pts_at(idx)` still rounds `pts_at`, so the floor against the *rounded* deadlines is the exact floor
+±1; **one** O(1) up-step (`deadline_nanos(idx+1) <= now`) and **one** O(1) down-step
+(`deadline_nanos(idx) > now`), mutually exclusive, reconcile that boundary. The skip stays a genuine
+forward jump because the cap only fires once `deadline_nanos(next+1) <= now`, so the floor is
+`>= next+1`, and the final `skip_to` target always has `deadline_nanos(target) <= now` (never a
+run-ahead). (Regression risk: an *integer*-period jump test cannot catch either the over-round or
+the rounded-period drift — floor == nearest on an integer — so the guards are a *fractional*-jump
+test asserting no fresh tick is composed ahead of its deadline (with a hard bounded-completion
+assert so a no-run-ahead-but-parks regression also fails) **and** a *non-integer*-cadence
+*large-index* test asserting the resync floors exactly in one bounded step rather than collapsing to
+`next` and grinding.)
 
 ## Consequences
 
@@ -148,6 +157,12 @@ deadline, with a hard bounded-completion assert so a no-run-ahead-but-parks regr
    assert at each fresh tick's compose-instant that its pts never exceeds elapsed wall-clock (no
    run-ahead). Catches the cap-path `to_tick` over-round that the integer-jump test (#5) cannot —
    floor == nearest on an integer. Fails at +0.4-period run-ahead before the floor fix, ok after.
+9. `non_integer_cadence_large_index_resync_floors_exactly_and_does_not_grind` (failing-first): a
+   23.976 fps (24000/1001) cadence primed to tick `K = 300_000_000`'s deadline + 0.6 period; assert
+   (a) no fresh tick composed ahead of its deadline AND (b) the bounded run completes at exactly the
+   budget with `frames_repeated <= MAX_REPEATS_PER_TICK` (hard). Catches the rounded-`pts_at(1)`
+   drift (+2 at this index) that the integer-cadence tests cannot: the old floor collapsed to `next`
+   and ground the backlog; the exact-rational floor resyncs in one bounded step.
 
 Plus a CI chaos/soak gate running the engine under synthetic CPU starvation asserting cadence held
 + bounded lag + frames-repeated-not-slipped, and a hardware soak on a deliberately-loaded box.
