@@ -39,12 +39,13 @@ function reviewItem(it) {
     { label: `review:${it.id}${idSuffix}`, phase: 'Review', schema: VERDICT })
 
   if (!it.highRisk) return single('', '')
-  // High-risk: 3-reviewer panel — Codex + two fresh-context lenses — then aggregate.
-  return parallel([
+  // High-risk: a fixed N-reviewer panel — Codex + fresh-context lenses — then aggregate.
+  const lenses = [
     () => single('Lens: correctness & concurrency/TOCTOU/race/timing.', '-a'),
     () => single('Lens: security & authorization (BOLA/per-object authz) & input hardening.', '-b'),
     () => single('Lens: spec-conformance & the Multiview invariants (#1 output-clock, #10 isolation) & data-plane bounded-queue discipline.', '-c'),
-  ]).then((panel) => {
+  ]
+  return parallel(lenses).then((panel) => {
     // Deterministic code-aggregation, FAIL-CLOSED. An LLM aggregator over the embedded panel
     // JSON is fragile — its StructuredOutput call can fail to parse and lose the whole verdict.
     // A defect from ANY lens stands; a MISSING/failed lens (a falsy panel entry — a lens that
@@ -52,7 +53,8 @@ function reviewItem(it) {
     // INCOMPLETE: ranOk=false AND blocked=true, never a clear verdict from the survivors alone.
     // Also blocked if any present lens blocked or raised a blocker/major.
     const vs = panel.filter(Boolean)
-    const allLensesRan = panel.length > 0 && panel.every(Boolean) && vs.every((x) => x.ranOk !== false)
+    // Require the FULL expected count present AND ran — a dropped/omitted lens fails closed.
+    const allLensesRan = panel.length === lenses.length && panel.every(Boolean) && vs.every((x) => x.ranOk !== false)
     const defects = vs.flatMap((x) => x.defects || [])
     const blocked = !allLensesRan || vs.some((x) => x.blocked) || defects.some((d) => d.severity === 'blocker' || d.severity === 'major')
     return {
@@ -69,9 +71,23 @@ function reviewItem(it) {
 phase('Review')
 const items = (args && args.items) || []
 const verdicts = await pipeline(items, reviewItem)
-// Fail closed: a fallback verdict (ranOk=false → not actually cross-vendor) can NEVER
-// clear the merge gate, regardless of whether the fallback reviewer found a defect.
-// The gate keys off `blocked`, so couple it to ranOk here rather than trusting prose
-// (codex-review runbook + orchestrate skill: "never merge on a fallback verdict").
-const enforced = verdicts.filter(Boolean).map((v) => (v.ranOk === false ? { ...v, blocked: true } : v))
+// Fail closed at TWO levels, keyed to each submitted item by index:
+// (1) a null item result — the whole review died/dropped — becomes an EXPLICIT blocked verdict
+//     so it can never silently vanish from the gate (the caller gets one verdict per item); and
+// (2) a fallback verdict (ranOk=false → not actually cross-vendor) can never clear the gate, so
+//     couple blocked to ranOk (codex-review runbook + orchestrate skill: never merge on fallback).
+const enforced = items.map((it, i) => {
+  const v = verdicts[i]
+  if (!v) {
+    return {
+      id: it.id,
+      reviewer: 'none',
+      ranOk: false,
+      defects: [{ severity: 'blocker', where: 'review-wave', what: 'the reviewer produced no verdict (review failed or was dropped) — failing closed' }],
+      highestResidualRisk: 'review did not complete',
+      blocked: true,
+    }
+  }
+  return v.ranOk === false ? { ...v, blocked: true } : v
+})
 return { verdicts: enforced }
