@@ -239,6 +239,49 @@ mirrors `mesh-mdns`). The implementation makes these concrete decisions:
       distinctness test); replaying an *unacknowledged in-flight* op across a crash
       (persisting the in-flight key) is a heavier tier, not required here and not
       claimed.
+11. **The client is RENEW-ONLY; device-side online-activate is DEFERRED** (operator
+    decision after a **round-5c** 0.7.0 conformance audit). The audit found the
+    activate path sent `ActivateRequest.serverNonce = String::new()` (empty), but
+    the spec requires `serverNonce` to match `^[0-9a-f]{2,128}$` — it is a
+    **server-issued** value (the freshness anchor for the per-instance lease chain),
+    and the device-credential/nonce mechanism that would let a device obtain one is
+    marked in the Conspect spec as "deferred to ADR-0036 §Deferred / not yet
+    available". So a device **cannot** mint a valid activation request today, and a
+    real server `422`s the empty value. Per rule 6 (never ship a stub/scaffold) the
+    broken activate path is **not shipped**. Binding rules:
+    - **Onboarding is operator/portal + the install surfaces, not the device:** the
+      operator activates a licence in the Conspect portal, and the signed lease
+      reaches the device via the **three existing install surfaces** — control-upload
+      (`POST /api/v1/licence/lease`), the offline file-drop watcher, and the mesh
+      relay — all of which feed `LeaseStore::install_binding`. Device-side activate
+      was never required for onboarding.
+    - **`run_once` is renew-only:** it resolves the binding to renew *before* any
+      network call (`configured ?? learned ?? store.current_binding_id()`). With an
+      established binding it RENEWS via the unchanged heartbeat path. With **no**
+      binding there is nothing to renew and the device cannot self-activate, so it
+      makes **no** server call, installs nothing, keeps last-good (output on air),
+      and returns the new `HeartbeatOutcome::NoBinding` — a lease arrives via an
+      install surface and a later cycle renews it.
+    - **The dead activate scaffold is removed, not stubbed:** the `activate`
+      `LicenceServer` method, `build_activate_request`, the
+      `ActivateRequest`/`ActivateResponse` wire types, the run_once activate branch,
+      the cli `ConspectHttpServer::activate` impl, and the activate-only settings
+      (`HeartbeatConfig.claim_code`, `HeartbeatSettings.claim_code`/`CLAIM_ENV`) are
+      deleted. The `DeviceIdentity` device-credential fields (`instance_id`,
+      `hardware_digest`, the discriminator hash/digest, `device_public_key_b64url`)
+      are **retained** on the identity (the cli's `MULTIVIEW_LICENCE_*` config
+      contract) with `forward-compat:` docs, so the activate slice re-adds without
+      re-plumbing the device config when the server-nonce flow lands; they are not
+      sent today.
+    - **`transport` is a closed enum:** `HeartbeatRequest.transport` is a closed
+      `Transport::{Direct,Relay,File}` enum (default `Direct`), not an open `String`,
+      so an out-of-vocabulary value can never reach the wire (a future `422` for an
+      unknown transport label is structurally impossible).
+    - **External blocker (named):** device-side activate is re-added as a future
+      slice when the Conspect server issues the `serverNonce` (the per-instance
+      lease-chain freshness anchor, part of the device-credential mechanism deferred
+      to ADR-0036). This is the only blocker; nothing else in the activate path is
+      missing on the device side.
 
 New deps behind `heartbeat`: `p256`, `base64`, `hex` (all `MIT`/`Apache-2.0`, with
 the ECDSA closure resolving to `MIT`/`Apache-2.0`/`BSD-3-Clause`/`BSD-1-Clause`),
@@ -287,13 +330,19 @@ so none enter the scanned default graph.
 | Write the install's lease / install-instant / fingerprint / binding-anchor in separate `RwLock` sections | A concurrent reader can observe a torn state — `current().is_some()` while `current_binding_id()` is still `None` — so a freshly-licensed device looks "fresh" and the cross-instance guard is skipped. Publish one `Installed` snapshot under a single lock so a reader never sees a partial install. |
 | Keep the idempotency counter in memory only (rotate on success) | Retry-stable within a process but the counter resets to 0 on restart, so a post-restart op reuses `mv-{machine}-1` and collides with a prior lifetime's first op (cross-restart duplicate mutation). Seed + commit the counter via a durable `NonceStore` seam (file-backed at the cli boundary); mint strictly above the durable high-water and commit at mint. |
 | Persist the idempotency nonce inside `multiview-licence` | Breaks the leaf crate's no-I/O invariant. The crate exposes a `NonceStore` seam (like the clock); the file-backed implementation lives at the cli boundary. |
+| Ship device-side online-activate with `serverNonce = ""` (empty) | The spec requires `serverNonce` to be a **server-issued** `^[0-9a-f]{2,128}$` value (the per-instance lease-chain freshness anchor); a real server `422`s an empty value, and the device-credential/nonce mechanism is "deferred to ADR-0036 §Deferred / not yet available", so the device cannot mint a valid request. Shipping it is a broken stub (rule 6). DEFER activate; ship the client RENEW-ONLY (decision point 11). |
+| Keep the activate code behind `#[allow(dead_code)]` until the nonce flow lands | Dead scaffold with an unjustified suppression (rules 6 + 20). Onboarding does not need device-side activate (operator/portal + the three install surfaces handle it), so the activate path is removed; the device-credential `DeviceIdentity` fields are retained with `forward-compat:` docs so it re-adds cleanly. |
+| Model `HeartbeatRequest.transport` as an open `String` | An out-of-vocabulary transport value could reach the wire and earn a `422`. The Conspect set is the fixed `{direct,relay,file}`; a closed `Transport` enum makes a bad value structurally unsendable. |
 
 ## Consequences
 
-- **Easier:** a configured device renews its lease against conspect.studio over the
-  same `install_binding` convergence the offline file-drop and mesh relay use, so
-  S1/S2/S3 + the control routes + the web screens re-sample with zero extra wiring;
-  the read-only heartbeat-status route now has a real device→server producer.
+- **Easier:** a device with a lease (installed via the portal-driven control-upload,
+  the offline file-drop, or the mesh relay) RENEWS it against conspect.studio over
+  the same `install_binding` convergence those surfaces use, so S1/S2/S3 + the
+  control routes + the web screens re-sample with zero extra wiring; the read-only
+  heartbeat-status route now has a real device→server producer. Onboarding stays an
+  operator/portal action (the device is renew-only) — no device-side activation
+  needed.
 - **Committed to maintain:** the canonical-CBOR encoder must stay byte-exact with
   the Conspect attestation contract (the golden-vector test guards this against the
   live well-known doc); the `MULTIVIEW_LICENCE_*` env surface is the device-config
@@ -303,10 +352,15 @@ so none enter the scanned default graph.
   every failure/withheld lease (#1) — re-proven by the extended never-off-air chaos
   gate (`crates/multiview-cli/tests/heartbeat_never_off_air.rs`) that SIGKILLs /
   stalls / partitions the heartbeat task while asserting one-frame-per-tick.
-- **Residual (non-blocking):** the free-tier default org id (O4) and the device-PoP
-  request-signing wire format (D2, deferred server-side, slice 5d) — the
-  `devicePublicKey` is captured + stored but does not yet authenticate requests
-  (account-JWT bearer today). Both are honestly tracked, not stubbed.
+- **Deferred (named blockers, not stubbed):** device-side **online-activate** is
+  deferred — the external blocker is the Conspect server-side `serverNonce`
+  issuance (the per-instance lease-chain freshness anchor, part of the
+  device-credential mechanism deferred to ADR-0036); the client ships RENEW-ONLY
+  and onboarding is via operator/portal + the three install surfaces (decision
+  point 11). The device-PoP request-signing wire format (D2, deferred server-side,
+  slice 5d) — the `devicePublicKey` is captured + stored but does not yet
+  authenticate requests (account-JWT bearer today). The free-tier default org id
+  (O4) is a config field, off until set. All are honestly tracked, not stubbed.
 - **CI/licensing:** the default build is unchanged (network-free, LGPL-clean); the
   `heartbeat` feature is on only in the shipped deploy presets. `cargo deny`
   (`all-features = false`) is unaffected; the `webpki-roots` `CDLA-Permissive-2.0`
