@@ -140,6 +140,38 @@ fn a_tampered_lease_is_rejected_signature_invalid() {
 }
 
 #[test]
+fn a_tampered_instance_binding_id_is_rejected_and_never_anchors_identity() {
+    // The binding anchor MUST come from SIGNED material: the device's durable
+    // instance identity (`current_binding_id`) is recorded from
+    // `binding.instance_binding_id`, so that field has to be covered by the same
+    // Ed25519 signature `install_binding` verifies. Here the lease is signed
+    // legitimately (binding id NONE in the signed payload) but an attacker grafts
+    // an unsigned `instance_binding_id` onto the binding AFTER signing. install
+    // must reject it `SignatureInvalid` and the store must NEVER anchor the forged
+    // id — otherwise an attacker could poison the device identity (or DoS renewals)
+    // via the offline/file-drop/relay surface with an unsigned binding id.
+    let (key, pinned) = keypair();
+    let now = epoch();
+    let lease = lease_at("serial-ANCHOR", now);
+    let mut b = binding(&key, &lease, 100);
+    // Graft a binding id the signature does not cover (signed payload had None).
+    b.instance_binding_id = Some("ib_attacker_9999".to_owned());
+
+    let store = LeaseStore::new();
+    let err = store
+        .install_binding(&b, &pinned, now)
+        .expect_err("an unsigned/forged instance_binding_id must be rejected");
+    assert!(
+        matches!(err, InstallError::SignatureInvalid),
+        "a binding id not covered by the signature must be SignatureInvalid, got {err:?}"
+    );
+    assert!(
+        store.current_binding_id().is_none(),
+        "a rejected install must NEVER anchor a forged binding id"
+    );
+}
+
+#[test]
 fn a_below_threshold_fingerprint_is_rejected_fingerprint_mismatch() {
     let (key, pinned) = keypair();
     let now = epoch();
