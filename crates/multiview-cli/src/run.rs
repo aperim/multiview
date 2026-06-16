@@ -569,22 +569,40 @@ impl SoftwareEngine {
         self.prime_stores(time_source.as_ref());
         let ts: Arc<dyn TimeSource> = time_source.clone();
         let mut runtime = self.build_runtime(ts, pacer)?;
-        // Jump the (jumpable) clock past the deadline of the final tick so the
-        // cooperative pacer releases every tick of this bounded run without any
-        // real sleep. The last tick emitted has index `max_ticks - 1`; covering
-        // its deadline (`seed + pts_at(max_ticks - 1)`) plus a tick of headroom
-        // releases the whole run. Computing against `max_ticks` is a safe
-        // over-estimate.
-        let headroom = runtime
-            .seed_nanos()
-            .saturating_add(pts_at(self.cadence, max_ticks).as_nanos());
-        time_source.advance_to(headroom);
+        // Pace the (jumpable) clock forward ONE TICK PERIOD PER FRESH COMPOSE rather
+        // than jumping it once to the final tick's deadline. A single up-front jump to
+        // `seed + pts_at(max_ticks)` leaves the clock a full `max_ticks` periods ahead
+        // of media-time, which ADR-T018's drop/repeat-to-cadence loop correctly reads
+        // as massive overload: for `max_ticks > MAX_REPEATS_PER_TICK` it emits a cap's
+        // worth of last-good repeats then `skip_to`s the counter to wall-clock — which
+        // advances the tick counter past `emitted`, so the bounded run can never reach
+        // `max_ticks` frames and parks forever on a post-skip deadline the frozen clock
+        // never covers (the live-overlay-churn / live-source-apply CI hang). Advancing
+        // exactly one period per fresh compose keeps the clock a single tick ahead of
+        // the composing tick, so the cadence-hold path stays dormant (a healthy 1.0×
+        // pace, no spurious repeats) and the loop composes exactly one fresh frame per
+        // tick — still sleep-free and deterministic under the `CooperativePacer`. The
+        // user's `control` hook still runs once per fresh compose, after the advance.
+        let seed = runtime.seed_nanos();
+        let cadence = self.cadence;
+        let advance_ts = Arc::clone(&time_source);
+        let mut fresh_index: u64 = 0;
+        let mut control = control;
+        let paced_control = move |drive: &mut CompositorDrive<Nv12Image>| {
+            // The hook for the tick that is about to compose fresh: release the NEXT
+            // tick's deadline so the pacer never gates and the loop never falls behind
+            // wall-clock (which would wake the cadence-hold repeat path).
+            let next = fresh_index.saturating_add(1);
+            advance_ts.advance_to(seed.saturating_add(pts_at(cadence, next).as_nanos()));
+            fresh_index = next;
+            control(drive);
+        };
         let publisher: EnginePublisher<SoftwareState, SoftwareState> =
             EnginePublisher::new(EVENT_CAPACITY);
         let stop = StopSignal::new();
         // Animated synthetic sources (the `clock`) are driven by wall-clock
         // generator threads; the engine only samples their stores. This bounded,
-        // jumped-clock path runs at executor speed (no real time elapses), so a
+        // paced-clock path runs at executor speed (no real time elapses), so a
         // clock does not visibly animate here — but the generators are still
         // spawned and torn down cleanly after the tick budget so the wiring is
         // identical across paths and no thread leaks.
@@ -605,7 +623,7 @@ impl SoftwareEngine {
                         pts: f.pts(),
                     })
                 },
-                control,
+                paced_control,
             )
             .await;
         generators.shutdown();

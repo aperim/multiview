@@ -338,10 +338,17 @@ async fn live_overlay_churn_flood_never_falters_the_output_clock() {
     );
 
     let time = Arc::new(ManualTimeSource::new());
-    let report = engine
-        .run_for_with_control(Arc::clone(&time), CooperativePacer, TICKS, drain)
-        .await
-        .expect("software run under live-overlay churn");
+    // Bounded so a drive-loop regression that parks/spins the output clock under
+    // this jumped-clock bounded run (the ADR-T018 cadence-hold `skip_to` vs
+    // `max_ticks` desync that hung CI ~37 min) fails FAST here instead of hanging.
+    // The honest sleep-free run finishes in well under a second.
+    let report = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        engine.run_for_with_control(Arc::clone(&time), CooperativePacer, TICKS, drain),
+    )
+    .await
+    .expect("output clock stalled under live-overlay churn (bounded run never completed)")
+    .expect("software run under live-overlay churn");
 
     stop_flood.store(true, Ordering::Relaxed);
     let _ = flooder.join();
