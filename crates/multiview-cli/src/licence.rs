@@ -984,6 +984,55 @@ mod tests {
         );
     }
 
+    // --- Round-8 MAJOR 2: a PRESENT '0' is untrustworthy (commit never writes 0).
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_load_rejects_a_present_zero() {
+        // `commit` only ever persists `guard.counter.max(durable).saturating_add(1)`,
+        // which is >= 1, so the durable file NEVER legitimately contains 0. A PRESENT
+        // file whose contents parse to 0 can therefore only be truncation / a partial
+        // write / tampering — trusting it would reset the high-water and re-mint
+        // mv-{machine}-1 after a restart. load() must reject a present 0 (Err). Only
+        // an ABSENT file (NotFound) is the trusted-zero fresh start.
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("idempotency-nonce");
+        std::fs::write(&path, "0").expect("seed a present zero");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
+        assert!(
+            store.load().is_err(),
+            "a PRESENT '0' must be rejected (commit never writes 0; only an absent file is a \
+             trusted 0)"
+        );
+        // Sanity: any value >= 1 still loads fine (whitespace-tolerant).
+        std::fs::write(&path, " 1\n").expect("seed a one");
+        assert_eq!(store.load().expect("a present >=1 loads"), 1);
+        std::fs::write(&path, "42").expect("seed 42");
+        assert_eq!(store.load().expect("a present 42 loads"), 42);
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_commit_errors_when_the_temp_write_fails() {
+        // The OTHER commit-failure branch: the write-temp step itself fails (the
+        // existing test only forces the rename). Put a DIRECTORY at the temp path so
+        // `std::fs::write(<dir>/idempotency-nonce.tmp, ..)` fails, and assert commit
+        // propagates a NonceError (not log-and-continue).
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
+        // The temp path is `<path>.tmp` = `<dir>/idempotency-nonce.tmp`.
+        std::fs::create_dir(dir.path().join("idempotency-nonce.tmp"))
+            .expect("a dir in the way of the temp write");
+        assert!(
+            store.commit(1).is_err(),
+            "a failing temp write must make commit() return an Error"
+        );
+    }
+
     // --- Round-6 MAJOR: the HTTP transport is HTTPS-only and FAILS CLOSED. -------
 
     #[cfg(feature = "heartbeat")]
