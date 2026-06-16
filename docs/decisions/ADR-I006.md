@@ -139,7 +139,8 @@ mirrors `mesh-mdns`). The implementation makes these concrete decisions:
      which the store correctly keeps-last-good (`Stale`), would still poison the
      learned identity with the foreign binding without anything being installed.
    - **The store IS the device identity:** a genuine install records the binding in
-     the store (`LeaseStore::record_binding_id`); the heartbeat anchor is
+     the store (in round-4 this moved into `LeaseStore::install_binding` as the
+     single chokepoint — see decision point #9); the heartbeat anchor is
      `established_binding = configured ?? learned ?? store.current_binding_id()`. So
      a device that already holds a lease is **never "fresh"** — the cross-instance
      guard rejects a foreign binding even on the activation path (the round-2 guard
@@ -152,6 +153,43 @@ mirrors `mesh-mdns`). The implementation makes these concrete decisions:
      the lease, because `verify_signed_lease_chain`/`lease_key` only check the
      Ed25519 signature, not time-validity/revocation. The pre-network verify is a
      fast-fail only; both reads go through the seam.
+9. **Fresh-fetch acceptance trust + the single binding-anchor chokepoint +
+   retry-stable idempotency** (hardened after the **round-4** rule-21 panel, which
+   confirmed #1–#8 correct and found the round-3 acceptance re-check did not fully
+   close two fail-open paths). Binding rules:
+   - **Acceptance trust is re-evaluated against a FRESHLY RE-FETCHED key document,
+     not the pre-network one (no revocation TOCTOU):** revocation is set-membership
+     over the signed key document, so the round-3 fix — a fresh `now()` against the
+     **same** fetched document — caught only an elapsed *validity window*, never a
+     signer **added to the (signed) revocation list** during a stalled call.
+     `run_once` now re-fetches `fetch_keys()` at acceptance and re-runs
+     `TrustedKeys::verify` on that fresh document (which re-checks the root match,
+     the root-attested revocation signature, every intermediate `root_sig`, the
+     signed validity window at the fresh `now()`, **and** the revocation set). A
+     newly-revoked or newly-expired signer is dropped from the re-fetched trusted
+     set, so `verify_signed_lease_chain` cannot resolve `signerKeyId` and rejects
+     the lease. The re-fetch fails closed on a transport error (keep last-good).
+   - **`LeaseStore::install_binding` IS the binding-anchor chokepoint:** the
+     round-3 anchor (`store.record_binding_id`) fired **only** from the heartbeat
+     genuine-install path, so a lease installed via the control-route/offline
+     upload, the file-drop watcher, or the mesh relay (all of which call
+     `install_binding` directly) left `current_binding_id() == None` — the device
+     looked "fresh" and a foreign-binding activate **skipped** the cross-instance
+     guard (identity poisoning). The binding id now rides on the `LeaseBinding`
+     (`instance_binding_id: Option<String>`, carried by every producer) and
+     `install_binding` records it **atomically with the install**, so **every**
+     surface anchors the device identity uniformly; the now-redundant
+     heartbeat-path `record_binding_id` call is removed (no double-record).
+   - **The Idempotency-Key is retry-stable per logical operation:** the round-3
+     key was `format!("mv-{}", unix_millis_now())` — minted fresh per call inline,
+     so a retry of the same logical operation issued a **new** key, defeating "a
+     retry replays, never re-issues" (lost-response duplicate-mutation risk). The
+     client now holds an `IdempotencyState { counter, current }`: a key is minted
+     once per logical operation from a **monotonic per-client counter + the device
+     machine id** (never the wall clock), **replayed** on every retry, and rotated
+     **only after a fully-successful contact** (install / stale-no-op / withheld
+     lease). An error *after* the mutation landed does not rotate, so its retry
+     also replays — the server dedupes, never duplicating a binding/lease.
 
 New deps behind `heartbeat`: `p256`, `base64`, `hex` (all `MIT`/`Apache-2.0`, with
 the ECDSA closure resolving to `MIT`/`Apache-2.0`/`BSD-3-Clause`/`BSD-1-Clause`),
@@ -193,6 +231,9 @@ so none enter the scanned default graph.
 | Treat any `Ok` from `install()` (incl. the `Stale → Ok` fold) as "installed" and learn the binding | Reject/stale identity poisoning: a crypto-valid-but-**stale FOREIGN** lease that the store keeps-last-good (`Stale`) would still poison the learned binding with the foreign id, with nothing installed. `install()` returns `Installed` vs `StaleNoop`; learn only on `Installed`. |
 | Anchor the cross-instance guard to the heartbeat-learned binding only (skip it when `established_binding == None`) | A device with a pre-existing local store lease but no learned/configured heartbeat binding takes the activate path and the guard is skipped — a foreign lease installs. Fold the store's current lease binding into the anchor (`store.current_binding_id()`), recorded on every genuine install. |
 | Evaluate signer time-validity / revocation only once, with the pre-network timestamp | Key-trust TOCTOU: a signer whose signed `valid_until` elapses (or that is revoked) **during** an arbitrarily-stalled network call still validates the returned lease, because the frozen `trusted` set is reused and `verify_signed_lease_chain` checks only the Ed25519 signature. Re-evaluate trust with a fresh `now()` at lease-acceptance. |
+| Re-check acceptance trust with a fresh clock against the **same** fetched key document (round-3) | Catches only an elapsed validity *window*; revocation is set-membership over the signed document, so a signer added to the revocation list **during** a stalled call is never observed against the stale doc. Re-FETCH the key document at acceptance and re-verify the fresh one (root + revocation-sig + intermediates + window + revocation set). |
+| Record the binding anchor only from the heartbeat genuine-install path (`store.record_binding_id`) | A lease installed via the control-route/offline upload, the file-drop watcher, or the mesh relay leaves `current_binding_id() == None`, so the device looks "fresh" and a foreign-binding activate skips the cross-instance guard (identity poisoning). Carry the id on `LeaseBinding` and record it atomically inside the single `install_binding` chokepoint every surface converges on. |
+| Mint the Idempotency-Key from `unix_millis_now()` per call | A retry of the same logical operation mints a NEW key, so a lost response can create a DUPLICATE binding/lease ("replay, never re-issue" violated). Use a per-operation key from a monotonic counter + the device id, replayed on retry and rotated only after a successful contact. |
 
 ## Consequences
 

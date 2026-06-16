@@ -800,7 +800,10 @@ pub fn shared_fake() -> Arc<FakeLicenceServer> {
 pub fn upload_binding_for(
     kit: &FabricatedKeyset,
     instance_binding_id: &str,
-) -> (multiview_licence::store::LeaseBinding, multiview_licence::verify::PinnedKey) {
+) -> (
+    multiview_licence::store::LeaseBinding,
+    multiview_licence::verify::PinnedKey,
+) {
     use ed25519_dalek::{Signer as _, SigningKey};
     use multiview_licence::entitlement::{Entitlement, EntitlementFlags, GpuLimit, HardwareClass};
     use multiview_licence::lease::Lease;
@@ -831,13 +834,13 @@ pub fn upload_binding_for(
     // the seal/verify contract `LeaseStore::install_binding` re-checks for every
     // producer. (This stands in for the offline-lease issuer's signature; the
     // store verifies the binding against the pinned key handed alongside it.)
-    let signer = SigningKey::from_bytes(&[0x6d; 32]);
-    let pinned = PinnedKey::from_verifying_key(&signer.verifying_key());
+    let envelope_signer = SigningKey::from_bytes(&[0x6d; 32]);
+    let pinned = PinnedKey::from_verifying_key(&envelope_signer.verifying_key());
     let msg = SignedLease::signing_bytes(&entitlement.lease);
-    let sig = signer.sign(&msg);
-    let signed = SignedLease::new(entitlement.lease.clone(), sig.to_bytes());
+    let sig = envelope_signer.sign(&msg);
+    let signed_lease = SignedLease::new(entitlement.lease.clone(), sig.to_bytes());
     let binding = LeaseBinding::new(
-        signed,
+        signed_lease,
         entitlement,
         100,
         Some(instance_binding_id.to_owned()),
