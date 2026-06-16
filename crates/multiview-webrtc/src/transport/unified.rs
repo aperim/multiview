@@ -90,8 +90,8 @@ struct RunProbe {
     /// Times an inbound drain stopped on its per-wake budget (still-readable
     /// socket) rather than `WouldBlock`.
     recv_budgets_exhausted: std::sync::atomic::AtomicU64,
-    /// Times the driver ran a full servicing pump (commands + timers + outbound
-    /// + GC) — once per idle tick, and once per exhausted receive budget as the
+    /// Times the driver ran a full servicing pump (commands, timers, outbound,
+    /// GC) — once per idle tick, and once per exhausted receive budget as the
     /// bounded handoff.
     driver_services: std::sync::atomic::AtomicU64,
 }
@@ -350,6 +350,7 @@ impl UnifiedEndpoint {
             // bias alone — but biasing keeps the steady-state tick cadence tight
             // even mid-flood (invariant #10).
             tokio::select! {
+                biased;
                 _ = tick.tick() => {
                     let now = Instant::now();
                     Self::service_timers_and_gc(
@@ -389,15 +390,33 @@ impl UnifiedEndpoint {
                     };
 
                     if outcome.budget_exhausted {
+                        // The budget cut the drain short while the socket still
+                        // holds data, so the `readable()` arm would re-fire at
+                        // once. Perform an explicit BOUNDED HANDOFF before that can
+                        // happen: yield to the runtime, then run ONE full servicing
+                        // pump (commands + timers + outbound + GC). This makes the
+                        // rest of the driver run GUARANTEED between consecutive
+                        // receive budgets — it does not rely on `select!` happening
+                        // to pick the tick arm (invariant #10, round-2 BLOCKER).
                         probe
                             .recv_budgets_exhausted
                             .fetch_add(1, Ordering::Relaxed);
+                        tokio::task::yield_now().await;
+                        Self::service_timers_and_gc(
+                            &socket, &mut turn,
+                            &mut ingest, &mut serve, preview.as_ref(), &mut push,
+                            local_addr, now, probe,
+                        ).await;
+                    } else {
+                        // The socket drained within budget: just pump outbound
+                        // (the full tick servicing runs on the idle tick arm). No
+                        // re-arm is needed — tokio cleared readiness.
+                        Self::pump_all(
+                            &socket, &mut turn,
+                            ingest.as_mut(), serve.as_mut(), preview.as_ref(), &mut push,
+                            local_addr, now,
+                        ).await;
                     }
-                    Self::pump_all(
-                        &socket, &mut turn,
-                        ingest.as_mut(), serve.as_mut(), preview.as_ref(), &mut push,
-                        local_addr, now,
-                    ).await;
                 }
             }
         }
@@ -435,9 +454,14 @@ impl UnifiedEndpoint {
             WhepServeEndpoint::tick(&mut lane.viewers, &lane.shared, now);
         }
         Self::pump_all(
-            socket, turn,
-            ingest.as_mut(), serve.as_mut(), preview, push,
-            local_addr, now,
+            socket,
+            turn,
+            ingest.as_mut(),
+            serve.as_mut(),
+            preview,
+            push,
+            local_addr,
+            now,
         )
         .await;
         // GC dead sessions per lane.
@@ -477,7 +501,14 @@ impl UnifiedEndpoint {
     /// datagram never halts the drain of good ones.
     ///
     /// [`DrainOutcome::budget_exhausted`] tells the caller the socket may still
-    /// have data; the caller decides how to re-arm the `select!`.
+    /// have data. On exhaustion the driver performs an explicit bounded handoff —
+    /// [`yield_now`](tokio::task::yield_now) then exactly one
+    /// [`service_timers_and_gc`](Self::service_timers_and_gc) pass — **before**
+    /// the `readable` arm can re-fire, so commands/timers/outbound/GC are
+    /// serviced once per exhausted budget regardless of `select!` arm ordering,
+    /// and the loop's top-of-iteration stop check is reached within a bounded
+    /// number of iterations. The flood gets bounded work per wake and cannot
+    /// defer the rest of the driver past one receive budget.
     ///
     /// [`recv_from_with_local`]: crate::transport::local_addr::recv_from_with_local
     fn drain_inbound_budgeted(

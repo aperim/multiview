@@ -225,9 +225,13 @@ mod unix {
     /// Receive one datagram, returning `(len, source, local_destination)` where
     /// `local_destination` is the **concrete** local address the datagram landed
     /// on (recovered from the `IPV6_PKTINFO` / `IP_PKTINFO` cmsg), carrying the
-    /// socket's bound port. When the kernel reports no PKTINFO cmsg (it should,
-    /// after [`enable_pktinfo`]), the destination falls back to the bound
-    /// `local_addr` so the caller's resolver still maps it onto a candidate.
+    /// socket's bound port. When the kernel reports no PKTINFO cmsg the fallback
+    /// depends on the bind: a **concrete** `local_addr` is its own destination and
+    /// is returned as-is; a **wildcard** `local_addr` (`[::]` / `0.0.0.0`) has no
+    /// concrete destination to fall back to, so the datagram is **dropped** (see
+    /// errors) rather than mapped onto the unspecified bind (which the resolver
+    /// would turn into an arbitrary same-family candidate — a multi-homed
+    /// misroute).
     ///
     /// Non-blocking: a `WouldBlock` surfaces verbatim so the driver parks on its
     /// timer rather than busy-spinning.
@@ -239,6 +243,10 @@ mod unix {
     ///   (the ancillary data was truncated) — the recovered destination would be
     ///   unreliable, so the datagram is **dropped** rather than mapped onto a
     ///   less-specific (possibly unspecified) candidate (defect #3 / rule 37).
+    /// * [`io::ErrorKind::InvalidData`] if the kernel reported **no PKTINFO cmsg**
+    ///   on a **wildcard-bound** socket — the concrete local destination cannot be
+    ///   recovered, so the datagram is dropped rather than mapped onto the
+    ///   unspecified bind (the same silent-wildcard class as `MSG_CTRUNC`).
     /// * [`io::ErrorKind::InvalidData`] if the kernel reported no source address.
     pub(crate) fn recv_from_with_local(
         socket: &Socket,
@@ -316,7 +324,31 @@ mod unix {
             .as_socket()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "recvmsg: no source addr"))?;
 
-        let local = parse_pktinfo(&msg, local_addr).unwrap_or(local_addr);
+        // Recover the concrete local destination from PKTINFO. When the cmsg is
+        // ABSENT (the kernel did not honour `enable_pktinfo`, an unexpected cmsg
+        // layout, etc.) `parse_pktinfo` returns `None`. The fallback then depends
+        // on the bind:
+        //
+        // * **Wildcard bind** (`[::]` / `0.0.0.0`): there is no concrete local
+        //   address to fall back to. Returning the wildcard would have the
+        //   resolver substitute the first same-family gathered candidate — NOT the
+        //   kernel-confirmed destination — misrouting ICE on a multi-homed host.
+        //   So drop the datagram (a receive-side error), exactly as `MSG_CTRUNC`
+        //   does (defect #3 / rule 37): never silently map onto the unspecified
+        //   bind.
+        // * **Concrete bind**: the bound address already IS the destination, so no
+        //   PKTINFO is needed; fall back to it (the datagram is correctly routed).
+        let local = match parse_pktinfo(&msg, local_addr) {
+            Some(dest) => dest,
+            None if local_addr.ip().is_unspecified() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "recvmsg: no PKTINFO cmsg on a wildcard-bound socket \
+                     (cannot recover the concrete local destination)",
+                ));
+            }
+            None => local_addr,
+        };
         Ok((len, source, local))
     }
 
@@ -620,8 +652,7 @@ mod unix {
         #[test]
         fn absent_pktinfo_on_a_concrete_bind_still_succeeds_with_the_concrete_addr() {
             // Bind to the concrete v6 loopback (a non-unspecified local address).
-            let bind: SocketAddr =
-                SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0));
+            let bind: SocketAddr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0));
             let (recv, local) = bound_without_pktinfo(bind);
             assert!(
                 !local.ip().is_unspecified(),
@@ -643,8 +674,7 @@ mod unix {
             let (n, _src, arrival) = recv_from_with_local(&recv, &mut buf, local).unwrap();
             assert_eq!(&buf[..n], b"concrete-ok");
             assert_eq!(
-                arrival,
-                local,
+                arrival, local,
                 "a concrete bind is its own destination; absent PKTINFO must not \
                  drop it, got {arrival}"
             );
