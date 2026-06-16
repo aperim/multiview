@@ -36,3 +36,10 @@ control routes/web screens.
 Depth: [conspect-account-architecture](../../docs/research/conspect-account-architecture.md) (§2
 constants, §6 ladder, §8 fingerprint, §12 state machines) ·
 [ADR-0050](../../docs/decisions/ADR-0050.md) · [conventions](../../docs/architecture/conventions.md).
+
+**Before the heartbeat client (CONSPECT-3):** read [ADR-0096](../../docs/decisions/ADR-0096.md)
+first — the device licensing wire was finalized by Conspect API v0.6.1 (key-trust via the public
+`/.well-known/conspect-licensing-keys.json` ECDSA-P256-root → root-attested dual-pin Ed25519
+intermediates; lease = bare Ed25519 hex over standard-base64 `leaseBytes` = RFC 8949 §4.2.1
+deterministic CBOR; auth = account JWT Bearer today, device PoP deferred). Implement against it; do
+not guess or ship a stub (rule 6).
