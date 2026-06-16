@@ -129,6 +129,29 @@ mirrors `mesh-mdns`). The implementation makes these concrete decisions:
      `InstallError::Stale` (a fixed-future fake epoch masked the path); a lease with
      an absolute-past `not_after` now deterministically exercises
      `HeartbeatError::LeaseExpired`.
+8. **Install-genuineness + acceptance-time trust** (hardened after the **round-3**
+   rule-21 panel, which confirmed #1–#7 correct and found two deep fail-open paths).
+   Binding rules:
+   - **"Ok from `install()`" ≠ "installed":** `install()` returns an
+     `InstallOutcome::{Installed, StaleNoop}` rather than folding `Err(Stale) → Ok`.
+     The binding id is learned (`remember_binding_id`) **only on `Installed`** —
+     never on the stale no-op. Otherwise a crypto-valid-but-**stale FOREIGN** lease,
+     which the store correctly keeps-last-good (`Stale`), would still poison the
+     learned identity with the foreign binding without anything being installed.
+   - **The store IS the device identity:** a genuine install records the binding in
+     the store (`LeaseStore::record_binding_id`); the heartbeat anchor is
+     `established_binding = configured ?? learned ?? store.current_binding_id()`. So
+     a device that already holds a lease is **never "fresh"** — the cross-instance
+     guard rejects a foreign binding even on the activation path (the round-2 guard
+     was skipped when `established_binding == None`).
+   - **Trust is re-evaluated at lease-ACCEPTANCE with a fresh clock (no TOCTOU):**
+     the key-trust chain is verified again with a fresh `now()` immediately before
+     `verify_signed_lease_chain` accepts the returned lease (`HeartbeatClient` gains
+     a `NowMs` clock seam). A signer whose signed validity window elapses — or that
+     is revoked — **during** an arbitrarily-stalled network call no longer validates
+     the lease, because `verify_signed_lease_chain`/`lease_key` only check the
+     Ed25519 signature, not time-validity/revocation. The pre-network verify is a
+     fast-fail only; both reads go through the seam.
 
 New deps behind `heartbeat`: `p256`, `base64`, `hex` (all `MIT`/`Apache-2.0`, with
 the ECDSA closure resolving to `MIT`/`Apache-2.0`/`BSD-3-Clause`/`BSD-1-Clause`),
@@ -163,11 +186,13 @@ so none enter the scanned default graph.
 | Put the `reqwest` HTTP transport inside `multiview-licence` | Breaks the leaf crate's "no I/O, no socket" invariant (its CLAUDE.md) and would pull a TLS stack into a pure-data crate. The crypto/verify lives in the testable crate; the socket lives at the cli boundary behind the `LicenceServer` seam. |
 | Hard-code the free auto-issue default org id | The default `{orgId}` for a free self-host is an external-doc residual (ADR-0096 O4, not yet provided). A guessed value would be wrong; the org id is a clearly-named env-driven config field, off unless set. |
 | Mint the installed lease term from `system_now() + 35d` (ignoring the signed `not_after`) | Defeats the licensing crypto: a short-lived or **replayed older** still-Ed25519-valid lease would become a fresh 35-day entitlement (signed-expiry bypass / lease replay). The installed `expires_at` MUST be the signed `not_after`, and an already-expired signed lease is rejected. |
-| Trust any `root_sig`-attested intermediate as a lease signer (ignore `key_type`/`status`) | A root may attest keys for several purposes; accepting a non-lease (e.g. `update`) key — or a `retired` key — as a lease signer is a key-purpose bypass that the signed `key_type` field exists to prevent. Enforce `key_type == "lease"` ∧ `status ∈ {current,next}`. |
+| Trust any `root_sig`-attested intermediate as a lease signer (ignore `key_type`) | A root may attest keys for several purposes; accepting a non-lease (e.g. `update`) key as a lease signer is a key-purpose bypass that the signed `key_type` field exists to prevent. Enforce `key_type == "lease"` (signed) — and **only** signed fields for the rest (validity window, revocation), never the unsigned `status`. |
 | Default omitted/empty `instance_binding_id`/`serial` to `""` (`unwrap_or_default`) | A signed-but-malformed body would install with an empty id and mis-bind enforcement/renewals. Required identity fields fail closed. |
 | Trust a lease for any binding (no install-time identity check) + stamp `FINGERPRINT_MATCH_STRONG` | Cross-instance replay: a valid Conspect-signed lease minted for another device installs onto this one, and the hardcoded strong stamp bypasses the store's fingerprint gate. Anchor install to the established binding + stamp the real fingerprint score. |
 | Use the well-known `status` field to gate lease-signer trust | `status` is NOT in the root-signed pre-image, so a MITM can flip a retired key to `current` without breaking `root_sig`. Only signed fields (`key_type`, validity window, revocation list) may gate trust; `status` is an operational hint. |
-| Learn `instanceBindingId` before/independently of a successful install | Reject-path identity poisoning: a rejected (expired/foreign) lease would still mutate the learned binding, redirecting the next renewal to the attacker's binding. Learn only after `install()` returns `Ok`. |
+| Treat any `Ok` from `install()` (incl. the `Stale → Ok` fold) as "installed" and learn the binding | Reject/stale identity poisoning: a crypto-valid-but-**stale FOREIGN** lease that the store keeps-last-good (`Stale`) would still poison the learned binding with the foreign id, with nothing installed. `install()` returns `Installed` vs `StaleNoop`; learn only on `Installed`. |
+| Anchor the cross-instance guard to the heartbeat-learned binding only (skip it when `established_binding == None`) | A device with a pre-existing local store lease but no learned/configured heartbeat binding takes the activate path and the guard is skipped — a foreign lease installs. Fold the store's current lease binding into the anchor (`store.current_binding_id()`), recorded on every genuine install. |
+| Evaluate signer time-validity / revocation only once, with the pre-network timestamp | Key-trust TOCTOU: a signer whose signed `valid_until` elapses (or that is revoked) **during** an arbitrarily-stalled network call still validates the returned lease, because the frozen `trusted` set is reused and `verify_signed_lease_chain` checks only the Ed25519 signature. Re-evaluate trust with a fresh `now()` at lease-acceptance. |
 
 ## Consequences
 
