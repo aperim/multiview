@@ -370,10 +370,18 @@ impl LeaseStore {
         pinned: &PinnedKey,
         now: DateTime<Utc>,
     ) -> Result<Lease, InstallError> {
-        // 1. Verify the Ed25519 signature against the pinned key. A malformed
-        //    signature/key is the same rejection class as a bad signature.
-        let verified = verify_signed_lease(&binding.signed, pinned)
-            .map_err(|_| InstallError::SignatureInvalid)?;
+        // 1. Verify the Ed25519 signature against the pinned key, BOUND to the
+        //    binding's `instance_binding_id`. The signature covers the binding id
+        //    (a presence tag + length-prefixed bytes), so a grafted/tampered or
+        //    absent-vs-present binding id fails here — the device identity anchor
+        //    recorded below therefore always rests on signed material, on every
+        //    install path. A malformed signature/key is the same rejection class.
+        let verified = verify_signed_lease(
+            &binding.signed,
+            pinned,
+            binding.instance_binding_id.as_deref(),
+        )
+        .map_err(|_| InstallError::SignatureInvalid)?;
 
         // The verified lease and the entitlement's lease must be the same grant —
         // a binding that signs lease A but carries entitlement-for-lease-B is a

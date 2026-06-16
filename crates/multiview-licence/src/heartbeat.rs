@@ -1543,7 +1543,9 @@ fn seal_for_install(
     // It is NOT an identity key and grants no authority.
     let envelope_signer = SigningKey::from_bytes(&INSTALL_ENVELOPE_SEED);
     let pinned = PinnedKey::from_verifying_key(&envelope_signer.verifying_key());
-    let msg = SignedLease::signing_bytes(&entitlement.lease);
+    // Sign over the lease BOUND to the binding id, so the store's re-verification
+    // covers the anchor the binding carries (a grafted id would not verify).
+    let msg = SignedLease::signing_bytes(&entitlement.lease, Some(instance_binding_id));
     let sig = envelope_signer.sign(&msg);
     let signed_lease = SignedLease::new(entitlement.lease.clone(), sig.to_bytes());
     // The device's ACTUAL local fingerprint score — NOT an unconditional STRONG.

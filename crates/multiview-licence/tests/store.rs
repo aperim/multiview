@@ -48,7 +48,9 @@ fn lease_at(serial: &str, granted: DateTime<Utc>) -> Lease {
 }
 
 fn sign(key: &SigningKey, lease: &Lease) -> SignedLease {
-    let msg = SignedLease::signing_bytes(lease);
+    // These fixtures build bindings with no instance_binding_id (None), so sign
+    // over the lease bound to None — the binding-anchor signature contract.
+    let msg = SignedLease::signing_bytes(lease, None);
     let sig = key.sign(&msg);
     SignedLease::new(lease.clone(), sig.to_bytes())
 }

@@ -58,7 +58,7 @@ fn binding(key: &SigningKey, serial: &str, granted: DateTime<Utc>, score: u8) ->
         LeaseSource::Online,
         ACTIVATION_WINDOW_DAYS,
     );
-    let sig = key.sign(&SignedLease::signing_bytes(&lease));
+    let sig = key.sign(&SignedLease::signing_bytes(&lease, None));
     LeaseBinding::new(
         SignedLease::new(lease.clone(), sig.to_bytes()),
         Entitlement::new(

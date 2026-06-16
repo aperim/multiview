@@ -836,7 +836,9 @@ pub fn upload_binding_for(
     // store verifies the binding against the pinned key handed alongside it.)
     let envelope_signer = SigningKey::from_bytes(&[0x6d; 32]);
     let pinned = PinnedKey::from_verifying_key(&envelope_signer.verifying_key());
-    let msg = SignedLease::signing_bytes(&entitlement.lease);
+    // Sign over the lease BOUND to the binding id this binding carries, so the
+    // store's signature check covers the anchor (matches seal_for_install).
+    let msg = SignedLease::signing_bytes(&entitlement.lease, Some(instance_binding_id));
     let sig = envelope_signer.sign(&msg);
     let signed_lease = SignedLease::new(entitlement.lease.clone(), sig.to_bytes());
     let binding = LeaseBinding::new(
