@@ -69,7 +69,10 @@ fn live_wellknown_intermediates_verify_against_the_pinned_root() {
     let keys: LicensingKeys = serde_json::from_str(LIVE_KEYS_JSON).expect("well-known parses");
     let trusted = TrustedKeys::verify(&keys, &pinned_root(), NOW_MS_VALID)
         .expect("the production keyset must verify against the pinned root");
-    assert!(trusted.lease_key(IV1_KID).is_some(), "current intermediate trusted");
+    assert!(
+        trusted.lease_key(IV1_KID).is_some(),
+        "current intermediate trusted"
+    );
     assert!(
         trusted.lease_key(IV2_KID).is_some(),
         "next (dual-pin) intermediate trusted"
@@ -84,7 +87,10 @@ fn an_intermediate_not_attested_by_the_root_is_rejected() {
     keys.lease_keys[0].public_key = "ht_UXIIuzGj5Tk2NQr0fg9NlkYab_eKUVtWlNlMLERg".to_owned();
     let err = TrustedKeys::verify(&keys, &pinned_root(), NOW_MS_VALID)
         .expect_err("a non-root-attested intermediate must be rejected");
-    assert!(matches!(err, KeyTrustError::IntermediateNotAttested { .. }), "got {err:?}");
+    assert!(
+        matches!(err, KeyTrustError::IntermediateNotAttested { .. }),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -104,20 +110,30 @@ fn a_forged_revocation_signature_is_rejected() {
     keys.revocation.root_revocation_sig = keys.lease_keys[0].root_sig.clone();
     let err = TrustedKeys::verify(&keys, &pinned_root(), NOW_MS_VALID)
         .expect_err("a forged revocation signature must be rejected (fail closed)");
-    assert!(matches!(err, KeyTrustError::RevocationNotAttested), "got {err:?}");
+    assert!(
+        matches!(err, KeyTrustError::RevocationNotAttested),
+        "got {err:?}"
+    );
 }
 
 #[test]
 fn a_wrong_pinned_root_rejects_the_whole_keyset() {
     let keys: LicensingKeys = serde_json::from_str(LIVE_KEYS_JSON).unwrap();
     // A different (fabricated) root cannot have signed the production attestations.
+    // The verifier rejects up front with `RootMismatch` (the advertised root in the
+    // document does not byte-match the pinned anchor) — a substituted well-known
+    // document is caught before any signature is even checked. A keyset that
+    // *omitted* the advertised root would instead fail at attestation; either way
+    // the foreign-root keyset is rejected, which is the property under test.
     let kit = FabricatedKeyset::new();
     let err = TrustedKeys::verify(&keys, &kit.pinned_root(), NOW_MS_VALID)
         .expect_err("the live keyset must not verify under a foreign root");
     assert!(
         matches!(
             err,
-            KeyTrustError::IntermediateNotAttested { .. } | KeyTrustError::RevocationNotAttested
+            KeyTrustError::RootMismatch
+                | KeyTrustError::IntermediateNotAttested { .. }
+                | KeyTrustError::RevocationNotAttested
         ),
         "got {err:?}"
     );
@@ -200,7 +216,10 @@ fn a_lease_signed_by_an_unknown_signer_key_id_is_rejected() {
     lease.signer_key_id = "intermediate-ghost".to_owned();
     let err = verify_signed_lease_chain(&lease, &trusted)
         .expect_err("an unknown signerKeyId must be rejected");
-    assert!(matches!(err, SignedLeaseError::UnknownSigner { .. }), "got {err:?}");
+    assert!(
+        matches!(err, SignedLeaseError::UnknownSigner { .. }),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -211,5 +230,8 @@ fn a_lease_with_a_non_hex_signature_is_rejected_not_panicked() {
     lease.signature = "not-hex-zz".to_owned();
     let err = verify_signed_lease_chain(&lease, &trusted)
         .expect_err("a malformed signature must be a typed error, never a panic");
-    assert!(matches!(err, SignedLeaseError::MalformedSignature), "got {err:?}");
+    assert!(
+        matches!(err, SignedLeaseError::MalformedSignature),
+        "got {err:?}"
+    );
 }

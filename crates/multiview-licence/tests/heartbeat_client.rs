@@ -133,7 +133,10 @@ async fn withholding_the_lease_keeps_last_good_never_tightens() {
         .unwrap()
         .unwrap();
     let installed_serial = store.current().unwrap().lease.serial;
-    assert_eq!(store.status().unwrap().enforcement, EnforcementLevel::Active);
+    assert_eq!(
+        store.status().unwrap().enforcement,
+        EnforcementLevel::Active
+    );
 
     // Now the entitlement is "revoked" server-side: heartbeat returns lease:null
     // (revocation by non-reissue). The client must NOT tighten — the last-good
@@ -144,7 +147,9 @@ async fn withholding_the_lease_keeps_last_good_never_tightens() {
         .unwrap()
         .expect("a withheld lease is a normal 200, not an error");
     assert!(matches!(outcome, HeartbeatOutcome::LeaseWithheld { .. }));
-    let after = store.current().expect("last-good lease must remain installed");
+    let after = store
+        .current()
+        .expect("last-good lease must remain installed");
     assert_eq!(
         after.lease.serial, installed_serial,
         "the last-good lease is unchanged — revocation never installs a worse state"
@@ -171,7 +176,10 @@ async fn an_unreachable_server_keeps_last_good() {
     let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
         .await
         .expect("run_once must not hang even when the server is down");
-    assert!(res.is_err(), "an unreachable server surfaces a transport error");
+    assert!(
+        res.is_err(),
+        "an unreachable server surfaces a transport error"
+    );
     assert_eq!(
         store.current().unwrap().lease.serial,
         serial,
@@ -191,8 +199,14 @@ async fn the_heartbeat_request_carries_no_raw_identifier() {
     // The salted digest IS present; a raw MAC/serial pattern is NOT.
     assert!(json.contains(&identity.fingerprint_digest));
     // No colon-separated MAC, no "serial"/"macAddress"/"uuid" raw fields.
-    assert!(!json.to_lowercase().contains("macaddress"), "no raw MAC field: {json}");
-    assert!(!json.to_lowercase().contains("serialnumber"), "no raw serial field: {json}");
+    assert!(
+        !json.to_lowercase().contains("macaddress"),
+        "no raw MAC field: {json}"
+    );
+    assert!(
+        !json.to_lowercase().contains("serialnumber"),
+        "no raw serial field: {json}"
+    );
     // The fingerprint digest is the salted hex, not a raw 48-bit MAC.
     assert!(
         !json.contains("\"00:1b:"),
@@ -203,8 +217,14 @@ async fn the_heartbeat_request_carries_no_raw_identifier() {
     let keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
     for k in &keys {
         assert!(
-            ["bindingId", "leaseSerial", "fingerprintDigest", "appVersion", "transport"]
-                .contains(&k.as_str()),
+            [
+                "bindingId",
+                "leaseSerial",
+                "fingerprintDigest",
+                "appVersion",
+                "transport"
+            ]
+            .contains(&k.as_str()),
             "unexpected heartbeat payload field {k:?} (data minimisation)"
         );
     }

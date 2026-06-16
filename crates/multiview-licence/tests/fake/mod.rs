@@ -6,13 +6,19 @@
 //! This is `tests/fake/mod.rs` (a submodule, not a top-level `tests/*.rs`) so it
 //! is shared by the integration tests without being compiled as its own test
 //! binary.
+// A shared test-helper module included by multiple integration-test crates; not
+// every crate exercises every helper, so `dead_code` / `unreachable_pub` are
+// expected and silenced here (test-only scaffolding, never product code).
 #![allow(
     dead_code,
+    unreachable_pub,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
     clippy::as_conversions,
+    clippy::cast_possible_wrap,
+    clippy::unused_self,
     clippy::missing_panics_doc
 )]
 
@@ -21,7 +27,10 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey as EdKey};
-use p256::ecdsa::{signature::Signer as _, Signature as P256Sig, SigningKey as P256Key};
+// `p256::ecdsa::SigningKey::sign` is provided by the inherent `Signer` impl that
+// `ecdsa` brings into scope through the type itself (no separate trait import is
+// needed in p256 0.13); `Signature` is `P256Sig`.
+use p256::ecdsa::{Signature as P256Sig, SigningKey as P256Key};
 
 use multiview_licence::heartbeat::{
     canonical_key_preimage, canonical_revocation_preimage, ActivateRequest, ActivateResponse,
@@ -112,8 +121,11 @@ impl FabricatedKeyset {
             &revoked_owned,
         );
         let rev_sig = self.root_sign(&rev_pre);
-        let root_pub = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(p256::ecdsa::VerifyingKey::from(&self.root).to_encoded_point(false).as_bytes());
+        let root_pub = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            p256::ecdsa::VerifyingKey::from(&self.root)
+                .to_encoded_point(false)
+                .as_bytes(),
+        );
 
         let json = serde_json::json!({
             "version": 1,
@@ -248,10 +260,10 @@ impl LicenceServer for FakeLicenceServer {
         if self.fail.load(Ordering::SeqCst) {
             return Err(HeartbeatError::Transport("fake offline".to_owned()));
         }
-        Ok(ActivateResponse {
-            lease: Some(self.kit.sign_lease(35)),
-            enforcement_state: EnforcementState::Compliant,
-        })
+        Ok(ActivateResponse::new(
+            Some(self.kit.sign_lease(35)),
+            EnforcementState::Compliant,
+        ))
     }
 
     async fn heartbeat(
@@ -269,11 +281,11 @@ impl LicenceServer for FakeLicenceServer {
         } else {
             (Some(self.kit.sign_lease(35)), EnforcementState::Compliant)
         };
-        Ok(HeartbeatResponse {
+        Ok(HeartbeatResponse::new(
             lease,
-            enforcement_state: state,
-            next_due: self.next_due_ms.load(Ordering::SeqCst) as i64,
-        })
+            state,
+            self.next_due_ms.load(Ordering::SeqCst) as i64,
+        ))
     }
 }
 
