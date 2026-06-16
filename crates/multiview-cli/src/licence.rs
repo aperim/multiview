@@ -576,14 +576,25 @@ fn non_empty_env(key: &str) -> Option<String> {
 ///
 /// `load` reads the persisted high-water counter and **fails closed**: an ABSENT
 /// file is `Ok(0)` (a fresh device legitimately starts at 0), but a PRESENT file
-/// that is corrupt/unparseable or unreadable for any other reason returns an
-/// `Err` — never a silent 0 that would reset the high-water and re-mint a colliding
-/// key after a restart. `commit` writes the new high-water via
-/// write-temp-then-rename (so a torn write cannot leave a truncated value) and
-/// **propagates** a write OR rename failure as an `Err` — an un-persisted key must
+/// that is corrupt/unparseable, reads the literal `0` (which a healthy `commit`
+/// never writes — the mint is always `>= 1` — so a present 0 is truncation/tamper),
+/// or is unreadable for any other reason returns an `Err` — never a silent 0 that
+/// would reset the high-water and re-mint a colliding key after a restart. `commit`
+/// persists the new high-water with the **crash-durable** write-temp → fsync-temp →
+/// rename → fsync-parent-dir protocol (so the value survives a power loss right
+/// after `commit` returns, not just a torn write) and **propagates** every step's
+/// failure (write, the two fsyncs, rename) as an `Err` — an un-persisted key must
 /// block the mutation, not continue best-effort. The heartbeat client gates the
 /// mint on these, so a nonce-store failure keeps last-good (never off air, never a
 /// colliding-key mutation).
+///
+/// **Operational assumption (the flock is advisory):** the interprocess
+/// cross-process uniqueness guarantee holds only for **cooperating owners that all
+/// use this `FileNonceStore`** on a **local filesystem with working `flock`
+/// semantics**. It does NOT defend against a process reaching the same lease-state
+/// dir through a different code path, nor against network/overlay filesystems
+/// (NFS/overlayfs) where advisory locks may be unreliable — those configurations
+/// are out of scope for the nonce guard.
 #[cfg(feature = "heartbeat")]
 struct FileNonceStore {
     path: std::path::PathBuf,
@@ -657,12 +668,28 @@ impl multiview_licence::heartbeat::NonceStore for FileNonceStore {
             // A PRESENT value that does not parse is NOT trustworthy — fail closed
             // (never a silent 0 that resets the high-water and re-mints a colliding
             // key after a restart).
-            Ok(s) => s.trim().parse::<u64>().map_err(|_| {
-                NonceError::new(format!(
-                    "idempotency nonce file {} is present but unparseable",
-                    self.path.display()
-                ))
-            }),
+            Ok(s) => {
+                let value = s.trim().parse::<u64>().map_err(|_| {
+                    NonceError::new(format!(
+                        "idempotency nonce file {} is present but unparseable",
+                        self.path.display()
+                    ))
+                })?;
+                // `commit` only ever persists a value >= 1 (the mint is
+                // `max(durable).saturating_add(1)`), so a PRESENT 0 is impossible
+                // from a healthy write — it can only be truncation / a partial write
+                // / tampering. Reject it (fail closed); trusting it would reset the
+                // high-water and re-mint a colliding key after a restart. Only an
+                // ABSENT file (the NotFound arm below) is the trusted-zero fresh start.
+                if value == 0 {
+                    return Err(NonceError::new(format!(
+                        "idempotency nonce file {} is present but reads 0 (commit never \
+                         writes 0 — truncation/partial-write/tamper); refusing to trust it",
+                        self.path.display()
+                    )));
+                }
+                Ok(value)
+            }
             // Absent on a fresh device (the common case) — a trusted start at 0.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
             // Present-but-unreadable (permissions, I/O error) is untrustworthy too.
@@ -674,22 +701,66 @@ impl multiview_licence::heartbeat::NonceStore for FileNonceStore {
     }
 
     fn commit(&self, value: u64) -> Result<(), multiview_licence::heartbeat::NonceError> {
+        use std::io::Write as _;
+
         use multiview_licence::heartbeat::NonceError;
-        // Write-temp-then-rename for atomicity: a crash mid-write leaves either the
-        // old value or the new one, never a truncated counter. BOTH steps fail
-        // closed — an un-persisted high-water must block the mutation (the caller
-        // refuses to send a possibly-colliding key), never continue best-effort.
+        // CRASH-DURABLE atomic write (write-temp → fsync temp → rename → fsync dir):
+        // a crash leaves either the old value or the new one, never a truncated
+        // counter, AND the persisted high-water survives a power loss right after
+        // `commit` returns — so the next process never re-mints a colliding key.
+        // EVERY step fails closed (the caller's gated mint refuses to send a
+        // possibly-colliding mutation), never best-effort. No unwrap/panic.
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, value.to_string()).map_err(|e| {
+        // 1. Write the new value to the temp file.
+        let mut file = std::fs::File::create(&tmp).map_err(|e| {
             NonceError::new(format!(
-                "could not persist the idempotency nonce to {}: {e}",
+                "could not create the idempotency nonce temp {}: {e}",
                 tmp.display()
             ))
         })?;
+        file.write_all(value.to_string().as_bytes()).map_err(|e| {
+            NonceError::new(format!(
+                "could not write the idempotency nonce to {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        // 2. fsync the TEMP file BEFORE the rename, so its data is on stable storage
+        //    before it becomes the live file (a rename of un-fsync'd data can roll
+        //    back the contents after a power loss).
+        file.sync_all().map_err(|e| {
+            NonceError::new(format!(
+                "could not fsync the idempotency nonce temp {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        drop(file);
+        // 3. Atomically replace the live file.
         std::fs::rename(&tmp, &self.path).map_err(|e| {
             NonceError::new(format!(
                 "could not finalise the idempotency nonce file {}: {e}",
                 self.path.display()
+            ))
+        })?;
+        // 4. fsync the PARENT DIRECTORY so the rename's directory entry is itself
+        //    durable (otherwise a power loss can lose the entry and the file reverts
+        //    to the old name/contents). Opening a directory read-only and calling
+        //    `sync_all` is the portable way to fsync it on Linux/macOS.
+        let parent = self.path.parent().ok_or_else(|| {
+            NonceError::new(format!(
+                "idempotency nonce path {} has no parent directory to fsync",
+                self.path.display()
+            ))
+        })?;
+        let dir = std::fs::File::open(parent).map_err(|e| {
+            NonceError::new(format!(
+                "could not open the lease-state dir {} to fsync: {e}",
+                parent.display()
+            ))
+        })?;
+        dir.sync_all().map_err(|e| {
+            NonceError::new(format!(
+                "could not fsync the lease-state dir {}: {e}",
+                parent.display()
             ))
         })?;
         Ok(())
