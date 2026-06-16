@@ -77,6 +77,25 @@ struct DrainOutcome {
     budget_exhausted: bool,
 }
 
+/// Diagnostic counters for the driver loop's invariant-#10 handoff, recorded
+/// unconditionally (two relaxed adds, only when each event fires) so a soak test
+/// can assert the **ordering** guarantee the round-2 BLOCKER turned on: every
+/// exhausted receive budget is followed by a deterministic servicing pump
+/// **before** the next datagram is read. Production calls
+/// [`UnifiedEndpoint::run`], which threads a throwaway probe; only tests inspect
+/// the counts.
+#[derive(Debug, Default)]
+#[doc(hidden)]
+struct RunProbe {
+    /// Times an inbound drain stopped on its per-wake budget (still-readable
+    /// socket) rather than `WouldBlock`.
+    recv_budgets_exhausted: std::sync::atomic::AtomicU64,
+    /// Times the driver ran a full servicing pump (commands + timers + outbound
+    /// + GC) — once per idle tick, and once per exhausted receive budget as the
+    /// bounded handoff.
+    driver_services: std::sync::atomic::AtomicU64,
+}
+
 /// The single-socket WebRTC endpoint: ONE bound dual-stack UDP socket and ONE
 /// TURN relay driver, shared by every WebRTC role (ADR-0048 §4).
 ///
@@ -257,12 +276,23 @@ impl UnifiedEndpoint {
     /// # Errors
     ///
     /// [`WebRtcError::Socket`] if converting the bound socket to async fails.
+    pub async fn run(self, stop: Arc<AtomicBool>) -> Result<()> {
+        self.run_inner(stop, &RunProbe::default()).await
+    }
+
+    /// The driver loop, threading a [`RunProbe`] so a soak test can assert the
+    /// invariant-#10 ordering guarantee (servicing keeps pace with receive
+    /// budgets). [`run`](Self::run) calls this with a throwaway probe.
+    ///
+    /// # Errors
+    ///
+    /// [`WebRtcError::Socket`] if converting the bound socket to async fails.
     #[allow(
         clippy::too_many_lines,
         reason = "one select! loop owning the single socket per ADR-0048 §4 — \
                   splitting the arms would re-introduce per-role drivers"
     )]
-    pub async fn run(self, stop: Arc<AtomicBool>) -> Result<()> {
+    async fn run_inner(self, stop: Arc<AtomicBool>, probe: &RunProbe) -> Result<()> {
         let bind_addr = self.endpoint.config().bind_addr();
         let local_addr = self.endpoint.local_addr()?;
         // The concrete candidates an inbound datagram's local destination may be
@@ -313,20 +343,31 @@ impl UnifiedEndpoint {
                 return Ok(());
             }
 
-            // Recv is the only awaited source besides the tick; commands are
-            // drained non-blocking each pass so one closed channel never wedges the
-            // others (each role lane is independent on the one socket).
+            // `biased`: poll the tick arm before the receive arm so a permanently
+            // ready socket can never crowd the idle tick out of the schedule. The
+            // receive arm additionally performs an explicit bounded handoff after
+            // an exhausted budget (below), so servicing does not depend on this
+            // bias alone — but biasing keeps the steady-state tick cadence tight
+            // even mid-flood (invariant #10).
             tokio::select! {
+                _ = tick.tick() => {
+                    let now = Instant::now();
+                    Self::service_timers_and_gc(
+                        &socket, &mut turn,
+                        &mut ingest, &mut serve, preview.as_ref(), &mut push,
+                        local_addr, now, probe,
+                    ).await;
+                }
                 ready = socket.readable() => {
                     let now = Instant::now();
-                    if ready.is_ok() {
+                    let outcome = if ready.is_ok() {
                         // Drain at most one wake's BUDGET of datagrams (count +
-                        // time), then break to pump/yield — never an unbounded
-                        // drain that a sustained/hostile flood could ride forever
-                        // and starve the rest of the loop (invariant #10, MAJOR
-                        // #1). Each read recovers the CONCRETE local destination
-                        // via PKTINFO and resolves it onto a gathered candidate so
-                        // str0m's STUN matching accepts the check (defect #3).
+                        // time), then break to hand off — never an unbounded drain
+                        // a sustained/hostile flood could ride forever and starve
+                        // the rest of the loop (invariant #10, MAJOR #1). Each read
+                        // recovers the CONCRETE local destination via PKTINFO and
+                        // resolves it onto a gathered candidate so str0m's STUN
+                        // matching accepts the check (defect #3).
                         Self::drain_inbound_budgeted(
                             &socket, &mut buf, local_addr, &concrete_candidates,
                             |src, dst, payload| {
@@ -342,45 +383,69 @@ impl UnifiedEndpoint {
                                     now,
                                 );
                             },
-                        );
-                        // If the budget cut the drain short the socket may still
-                        // hold data; we do NOT loop here — we pump first, then fall
-                        // through to the top of the `select!`, whose `readable()`
-                        // arm re-fires at once (readiness is still set) while the
-                        // tick arm + stop check interleave. The flood gets bounded
-                        // work per wake; the rest of the driver always runs.
+                        )
+                    } else {
+                        DrainOutcome { read_count: 0, budget_exhausted: false }
+                    };
+
+                    if outcome.budget_exhausted {
+                        probe
+                            .recv_budgets_exhausted
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     Self::pump_all(
                         &socket, &mut turn,
                         ingest.as_mut(), serve.as_mut(), preview.as_ref(), &mut push,
                         local_addr, now,
                     ).await;
-                }
-                _ = tick.tick() => {
-                    let now = Instant::now();
-                    // Drain pending register/release commands for each lane.
-                    Self::drain_commands(ingest.as_mut(), serve.as_mut());
-                    // Advance each role's timers / feeds.
-                    if let Some(lane) = ingest.as_mut() {
-                        WhipEndpoint::tick(&mut lane.sessions, now);
-                    }
-                    if let Some(lane) = serve.as_mut() {
-                        WhepServeEndpoint::tick(&mut lane.viewers, &lane.shared, now);
-                    }
-                    Self::pump_all(
-                        &socket, &mut turn,
-                        ingest.as_mut(), serve.as_mut(), preview.as_ref(), &mut push,
-                        local_addr, now,
-                    ).await;
-                    // GC dead sessions per lane.
-                    if let Some(lane) = ingest.as_mut() {
-                        WhipEndpoint::reap(&mut lane.sessions, &lane.shared);
-                    }
-                    if let Some(lane) = serve.as_mut() {
-                        WhepServeEndpoint::reap(&mut lane.viewers, &lane.shared);
-                    }
                 }
             }
+        }
+    }
+
+    /// One full servicing pass: drain each lane's register/release commands,
+    /// advance every role's ICE/DTLS timers + feeds, pump outbound onto the one
+    /// socket, then GC dead sessions. Run once per idle tick **and** once per
+    /// exhausted receive budget (the invariant-#10 bounded handoff), so a
+    /// permanent inbound flood can never defer command/timer/GC servicing past
+    /// one receive budget.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the single servicing pass drives every role on one socket"
+    )]
+    async fn service_timers_and_gc(
+        socket: &tokio::net::UdpSocket,
+        turn: &mut TurnRelayDriver,
+        ingest: &mut Option<IngestLane>,
+        serve: &mut Option<ServeLane>,
+        preview: Option<&Arc<crate::whep_egress::WhepEgress>>,
+        push: &mut [PushLane],
+        local_addr: SocketAddr,
+        now: Instant,
+        probe: &RunProbe,
+    ) {
+        probe.driver_services.fetch_add(1, Ordering::Relaxed);
+        // Drain pending register/release commands for each lane.
+        Self::drain_commands(ingest.as_mut(), serve.as_mut());
+        // Advance each role's timers / feeds.
+        if let Some(lane) = ingest.as_mut() {
+            WhipEndpoint::tick(&mut lane.sessions, now);
+        }
+        if let Some(lane) = serve.as_mut() {
+            WhepServeEndpoint::tick(&mut lane.viewers, &lane.shared, now);
+        }
+        Self::pump_all(
+            socket, turn,
+            ingest.as_mut(), serve.as_mut(), preview, push,
+            local_addr, now,
+        )
+        .await;
+        // GC dead sessions per lane.
+        if let Some(lane) = ingest.as_mut() {
+            WhipEndpoint::reap(&mut lane.sessions, &lane.shared);
+        }
+        if let Some(lane) = serve.as_mut() {
+            WhepServeEndpoint::reap(&mut lane.viewers, &lane.shared);
         }
     }
 
@@ -412,10 +477,7 @@ impl UnifiedEndpoint {
     /// datagram never halts the drain of good ones.
     ///
     /// [`DrainOutcome::budget_exhausted`] tells the caller the socket may still
-    /// have data: the driver loops back so the next `select!` re-arms immediately
-    /// (a `readable` socket re-fires at once), but only **after** yielding to the
-    /// runtime + pumping, so timers/commands/GC/stop always get serviced between
-    /// budgets — the flood can never wedge the driver.
+    /// have data; the caller decides how to re-arm the `select!`.
     ///
     /// [`recv_from_with_local`]: crate::transport::local_addr::recv_from_with_local
     fn drain_inbound_budgeted(
@@ -602,6 +664,104 @@ impl UnifiedEndpoint {
 mod tests {
     use super::*;
     use std::net::{Ipv6Addr, SocketAddrV6, UdpSocket};
+
+    /// Invariant #10 / round-2 BLOCKER: under a **permanent** inbound flood the
+    /// driver's servicing pass (commands + timers + outbound + GC) must keep pace
+    /// with the receive budget — every exhausted budget is followed by a
+    /// deterministic servicing pass **before** the next datagram is read, not by
+    /// probabilistic `select!` fairness.
+    ///
+    /// The discriminating assertion is an **ordering** one, not a timing one
+    /// (timing cannot tell a starved loop from a lucky scheduler): after the
+    /// driver has run under a saturating flood, the number of servicing passes
+    /// must be at least the number of exhausted receive budgets. The round-1 loop
+    /// (drain as a bare statement, unbiased `select!`, no `yield_now`) serviced
+    /// only when the tick arm happened to win, so `driver_services` lagged far
+    /// behind `recv_budgets_exhausted`; the bounded-handoff fix services once per
+    /// exhausted budget, so it keeps pace. A real OS-thread flooder keeps the
+    /// socket permanently readable; a `tokio::time::timeout` bounds the run so a
+    /// regression that wedges fails deterministically rather than hanging.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn servicing_keeps_pace_with_the_receive_budget_under_flood() {
+        use std::sync::atomic::AtomicBool;
+
+        let cfg = crate::config::EndpointConfig {
+            udp_port: 0,
+            advertised_addresses: vec!["::1".parse().expect("v6 literal")],
+            ..crate::config::EndpointConfig::default()
+        };
+        let builder = UnifiedEndpoint::bind(cfg).expect("the single shared socket binds once");
+        let bound = builder.local_addr().expect("a bound local addr");
+        let (builder, _whip) = builder.with_ingest();
+        let endpoint = builder.build();
+
+        let probe = Arc::new(RunProbe::default());
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Saturating flood from a dedicated OS thread (not a tokio worker) so the
+        // driver's `socket.readable()` is effectively always ready.
+        let flood_stop = Arc::new(AtomicBool::new(false));
+        let flooder = {
+            let flood_stop = Arc::clone(&flood_stop);
+            std::thread::spawn(move || {
+                let s = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::LOCALHOST,
+                    0,
+                    0,
+                    0,
+                )))
+                .expect("flooder binds a v6 loopback");
+                let target =
+                    SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, bound.port(), 0, 0));
+                let junk = [0u8; 64];
+                while !flood_stop.load(Ordering::Relaxed) {
+                    for _ in 0..1024 {
+                        let _ = s.send_to(&junk, target);
+                    }
+                }
+            })
+        };
+
+        // Run the driver under the flood for a bounded window.
+        let driver = {
+            let probe = Arc::clone(&probe);
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move { endpoint.run_inner(stop, &probe).await })
+        };
+
+        // Let the driver service many receive budgets while flooded.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        stop.store(true, Ordering::Release);
+        flood_stop.store(true, Ordering::Relaxed);
+        let stopped = tokio::time::timeout(Duration::from_secs(5), driver).await;
+        let _ = flooder.join();
+
+        let exhausted = probe.recv_budgets_exhausted.load(Ordering::Relaxed);
+        let services = probe.driver_services.load(Ordering::Relaxed);
+
+        // The flood must actually have exhausted budgets (else the test proves
+        // nothing); a saturating loopback flood trips many in 400ms.
+        assert!(
+            exhausted > 0,
+            "the flood must exhaust at least one receive budget (got {exhausted}); \
+             the flood was not saturating"
+        );
+        // The discriminating invariant: servicing keeps pace with the receive
+        // budget. Each exhausted budget hands off to exactly one servicing pass
+        // (plus the idle-tick passes), so services >= exhausted. A starved loop
+        // (round-1) leaves services far below exhausted.
+        assert!(
+            services >= exhausted,
+            "servicing must keep pace with the receive budget under flood: \
+             {services} services < {exhausted} exhausted budgets — the rest of \
+             the driver was starved (invariant #10 BLOCKER)"
+        );
+        assert!(
+            matches!(stopped, Ok(Ok(Ok(())))),
+            "the driver must honour stop within the bound under flood, got {stopped:?}"
+        );
+    }
 
     /// Invariant #10 / MAJOR #1: a flood of inbound datagrams CANNOT keep the
     /// driver in the inbound drain indefinitely. One `drain_inbound_budgeted` wake

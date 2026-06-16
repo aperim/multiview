@@ -439,6 +439,24 @@ mod unix {
             (sock, local)
         }
 
+        /// Bind a UDP socket to `bind` **without** enabling PKTINFO, so the kernel
+        /// attaches no `IP*_PKTINFO` cmsg and `parse_pktinfo` returns `None` — the
+        /// "kernel did not honour the sockopt" / absent-cmsg case (finding: absent
+        /// PKTINFO must not silently map onto the wildcard bind).
+        fn bound_without_pktinfo(bind: SocketAddr) -> (Socket, SocketAddr) {
+            let sock = Socket::new(
+                socket2::Domain::IPV6,
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )
+            .unwrap();
+            sock.set_only_v6(false).unwrap();
+            sock.bind(&bind.into()).unwrap();
+            // Deliberately NOT calling enable_pktinfo.
+            let local = sock.local_addr().unwrap().as_socket().unwrap();
+            (sock, local)
+        }
+
         /// recvmsg round-trip: a datagram sent to the v6 loopback recovers the
         /// **concrete** IPv6 loopback as the local destination, not the
         /// unspecified bind addr (defect #3 parser coverage, finding #4).
@@ -478,23 +496,24 @@ mod unix {
         /// recvmsg round-trip over the v4-mapped path: a datagram sent to the
         /// dual-stack socket's IPv4 loopback recovers a **concrete un-mapped
         /// IPv4** destination (the `to_ipv4_mapped` un-map path, finding #4).
+        ///
+        /// The v4-loopback bind/send are HARD failures (round-2 MAJOR): a soft
+        /// `return` here let the suite pass green WITHOUT ever exercising the
+        /// `unsafe` v4-mapped un-map parser path the spec requires. IPv4 loopback
+        /// (`127.0.0.1`) is guaranteed on every supported deploy target (Linux +
+        /// macOS; rule 39); a host without it is a misconfigured environment we
+        /// fail loudly on rather than silently skip coverage (rule 19 spirit).
         #[test]
         fn recvmsg_recovers_concrete_ipv4_mapped_destination() {
             let (recv, local) = bound_dual_stack();
             let port = local.port();
             // Send over IPv4 to the dual-stack socket's v4 loopback.
             let dst: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-            let sender = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0));
-            let Ok(sender) = sender else {
-                // No IPv4 loopback on this host (rare CI sandbox); skip rather
-                // than fail — the v6 path test still covers the parser.
-                eprintln!("skipping v4-mapped round-trip: no IPv4 loopback");
-                return;
-            };
-            if sender.send_to(b"v4-probe", dst).is_err() {
-                eprintln!("skipping v4-mapped round-trip: v4 send failed");
-                return;
-            }
+            let sender = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+                .expect("IPv4 loopback bind is guaranteed on supported targets (rule 39)");
+            sender
+                .send_to(b"v4-probe", dst)
+                .expect("the v4-mapped un-map parser path must be exercised, not skipped");
 
             let mut buf = [0u8; 64];
             let bind_fallback: SocketAddr =
@@ -550,6 +569,88 @@ mod unix {
             assert!(
                 err.to_string().contains("MSG_CTRUNC"),
                 "the error must name the truncation cause, got: {err}"
+            );
+        }
+
+        /// Round-2 MAJOR: a datagram on a **wildcard-bound** socket whose PKTINFO
+        /// cmsg is **absent** (the kernel did not honour the sockopt, etc.) must
+        /// surface as a receive error — NOT a silent fallback to the unspecified
+        /// `[::]` bind addr. The resolver would otherwise substitute the first
+        /// same-family gathered candidate rather than the kernel-confirmed
+        /// destination, misrouting ICE on a multi-homed host (the same
+        /// silent-wildcard class the `MSG_CTRUNC` rejection closed). Forced by
+        /// receiving on a wildcard socket with PKTINFO never enabled.
+        #[test]
+        fn absent_pktinfo_on_a_wildcard_bind_is_a_receive_error_not_a_silent_fallback() {
+            let bind: SocketAddr =
+                SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
+            let (recv, local) = bound_without_pktinfo(bind);
+            assert!(
+                local.ip().is_unspecified(),
+                "this test exercises the WILDCARD bind path"
+            );
+            let port = local.port();
+            let dst: SocketAddr =
+                SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0));
+            let sender = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::LOCALHOST,
+                0,
+                0,
+                0,
+            )))
+            .unwrap();
+            sender.send_to(b"no-pktinfo", dst).unwrap();
+
+            let mut buf = [0u8; 64];
+            // The wildcard bind addr is the `local_addr` the driver would pass.
+            let err = recv_from_with_local(&recv, &mut buf, local).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                io::ErrorKind::InvalidData,
+                "absent PKTINFO on a wildcard bind must drop (InvalidData), not \
+                 fall back to the unspecified bind addr, got {err:?}"
+            );
+        }
+
+        /// Round-2 MAJOR (the nuance): a datagram on a **concrete-bound** socket
+        /// with PKTINFO absent must STILL succeed, reporting the concrete bind
+        /// addr as the destination — that address already IS the destination, so
+        /// PKTINFO is unnecessary and the datagram must NOT be dropped. Only the
+        /// wildcard-bind + absent-PKTINFO path is the misroute bug.
+        #[test]
+        fn absent_pktinfo_on_a_concrete_bind_still_succeeds_with_the_concrete_addr() {
+            // Bind to the concrete v6 loopback (a non-unspecified local address).
+            let bind: SocketAddr =
+                SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0));
+            let (recv, local) = bound_without_pktinfo(bind);
+            assert!(
+                !local.ip().is_unspecified(),
+                "this test exercises the CONCRETE bind path"
+            );
+            let port = local.port();
+            let dst: SocketAddr =
+                SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0));
+            let sender = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::LOCALHOST,
+                0,
+                0,
+                0,
+            )))
+            .unwrap();
+            sender.send_to(b"concrete-ok", dst).unwrap();
+
+            let mut buf = [0u8; 64];
+            let (n, _src, arrival) = recv_from_with_local(&recv, &mut buf, local).unwrap();
+            assert_eq!(&buf[..n], b"concrete-ok");
+            assert_eq!(
+                arrival,
+                local,
+                "a concrete bind is its own destination; absent PKTINFO must not \
+                 drop it, got {arrival}"
+            );
+            assert!(
+                !arrival.ip().is_unspecified(),
+                "the concrete bind addr is returned, never the unspecified addr"
             );
         }
     }
