@@ -282,11 +282,51 @@ mirrors `mesh-mdns`). The implementation makes these concrete decisions:
       lease-chain freshness anchor, part of the device-credential mechanism deferred
       to ADR-0036). This is the only blocker; nothing else in the activate path is
       missing on the device side.
+12. **The cli boundary wiring FAILS CLOSED** (hardened after the **round-6** rule-21
+    final panel, which confirmed #1–#11's core — the signed binding-anchor across
+    all four install paths, the atomic single-lock install, renew-only, the
+    revocation-TOCTOU re-fetch, and the crypto chain — clean, and found three
+    fail-open paths only in the cli boundary). Binding rules:
+    - **The durable idempotency nonce fails closed (no silent reset, no
+      log-and-continue):** the `NonceStore` seam is now fallible
+      (`load`/`commit → Result<_, NonceError>`). `FileNonceStore::load` returns an
+      error for a **present-but-corrupt/unreadable** file — only an **absent** file
+      is the trusted `Ok(0)` fresh start (a silent `0` would reset the high-water and
+      re-mint `mv-{machine}-1`, colliding with a prior lifetime's first op after a
+      restart). `FileNonceStore::commit` **propagates** both the write and the rename
+      failure (an un-persisted high-water must block the mutation, not continue).
+      `HeartbeatClient::idempotency_key` gates the mint on a trustworthy `load` + a
+      successful durable `commit` **before** the key is exposed: on a nonce-store
+      error it advances nothing and returns `HeartbeatError::NonceStore`, so
+      `run_once` sends **no** mutation that cycle (a non-durable key could collide
+      across a restart), keeps last-good, and retries next cycle — a nonce-store I/O
+      failure never tightens output (inv #1/#10). The round-5 "a restart may reuse a
+      key" comments (false then) are removed (rule 27).
+    - **The HTTP transport is HTTPS-only and fails closed:**
+      `ConspectHttpServer::new` propagates the `https_only(true)` build with `?`
+      (was `unwrap_or_default()`, which silently fell back to a **default**
+      non-HTTPS-only client while every request still attached the bearer JWT — a
+      plaintext credential leak on an `http://` base). A failed build disables the
+      heartbeat (keep last-good); `spawn_heartbeat` never constructs a
+      plaintext-capable client.
+    - **The durable nonce has an interprocess guard:** two `multiview` processes
+      sharing one lease-state dir could each load the same high-water and mint
+      colliding keys. `FileNonceStore` takes a **non-blocking exclusive advisory
+      lock** (`rustix::fs::flock(NonBlockingLockExclusive)`, a safe wrapper) on
+      `<dir>/idempotency-nonce.lock` at construction and holds it for the process
+      lifetime (the OS releases it on exit, so a crashed owner never strands it). A
+      second owner is refused and its heartbeat declines to start (fail closed). The
+      anti-aliasing `assert_ne!(binding_id, lease_serial)` guard — dropped when
+      round-5c removed `the_renewal_addresses_the_binding_by_id_…` — is restored on
+      the renew-anchor test so "renew addresses by the signed `instanceBindingId`,
+      never the lease serial" is a meaningful (non-tautological) assertion (rule 19).
 
 New deps behind `heartbeat`: `p256`, `base64`, `hex` (all `MIT`/`Apache-2.0`, with
 the ECDSA closure resolving to `MIT`/`Apache-2.0`/`BSD-3-Clause`/`BSD-1-Clause`),
-`tokio`; the cli adds `reqwest` (rustls). `cargo deny` runs `all-features = false`,
-so none enter the scanned default graph.
+`tokio`; the cli adds `reqwest` (rustls) and — round-6 — `rustix` (`fs` feature,
+for the safe `flock`; already in the workspace graph via the engine `ptp`/`display-kms`
+paths, `MIT`/`Apache-2.0`/`BSD`, adds no new crate to `Cargo.lock`). `cargo deny`
+runs `all-features = false`, so none enter the scanned default graph.
 
 ## Rationale
 
@@ -333,6 +373,10 @@ so none enter the scanned default graph.
 | Ship device-side online-activate with `serverNonce = ""` (empty) | The spec requires `serverNonce` to be a **server-issued** `^[0-9a-f]{2,128}$` value (the per-instance lease-chain freshness anchor); a real server `422`s an empty value, and the device-credential/nonce mechanism is "deferred to ADR-0036 §Deferred / not yet available", so the device cannot mint a valid request. Shipping it is a broken stub (rule 6). DEFER activate; ship the client RENEW-ONLY (decision point 11). |
 | Keep the activate code behind `#[allow(dead_code)]` until the nonce flow lands | Dead scaffold with an unjustified suppression (rules 6 + 20). Onboarding does not need device-side activate (operator/portal + the three install surfaces handle it), so the activate path is removed; the device-credential `DeviceIdentity` fields are retained with `forward-compat:` docs so it re-adds cleanly. |
 | Model `HeartbeatRequest.transport` as an open `String` | An out-of-vocabulary transport value could reach the wire and earn a `422`. The Conspect set is the fixed `{direct,relay,file}`; a closed `Transport` enum makes a bad value structurally unsendable. |
+| `FileNonceStore::load` returns a silent `0` on a corrupt/unreadable nonce file (round-5) | A present-but-untrustworthy value silently resetting the high-water re-mints `mv-{machine}-1` and collides with a prior lifetime's first op after a restart. Fail closed: only an **absent** file is the trusted `Ok(0)`; a present-but-corrupt/unreadable file is `Err`, and the mint (gated on `load` + a durable `commit`) refuses, so no mutation is sent. |
+| `FileNonceStore::commit` logs-and-continues on a write/rename failure (round-5) | An un-persisted high-water is exactly the cross-restart collision risk the durable nonce exists to prevent. Propagate both failures as `Err`; the gated mint then blocks the mutation (keep last-good) rather than send a possibly-colliding key. |
+| Build the `reqwest` client with `.build().unwrap_or_default()` | On a build error `unwrap_or_default()` drops `https_only(true)` for a **default** client while every request still attaches the bearer JWT — a plaintext credential leak over `http://`. Propagate with `?`; a failed HTTPS-only build disables the heartbeat (keep last-good), never a plaintext-capable client. |
+| Leave the single nonce file unguarded across processes (document single-owner only) | Two `multiview` processes sharing a lease-state dir could each `load` the same high-water and mint colliding keys. A real non-blocking `flock` (held for the process lifetime, OS-released on crash) is stronger than a documented invariant and cheap (`rustix` is already in the graph): a second owner is refused and fails closed. |
 
 ## Consequences
 
@@ -351,7 +395,10 @@ so none enter the scanned default graph.
   only ever tightens on a positively-verified signed lease, keeping last-good on
   every failure/withheld lease (#1) — re-proven by the extended never-off-air chaos
   gate (`crates/multiview-cli/tests/heartbeat_never_off_air.rs`) that SIGKILLs /
-  stalls / partitions the heartbeat task while asserting one-frame-per-tick.
+  stalls / partitions the heartbeat task while asserting one-frame-per-tick. The
+  round-6 fail-closed paths extend this: a durable-nonce I/O failure and an
+  un-buildable HTTPS-only client both keep last-good (no mutation, heartbeat off),
+  never a colliding-key mutation and never a plaintext credential-carrying client.
 - **Deferred (named blockers, not stubbed):** device-side **online-activate** is
   deferred — the external blocker is the Conspect server-side `serverNonce`
   issuance (the per-instance lease-chain freshness anchor, part of the
@@ -363,6 +410,9 @@ so none enter the scanned default graph.
   (O4) is a config field, off until set. All are honestly tracked, not stubbed.
 - **CI/licensing:** the default build is unchanged (network-free, LGPL-clean); the
   `heartbeat` feature is on only in the shipped deploy presets. `cargo deny`
-  (`all-features = false`) is unaffected; the `webpki-roots` `CDLA-Permissive-2.0`
-  edge under `--features heartbeat` is pre-existing for every `reqwest` feature
-  (e.g. `devices-net`) and is never in CI's scanned default graph.
+  (`all-features = false`) is unaffected; the round-6 `rustix` (`fs`) addition is
+  behind `heartbeat`, already in the workspace graph (engine `ptp`/`display-kms`),
+  and adds **no** new crate to `Cargo.lock` (only the cli→rustix edge). The
+  `webpki-roots` `CDLA-Permissive-2.0` edge under `--features heartbeat` is
+  pre-existing for every `reqwest` feature (e.g. `devices-net`) and is never in CI's
+  scanned default graph.
