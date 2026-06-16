@@ -54,7 +54,7 @@ function reviewItem(it) {
     // Also blocked if any present lens blocked or raised a blocker/major.
     const vs = panel.filter(Boolean)
     // Require the FULL expected count present AND ran — a dropped/omitted lens fails closed.
-    const allLensesRan = panel.length === lenses.length && panel.every(Boolean) && vs.every((x) => x.ranOk !== false)
+    const allLensesRan = panel.length === lenses.length && panel.every(Boolean) && vs.every((x) => x.ranOk === true)
     const defects = vs.flatMap((x) => x.defects || [])
     const blocked = !allLensesRan || vs.some((x) => x.blocked) || defects.some((d) => d.severity === 'blocker' || d.severity === 'major')
     return {
@@ -88,6 +88,8 @@ const enforced = items.map((it, i) => {
       blocked: true,
     }
   }
-  return v.ranOk === false ? { ...v, blocked: true } : v
+  // Fail closed: ONLY an explicit ranOk===true may pass; anything else (false, or a malformed
+  // verdict that omits ranOk) is forced blocked.
+  return v.ranOk === true ? v : { ...v, blocked: true }
 })
 return { verdicts: enforced }
