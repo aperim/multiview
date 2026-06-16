@@ -560,9 +560,35 @@ impl<P: Pacer> EngineRuntime<P> {
                         // per-frame burst and resync the counter to wall-clock in one
                         // `skip_to` step, accepting one bounded discontinuity rather
                         // than unbounded catch-up work. Never spins.
+                        //
+                        // Resync to the FLOOR tick — the greatest index whose deadline
+                        // has already passed (`deadline_nanos(idx) <= now`) — never the
+                        // nearest. `MediaTime::to_tick` rounds half-away-from-zero, so a
+                        // fractional jump (`elapsed = (N + r)·period`, `r >= 0.5`) would
+                        // round UP to `N+1`; `skip_to(N+1)` + step-2 would then compose
+                        // tick `N+1` BEFORE its deadline `pts_at(N+1) > now` — running
+                        // ahead, violating invariant #1 ("one frame per tick at its
+                        // exact deadline; never ahead when not stopping"). A VM pause is
+                        // arbitrary, not period-aligned, so the fractional case is the
+                        // common one. The nearest candidate is at most one tick high, so
+                        // a single guarded decrement yields the exact floor; the bounded
+                        // loop is belt-and-braces and re-checks the deadline each step.
+                        // This restores the floor-not-nearest discipline of the normal
+                        // repeat predicate above (ADR-T018 fix-D1) on the cap path too.
                         let elapsed = now.saturating_sub(self.seed_nanos);
-                        let wall = MediaTime::from_nanos(elapsed).to_tick(self.clock.cadence());
-                        self.clock.skip_to(u64::try_from(wall).unwrap_or(0));
+                        let mut target = u64::try_from(
+                            MediaTime::from_nanos(elapsed).to_tick(self.clock.cadence()),
+                        )
+                        .unwrap_or(0);
+                        // Step the candidate down to the floor: drop any tick whose
+                        // deadline is still in the future. Bounded by the candidate
+                        // itself; in practice at most one iteration.
+                        while target > next
+                            && self.clock.deadline_nanos(target, self.seed_nanos) > now
+                        {
+                            target = target.saturating_sub(1);
+                        }
+                        self.clock.skip_to(target);
                         break;
                     }
                     // Re-emit last-good under the fresh tick: the held canvas is
