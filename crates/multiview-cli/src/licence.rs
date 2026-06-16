@@ -321,12 +321,22 @@ impl EntitlementPlane {
             settings.api_base.clone(),
             settings.bearer_token.clone(),
         ));
-        let client = HeartbeatClient::new(
+        // Durable idempotency nonce beside the lease state (the same dir the
+        // offline file-drop watcher reads), so a restart never reuses a prior
+        // lifetime's Idempotency-Key (cross-restart duplicate-mutation defence).
+        let lease_dir = std::env::var(LEASE_DIR_ENV)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_LEASE_DIR.to_owned());
+        let nonce_store: multiview_licence::heartbeat::SharedNonceStore =
+            std::sync::Arc::new(FileNonceStore::in_dir(&lease_dir));
+        let client = HeartbeatClient::with_nonce(
             server,
             std::sync::Arc::clone(&self.store),
             pinned_root,
             settings.heartbeat_config(),
             settings.identity.clone(),
+            nonce_store,
         );
         let org = settings.org_id.clone();
         tokio::spawn(async move {
@@ -537,6 +547,78 @@ impl HeartbeatSettings {
 #[cfg(feature = "heartbeat")]
 fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+/// A durable, file-backed [`NonceStore`](multiview_licence::heartbeat::NonceStore)
+/// for the idempotency mint counter — a tiny decimal file beside the lease state,
+/// so the per-operation nonce survives a restart and a post-restart operation
+/// never reuses a prior lifetime's key. The leaf crate does no I/O; this is the
+/// cli-boundary implementation it injects via `with_clock_and_nonce`.
+///
+/// `load` reads the persisted high-water counter (0 when absent/unreadable —
+/// fail-open: a fresh device legitimately starts at 0, and the in-process monotone
+/// guard still prevents same-lifetime reuse; a read error is logged, never a
+/// crash, never off air). `commit` writes the new high-water counter via
+/// write-temp-then-rename so a torn write cannot leave a truncated value.
+#[cfg(feature = "heartbeat")]
+struct FileNonceStore {
+    path: std::path::PathBuf,
+}
+
+#[cfg(feature = "heartbeat")]
+impl FileNonceStore {
+    /// The nonce file lives in `dir` (the lease-state dir) as `idempotency-nonce`.
+    fn in_dir(dir: &str) -> Self {
+        Self {
+            path: std::path::Path::new(dir).join("idempotency-nonce"),
+        }
+    }
+}
+
+#[cfg(feature = "heartbeat")]
+impl multiview_licence::heartbeat::NonceStore for FileNonceStore {
+    fn load(&self) -> u64 {
+        match std::fs::read_to_string(&self.path) {
+            Ok(s) => s.trim().parse::<u64>().unwrap_or_else(|_| {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    "idempotency nonce file is unparseable — restarting the counter at 0 \
+                     (bounded: the server idempotency window is short; never off air)"
+                );
+                0
+            }),
+            // Absent on a fresh device (the common case) — start at 0 silently.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "could not read the idempotency nonce file — restarting the counter at 0"
+                );
+                0
+            }
+        }
+    }
+
+    fn commit(&self, value: u64) {
+        // Write-temp-then-rename for atomicity: a crash mid-write leaves either the
+        // old value or the new one, never a truncated counter.
+        let tmp = self.path.with_extension("tmp");
+        if let Err(e) = std::fs::write(&tmp, value.to_string()) {
+            tracing::warn!(
+                path = %tmp.display(), error = %e,
+                "could not persist the idempotency nonce (continuing; in-memory monotone holds \
+                 this lifetime, but a restart may reuse a key)"
+            );
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &self.path) {
+            tracing::warn!(
+                path = %self.path.display(), error = %e,
+                "could not finalise the idempotency nonce file (continuing best-effort)"
+            );
+        }
+    }
 }
 
 /// The live Conspect HTTP transport (the cli-boundary implementation of

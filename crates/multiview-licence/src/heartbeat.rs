@@ -1154,6 +1154,29 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         )
     }
 
+    /// Assemble a heartbeat client with the production wall clock and a durable
+    /// [`NonceStore`] for the idempotency mint counter (the cli supplies a
+    /// file-backed store so the per-operation nonce survives a restart).
+    #[must_use]
+    pub fn with_nonce(
+        server: Arc<S>,
+        store: Arc<LeaseStore>,
+        pinned: PinnedRoot,
+        config: HeartbeatConfig,
+        identity: DeviceIdentity,
+        nonce_store: SharedNonceStore,
+    ) -> Self {
+        Self::with_clock_and_nonce(
+            server,
+            store,
+            pinned,
+            config,
+            identity,
+            Arc::new(unix_millis_now),
+            nonce_store,
+        )
+    }
+
     /// Assemble a heartbeat client reading "now" (epoch ms) from `now_ms` — tests
     /// inject a controllable clock to exercise the key-trust re-evaluation at
     /// lease-acceptance time (the validity-window / revocation TOCTOU). The
@@ -1222,8 +1245,18 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         if let Some(existing) = guard.current.clone() {
             return existing;
         }
-        let counter = guard.counter.wrapping_add(1);
+        // Mint a NEW counter strictly above BOTH this process's in-memory high-water
+        // AND the durable high-water — so a restart (in-memory resets to 0, durable
+        // persists) never reuses a prior lifetime's value. `saturating_add` (not
+        // `wrapping_add`) so the monotonic guarantee never wraps back to a reused
+        // low value. Commit the new high-water durably AT MINT (before the request),
+        // so even a crash mid-operation cannot let the next process reuse it.
+        let counter = guard
+            .counter
+            .max(self.nonce_store.load())
+            .saturating_add(1);
         guard.counter = counter;
+        self.nonce_store.commit(counter);
         let key = format!("mv-{}-{counter}", self.identity.machine_id);
         guard.current = Some(key.clone());
         key
