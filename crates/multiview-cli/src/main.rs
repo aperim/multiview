@@ -438,6 +438,11 @@ async fn run_pipeline_until_ctrl_c(
     // reflects live neighbours. The shared `MeshState` is wired into the control
     // plane below regardless of the `mesh-mdns` feature.
     plane.spawn_mesh_discovery();
+    // Conspect device heartbeat (CONSPECT-3 / ADR-0096): start the supervised
+    // licensing phone-home (best-effort, never off air — inv #1/#10) when the
+    // `heartbeat` feature is built AND the device is configured. It renews the
+    // lease via the same `install_binding` convergence; a no-op otherwise.
+    plane.spawn_heartbeat();
     let (server, drain, live_hub, config_watch): (Option<_>, ControlDrain, Option<_>, Option<_>) =
         if let Some(cfg) = config.control.as_ref() {
             // What THIS build + run path can take live (ADR-W022): with the
@@ -782,6 +787,10 @@ async fn run_software_until_ctrl_c(
     // (best-effort, never blocks — inv #10) before serving. The shared `MeshState`
     // is wired into the control plane below regardless of the `mesh-mdns` feature.
     plane.spawn_mesh_discovery();
+    // Conspect device heartbeat (CONSPECT-3 / ADR-0096): the supervised licensing
+    // phone-home (best-effort, never off air — inv #1/#10), when the `heartbeat`
+    // feature is built and the device is configured; a no-op otherwise.
+    plane.spawn_heartbeat();
     let (server, drain, live_hub, config_watch): (Option<_>, ControlDrain, Option<_>, Option<_>) =
         if let Some(cfg) = config.control.as_ref() {
             let (handle, command_rx, hub, watch) = serve_control_plane(

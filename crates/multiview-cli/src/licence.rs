@@ -26,6 +26,8 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+#[cfg(feature = "heartbeat")]
+use multiview_licence::heartbeat::{DeviceIdentity, HeartbeatClient, HeartbeatConfig};
 use multiview_licence::verify::PinnedKey;
 use multiview_licence::watcher::{LeaseDirectoryWatcher, DEFAULT_LEASE_DIR};
 use multiview_licence::{EnforcementLevel, LeaseStore};
@@ -268,6 +270,124 @@ impl EntitlementPlane {
         );
     }
 
+    /// Spawn the Conspect **device-licensing heartbeat** loop (CONSPECT-3,
+    /// ADR-0096) — the `heartbeat` feature only.
+    ///
+    /// Reads the heartbeat settings from the environment ([`HeartbeatSettings`]):
+    /// the organisation id (config-driven, O4), the pinned ECDSA-P256 **root**
+    /// key, the Conspect base URL, the account JWT bearer, and the salted device
+    /// identity. When the essential settings are unset, the loop is **not** started
+    /// (logged) — the machine runs unlicensed-honest, the same fail-toward-leniency
+    /// posture as the rest of the plane.
+    ///
+    /// When configured, it `tokio::spawn`s a [`HeartbeatClient`] loop that renews
+    /// the lease against conspect.studio and drives the shared
+    /// [`LeaseStore::install_binding`](multiview_licence::LeaseStore::install_binding)
+    /// convergence — the same path the offline file-drop and mesh relay already
+    /// use, so S1/S2/S3 re-sample with no extra wiring (via the existing
+    /// [`refresh_signal`] poll). **Best-effort, never off air (invariants #1/#10):**
+    /// the task holds only [`Arc<LeaseStore>`](multiview_licence::LeaseStore) + the
+    /// pinned root + the client — **no** engine handle/channel/lock — and only ever
+    /// tightens on a positively-verified signed lease; every failure (or a withheld
+    /// lease) keeps the last-good lease and lets it age.
+    #[cfg(feature = "heartbeat")]
+    pub fn spawn_heartbeat(&self) {
+        let Some(settings) = HeartbeatSettings::from_env() else {
+            tracing::info!(
+                "Conspect heartbeat is OFF (unconfigured): set {} + {} + {} + {} to enable the \
+                 device-licensing phone-home; running unlicensed-honest until then",
+                HeartbeatSettings::ORG_ENV,
+                HeartbeatSettings::ROOT_ENV,
+                HeartbeatSettings::API_ENV,
+                HeartbeatSettings::TOKEN_ENV
+            );
+            return;
+        };
+        let pinned_root = match multiview_licence::heartbeat::PinnedRoot::from_base64url(
+            &settings.pinned_root_b64url,
+        ) {
+            Ok(root) => root,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    "Conspect heartbeat is OFF: {} is not a valid base64url ECDSA-P256 root \
+                     point — running unlicensed-honest",
+                    HeartbeatSettings::ROOT_ENV
+                );
+                return;
+            }
+        };
+        // Fail closed: if the HTTPS-only client cannot be built, do NOT fall back
+        // to a plaintext-capable client that would leak the bearer JWT — the
+        // heartbeat stays OFF (the entitlement plane keeps last-good).
+        let server =
+            match ConspectHttpServer::new(settings.api_base.clone(), settings.bearer_token.clone())
+            {
+                Ok(server) => std::sync::Arc::new(server),
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        "Conspect heartbeat is OFF: could not build the HTTPS-only client — \
+                         running unlicensed-honest (never a plaintext credential-carrying client)"
+                    );
+                    return;
+                }
+            };
+        // Durable idempotency nonce beside the lease state (the same dir the
+        // offline file-drop watcher reads), so a restart never reuses a prior
+        // lifetime's Idempotency-Key (cross-restart duplicate-mutation defence).
+        let lease_dir = std::env::var(LEASE_DIR_ENV)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_LEASE_DIR.to_owned());
+        // Fail closed: if the nonce lock cannot be taken (another `multiview` owns
+        // this lease dir, or the dir is unwritable) do NOT start a second minter
+        // that could issue colliding Idempotency-Keys — the heartbeat stays OFF
+        // (the entitlement plane keeps last-good).
+        let nonce_store: multiview_licence::heartbeat::SharedNonceStore =
+            match FileNonceStore::in_dir(&lease_dir) {
+                Ok(store) => std::sync::Arc::new(store),
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        "Conspect heartbeat is OFF: could not take the durable idempotency-nonce \
+                         lock (a second heartbeat owner on this lease dir?) — keeping last-good"
+                    );
+                    return;
+                }
+            };
+        let client = HeartbeatClient::with_nonce(
+            server,
+            std::sync::Arc::clone(&self.store),
+            pinned_root,
+            settings.heartbeat_config(),
+            settings.identity.clone(),
+            nonce_store,
+        );
+        let org = settings.org_id.clone();
+        tokio::spawn(async move {
+            client.run_forever().await;
+        });
+        tracing::info!(
+            org = %org,
+            api = %settings.api_base,
+            "Conspect device heartbeat running (control-plane phone-home; renews the lease via \
+             the shared install convergence; never off air)"
+        );
+    }
+
+    /// No-op when the `heartbeat` feature is off: the entitlement plane is fully
+    /// wired (the offline file-drop install + the read-only heartbeat-status
+    /// surface still work), but no live licence-server loop runs and the default
+    /// build stays network-free + `cargo deny`-clean (ADR-0096).
+    #[cfg(not(feature = "heartbeat"))]
+    pub fn spawn_heartbeat(&self) {
+        tracing::debug!(
+            "Conspect device heartbeat is OFF (build without `heartbeat`); the entitlement \
+             plane serves local lease state only"
+        );
+    }
+
     /// The current sampled enforcement level for the S1 startup gate.
     #[must_use]
     pub fn level(&self) -> Option<EnforcementLevel> {
@@ -343,6 +463,449 @@ pub fn refresh_signal(store: &LeaseStore, signal: &WatermarkSignal) {
     signal.set(level);
 }
 
+// ===========================================================================
+// Conspect heartbeat (CONSPECT-3, ADR-0096) — the cli-boundary HTTP transport
+// + environment-driven settings. Feature `heartbeat`, OFF by default.
+// ===========================================================================
+
+/// The environment-driven heartbeat settings the cli assembles for the
+/// [`HeartbeatClient`]. Read from the process environment so the pinned root, the
+/// account token, and the salted device identity never live in the binary
+/// (secret hygiene; mirrors [`PUBKEY_ENV`]). The **organisation id is
+/// config-driven** (ADR-0096 O4): the operator sets it explicitly (the free
+/// auto-issue default org is an external-doc residual), so there is no hard-coded
+/// guess.
+#[cfg(feature = "heartbeat")]
+#[derive(Debug, Clone)]
+pub struct HeartbeatSettings {
+    /// The organisation id the device heartbeats against (`{orgId}`).
+    pub org_id: String,
+    /// The pinned ECDSA-P256 **root** key, base64url uncompressed point.
+    pub pinned_root_b64url: String,
+    /// The Conspect API base URL (e.g. `https://api.conspect.studio/v0`).
+    pub api_base: String,
+    /// The account JWT bearer token (operator role for heartbeat). Never logged.
+    pub bearer_token: String,
+    /// The salted device identity the requests carry (no raw identifiers).
+    pub identity: DeviceIdentity,
+}
+
+#[cfg(feature = "heartbeat")]
+impl HeartbeatSettings {
+    /// The env var the organisation id is read from (config-driven, O4).
+    pub const ORG_ENV: &'static str = "MULTIVIEW_LICENCE_ORG";
+    /// The env var the pinned ECDSA-P256 root key (base64url) is read from.
+    pub const ROOT_ENV: &'static str = "MULTIVIEW_LICENCE_ROOT";
+    /// The env var the Conspect API base URL is read from.
+    pub const API_ENV: &'static str = "MULTIVIEW_LICENCE_API";
+    /// The env var the account JWT bearer token is read from (never logged).
+    pub const TOKEN_ENV: &'static str = "MULTIVIEW_LICENCE_TOKEN";
+    /// The env var the salted hardware-fingerprint digest is read from (hex).
+    pub const FP_DIGEST_ENV: &'static str = "MULTIVIEW_LICENCE_FP_DIGEST";
+    /// The env var the fingerprint score is read from (0–100).
+    pub const FP_SCORE_ENV: &'static str = "MULTIVIEW_LICENCE_FP_SCORE";
+    /// The env var the registered machine id is read from.
+    pub const MACHINE_ENV: &'static str = "MULTIVIEW_LICENCE_MACHINE_ID";
+    /// The env var the instance id is read from.
+    pub const INSTANCE_ENV: &'static str = "MULTIVIEW_LICENCE_INSTANCE_ID";
+    /// The env var the instance binding id is read from (once known).
+    pub const BINDING_ENV: &'static str = "MULTIVIEW_LICENCE_BINDING_ID";
+    /// The env var the salted hardware digest is read from.
+    pub const HW_DIGEST_ENV: &'static str = "MULTIVIEW_LICENCE_HW_DIGEST";
+    /// The env var the instance discriminator hash is read from.
+    pub const DISC_HASH_ENV: &'static str = "MULTIVIEW_LICENCE_DISC_HASH";
+    /// The env var the instance discriminator digest is read from.
+    pub const DISC_DIGEST_ENV: &'static str = "MULTIVIEW_LICENCE_DISC_DIGEST";
+    /// The env var the device Ed25519 proof-of-possession public key (base64url)
+    /// is read from.
+    pub const DEVICE_KEY_ENV: &'static str = "MULTIVIEW_LICENCE_DEVICE_KEY";
+
+    /// Assemble settings from the process environment, or `None` when the
+    /// essential ones (org id, pinned root, API base, bearer token) are unset —
+    /// the heartbeat then stays off and the machine runs unlicensed-honest.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        let org_id = non_empty_env(Self::ORG_ENV)?;
+        let pinned_root_b64url = non_empty_env(Self::ROOT_ENV)?;
+        let api_base = non_empty_env(Self::API_ENV)?;
+        let bearer_token = non_empty_env(Self::TOKEN_ENV)?;
+        let identity = DeviceIdentity {
+            machine_id: non_empty_env(Self::MACHINE_ENV).unwrap_or_default(),
+            instance_id: non_empty_env(Self::INSTANCE_ENV).unwrap_or_default(),
+            binding_id: non_empty_env(Self::BINDING_ENV),
+            fingerprint_digest: non_empty_env(Self::FP_DIGEST_ENV).unwrap_or_default(),
+            fingerprint_score: non_empty_env(Self::FP_SCORE_ENV)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+            hardware_digest: non_empty_env(Self::HW_DIGEST_ENV).unwrap_or_default(),
+            instance_discriminator_hash: non_empty_env(Self::DISC_HASH_ENV).unwrap_or_default(),
+            instance_discriminator_digest: non_empty_env(Self::DISC_DIGEST_ENV).unwrap_or_default(),
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            device_public_key_b64url: non_empty_env(Self::DEVICE_KEY_ENV).unwrap_or_default(),
+        };
+        Some(Self {
+            org_id,
+            pinned_root_b64url,
+            api_base,
+            bearer_token,
+            identity,
+        })
+    }
+
+    /// Build the [`HeartbeatConfig`] from these settings.
+    #[must_use]
+    pub fn heartbeat_config(&self) -> HeartbeatConfig {
+        HeartbeatConfig {
+            org_id: self.org_id.clone(),
+            ..HeartbeatConfig::default()
+        }
+    }
+}
+
+/// Read an environment variable, returning `None` when unset or empty.
+#[cfg(feature = "heartbeat")]
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+/// A durable, file-backed [`NonceStore`](multiview_licence::heartbeat::NonceStore)
+/// for the idempotency mint counter — a tiny decimal file beside the lease state,
+/// so the per-operation nonce survives a restart and a post-restart operation
+/// never reuses a prior lifetime's key. The leaf crate does no I/O; this is the
+/// cli-boundary implementation it injects via `with_clock_and_nonce`.
+///
+/// `load` reads the persisted high-water counter and **fails closed**: an ABSENT
+/// file is `Ok(0)` (a fresh device legitimately starts at 0), but a PRESENT file
+/// that is corrupt/unparseable, reads the literal `0` (which a healthy `commit`
+/// never writes — the mint is always `>= 1` — so a present 0 is truncation/tamper),
+/// or is unreadable for any other reason returns an `Err` — never a silent 0 that
+/// would reset the high-water and re-mint a colliding key after a restart. `commit`
+/// persists the new high-water with the **crash-durable** write-temp → fsync-temp →
+/// rename → fsync-parent-dir protocol (so the value survives a power loss right
+/// after `commit` returns, not just a torn write) and **propagates** every step's
+/// failure (write, the two fsyncs, rename) as an `Err` — an un-persisted key must
+/// block the mutation, not continue best-effort. The heartbeat client gates the
+/// mint on these, so a nonce-store failure keeps last-good (never off air, never a
+/// colliding-key mutation).
+///
+/// **Operational assumption (the flock is advisory):** the interprocess
+/// cross-process uniqueness guarantee holds only for **cooperating owners that all
+/// use this `FileNonceStore`** on a **local filesystem with working `flock`
+/// semantics**. It does NOT defend against a process reaching the same lease-state
+/// dir through a different code path, nor against network/overlay filesystems
+/// (NFS/overlayfs) where advisory locks may be unreliable — those configurations
+/// are out of scope for the nonce guard.
+#[cfg(feature = "heartbeat")]
+struct FileNonceStore {
+    path: std::path::PathBuf,
+    /// The exclusive advisory lock holder for the whole process lifetime. Held so
+    /// a SECOND `multiview` process pointed at the same lease-state dir cannot
+    /// concurrently mint colliding Idempotency-Keys: that process's
+    /// [`FileNonceStore::in_dir`] fails to take the lock and its heartbeat declines
+    /// to start (fail closed). The OS releases the lock when this `File` is dropped
+    /// (process exit or `EntitlementPlane` teardown), so a crashed owner never
+    /// strands the lock. `_lock` is never read — its lifetime IS the guarantee.
+    _lock: std::fs::File,
+}
+
+#[cfg(feature = "heartbeat")]
+impl FileNonceStore {
+    /// Open the durable nonce store in `dir` (the lease-state dir), taking a
+    /// **non-blocking exclusive advisory lock** on `<dir>/idempotency-nonce.lock`
+    /// so this process is the sole minter of the nonce file. The data lives in
+    /// `<dir>/idempotency-nonce`.
+    ///
+    /// # Errors
+    /// [`NonceError`](multiview_licence::heartbeat::NonceError) when the lock dir
+    /// cannot be created/opened, or when ANOTHER process already holds the lock
+    /// (a second heartbeat owner on the same lease dir) — the caller then keeps the
+    /// heartbeat OFF (fail closed; the entitlement plane keeps last-good).
+    fn in_dir(dir: &str) -> Result<Self, multiview_licence::heartbeat::NonceError> {
+        use multiview_licence::heartbeat::NonceError;
+        let dir_path = std::path::Path::new(dir);
+        // Ensure the lease-state dir exists so the lock/data files can be created
+        // (the offline file-drop watcher tolerates an absent dir; the nonce owner
+        // must materialise it to hold the lock).
+        std::fs::create_dir_all(dir_path).map_err(|e| {
+            NonceError::new(format!("could not create the lease-state dir {dir}: {e}"))
+        })?;
+        let lock_path = dir_path.join("idempotency-nonce.lock");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| {
+                NonceError::new(format!(
+                    "could not open the idempotency-nonce lock {}: {e}",
+                    lock_path.display()
+                ))
+            })?;
+        // Non-blocking exclusive lock: if a second owner holds it, fail closed
+        // rather than block the spawn. Released automatically when `lock` drops.
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
+            |e| {
+                NonceError::new(format!(
+                    "another process holds the idempotency-nonce lock {} \
+                     (a second heartbeat owner on this lease dir?): {e}",
+                    lock_path.display()
+                ))
+            },
+        )?;
+        Ok(Self {
+            path: dir_path.join("idempotency-nonce"),
+            _lock: lock,
+        })
+    }
+}
+
+#[cfg(feature = "heartbeat")]
+impl multiview_licence::heartbeat::NonceStore for FileNonceStore {
+    fn load(&self) -> Result<u64, multiview_licence::heartbeat::NonceError> {
+        use multiview_licence::heartbeat::NonceError;
+        match std::fs::read_to_string(&self.path) {
+            // A PRESENT value that does not parse is NOT trustworthy — fail closed
+            // (never a silent 0 that resets the high-water and re-mints a colliding
+            // key after a restart).
+            Ok(s) => {
+                let value = s.trim().parse::<u64>().map_err(|_| {
+                    NonceError::new(format!(
+                        "idempotency nonce file {} is present but unparseable",
+                        self.path.display()
+                    ))
+                })?;
+                // `commit` only ever persists a value >= 1 (the mint is
+                // `max(durable).saturating_add(1)`), so a PRESENT 0 is impossible
+                // from a healthy write — it can only be truncation / a partial write
+                // / tampering. Reject it (fail closed); trusting it would reset the
+                // high-water and re-mint a colliding key after a restart. Only an
+                // ABSENT file (the NotFound arm below) is the trusted-zero fresh start.
+                if value == 0 {
+                    return Err(NonceError::new(format!(
+                        "idempotency nonce file {} is present but reads 0 (commit never \
+                         writes 0 — truncation/partial-write/tamper); refusing to trust it",
+                        self.path.display()
+                    )));
+                }
+                Ok(value)
+            }
+            // Absent on a fresh device (the common case) — a trusted start at 0.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            // Present-but-unreadable (permissions, I/O error) is untrustworthy too.
+            Err(e) => Err(NonceError::new(format!(
+                "could not read the idempotency nonce file {}: {e}",
+                self.path.display()
+            ))),
+        }
+    }
+
+    fn commit(&self, value: u64) -> Result<(), multiview_licence::heartbeat::NonceError> {
+        use std::io::Write as _;
+
+        use multiview_licence::heartbeat::NonceError;
+        // CRASH-DURABLE atomic write (write-temp → fsync temp → rename → fsync dir):
+        // a crash leaves either the old value or the new one, never a truncated
+        // counter, AND the persisted high-water survives a power loss right after
+        // `commit` returns — so the next process never re-mints a colliding key.
+        // EVERY step fails closed (the caller's gated mint refuses to send a
+        // possibly-colliding mutation), never best-effort. No unwrap/panic.
+        let tmp = self.path.with_extension("tmp");
+        // 1. Write the new value to the temp file.
+        let mut file = std::fs::File::create(&tmp).map_err(|e| {
+            NonceError::new(format!(
+                "could not create the idempotency nonce temp {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        file.write_all(value.to_string().as_bytes()).map_err(|e| {
+            NonceError::new(format!(
+                "could not write the idempotency nonce to {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        // 2. fsync the TEMP file BEFORE the rename, so its data is on stable storage
+        //    before it becomes the live file (a rename of un-fsync'd data can roll
+        //    back the contents after a power loss).
+        file.sync_all().map_err(|e| {
+            NonceError::new(format!(
+                "could not fsync the idempotency nonce temp {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        drop(file);
+        // 3. Atomically replace the live file.
+        std::fs::rename(&tmp, &self.path).map_err(|e| {
+            NonceError::new(format!(
+                "could not finalise the idempotency nonce file {}: {e}",
+                self.path.display()
+            ))
+        })?;
+        // 4. fsync the PARENT DIRECTORY so the rename's directory entry is itself
+        //    durable (otherwise a power loss can lose the entry and the file reverts
+        //    to the old name/contents). Opening a directory read-only and calling
+        //    `sync_all` is the portable way to fsync it on Linux/macOS.
+        let parent = self.path.parent().ok_or_else(|| {
+            NonceError::new(format!(
+                "idempotency nonce path {} has no parent directory to fsync",
+                self.path.display()
+            ))
+        })?;
+        let dir = std::fs::File::open(parent).map_err(|e| {
+            NonceError::new(format!(
+                "could not open the lease-state dir {} to fsync: {e}",
+                parent.display()
+            ))
+        })?;
+        dir.sync_all().map_err(|e| {
+            NonceError::new(format!(
+                "could not fsync the lease-state dir {}: {e}",
+                parent.display()
+            ))
+        })?;
+        Ok(())
+    }
+}
+
+/// The live Conspect HTTP transport (the cli-boundary implementation of
+/// [`multiview_licence::heartbeat::LicenceServer`]). Owns the `reqwest` (rustls)
+/// client so the leaf crate stays socket-free; carries the account JWT bearer +
+/// a fresh `Idempotency-Key` on every mutation (ADR-0096 D2: account-JWT auth
+/// today; device-PoP request-signing deferred). IPv6-first via `reqwest`'s
+/// resolver; HTTPS only.
+#[cfg(feature = "heartbeat")]
+struct ConspectHttpServer {
+    client: reqwest::Client,
+    api_base: String,
+    bearer_token: String,
+}
+
+#[cfg(feature = "heartbeat")]
+impl ConspectHttpServer {
+    /// Build the HTTPS-only transport. **Fails closed (round-6 panel):** the
+    /// `https_only(true)` client is propagated with `?` — NOT `unwrap_or_default()`,
+    /// which would silently fall back to a DEFAULT (non-HTTPS-only) client while
+    /// every request still attaches the bearer JWT, leaking the account credential
+    /// over plaintext `http://`. A failed build disables the heartbeat (the caller
+    /// keeps last-good), never a credential-carrying non-HTTPS client.
+    ///
+    /// # Errors
+    /// [`HeartbeatError::Transport`] if the HTTPS-only `reqwest` client cannot be
+    /// built.
+    fn new(
+        mut api_base: String,
+        bearer_token: String,
+    ) -> Result<Self, multiview_licence::heartbeat::HeartbeatError> {
+        use multiview_licence::heartbeat::HeartbeatError;
+        let client = reqwest::Client::builder()
+            .user_agent(concat!("multiview/", env!("CARGO_PKG_VERSION")))
+            .https_only(true)
+            .build()
+            .map_err(|e| {
+                HeartbeatError::Transport(format!("could not build the HTTPS-only client: {e}"))
+            })?;
+        // Normalise the base URL in place (consume the owned String — no realloc).
+        api_base.truncate(api_base.trim_end_matches('/').len());
+        Ok(Self {
+            client,
+            api_base,
+            bearer_token,
+        })
+    }
+
+    /// `GET` + JSON-decode against `url`, mapping every failure to a
+    /// [`HeartbeatError`] the loop treats as "keep last-good".
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: String,
+    ) -> Result<T, multiview_licence::heartbeat::HeartbeatError> {
+        use multiview_licence::heartbeat::HeartbeatError;
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.bearer_token)
+            .send()
+            .await
+            .map_err(|e| HeartbeatError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(HeartbeatError::Transport(format!(
+                "{} returned HTTP {}",
+                url,
+                resp.status()
+            )));
+        }
+        resp.json::<T>()
+            .await
+            .map_err(|e| HeartbeatError::Malformed(e.to_string()))
+    }
+
+    /// `POST` `body` as JSON with the required `Idempotency-Key`, JSON-decode the
+    /// response.
+    async fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        url: String,
+        body: &B,
+        idempotency_key: &str,
+    ) -> Result<T, multiview_licence::heartbeat::HeartbeatError> {
+        use multiview_licence::heartbeat::HeartbeatError;
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.bearer_token)
+            .header("Idempotency-Key", idempotency_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| HeartbeatError::Transport(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(HeartbeatError::Transport(format!(
+                "{} returned HTTP {}",
+                url,
+                resp.status()
+            )));
+        }
+        resp.json::<T>()
+            .await
+            .map_err(|e| HeartbeatError::Malformed(e.to_string()))
+    }
+}
+
+#[cfg(feature = "heartbeat")]
+impl multiview_licence::heartbeat::LicenceServer for ConspectHttpServer {
+    async fn fetch_keys(
+        &self,
+    ) -> Result<
+        multiview_licence::heartbeat::LicensingKeys,
+        multiview_licence::heartbeat::HeartbeatError,
+    > {
+        // The well-known document is served from the API host root, not under the
+        // versioned `/v0` base path.
+        let host = self
+            .api_base
+            .rsplit_once("/v0")
+            .map_or(self.api_base.as_str(), |(h, _)| h);
+        self.get_json(format!("{host}/.well-known/conspect-licensing-keys.json"))
+            .await
+    }
+
+    async fn heartbeat(
+        &self,
+        org: &str,
+        req: multiview_licence::heartbeat::HeartbeatRequest,
+        idempotency_key: &str,
+    ) -> Result<
+        multiview_licence::heartbeat::HeartbeatResponse,
+        multiview_licence::heartbeat::HeartbeatError,
+    > {
+        self.post_json(
+            format!("{}/organisations/{org}/heartbeat", self.api_base),
+            &req,
+            idempotency_key,
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +958,187 @@ mod tests {
         assert_eq!(decode_hex("abc"), None);
         assert_eq!(decode_hex("zz"), None);
         assert_eq!(decode_hex("0x10"), None);
+    }
+
+    // --- Round-6 BLOCKER 1: the file-backed durable nonce FAILS CLOSED. ----------
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_load_is_ok_zero_when_absent() {
+        // A fresh device legitimately has no nonce file → 0 is a correct, trusted
+        // value (NOT an error): the in-process monotone guard covers same-lifetime
+        // reuse and there is no prior lifetime to collide with.
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
+        assert_eq!(
+            store
+                .load()
+                .expect("an absent nonce file loads as a trusted 0"),
+            0
+        );
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_load_errors_on_a_corrupt_file() {
+        // A PRESENT but unparseable nonce file must NOT be silently trusted as 0 —
+        // that would reset the high-water and re-mint a colliding key after restart.
+        // load() returns an Error so the mint fails closed.
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("idempotency-nonce");
+        std::fs::write(&path, "not-a-number").expect("seed corrupt nonce");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
+        assert!(
+            store.load().is_err(),
+            "a present-but-corrupt nonce file must load as an Error, never a silent 0"
+        );
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_commit_errors_when_unwritable() {
+        // commit() must PROPAGATE a write/rename failure (not log-and-continue): an
+        // un-persisted high-water is exactly the cross-restart collision risk. After
+        // a clean open, make the data path unwritable by replacing the nonce-file
+        // location with a DIRECTORY (so write to it fails), and assert commit errors.
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
+        // Replace the would-be nonce data file with a directory of the same name:
+        // write-temp succeeds but the rename onto a non-empty directory fails.
+        std::fs::create_dir(dir.path().join("idempotency-nonce")).expect("dir in the way");
+        std::fs::create_dir(dir.path().join("idempotency-nonce").join("busy"))
+            .expect("make the dir non-empty so rename-onto-it fails");
+        assert!(
+            store.commit(1).is_err(),
+            "an unwritable nonce path must make commit() return an Error"
+        );
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_round_trips_a_committed_value() {
+        // The happy path still works: a committed value reloads exactly.
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
+        store.commit(7).expect("commit persists");
+        assert_eq!(store.load().expect("reload"), 7);
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn a_second_nonce_owner_on_the_same_dir_is_refused_fail_closed() {
+        // INTERPROCESS GUARD (round-6 residual): two minters sharing one lease-state
+        // dir could load the same high-water and mint COLLIDING keys. The first owner
+        // holds a non-blocking exclusive advisory lock; a second `in_dir` on the SAME
+        // dir is refused, so its heartbeat declines to start (fail closed). Releasing
+        // the first (drop) then lets a new owner acquire it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf8 path");
+        let first = FileNonceStore::in_dir(path).expect("first owner takes the lock");
+        assert!(
+            FileNonceStore::in_dir(path).is_err(),
+            "a second owner on the same lease dir must be refused (no colliding minters)"
+        );
+        drop(first);
+        // Once the first owner releases the lock, a fresh owner can take it.
+        assert!(
+            FileNonceStore::in_dir(path).is_ok(),
+            "after the first owner drops, the lock is available again"
+        );
+    }
+
+    // --- Round-8 MAJOR 2: a PRESENT '0' is untrustworthy (commit never writes 0).
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_load_rejects_a_present_zero() {
+        // `commit` only ever persists `guard.counter.max(durable).saturating_add(1)`,
+        // which is >= 1, so the durable file NEVER legitimately contains 0. A PRESENT
+        // file whose contents parse to 0 can therefore only be truncation / a partial
+        // write / tampering — trusting it would reset the high-water and re-mint
+        // mv-{machine}-1 after a restart. load() must reject a present 0 (Err). Only
+        // an ABSENT file (NotFound) is the trusted-zero fresh start.
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("idempotency-nonce");
+        std::fs::write(&path, "0").expect("seed a present zero");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
+        assert!(
+            store.load().is_err(),
+            "a PRESENT '0' must be rejected (commit never writes 0; only an absent file is a \
+             trusted 0)"
+        );
+        // Sanity: any value >= 1 still loads fine (whitespace-tolerant).
+        std::fs::write(&path, " 1\n").expect("seed a one");
+        assert_eq!(store.load().expect("a present >=1 loads"), 1);
+        std::fs::write(&path, "42").expect("seed 42");
+        assert_eq!(store.load().expect("a present 42 loads"), 42);
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_commit_errors_when_the_temp_write_fails() {
+        // The OTHER commit-failure branch: the write-temp step itself fails (the
+        // existing test only forces the rename). Put a DIRECTORY at the temp path so
+        // `std::fs::write(<dir>/idempotency-nonce.tmp, ..)` fails, and assert commit
+        // propagates a NonceError (not log-and-continue).
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("first owner takes the lock");
+        // The temp path is `<path>.tmp` = `<dir>/idempotency-nonce.tmp`.
+        std::fs::create_dir(dir.path().join("idempotency-nonce.tmp"))
+            .expect("a dir in the way of the temp write");
+        assert!(
+            store.commit(1).is_err(),
+            "a failing temp write must make commit() return an Error"
+        );
+    }
+
+    // --- Round-6 MAJOR: the HTTP transport is HTTPS-only and FAILS CLOSED. -------
+
+    #[cfg(feature = "heartbeat")]
+    #[tokio::test]
+    async fn the_transport_refuses_a_plaintext_http_base_https_only() {
+        // The client must NEVER attach the bearer JWT to a plaintext http:// request
+        // (credential leak). The reqwest client is built https_only(true) and the
+        // constructor FAILS CLOSED (no unwrap_or_default fallback that would drop
+        // https_only), so a heartbeat against an http:// base is rejected at the
+        // transport with NO plaintext request leaving the host.
+        use multiview_licence::heartbeat::{DeviceIdentity, HeartbeatClient, LicenceServer as _};
+        let server = ConspectHttpServer::new(
+            "http://insecure.example.invalid/v0".to_owned(),
+            "super-secret-bearer".to_owned(),
+        )
+        .expect("an https-only client builds");
+        // `HeartbeatRequest` is #[non_exhaustive]; build it via the public builder.
+        let identity = DeviceIdentity {
+            machine_id: "m".to_owned(),
+            fingerprint_digest: "0".repeat(64),
+            fingerprint_score: 0,
+            binding_id: Some("ib_x".to_owned()),
+            app_version: "test".to_owned(),
+            instance_id: String::new(),
+            hardware_digest: String::new(),
+            instance_discriminator_hash: String::new(),
+            instance_discriminator_digest: String::new(),
+            device_public_key_b64url: String::new(),
+        };
+        let req = HeartbeatClient::<ConspectHttpServer>::build_heartbeat_request(&identity, None);
+        let res = server.heartbeat("org_x", req, "mv-m-1").await;
+        assert!(
+            res.is_err(),
+            "an http:// base must be refused by the https-only client (no plaintext \
+             credential-carrying request)"
+        );
     }
 }

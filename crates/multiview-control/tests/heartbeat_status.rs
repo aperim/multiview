@@ -57,7 +57,7 @@ fn binding(
         LeaseSource::File => Lease::new_offline(serial.to_owned(), granted, ACTIVATION_WINDOW_DAYS),
         other => Lease::new_full(serial.to_owned(), granted, other, ACTIVATION_WINDOW_DAYS),
     };
-    let sig = key.sign(&SignedLease::signing_bytes(&lease));
+    let sig = key.sign(&SignedLease::signing_bytes(&lease, None));
     LeaseBinding::new(
         SignedLease::new(lease.clone(), sig.to_bytes()),
         Entitlement::new(
@@ -69,6 +69,7 @@ fn binding(
             EntitlementFlags::default(),
         ),
         100,
+        None,
     )
 }
 

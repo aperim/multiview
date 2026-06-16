@@ -2955,6 +2955,7 @@ dependencies = [
  "multiview-telemetry",
  "multiview-webrtc",
  "reqwest",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "tempfile",
@@ -3165,16 +3166,20 @@ dependencies = [
 name = "multiview-licence"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "ciborium",
  "ed25519-dalek",
+ "hex",
  "multiview-core",
  "multiview-events",
+ "p256",
  "proptest",
  "rand_core 0.6.4",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 

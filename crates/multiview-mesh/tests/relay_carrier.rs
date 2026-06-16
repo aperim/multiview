@@ -36,7 +36,7 @@ fn server_binding(server: &SigningKey, serial: &str, granted: DateTime<Utc>) -> 
         LeaseSource::Relay,
         ACTIVATION_WINDOW_DAYS,
     );
-    let sig = server.sign(&SignedLease::signing_bytes(&lease));
+    let sig = server.sign(&SignedLease::signing_bytes(&lease, None));
     LeaseBinding::new(
         SignedLease::new(lease.clone(), sig.to_bytes()),
         Entitlement::new(
@@ -48,6 +48,7 @@ fn server_binding(server: &SigningKey, serial: &str, granted: DateTime<Utc>) -> 
             EntitlementFlags::default(),
         ),
         100,
+        None,
     )
 }
 
