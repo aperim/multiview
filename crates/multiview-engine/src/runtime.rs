@@ -61,15 +61,32 @@ use crate::isolation::EnginePublisher;
 /// 120 ticks is ~4 s at 30 fps / ~2 s at 60 fps of held last-good before resync.
 pub const MAX_REPEATS_PER_TICK: u32 = 120;
 
+/// The longest a [`RealtimePacer`] sleeps in one step before re-checking the
+/// [`StopSignal`]. Real per-tick deadlines are at most one tick period out
+/// (~16.7 ms at 60 fps), so this cap never fragments a normal wait; it only
+/// bounds the stop-observation latency when a deadline is unusually far in the
+/// future (a paused/jumped clock), keeping shutdown prompt without busy-waking.
+const PACER_STOP_POLL: Duration = Duration::from_millis(10);
+
 /// How the runtime waits for a tick's wall-clock deadline.
 ///
 /// The runtime computes the absolute deadline (on the [`TimeSource`] timeline)
 /// of each tick and asks the pacer to wait for it. The pacer **must not** block
 /// the executor thread; it returns once the time source has reached (or passed)
-/// the deadline. Two implementations cover production and deterministic tests
-/// (see the module docs).
+/// the deadline **or** the [`StopSignal`] is raised — whichever comes first. Two
+/// implementations cover production and deterministic tests (see the module docs).
 pub trait Pacer {
-    /// Wait until `source.now_nanos() >= deadline_nanos`, cooperatively.
+    /// Wait until `source.now_nanos() >= deadline_nanos`, cooperatively, **or
+    /// until `stop` is raised** — whichever happens first.
+    ///
+    /// Honouring `stop` here is load-bearing for invariant #1's shutdown
+    /// contract: the drive loop parks in this wait between ticks, so a pacer that
+    /// ignored `stop` would spin/sleep on an unreachable deadline forever once the
+    /// clock is frozen or merely slow (a contended host), and the loop could never
+    /// observe the stop. The pacer therefore returns promptly (within
+    /// [`PACER_STOP_POLL`] for the real pacer; a single cooperative yield for the
+    /// test pacer) once `stop` is set; the caller re-checks `stop` immediately
+    /// after and returns without composing an unwanted tick.
     ///
     /// The returned future is **`Send`** so an [`EngineRuntime`] driving this
     /// pacer can run on a `tokio::spawn`ed task — exactly what MP-1's
@@ -81,47 +98,63 @@ pub trait Pacer {
         &self,
         deadline_nanos: i64,
         source: &dyn TimeSource,
+        stop: &StopSignal,
     ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// Production pacer: a real [`tokio::time::sleep`] until the deadline.
 ///
-/// Computes the remaining duration from the time source and sleeps it; on wakeup
-/// it re-checks (a spurious early wake or accumulated rounding never advances the
-/// tick before its deadline). Paused-time aware, so it also works under
-/// `tokio::time::pause`.
+/// Computes the remaining duration from the time source and sleeps it (in steps
+/// of at most [`PACER_STOP_POLL`] so a raised [`StopSignal`] is observed
+/// promptly); on wakeup it re-checks (a spurious early wake or accumulated
+/// rounding never advances the tick before its deadline). Paused-time aware, so
+/// it also works under `tokio::time::pause`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RealtimePacer;
 
 impl Pacer for RealtimePacer {
-    async fn wait_until(&self, deadline_nanos: i64, source: &dyn TimeSource) {
+    async fn wait_until(&self, deadline_nanos: i64, source: &dyn TimeSource, stop: &StopSignal) {
         loop {
+            if stop.is_stopped() {
+                return;
+            }
             let now = source.now_nanos();
             let remaining = deadline_nanos.saturating_sub(now);
             if remaining <= 0 {
                 return;
             }
             let nanos = u64::try_from(remaining).unwrap_or(u64::MAX);
-            tokio::time::sleep(Duration::from_nanos(nanos)).await;
+            // Cap each sleep so a stop raised mid-wait is seen within one poll
+            // interval rather than only after the (possibly far) deadline. A
+            // normal one-period wait is shorter than the cap, so this is a single
+            // sleep in the steady state.
+            let poll_cap = u64::try_from(PACER_STOP_POLL.as_nanos()).unwrap_or(u64::MAX);
+            tokio::time::sleep(Duration::from_nanos(nanos.min(poll_cap))).await;
         }
     }
 }
 
 /// Deterministic test pacer: a cooperative yield-spin until the (manually
-/// advanced) source reaches the deadline. **No real sleeps.**
+/// advanced) source reaches the deadline — **or `stop` is raised**. **No real
+/// sleeps.**
 ///
 /// The test advances the [`ManualTimeSource`] (typically by exactly one tick
 /// period before each step), so each `wait_until` returns after at most a couple
 /// of cooperative yields — giving a contending consumer task a chance to run
-/// while remaining wall-clock-free and flake-free.
+/// while remaining wall-clock-free and flake-free. Checking `stop` each yield is
+/// what lets a bounded test (or a real shutdown) end even when the manual clock
+/// is frozen on an unreachable deadline — otherwise this spin would never exit.
 ///
 /// [`ManualTimeSource`]: crate::clock::ManualTimeSource
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CooperativePacer;
 
 impl Pacer for CooperativePacer {
-    async fn wait_until(&self, deadline_nanos: i64, source: &dyn TimeSource) {
+    async fn wait_until(&self, deadline_nanos: i64, source: &dyn TimeSource, stop: &StopSignal) {
         while source.now_nanos() < deadline_nanos {
+            if stop.is_stopped() {
+                return;
+            }
             tokio::task::yield_now().await;
         }
     }
@@ -462,13 +495,23 @@ impl<P: Pacer> EngineRuntime<P> {
             }
 
             // 1. Pace to the due tick's absolute deadline (the only `.await` that
-            //    gates the loop — and it gates only on the clock, never on an
-            //    input or a consumer).
+            //    gates the loop — and it gates only on the clock or a raised stop,
+            //    never on an input or a consumer).
             let index = self.clock.next_index();
             let deadline = self.clock.deadline_nanos(index, self.seed_nanos);
             self.pacer
-                .wait_until(deadline, self.time_source.as_ref())
+                .wait_until(deadline, self.time_source.as_ref(), stop)
                 .await;
+            // The pacer returns early on stop (so it cannot spin/sleep forever on an
+            // unreachable deadline). Re-check here and return WITHOUT composing this
+            // tick, so a stop raised mid-wait ends the loop within one poll interval
+            // rather than emitting one more frame past the deadline it never met.
+            if stop.is_stopped() {
+                return Ok(RunOutcome {
+                    ticks: emitted,
+                    stop: RunStop::Stopped,
+                });
+            }
 
             // 1.5 DROP/REPEAT-TO-CADENCE (ADR-T018). If compose has fallen behind
             //     wall-clock (a CPU/GPU-contended host), re-emit the held last-good
