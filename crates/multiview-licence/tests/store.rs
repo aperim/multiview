@@ -174,6 +174,53 @@ fn a_tampered_instance_binding_id_is_rejected_and_never_anchors_identity() {
 }
 
 #[test]
+fn a_tampered_instance_binding_id_in_a_cbor_payload_is_rejected_on_the_file_drop_relay_path() {
+    // The realistic cross-instance-poisoning attack on the offline file-drop /
+    // mesh-relay surfaces: those install a LeaseBinding decoded from CBOR
+    // (LeaseBinding::from_bytes), NOT one built in-process. An attacker takes a
+    // genuinely-signed binding and edits the CBOR `instanceBindingId` to a binding
+    // they control while leaving the inner lease signature intact. The decoded
+    // binding must be REJECTED at install (SignatureInvalid — the signature covers
+    // the binding id) and must NEVER anchor the forged id. This exercises the
+    // EXACT from_bytes→install path watcher.rs and the mesh relay take.
+    let (key, pinned) = keypair();
+    let now = epoch();
+    let lease = lease_at("serial-CBOR", now);
+    // A legitimate, fully-signed binding for THIS device's real binding id.
+    let genuine = binding_with_id(&key, &lease, 100, "ib_real_device");
+    let bytes = genuine.to_cbor().expect("encode the genuine binding to CBOR");
+
+    // The attacker decodes it and grafts a foreign binding id (the CBOR field is
+    // not covered by re-signing — only the inner lease bytes are signed).
+    let mut tampered = LeaseBinding::from_bytes(&bytes).expect("decode the CBOR binding");
+    tampered.instance_binding_id = Some("ib_attacker_via_file".to_owned());
+
+    let store = LeaseStore::new();
+    let err = store
+        .install_binding(&tampered, &pinned, now)
+        .expect_err("a CBOR binding with a tampered instance_binding_id must be rejected");
+    assert!(
+        matches!(err, InstallError::SignatureInvalid),
+        "a tampered CBOR binding id must be SignatureInvalid on the file-drop/relay path, got {err:?}"
+    );
+    assert!(
+        store.current_binding_id().is_none(),
+        "the file-drop/relay path must NEVER anchor a forged binding id"
+    );
+
+    // Control: the UNtampered decoded binding installs and anchors the real id.
+    let genuine_decoded = LeaseBinding::from_bytes(&bytes).expect("decode again");
+    store
+        .install_binding(&genuine_decoded, &pinned, now)
+        .expect("the genuine CBOR binding installs");
+    assert_eq!(
+        store.current_binding_id(),
+        Some("ib_real_device".to_owned()),
+        "the genuine signed binding id is anchored from the CBOR/file-drop path"
+    );
+}
+
+#[test]
 fn a_below_threshold_fingerprint_is_rejected_fingerprint_mismatch() {
     let (key, pinned) = keypair();
     let now = epoch();
