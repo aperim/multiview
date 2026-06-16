@@ -567,6 +567,148 @@ async fn a_signed_lease_with_an_absolute_past_not_after_is_rejected_lease_expire
     );
 }
 
+// --- Round-3 BLOCKER 1: a STALE FOREIGN lease on the activate path with a
+//     pre-existing local store lease does NOT poison the learned binding id, and
+//     is rejected. The Stale->Ok fold must not be treated as "installed". --------
+
+#[tokio::test]
+async fn a_stale_foreign_lease_on_the_activate_path_does_not_poison_identity() {
+    use multiview_licence::heartbeat::HeartbeatError;
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+
+    // The device has NO configured/learned heartbeat binding (activate path), but
+    // its local store ALREADY HOLDS a newer lease for THIS device (a prior
+    // heartbeat install). Seed that by installing a genuine local lease first via
+    // a client whose identity IS this device's binding.
+    let seed_client = {
+        let mut id = test_identity();
+        id.binding_id = Some(server.kit().binding_id().to_owned());
+        HeartbeatClient::new(
+            Arc::clone(&server),
+            Arc::clone(&store),
+            server.pinned_root(),
+            test_config(),
+            id,
+        )
+    };
+    tokio::time::timeout(Duration::from_secs(5), seed_client.run_once())
+        .await
+        .unwrap()
+        .expect("seed install for this device");
+    let seeded_binding = server.kit().binding_id().to_owned();
+    assert!(
+        store.current().is_some(),
+        "the store holds a newer local lease"
+    );
+
+    // A FRESH client with NO binding (activate path). The server now replays a
+    // STALE (older granted_at) lease minted for a FOREIGN binding. It is
+    // crypto-valid, so verify passes; the store returns Stale (keeps last-good).
+    // The fold-of-Stale-to-Ok must NOT learn the foreign binding, and the device
+    // identity must remain the seeded one.
+    let attack_client = HeartbeatClient::new(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        server.pinned_root(),
+        test_config(),
+        {
+            let mut id = test_identity();
+            id.binding_id = None; // activate path
+            id
+        },
+    );
+    server.set_foreign_binding(true);
+    server.set_replay_stale(true); // older granted_at than the seeded lease
+    let res = tokio::time::timeout(Duration::from_secs(5), attack_client.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(
+        matches!(res, Err(HeartbeatError::BindingMismatch)),
+        "a stale FOREIGN lease must be rejected as a binding mismatch, got {res:?}"
+    );
+
+    // The store still holds the seeded (this-device) lease — unchanged.
+    let after = store.current().expect("store still holds the seeded lease");
+    assert_eq!(
+        after.lease.serial,
+        server.kit().lease_serial(),
+        "the seeded local lease is untouched"
+    );
+
+    // Identity was NOT poisoned: the next heartbeat addresses the seeded binding.
+    server.set_foreign_binding(false);
+    server.set_replay_stale(false);
+    server.clear_last_binding_id();
+    tokio::time::timeout(Duration::from_secs(5), attack_client.run_once())
+        .await
+        .unwrap()
+        .expect("a legitimate renewal succeeds");
+    assert_eq!(
+        server.last_binding_id().expect("a binding id was sent"),
+        seeded_binding,
+        "identity was not poisoned — the renewal addresses the device's real binding"
+    );
+}
+
+// --- Round-3 BLOCKER 2: key-trust TOCTOU. A signer that expires (valid_until
+//     elapses) BETWEEN trust-evaluation and lease-acceptance is rejected. ---------
+
+#[tokio::test]
+async fn a_signer_that_expires_during_the_call_is_rejected_at_acceptance() {
+    use multiview_licence::heartbeat::HeartbeatError;
+    use std::sync::atomic::{AtomicUsize, Ordering as O};
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+
+    // The fabricated signer is valid in [VALID_FROM, VALID_UNTIL]. We drive a
+    // clock that reports an instant INSIDE the window on the FIRST read (so any
+    // pre-network trust check passes) and an instant just AFTER valid_until on the
+    // SECOND read (lease-acceptance time). A verifier that froze trust at the
+    // pre-network instant would wrongly accept; re-evaluating at acceptance must
+    // reject the now-expired signer.
+    let inside = server.kit().now_ms();
+    let after_expiry = server.kit().valid_until() + 1;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let reads2 = Arc::clone(&reads);
+    let clock = std::sync::Arc::new(move || {
+        // First read → inside validity; every later read → after expiry.
+        if reads2.fetch_add(1, O::SeqCst) == 0 {
+            inside
+        } else {
+            after_expiry
+        }
+    });
+    let client = HeartbeatClient::with_clock(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        server.pinned_root(),
+        test_config(),
+        test_identity(),
+        clock,
+    );
+
+    let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(
+        matches!(
+            res,
+            Err(HeartbeatError::KeyTrust(_)) | Err(HeartbeatError::SignedLease(_))
+        ),
+        "a signer that expired between trust-eval and acceptance must be rejected, got {res:?}"
+    );
+    assert!(
+        store.status().is_none(),
+        "nothing is installed when the signer expired at acceptance time"
+    );
+    assert!(
+        reads.load(O::SeqCst) >= 2,
+        "trust must be re-evaluated with a fresh clock read at acceptance (got {} reads)",
+        reads.load(O::SeqCst)
+    );
+}
+
 /// A deterministic foreign root (different from the fabricated keyset's root) for
 /// the wrong-root rejection test.
 fn foreign_root() -> multiview_licence::heartbeat::PinnedRoot {

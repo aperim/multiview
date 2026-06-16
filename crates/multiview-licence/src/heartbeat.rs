@@ -1018,6 +1018,12 @@ pub enum HeartbeatOutcome {
     },
 }
 
+/// A wall-clock seam returning epoch milliseconds. The production default is
+/// [`unix_millis_now`]; tests inject a controllable clock to drive time-sensitive
+/// key-trust re-evaluation (signer validity-window / revocation at lease-acceptance
+/// time) deterministically.
+pub type NowMs = Arc<dyn Fn() -> i64 + Send + Sync>;
+
 /// The device heartbeat client: drives the verified-lease install convergence and
 /// nothing else. Holds only the server handle, the shared lease store, the pinned
 /// root, config, and identity — **no engine handle** (invariant #10).
@@ -1032,10 +1038,15 @@ pub struct HeartbeatClient<S: LicenceServer> {
     /// **never** the lease serial (a different object). Control-plane only; the
     /// loop is the sole writer/reader, so a plain `Mutex` is correct (no hot path).
     learned_binding_id: std::sync::Mutex<Option<String>>,
+    /// The wall-clock seam (epoch ms). Read FRESH at key-trust evaluation AND
+    /// again at lease-acceptance, so a signer that expires (or is revoked) during
+    /// an arbitrarily-stalled network call is rejected at acceptance (no TOCTOU).
+    now_ms: NowMs,
 }
 
 impl<S: LicenceServer> HeartbeatClient<S> {
-    /// Assemble a heartbeat client.
+    /// Assemble a heartbeat client with the production wall clock
+    /// ([`unix_millis_now`]).
     #[must_use]
     pub fn new(
         server: Arc<S>,
@@ -1043,6 +1054,28 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         pinned: PinnedRoot,
         config: HeartbeatConfig,
         identity: DeviceIdentity,
+    ) -> Self {
+        Self::with_clock(
+            server,
+            store,
+            pinned,
+            config,
+            identity,
+            Arc::new(unix_millis_now),
+        )
+    }
+
+    /// Assemble a heartbeat client reading "now" (epoch ms) from `now_ms` — tests
+    /// inject a controllable clock to exercise the key-trust re-evaluation at
+    /// lease-acceptance time (the validity-window / revocation TOCTOU).
+    #[must_use]
+    pub fn with_clock(
+        server: Arc<S>,
+        store: Arc<LeaseStore>,
+        pinned: PinnedRoot,
+        config: HeartbeatConfig,
+        identity: DeviceIdentity,
+        now_ms: NowMs,
     ) -> Self {
         let learned_binding_id = std::sync::Mutex::new(identity.binding_id.clone());
         Self {
@@ -1052,6 +1085,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             config,
             identity,
             learned_binding_id,
+            now_ms,
         }
     }
 

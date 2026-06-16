@@ -78,6 +78,11 @@ impl FabricatedKeyset {
     pub fn now_ms(&self) -> i64 {
         FAB_NOW_MS
     }
+    /// The signer's signed `valid_until` (epoch ms) — the dual-pin intermediate's
+    /// validity-window end. The TOCTOU test advances the clock just past this.
+    pub fn valid_until(&self) -> i64 {
+        FAB_VALID_UNTIL
+    }
     pub fn kid(&self) -> &'static str {
         FAB_KID
     }
@@ -505,6 +510,11 @@ pub struct FakeLicenceServer {
     /// absolute instant in 1970 — clearly past ANY real clock, so install() takes
     /// the `LeaseExpired` path deterministically.
     replay_absolute_past: AtomicBool,
+    /// When true, the returned (correctly-signed) lease has an OLDER `granted_at`
+    /// (a smaller, but still-future, `not_after`) than a normal lease — so the
+    /// store rejects it as `Stale`. Still future, so it clears the expiry gate and
+    /// reaches the store's staleness check (the Stale->Ok fold path).
+    replay_stale: AtomicBool,
     /// The `bindingId` the most recent heartbeat request carried (so a test can
     /// assert the renewal addresses the binding by id, never the lease serial).
     last_binding_id: std::sync::Mutex<Option<String>>,
@@ -526,6 +536,7 @@ impl FakeLicenceServer {
             replay_expired: AtomicBool::new(false),
             foreign_binding: AtomicBool::new(false),
             replay_absolute_past: AtomicBool::new(false),
+            replay_stale: AtomicBool::new(false),
             last_binding_id: std::sync::Mutex::new(None),
             heartbeats: AtomicU64::new(0),
             next_due_ms: AtomicU64::new(FAB_NOW_MS as u64 + 30 * 86_400_000),
@@ -575,6 +586,12 @@ impl FakeLicenceServer {
     pub fn set_replay_absolute_past(&self, on: bool) {
         self.replay_absolute_past.store(on, Ordering::SeqCst);
     }
+    /// Make the returned lease STALE (older granted_at than a normal lease) yet
+    /// still future — so it clears the expiry gate and the store rejects it as
+    /// `Stale` (exercising the Stale->Ok fold / no-poison path).
+    pub fn set_replay_stale(&self, on: bool) {
+        self.replay_stale.store(on, Ordering::SeqCst);
+    }
     /// The binding id the current knobs select for the served lease body.
     fn served_binding(&self) -> &'static str {
         if self.foreign_binding.load(Ordering::SeqCst) {
@@ -588,6 +605,12 @@ impl FakeLicenceServer {
     fn served_lease(&self) -> ServerLease {
         let not_after = if self.replay_absolute_past.load(Ordering::SeqCst) {
             1_000_000 // 1970-01-01T00:16:40Z — before any real clock
+        } else if self.replay_stale.load(Ordering::SeqCst) {
+            // A SHORTER (still-future) term → an OLDER granted_at than the normal
+            // 35-day lease (granted_at = not_after - 35d). fab_now+20d is still
+            // far past the real clock, so it clears the expiry gate but is stale
+            // vs a lease granted at fab_now.
+            self.kit.now_ms() + 20 * 86_400_000
         } else {
             self.kit.now_ms() + 35 * 86_400_000
         };
