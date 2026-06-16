@@ -322,6 +322,20 @@ async fn an_installed_lease_then_renews_on_the_next_cycle() {
         "the install surface anchored the device binding"
     );
 
+    // ANTI-ALIASING PRECONDITION (rule 19): the assertions below are only a
+    // meaningful "addresses by instanceBindingId, never the lease serial" guard if
+    // the fixture's binding id and lease serial are DISTINCT values. If they
+    // aliased, a renew-BY-SERIAL regression could pass the binding-id assertion.
+    // This was the load-bearing assert_ne! of the round-5c-removed
+    // `the_renewal_addresses_the_binding_by_id_never_the_lease_serial` test; it is
+    // restored here on the renew path it now lives on.
+    assert_ne!(
+        server.kit().binding_id(),
+        server.kit().lease_serial(),
+        "fixture binding id and lease serial MUST be distinct, else the renew-by-id \
+         assertion below is a tautology"
+    );
+
     // Cycle 2: now the store holds a binding → the client RENEWS via heartbeat.
     server.clear_last_binding_id();
     let outcome = tokio::time::timeout(Duration::from_secs(5), client.run_once())
@@ -334,10 +348,16 @@ async fn an_installed_lease_then_renews_on_the_next_cycle() {
         1,
         "the next cycle renews via heartbeat once a binding exists"
     );
+    let seen = server.last_binding_id().expect("a binding id was sent");
     assert_eq!(
-        server.last_binding_id().expect("a binding id was sent"),
+        seen,
         server.kit().binding_id(),
         "the renewal addresses the binding by the server's instanceBindingId"
+    );
+    assert_ne!(
+        seen,
+        server.kit().lease_serial(),
+        "the renewal must NEVER address the binding by the lease serial"
     );
 }
 
@@ -933,11 +953,12 @@ impl SharedNonceStore {
 }
 
 impl multiview_licence::heartbeat::NonceStore for SharedNonceStore {
-    fn load(&self) -> u64 {
-        self.cell.load(Ordering::SeqCst)
+    fn load(&self) -> Result<u64, multiview_licence::heartbeat::NonceError> {
+        Ok(self.cell.load(Ordering::SeqCst))
     }
-    fn commit(&self, value: u64) {
+    fn commit(&self, value: u64) -> Result<(), multiview_licence::heartbeat::NonceError> {
         self.cell.store(value, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -1009,4 +1030,123 @@ async fn the_idempotency_nonce_is_distinct_across_a_restart() {
 /// the key derives from the counter + machine id, never the clock).
 fn unix_millis_for_test() -> impl Fn() -> i64 + Send + Sync {
     || 1_790_000_000_000
+}
+
+// --- Round-6 BLOCKER 1: the durable idempotency nonce FAILS CLOSED. --------------
+//
+// A durable nonce store that cannot be trusted (a corrupt/unreadable load, or a
+// commit that does not persist) must NEVER let the heartbeat send a mutation under
+// a possibly-colliding key. The mint is gated on a trustworthy durable commit
+// BEFORE the mutation; on a nonce-store error the cycle is a keep-last-good no-op
+// (no mutation reaches the server) — a nonce-store I/O failure must never tighten
+// output (inv #1/#10) and never send a colliding-key mutation.
+
+/// A [`NonceStore`] whose `load` and `commit` both fail — the analogue of a
+/// corrupt/unwritable on-disk nonce file. The client must refuse to mint a key
+/// against it (fail closed), so no mutation is sent.
+struct FailingNonceStore;
+
+impl multiview_licence::heartbeat::NonceStore for FailingNonceStore {
+    fn load(&self) -> Result<u64, multiview_licence::heartbeat::NonceError> {
+        Err(multiview_licence::heartbeat::NonceError::new(
+            "durable nonce unreadable/corrupt",
+        ))
+    }
+    fn commit(&self, _value: u64) -> Result<(), multiview_licence::heartbeat::NonceError> {
+        Err(multiview_licence::heartbeat::NonceError::new(
+            "durable nonce commit failed",
+        ))
+    }
+}
+
+/// A [`NonceStore`] that loads fine (fresh device, 0) but whose `commit` always
+/// fails — the analogue of a read-only / full lease-state dir. The mint must fail
+/// closed (the key was never durably committed), so no mutation is sent.
+struct UncommittableNonceStore;
+
+impl multiview_licence::heartbeat::NonceStore for UncommittableNonceStore {
+    fn load(&self) -> Result<u64, multiview_licence::heartbeat::NonceError> {
+        Ok(0)
+    }
+    fn commit(&self, _value: u64) -> Result<(), multiview_licence::heartbeat::NonceError> {
+        Err(multiview_licence::heartbeat::NonceError::new(
+            "durable nonce commit failed",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn a_failing_durable_nonce_store_keeps_last_good_and_sends_no_mutation() {
+    // The device HAS a binding (so it would otherwise renew), but its durable nonce
+    // store fails. The mint must fail closed: run_once returns an error, NO
+    // heartbeat mutation is sent (so the server can never receive a colliding key),
+    // and nothing is installed (last-good kept; output stays on air).
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    // Default identity carries a configured binding → the renew path.
+    let client = HeartbeatClient::with_clock_and_nonce(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        server.pinned_root(),
+        test_config(),
+        test_identity(),
+        Arc::new(unix_millis_for_test()),
+        Arc::new(FailingNonceStore),
+    );
+
+    let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(
+        res.is_err(),
+        "a failing durable nonce store must fail the cycle closed, got {res:?}"
+    );
+    assert_eq!(
+        server.heartbeats.load(Ordering::SeqCst),
+        0,
+        "NO heartbeat mutation may be sent when the nonce cannot be durably committed"
+    );
+    assert!(
+        server.idempotency_keys().is_empty(),
+        "no mutation (and so no idempotency key) reaches the server on a nonce-store failure"
+    );
+    assert!(
+        store.status().is_none(),
+        "nothing is installed — last-good is kept (never off air)"
+    );
+}
+
+#[tokio::test]
+async fn a_nonce_commit_failure_blocks_the_mutation_fail_closed() {
+    // load() succeeds (fresh device, counter 0) but commit() fails — the key was
+    // never durably persisted, so sending the mutation would risk a cross-restart
+    // collision. The mint must fail closed: no mutation, nothing installed.
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = HeartbeatClient::with_clock_and_nonce(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        server.pinned_root(),
+        test_config(),
+        test_identity(),
+        Arc::new(unix_millis_for_test()),
+        Arc::new(UncommittableNonceStore),
+    );
+
+    let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(
+        res.is_err(),
+        "a nonce commit failure must fail the cycle closed, got {res:?}"
+    );
+    assert_eq!(
+        server.heartbeats.load(Ordering::SeqCst),
+        0,
+        "NO mutation may be sent when the nonce commit did not persist"
+    );
+    assert!(
+        store.status().is_none(),
+        "nothing is installed — last-good is kept"
+    );
 }

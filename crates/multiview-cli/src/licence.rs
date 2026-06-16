@@ -790,4 +790,109 @@ mod tests {
         assert_eq!(decode_hex("zz"), None);
         assert_eq!(decode_hex("0x10"), None);
     }
+
+    // --- Round-6 BLOCKER 1: the file-backed durable nonce FAILS CLOSED. ----------
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_load_is_ok_zero_when_absent() {
+        // A fresh device legitimately has no nonce file → 0 is a correct, trusted
+        // value (NOT an error): the in-process monotone guard covers same-lifetime
+        // reuse and there is no prior lifetime to collide with.
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"));
+        assert_eq!(
+            store.load().expect("an absent nonce file loads as a trusted 0"),
+            0
+        );
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_load_errors_on_a_corrupt_file() {
+        // A PRESENT but unparseable nonce file must NOT be silently trusted as 0 —
+        // that would reset the high-water and re-mint a colliding key after restart.
+        // load() returns an Error so the mint fails closed.
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("idempotency-nonce");
+        std::fs::write(&path, "not-a-number").expect("seed corrupt nonce");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"));
+        assert!(
+            store.load().is_err(),
+            "a present-but-corrupt nonce file must load as an Error, never a silent 0"
+        );
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_commit_errors_when_unwritable() {
+        // commit() must PROPAGATE a write/rename failure (not log-and-continue): an
+        // un-persisted high-water is exactly the cross-restart collision risk. Point
+        // the store at a path whose parent is a FILE (so write fails), and assert
+        // commit returns an Error.
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let not_a_dir = dir.path().join("a-file");
+        std::fs::write(&not_a_dir, "x").expect("seed a file");
+        // `not_a_dir` is a file; using it as the lease-state dir makes the nonce
+        // path `<file>/idempotency-nonce`, whose write must fail.
+        let store = FileNonceStore::in_dir(not_a_dir.to_str().expect("utf8 path"));
+        assert!(
+            store.commit(1).is_err(),
+            "an unwritable nonce path must make commit() return an Error"
+        );
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn file_nonce_store_round_trips_a_committed_value() {
+        // The happy path still works: a committed value reloads exactly.
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"));
+        store.commit(7).expect("commit persists");
+        assert_eq!(store.load().expect("reload"), 7);
+    }
+
+    // --- Round-6 MAJOR: the HTTP transport is HTTPS-only and FAILS CLOSED. -------
+
+    #[cfg(feature = "heartbeat")]
+    #[tokio::test]
+    async fn the_transport_refuses_a_plaintext_http_base_https_only() {
+        // The client must NEVER attach the bearer JWT to a plaintext http:// request
+        // (credential leak). The reqwest client is built https_only(true) and the
+        // constructor FAILS CLOSED (no unwrap_or_default fallback that would drop
+        // https_only), so a heartbeat against an http:// base is rejected at the
+        // transport with NO plaintext request leaving the host.
+        use multiview_licence::heartbeat::{
+            DeviceIdentity, HeartbeatClient, LicenceServer as _,
+        };
+        let server = ConspectHttpServer::new(
+            "http://insecure.example.invalid/v0".to_owned(),
+            "super-secret-bearer".to_owned(),
+        )
+        .expect("an https-only client builds");
+        // `HeartbeatRequest` is #[non_exhaustive]; build it via the public builder.
+        let identity = DeviceIdentity {
+            machine_id: "m".to_owned(),
+            fingerprint_digest: "0".repeat(64),
+            fingerprint_score: 0,
+            binding_id: Some("ib_x".to_owned()),
+            app_version: "test".to_owned(),
+            instance_id: String::new(),
+            hardware_digest: String::new(),
+            instance_discriminator_hash: String::new(),
+            instance_discriminator_digest: String::new(),
+            device_public_key_b64url: String::new(),
+        };
+        let req = HeartbeatClient::<ConspectHttpServer>::build_heartbeat_request(&identity, None);
+        let res = server.heartbeat("org_x", req, "mv-m-1").await;
+        assert!(
+            res.is_err(),
+            "an http:// base must be refused by the https-only client (no plaintext \
+             credential-carrying request)"
+        );
+    }
 }
