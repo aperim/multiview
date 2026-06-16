@@ -67,6 +67,10 @@ recall/record is the [`memory`](../memory/SKILL.md) skill.
      Report concrete defects with file:line; if none, name the single highest-residual \
      risk. Do not comment on style." < /tmp/review.diff
   ```
+- **Codex must be authenticated** or `codex exec` fails 401 and `review-wave` records a
+  labeled `claude-fallback` (fresh-context Claude, **not** cross-vendor). **Never merge on
+  a fallback verdict** — hold the PR until Codex auth lands. Setup + verify:
+  [codex-review runbook](../../../docs/runbooks/codex-review.md).
 - Require **≥1 substantive risk statement** (unanimous bland approval is a yellow flag,
   rule 16). Fix every finding before merge (a "blocked" verdict is real, rule 16).
 - **High-risk diffs** (auth, concurrency, data migration, money, and any engine/data-plane
