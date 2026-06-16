@@ -46,6 +46,37 @@ const RECV_BUFFER: usize = 2048;
 /// AUs are packetized promptly.
 const DRIVER_TICK: Duration = Duration::from_millis(10);
 
+/// Per-wake inbound drain budget: the **maximum datagrams** one `readable` wake
+/// reads from the socket before it MUST break to pump str0m timers / TURN
+/// keepalives / commands / GC and yield back to `select!` (invariant #10). At the
+/// ADR-0048 §12 worst case (~50 kpps aggregate), 256 datagrams is ~5 ms of
+/// arrivals — bounded work — while the `select!` re-fires immediately if the
+/// socket still has data, so no datagram is *lost* by the cap (only deferred to
+/// the next wake; the OS receive buffer holds the rest, dropping oldest on
+/// overflow exactly as UDP already does). Without this cap a sustained/hostile
+/// flood (the socket never returns `WouldBlock`) would keep the task in the inner
+/// loop forever and starve the whole driver — the panel's MAJOR #1.
+const MAX_DATAGRAMS_PER_WAKE: usize = 256;
+
+/// Per-wake inbound drain **time budget**: even below [`MAX_DATAGRAMS_PER_WAKE`],
+/// once this much wall-clock has elapsed inside one drain the loop breaks to
+/// pump/yield. A belt-and-braces bound for the case where per-datagram routing is
+/// unexpectedly costly, so a wake can never monopolise the task for longer than
+/// this regardless of datagram size/rate. Well under [`DRIVER_TICK`] so pumping
+/// and the tick arm still run promptly.
+const MAX_DRAIN_TIME: Duration = Duration::from_millis(2);
+
+/// How a single-wake inbound drain ended (invariant #10, MAJOR #1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DrainOutcome {
+    /// Datagrams read this wake (routed + dropped-malformed), capped by the budget.
+    read_count: usize,
+    /// `true` when the per-wake budget (count or time) stopped the drain before
+    /// the socket reported `WouldBlock` — the socket may still hold data, so the
+    /// caller must re-arm the `select!` (after pumping/yielding).
+    budget_exhausted: bool,
+}
+
 /// The single-socket WebRTC endpoint: ONE bound dual-stack UDP socket and ONE
 /// TURN relay driver, shared by every WebRTC role (ADR-0048 §4).
 ///
@@ -289,44 +320,35 @@ impl UnifiedEndpoint {
                 ready = socket.readable() => {
                     let now = Instant::now();
                     if ready.is_ok() {
-                        // Read every queued datagram (the socket is non-blocking;
-                        // `recvmsg` returns `WouldBlock` when drained). Each read
-                        // recovers the CONCRETE local destination via PKTINFO and
-                        // resolves it onto a gathered candidate so str0m's STUN
-                        // matching accepts the check (defect #3).
-                        loop {
-                            let read = socket.try_io(tokio::io::Interest::READABLE, || {
-                                crate::transport::local_addr::recv_from_with_local(
-                                    &socket2::SockRef::from(&socket),
-                                    &mut buf,
-                                    local_addr,
-                                )
-                            });
-                            match read {
-                                Ok((len, src, arrival)) => {
-                                    let dst = crate::transport::resolve_local_destination(
-                                        arrival,
-                                        &concrete_candidates,
-                                    );
-                                    if let Some(payload) = buf.get(..len) {
-                                        Self::route_inbound(
-                                            &mut turn,
-                                            ingest.as_mut(),
-                                            serve.as_mut(),
-                                            preview.as_ref(),
-                                            &mut push,
-                                            src,
-                                            dst,
-                                            payload,
-                                            now,
-                                        );
-                                    }
-                                }
-                                // Socket drained (WouldBlock) or a transient error:
-                                // stop reading this wake and pump.
-                                Err(_) => break,
-                            }
-                        }
+                        // Drain at most one wake's BUDGET of datagrams (count +
+                        // time), then break to pump/yield — never an unbounded
+                        // drain that a sustained/hostile flood could ride forever
+                        // and starve the rest of the loop (invariant #10, MAJOR
+                        // #1). Each read recovers the CONCRETE local destination
+                        // via PKTINFO and resolves it onto a gathered candidate so
+                        // str0m's STUN matching accepts the check (defect #3).
+                        Self::drain_inbound_budgeted(
+                            &socket, &mut buf, local_addr, &concrete_candidates,
+                            |src, dst, payload| {
+                                Self::route_inbound(
+                                    &mut turn,
+                                    ingest.as_mut(),
+                                    serve.as_mut(),
+                                    preview.as_ref(),
+                                    &mut push,
+                                    src,
+                                    dst,
+                                    payload,
+                                    now,
+                                );
+                            },
+                        );
+                        // If the budget cut the drain short the socket may still
+                        // hold data; we do NOT loop here — we pump first, then fall
+                        // through to the top of the `select!`, whose `readable()`
+                        // arm re-fires at once (readiness is still set) while the
+                        // tick arm + stop check interleave. The flood gets bounded
+                        // work per wake; the rest of the driver always runs.
                     }
                     Self::pump_all(
                         &socket, &mut turn,
@@ -373,6 +395,72 @@ impl UnifiedEndpoint {
         if let Some(lane) = serve {
             while let Ok(cmd) = lane.commands.try_recv() {
                 WhepServeEndpoint::apply_command(&mut lane.viewers, Some(cmd));
+            }
+        }
+    }
+
+    /// Drain the readable socket for **at most one wake's budget** of datagrams,
+    /// invoking `route` for each, then return how the drain ended (invariant #10,
+    /// MAJOR #1).
+    ///
+    /// The drain stops at the **first** of: the socket draining (`WouldBlock`),
+    /// the [`MAX_DATAGRAMS_PER_WAKE`] count cap, or the [`MAX_DRAIN_TIME`] time
+    /// budget. A per-datagram receive error other than `WouldBlock` (a malformed
+    /// datagram, or `MSG_CTRUNC` from [`recv_from_with_local`]) **drops that one
+    /// datagram and continues** — it still counts against the budget, so a hostile
+    /// peer spraying malformed datagrams cannot get unbounded reads, and one bad
+    /// datagram never halts the drain of good ones.
+    ///
+    /// [`DrainOutcome::budget_exhausted`] tells the caller the socket may still
+    /// have data: the driver loops back so the next `select!` re-arms immediately
+    /// (a `readable` socket re-fires at once), but only **after** yielding to the
+    /// runtime + pumping, so timers/commands/GC/stop always get serviced between
+    /// budgets — the flood can never wedge the driver.
+    ///
+    /// [`recv_from_with_local`]: crate::transport::local_addr::recv_from_with_local
+    fn drain_inbound_budgeted(
+        socket: &tokio::net::UdpSocket,
+        buf: &mut [u8],
+        local_addr: SocketAddr,
+        concrete_candidates: &[SocketAddr],
+        mut route: impl FnMut(SocketAddr, SocketAddr, &[u8]),
+    ) -> DrainOutcome {
+        let started = Instant::now();
+        let mut read_count = 0usize;
+        loop {
+            // RED (pre-fix, finding #1): NO per-wake budget -> unbounded drain that
+            // a sustained/hostile flood rides forever, starving the driver.
+            let _ = (started, MAX_DATAGRAMS_PER_WAKE, MAX_DRAIN_TIME);
+            let read = socket.try_io(tokio::io::Interest::READABLE, || {
+                crate::transport::local_addr::recv_from_with_local(
+                    &socket2::SockRef::from(socket),
+                    buf,
+                    local_addr,
+                )
+            });
+            match read {
+                Ok((len, src, arrival)) => {
+                    read_count += 1;
+                    let dst =
+                        crate::transport::resolve_local_destination(arrival, concrete_candidates);
+                    if let Some(payload) = buf.get(..len) {
+                        route(src, dst, payload);
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Socket drained: tokio cleared readiness, so the next
+                    // `select!` `readable()` genuinely waits. No re-arm needed.
+                    return DrainOutcome {
+                        read_count,
+                        budget_exhausted: false,
+                    };
+                }
+                Err(_) => {
+                    // A malformed/truncated datagram (e.g. MSG_CTRUNC): drop just
+                    // this one, count it against the budget, keep draining the
+                    // rest. A hostile peer cannot halt the drain or escape the cap.
+                    read_count += 1;
+                }
             }
         }
     }
@@ -502,5 +590,157 @@ impl UnifiedEndpoint {
                 preview.learn_relay(*relay, local_addr);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv6Addr, SocketAddrV6, UdpSocket};
+
+    /// Invariant #10 / MAJOR #1: a flood of inbound datagrams CANNOT keep the
+    /// driver in the inbound drain indefinitely. One `drain_inbound_budgeted` wake
+    /// reads **at most** the budget and reports `budget_exhausted`, so it breaks to
+    /// pump/yield instead of looping until the (never-arriving under flood)
+    /// `WouldBlock`. Driven against a REAL loopback socket flooded well past the
+    /// budget — deterministic, fast, kernel-backed.
+    #[tokio::test]
+    async fn an_inbound_flood_cannot_starve_the_driver() {
+        // A real dual-stack loopback receiver with a large receive buffer so the
+        // whole flood is queued (the test asserts the *budget* caps the drain, not
+        // the OS buffer).
+        let recv = socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )
+        .unwrap();
+        recv.set_only_v6(false).unwrap();
+        // Big enough for >> MAX_DATAGRAMS_PER_WAKE small datagrams.
+        let _ = recv.set_recv_buffer_size(8 * 1024 * 1024);
+        recv.set_nonblocking(true).unwrap();
+        let bind = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0));
+        recv.bind(&bind.into()).unwrap();
+        let local_addr = recv.local_addr().unwrap().as_socket().unwrap();
+        crate::transport::local_addr::enable_pktinfo(&recv).unwrap();
+
+        let recv = tokio::net::UdpSocket::from_std(recv.into()).unwrap();
+
+        // Flood: send well past the per-wake budget so a naive unbounded drain
+        // would read them all in one go (and, under a real sustained flood, never
+        // stop).
+        let flood = MAX_DATAGRAMS_PER_WAKE * 3;
+        let sender = UdpSocket::bind(SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::LOCALHOST,
+            0,
+            0,
+            0,
+        )))
+        .unwrap();
+        let mut sent = 0usize;
+        for _ in 0..flood {
+            if sender.send_to(b"flood", local_addr).is_ok() {
+                sent += 1;
+            }
+        }
+        assert!(
+            sent > MAX_DATAGRAMS_PER_WAKE,
+            "test precondition: queued {sent} datagrams (> budget {MAX_DATAGRAMS_PER_WAKE})"
+        );
+        // Let the kernel enqueue them.
+        recv.readable().await.unwrap();
+
+        let mut buf = vec![0u8; RECV_BUFFER];
+        let concrete = [local_addr];
+
+        // ONE wake. A bounded drain returns promptly; an unbounded one would keep
+        // reading every queued datagram (and spin forever on a live flood).
+        let mut routed = 0usize;
+        let started = Instant::now();
+        let outcome = UnifiedEndpoint::drain_inbound_budgeted(
+            &recv,
+            &mut buf,
+            local_addr,
+            &concrete,
+            |_src, _dst, _payload| {
+                routed += 1;
+            },
+        );
+        let elapsed = started.elapsed();
+
+        // The drain stopped at the budget, NOT at the socket draining.
+        assert!(
+            outcome.budget_exhausted,
+            "the flood must trip the per-wake budget (so the driver yields), \
+             but the drain ran to WouldBlock: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.read_count, MAX_DATAGRAMS_PER_WAKE,
+            "exactly the count budget is read before breaking to pump/yield"
+        );
+        assert_eq!(
+            routed, MAX_DATAGRAMS_PER_WAKE,
+            "every budgeted datagram was routed (none dropped beyond the cap)"
+        );
+        // Bounded work => fast; never the unbounded spin the panel flagged. Very
+        // generous ceiling to stay non-flaky on a loaded CI box.
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "one budgeted wake must be bounded/fast, took {elapsed:?}"
+        );
+
+        // The deferred datagrams are NOT lost — a second wake drains more,
+        // proving the budget defers rather than drops (the OS buffer held them).
+        let mut routed2 = 0usize;
+        let outcome2 = UnifiedEndpoint::drain_inbound_budgeted(
+            &recv,
+            &mut buf,
+            local_addr,
+            &concrete,
+            |_src, _dst, _payload| {
+                routed2 += 1;
+            },
+        );
+        assert!(
+            routed2 > 0 && outcome2.read_count > 0,
+            "the next wake drains the datagrams deferred by the budget: {outcome2:?}"
+        );
+    }
+
+    /// A drain over an EMPTY socket reports the socket drained (`WouldBlock`),
+    /// reads nothing, and does NOT claim the budget was exhausted — so the driver
+    /// parks on its timer rather than busy-looping (the no-flood steady state).
+    #[tokio::test]
+    async fn an_empty_socket_drains_without_exhausting_the_budget() {
+        let recv = socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )
+        .unwrap();
+        recv.set_only_v6(false).unwrap();
+        recv.set_nonblocking(true).unwrap();
+        let bind = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0));
+        recv.bind(&bind.into()).unwrap();
+        let local_addr = recv.local_addr().unwrap().as_socket().unwrap();
+        crate::transport::local_addr::enable_pktinfo(&recv).unwrap();
+        let recv = tokio::net::UdpSocket::from_std(recv.into()).unwrap();
+
+        let mut buf = vec![0u8; RECV_BUFFER];
+        let concrete = [local_addr];
+        let mut routed = 0usize;
+        let outcome = UnifiedEndpoint::drain_inbound_budgeted(
+            &recv,
+            &mut buf,
+            local_addr,
+            &concrete,
+            |_s, _d, _p| routed += 1,
+        );
+        assert_eq!(routed, 0, "no datagrams queued => nothing routed");
+        assert_eq!(outcome.read_count, 0);
+        assert!(
+            !outcome.budget_exhausted,
+            "an empty socket drains to WouldBlock, it does not exhaust the budget"
+        );
     }
 }
