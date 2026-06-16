@@ -1301,8 +1301,11 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         // STRONG): the store's fingerprint-continuity gate then does real work —
         // a machine whose salted fingerprint does not match (score below the
         // threshold) is rejected rather than silently installed.
-        let (binding, install_pinned) =
-            seal_for_install(&entitlement, self.identity.fingerprint_score);
+        let (binding, install_pinned) = seal_for_install(
+            &entitlement,
+            self.identity.fingerprint_score,
+            &body.instance_binding_id,
+        );
         match self
             .store
             .install_binding(&binding, &install_pinned, granted_at)
@@ -1460,7 +1463,11 @@ fn sleep_until_due(next_due: i64, min: Duration) -> Duration {
 /// convergence re-checks uniformly across all producers (file-drop, mesh relay,
 /// heartbeat). The signing key is ephemeral and per-call — it never leaves this
 /// function and authenticates nothing externally.
-fn seal_for_install(entitlement: &Entitlement, fingerprint_score: u8) -> (LeaseBinding, PinnedKey) {
+fn seal_for_install(
+    entitlement: &Entitlement,
+    fingerprint_score: u8,
+    instance_binding_id: &str,
+) -> (LeaseBinding, PinnedKey) {
     use ed25519_dalek::{Signer as _, SigningKey};
     // A deterministic per-process signer derived from nothing secret — its only
     // job is to satisfy the store's internal re-verification of a binding this
@@ -1473,8 +1480,15 @@ fn seal_for_install(entitlement: &Entitlement, fingerprint_score: u8) -> (LeaseB
     let signed_lease = SignedLease::new(entitlement.lease.clone(), sig.to_bytes());
     // The device's ACTUAL local fingerprint score — NOT an unconditional STRONG.
     // The store's fingerprint-continuity gate then genuinely rejects a machine
-    // whose salted fingerprint does not match (score below threshold).
-    let binding = LeaseBinding::new(signed_lease, entitlement.clone(), fingerprint_score);
+    // whose salted fingerprint does not match (score below threshold). The
+    // verified binding id rides along so `install_binding` records the device's
+    // instance identity atomically (the single binding-anchor chokepoint).
+    let binding = LeaseBinding::new(
+        signed_lease,
+        entitlement.clone(),
+        fingerprint_score,
+        Some(instance_binding_id.to_owned()),
+    );
     (binding, pinned)
 }
 

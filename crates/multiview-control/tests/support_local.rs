@@ -84,6 +84,7 @@ fn binding(key: &SigningKey, tier: &str, granted: DateTime<Utc>) -> LeaseBinding
             EntitlementFlags::default(),
         ),
         100,
+        None,
     )
 }
 

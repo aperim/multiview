@@ -67,6 +67,7 @@ fn binding(key: &SigningKey, lease: &Lease, score: u8) -> LeaseBinding {
             EntitlementFlags::default(),
         ),
         score,
+        None,
     )
 }
 

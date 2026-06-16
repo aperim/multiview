@@ -718,3 +718,120 @@ fn foreign_root() -> multiview_licence::heartbeat::PinnedRoot {
     multiview_licence::heartbeat::PinnedRoot::from_sec1_bytes(vk.to_encoded_point(false).as_bytes())
         .unwrap()
 }
+
+// --- Round-4 BLOCKER 1: REVOCATION TOCTOU. A revocation published for the signer
+//     BETWEEN the initial fetch and the response must reject the returned lease.
+
+#[tokio::test]
+async fn a_signer_revoked_during_the_call_is_rejected_at_acceptance() {
+    use multiview_licence::heartbeat::HeartbeatError;
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = client(Arc::clone(&server), Arc::clone(&store));
+
+    // The first fetch_keys returns a clean keyset (signer unrevoked). The issuer
+    // then publishes a ROOT-ATTESTED revocation for that signer during the stalled
+    // call, so the SECOND (acceptance-time) fetch must see the signer revoked and
+    // reject the returned lease. A fresh CLOCK alone cannot catch this — revocation
+    // is set-membership over the keys document, so the acceptance re-check must
+    // RE-FETCH the key/revocation material, not re-evaluate the stale doc.
+    server.set_revoke_signer_after_first_fetch(true);
+    let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(
+        matches!(
+            res,
+            Err(HeartbeatError::KeyTrust(_) | HeartbeatError::SignedLease(_))
+        ),
+        "a signer revoked between fetch and acceptance must be rejected, got {res:?}"
+    );
+    assert!(
+        store.status().is_none(),
+        "nothing is installed when the signer was revoked at acceptance time"
+    );
+    assert!(
+        server.key_fetches() >= 2,
+        "revocation must be re-checked against a FRESH key fetch at acceptance (got {} fetches)",
+        server.key_fetches()
+    );
+}
+
+// --- Round-4 BLOCKER 2: BINDING-ANCHOR GAP. A lease installed via the file-drop /
+//     upload surface (a LeaseBinding installed DIRECTLY into the store) must make
+//     the device non-fresh, so a subsequent foreign activate lease is rejected.
+
+#[tokio::test]
+async fn a_lease_installed_via_the_upload_surface_anchors_identity_against_a_foreign_activate() {
+    use multiview_licence::heartbeat::HeartbeatError;
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+
+    // Simulate the offline-upload / file-drop surface: install a LeaseBinding for
+    // THIS device's binding DIRECTLY into the store (NOT via the heartbeat path),
+    // exactly as control/routes/licence.rs and watcher.rs do.
+    let (binding, pinned) = fake::upload_binding_for(server.kit(), server.kit().binding_id());
+    store
+        .install_binding(&binding, &pinned, store.now())
+        .expect("the upload/file-drop surface installs a binding");
+    assert!(
+        store.current_binding_id().is_some(),
+        "an upload/file-drop install must establish the device's binding identity"
+    );
+
+    // A FRESH heartbeat client with NO configured/learned binding (activate path).
+    // The server returns a FOREIGN-binding lease. The device is NOT fresh (it holds
+    // an upload-installed lease), so the foreign lease must be rejected.
+    let attack = HeartbeatClient::new(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        server.pinned_root(),
+        test_config(),
+        {
+            let mut id = test_identity();
+            id.binding_id = None;
+            id
+        },
+    );
+    server.set_foreign_binding(true);
+    let res = tokio::time::timeout(Duration::from_secs(5), attack.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(
+        matches!(res, Err(HeartbeatError::BindingMismatch)),
+        "a foreign activate lease must be rejected when an upload lease already anchors identity, got {res:?}"
+    );
+}
+
+// --- Round-4 MAJOR: the Idempotency-Key is retry-stable per logical operation. ---
+
+#[tokio::test]
+async fn retries_of_the_same_logical_operation_send_a_stable_idempotency_key() {
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = client(Arc::clone(&server), Arc::clone(&store));
+
+    // The first heartbeat attempt fails AFTER the server records its Idempotency-
+    // Key (a lost-response analogue), the second attempt succeeds. Both attempts of
+    // the SAME logical operation must carry the SAME Idempotency-Key so the server
+    // can dedupe and never create a duplicate binding/lease.
+    server.set_fail_after_recording_idempotency(1);
+    // First cycle: fails (the server recorded the key, then errored).
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.run_once()).await;
+    // Second cycle (the retry of the same logical heartbeat): succeeds.
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+
+    let keys = server.idempotency_keys();
+    assert!(
+        keys.len() >= 2,
+        "the server must have seen at least two attempts (got {})",
+        keys.len()
+    );
+    assert!(
+        keys.iter().all(|k| k == &keys[0]),
+        "every retry of the same logical operation must send the SAME Idempotency-Key, got {keys:?}"
+    );
+    assert!(!keys[0].is_empty(), "the Idempotency-Key must be non-empty");
+}

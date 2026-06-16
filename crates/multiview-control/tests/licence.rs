@@ -70,6 +70,7 @@ fn binding(key: &SigningKey, serial: &str, granted: DateTime<Utc>, score: u8) ->
             EntitlementFlags::default(),
         ),
         score,
+        None,
     )
 }
 

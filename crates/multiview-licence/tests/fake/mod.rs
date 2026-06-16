@@ -518,6 +518,18 @@ pub struct FakeLicenceServer {
     /// The `bindingId` the most recent heartbeat request carried (so a test can
     /// assert the renewal addresses the binding by id, never the lease serial).
     last_binding_id: std::sync::Mutex<Option<String>>,
+    /// When true, the signer is unrevoked on the FIRST `fetch_keys` but REVOKED on
+    /// every later fetch — the revocation-TOCTOU case: a revocation published
+    /// between the initial fetch and the acceptance re-fetch must reject the lease.
+    revoke_signer_after_first_fetch: AtomicBool,
+    /// Counts `fetch_keys` calls (the revocation-TOCTOU test asserts a re-fetch).
+    key_fetches: AtomicU64,
+    /// Every `Idempotency-Key` the server has received, in order (the idempotency
+    /// test asserts retries of the same logical op reuse one key).
+    idempotency_keys: std::sync::Mutex<Vec<String>>,
+    /// When > 0, the next N heartbeat calls record their Idempotency-Key and then
+    /// return a transport error (a lost-response analogue) — decremented per call.
+    fail_after_recording: AtomicU64,
     /// Counts heartbeat calls (the loop test asserts it advances).
     pub heartbeats: AtomicU64,
     /// The `nextDue` (epoch ms) the server returns — the loop sleeps to it.
@@ -538,6 +550,10 @@ impl FakeLicenceServer {
             replay_absolute_past: AtomicBool::new(false),
             replay_stale: AtomicBool::new(false),
             last_binding_id: std::sync::Mutex::new(None),
+            revoke_signer_after_first_fetch: AtomicBool::new(false),
+            key_fetches: AtomicU64::new(0),
+            idempotency_keys: std::sync::Mutex::new(Vec::new()),
+            fail_after_recording: AtomicU64::new(0),
             heartbeats: AtomicU64::new(0),
             next_due_ms: AtomicU64::new(FAB_NOW_MS as u64 + 30 * 86_400_000),
         }
@@ -623,6 +639,50 @@ impl FakeLicenceServer {
     pub fn clear_last_binding_id(&self) {
         *self.last_binding_id.lock().expect("poisoned") = None;
     }
+    /// Make the signer unrevoked on the first `fetch_keys` but revoked on every
+    /// later fetch (the revocation-TOCTOU case).
+    pub fn set_revoke_signer_after_first_fetch(&self, on: bool) {
+        self.revoke_signer_after_first_fetch
+            .store(on, Ordering::SeqCst);
+    }
+    /// How many times `fetch_keys` has been called.
+    pub fn key_fetches(&self) -> u64 {
+        self.key_fetches.load(Ordering::SeqCst)
+    }
+    /// Every `Idempotency-Key` the server received, in order.
+    pub fn idempotency_keys(&self) -> Vec<String> {
+        self.idempotency_keys.lock().expect("poisoned").clone()
+    }
+    /// Make the next `n` heartbeat calls record their Idempotency-Key, then return
+    /// a transport error (a lost-response analogue) — for the retry-stability test.
+    pub fn set_fail_after_recording_idempotency(&self, n: u64) {
+        self.fail_after_recording.store(n, Ordering::SeqCst);
+    }
+
+    /// Record the `Idempotency-Key` this mutation carried, then — if the
+    /// `fail_after_recording` knob is still positive — decrement it and return a
+    /// transport error (a lost-response analogue: the server DID process/record
+    /// the key, but the device never saw the response). The retry of the same
+    /// logical operation must carry the SAME key (the idempotency-stability test).
+    fn record_idempotency_then_maybe_fail(&self, idempotency_key: &str) -> Option<HeartbeatError> {
+        self.idempotency_keys
+            .lock()
+            .expect("poisoned")
+            .push(idempotency_key.to_owned());
+        // `fetch_update` decrements only while positive, so the failure fires for
+        // exactly the first N recorded mutations and not after.
+        let took = self
+            .fail_after_recording
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                if n > 0 {
+                    Some(n - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok();
+        took.then(|| HeartbeatError::Transport("fake lost-response after recording".to_owned()))
+    }
 
     /// Block in-flight (mark in_flight, await the unblock) when the block knob is
     /// set — the shared body each server method runs first.
@@ -649,6 +709,15 @@ impl LicenceServer for FakeLicenceServer {
         if self.fail.load(Ordering::SeqCst) {
             return Err(HeartbeatError::Transport("fake offline".to_owned()));
         }
+        // Count this fetch. The revocation-TOCTOU knob serves a clean keyset on
+        // the FIRST fetch (signer unrevoked) and a keyset listing the signer in
+        // the (root-signed) revocation set on every LATER fetch — so a re-fetch at
+        // lease-acceptance observes the revocation, while reusing the stale doc
+        // would not. The first fetch is `0`; the acceptance re-fetch is `1`+.
+        let n = self.key_fetches.fetch_add(1, Ordering::SeqCst);
+        if self.revoke_signer_after_first_fetch.load(Ordering::SeqCst) && n >= 1 {
+            return Ok(self.kit.keys_with_signer_revoked("current"));
+        }
         Ok(self.kit.keys())
     }
 
@@ -656,9 +725,12 @@ impl LicenceServer for FakeLicenceServer {
         &self,
         _org: &str,
         _req: ActivateRequest,
-        _idempotency_key: &str,
+        idempotency_key: &str,
     ) -> Result<ActivateResponse, HeartbeatError> {
         self.maybe_block().await;
+        if let Some(err) = self.record_idempotency_then_maybe_fail(idempotency_key) {
+            return Err(err);
+        }
         if self.fail.load(Ordering::SeqCst) {
             return Err(HeartbeatError::Transport("fake offline".to_owned()));
         }
@@ -672,9 +744,12 @@ impl LicenceServer for FakeLicenceServer {
         &self,
         _org: &str,
         req: HeartbeatRequest,
-        _idempotency_key: &str,
+        idempotency_key: &str,
     ) -> Result<HeartbeatResponse, HeartbeatError> {
         self.maybe_block().await;
+        if let Some(err) = self.record_idempotency_then_maybe_fail(idempotency_key) {
+            return Err(err);
+        }
         if self.fail.load(Ordering::SeqCst) {
             return Err(HeartbeatError::Transport("fake offline".to_owned()));
         }
@@ -711,4 +786,61 @@ impl LicenceServer for FakeLicenceServer {
 /// Shareable handle for the loop test.
 pub fn shared_fake() -> Arc<FakeLicenceServer> {
     Arc::new(FakeLicenceServer::new())
+}
+
+/// Build a [`LeaseBinding`] + the [`PinnedKey`] that verifies it, for the
+/// **offline-upload / file-drop** install surface — the path
+/// `multiview-control`'s `install_lease` route and the `LeaseDirectoryWatcher`
+/// take, which call [`LeaseStore::install_binding`] DIRECTLY (not via the
+/// heartbeat client). The returned binding carries `instance_binding_id` so a
+/// store that records the binding anchor on install makes `current_binding_id()`
+/// reflect this device's identity — exactly the chokepoint the binding-anchor fix
+/// establishes. The lease expiry is anchored well into the future (the kit's
+/// epoch + 35d) so the install clears the expiry gate.
+pub fn upload_binding_for(
+    kit: &FabricatedKeyset,
+    instance_binding_id: &str,
+) -> (multiview_licence::store::LeaseBinding, multiview_licence::verify::PinnedKey) {
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use multiview_licence::entitlement::{Entitlement, EntitlementFlags, GpuLimit, HardwareClass};
+    use multiview_licence::lease::Lease;
+    use multiview_licence::store::LeaseBinding;
+    use multiview_licence::verify::{PinnedKey, SignedLease};
+    use multiview_licence::{Tier, ACTIVATION_WINDOW_DAYS};
+
+    // A dated lease whose expiry is the kit's signed `not_after` (epoch + 35d) —
+    // far past any real clock, so the store's expiry gate passes and the grant is
+    // newer than an empty store.
+    let not_after = kit.now_ms() + 35 * 86_400_000;
+    let lease = Lease::new_online_expiring_at(
+        kit.lease_serial().to_owned(),
+        not_after,
+        kit.now_ms(),
+        ACTIVATION_WINDOW_DAYS,
+    )
+    .expect("a future not_after yields a lease");
+    let entitlement = Entitlement::new(
+        Tier::new(kit.licence_id().to_owned()),
+        HardwareClass::Standard,
+        HardwareClass::Standard,
+        GpuLimit::Limited(2),
+        lease,
+        EntitlementFlags::default(),
+    );
+    // Sign the install envelope with a deterministic key the caller pins — exactly
+    // the seal/verify contract `LeaseStore::install_binding` re-checks for every
+    // producer. (This stands in for the offline-lease issuer's signature; the
+    // store verifies the binding against the pinned key handed alongside it.)
+    let signer = SigningKey::from_bytes(&[0x6d; 32]);
+    let pinned = PinnedKey::from_verifying_key(&signer.verifying_key());
+    let msg = SignedLease::signing_bytes(&entitlement.lease);
+    let sig = signer.sign(&msg);
+    let signed = SignedLease::new(entitlement.lease.clone(), sig.to_bytes());
+    let binding = LeaseBinding::new(
+        signed,
+        entitlement,
+        100,
+        Some(instance_binding_id.to_owned()),
+    );
+    (binding, pinned)
 }

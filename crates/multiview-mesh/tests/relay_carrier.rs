@@ -48,6 +48,7 @@ fn server_binding(server: &SigningKey, serial: &str, granted: DateTime<Utc>) -> 
             EntitlementFlags::default(),
         ),
         100,
+        None,
     )
 }
 

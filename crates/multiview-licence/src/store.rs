@@ -66,16 +66,38 @@ pub struct LeaseBinding {
     /// this machine (brief §2.3). At/above [`FINGERPRINT_MATCH_THRESHOLD`] is the
     /// same machine; below is a new machine requiring re-claim.
     pub fingerprint_score: u8,
+    /// The server-issued `instanceBindingId` this lease binds, when the producer
+    /// carries one. **Every** install surface that has it MUST pass it so
+    /// [`LeaseStore::install_binding`] records the device's durable instance
+    /// identity atomically (the single chokepoint behind the cross-instance-replay
+    /// guard): the heartbeat client sets it from the verified lease body, the
+    /// offline file-drop + control-route uploads carry it in the CBOR binding, and
+    /// the mesh relay forwards it end-to-end. An opaque id, never a raw identifier
+    /// (brief §8). `None` for a legacy/binding-less producer (older offline files):
+    /// such an install simply does not anchor identity, exactly as before.
+    /// Defaulted on deserialize so pre-field CBOR bindings still decode (a missing
+    /// field is `None`), keeping `deny_unknown_fields` strict on extra keys.
+    #[serde(default)]
+    pub instance_binding_id: Option<String>,
 }
 
 impl LeaseBinding {
-    /// Bundle a signed lease with its entitlement + fingerprint score.
+    /// Bundle a signed lease with its entitlement, fingerprint score, and the
+    /// server-issued `instanceBindingId` it binds (`None` for a binding-less
+    /// producer). Every producer that has the binding id passes it so
+    /// [`LeaseStore::install_binding`] anchors the device identity on install.
     #[must_use]
-    pub fn new(signed: SignedLease, entitlement: Entitlement, fingerprint_score: u8) -> Self {
+    pub fn new(
+        signed: SignedLease,
+        entitlement: Entitlement,
+        fingerprint_score: u8,
+        instance_binding_id: Option<String>,
+    ) -> Self {
         Self {
             signed,
             entitlement,
             fingerprint_score,
+            instance_binding_id,
         }
     }
 
