@@ -551,3 +551,54 @@ impl VideoWall {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn canvas(fps_num: i64, fps_den: i64) -> Canvas {
+        Canvas {
+            width: 1920,
+            height: 1080,
+            fps_num,
+            fps_den,
+        }
+    }
+
+    #[test]
+    fn canvas_validate_rejects_subnanosecond_cadence() {
+        // fps > 1 GHz → sub-nanosecond per-tick period → rejected (inv #3 / ADR-T018).
+        for (num, den) in [
+            (10_000_000_000_i64, 1_i64), // period rounds to 0 ns
+            (1_500_000_000, 1),          // rounded 1 ns but exact < 1 ns
+            (1_000_000_001, 1),          // just over 1 GHz
+            (2_000_000_000, 1),
+        ] {
+            let err = canvas(num, den)
+                .validate()
+                .expect_err("a sub-nanosecond cadence must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("per-tick period is under 1 ns") || msg.contains("1 GHz"),
+                "error should name the sub-ns/1 GHz cause, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn canvas_validate_accepts_the_1ghz_boundary_and_real_cadences() {
+        // Exactly 1 GHz (period == 1 ns) is the accepted boundary.
+        canvas(1_000_000_000, 1)
+            .validate()
+            .expect("1 GHz (period == 1 ns) is accepted");
+        // Real broadcast cadences are unaffected.
+        for (num, den) in [(60, 1), (30_000, 1_001), (24_000, 1_001), (25, 1)] {
+            canvas(num, den)
+                .validate()
+                .expect("a real cadence must validate");
+        }
+        // The pre-existing positive-rational checks still fire.
+        assert!(canvas(0, 1).validate().is_err());
+        assert!(canvas(60, 0).validate().is_err());
+    }
+}

@@ -163,8 +163,12 @@ impl OutputClock {
     /// # Errors
     ///
     /// Returns [`Error::InvalidCadence`] if the cadence is not a positive,
-    /// non-degenerate rational (`num > 0`, `den > 0`) — the clock must have an
-    /// exact, usable frame rate (invariant #1/#3).
+    /// non-degenerate rational (`num > 0`, `den > 0`), or if it is so fast that one
+    /// tick's **exact** period is under 1 ns (`fps > 1 GHz`, see
+    /// [`Rational::has_subnanosecond_period`]) — the clock must have an exact, usable
+    /// frame rate with a per-tick period of at least 1 ns, so that output PTS is
+    /// strictly increasing (invariant #3) and the cadence-hold wall-clock resync
+    /// (ADR-T018) has an exact floor.
     pub fn new(cadence: Rational) -> Result<Self> {
         if !cadence.is_valid() || cadence.num <= 0 || cadence.den <= 0 {
             return Err(Error::invalid_cadence(cadence));
@@ -294,5 +298,46 @@ mod tests {
         // tick() saturates the counter rather than wrapping.
         assert_eq!(clock.tick().index, u64::MAX);
         assert_eq!(clock.next_index(), u64::MAX);
+    }
+
+    #[test]
+    fn rejects_subnanosecond_cadence_but_accepts_the_1ghz_boundary() {
+        // A sub-nanosecond per-tick period (fps > 1 GHz) collapses consecutive ticks
+        // onto the same nanosecond → breaks strictly-increasing PTS (inv #3) and the
+        // cadence-hold exact-floor resync (ADR-T018). `new` must reject it.
+        for cadence in [
+            Rational::new(10_000_000_000, 1), // 10 GHz: period rounds to 0 ns
+            Rational::new(1_000_000_001, 1),  // just over 1 GHz: exact period < 1 ns
+            Rational::new(1_500_000_000, 1),  // 1.5 GHz: rounded period 1 ns but exact < 1
+            Rational::new(2_000_000_000, 1),  // 2 GHz
+        ] {
+            assert!(
+                OutputClock::new(cadence).is_err(),
+                "cadence {}/{} (sub-ns period) must be rejected",
+                cadence.num,
+                cadence.den
+            );
+        }
+        // Exactly 1 GHz (period == 1 ns) is the accepted boundary, and its PTS is
+        // strictly increasing (tick i is at exactly i ns).
+        let clock = OutputClock::new(Rational::new(1_000_000_000, 1))
+            .expect("1 GHz (period == 1 ns) is accepted");
+        assert_eq!(
+            clock.pts_at(1).as_nanos(),
+            1,
+            "1 GHz period is exactly 1 ns"
+        );
+        assert!(
+            clock.pts_at(2).as_nanos() > clock.pts_at(1).as_nanos(),
+            "PTS strictly increasing at the 1 GHz boundary"
+        );
+        // Real broadcast cadences remain accepted.
+        for cadence in [
+            Rational::new(60, 1),
+            Rational::new(30_000, 1_001),
+            Rational::new(24_000, 1_001),
+        ] {
+            assert!(OutputClock::new(cadence).is_ok());
+        }
     }
 }

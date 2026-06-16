@@ -632,3 +632,92 @@ async fn non_integer_cadence_large_index_resync_floors_exactly_and_does_not_grin
         "the large-index resync must stay bounded to one cap's worth of repeats, not grind"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_accepted_cadence_1ghz_resyncs_one_step_with_postcondition_holding() {
+    // The accepted-cadence boundary: 1 GHz (1_000_000_000/1), the fastest cadence
+    // `OutputClock::new`/`Canvas::validate` permit (period == exactly 1 ns;
+    // `pts_at(idx) == idx` ns, no rounding). At a LARGE index the cap-path floor must
+    // still resync in ONE step to the true wall-clock floor — `deadline(result+1) <=
+    // now` (the cap_resync_floor postcondition) — never composing ahead and never
+    // collapsing to `next` to grind. (Faster cadences are rejected, so this is the
+    // tightest case the floor must handle.)
+    const K: u64 = 300_000_000;
+    let ticks: u64 = u64::from(MAX_REPEATS_PER_TICK) + 16;
+    let cadence = Rational::new(1_000_000_000, 1); // 1 GHz — period exactly 1 ns
+    let period = oracle_pts_ns(1, cadence);
+    assert_eq!(period, 1, "1 GHz period must be exactly 1 ns");
+
+    let time_source = Arc::new(ManualTimeSource::new());
+    let ts: Arc<dyn TimeSource> = time_source.clone();
+    let publisher: Arc<EnginePublisher<u64, u64>> = Arc::new(EnginePublisher::new(8));
+    let mut runtime = EngineRuntime::new(
+        OutputClock::new(cadence).expect("1 GHz cadence is accepted (period == 1 ns)"),
+        build_drive(16, 16),
+        ts,
+        CooperativePacer,
+    );
+    let seed = runtime.seed_nanos();
+
+    // Prime to tick K's exact deadline (period is integer, so no fractional part):
+    // the first catch-up after tick 0 sees a K-tick gap and must floor to ~K.
+    let prime = oracle_pts_ns(K as i64, cadence).saturating_sub(seed);
+    time_source.advance(Duration::from_nanos(u64::try_from(prime).unwrap_or(0)));
+
+    // Compose-instant run-ahead (fresh ticks only) + max emitted pts.
+    let compose_now = Arc::new(AtomicI64::new(i64::MIN));
+    let last_measured = Arc::new(AtomicI64::new(i64::MIN));
+    let worst_ahead = Arc::new(AtomicI64::new(i64::MIN));
+    let max_pts = Arc::new(AtomicI64::new(i64::MIN));
+    let cn_s = Arc::clone(&compose_now);
+    let lm_s = Arc::clone(&last_measured);
+    let worst_s = Arc::clone(&worst_ahead);
+    let mp_s = Arc::clone(&max_pts);
+    let state_of = move |f: &CompositedFrame| -> u64 {
+        let pts = f.pts().as_nanos();
+        let cn = cn_s.load(Ordering::Acquire);
+        if cn != i64::MIN && lm_s.swap(cn, Ordering::AcqRel) != cn {
+            worst_s.fetch_max(pts - (cn - seed), Ordering::AcqRel);
+        }
+        mp_s.fetch_max(pts, Ordering::AcqRel);
+        f.tick.index
+    };
+
+    let ts_ctl = Arc::clone(&time_source);
+    let cn_ctl = Arc::clone(&compose_now);
+    let control = move |_d: &mut CompositorDrive<Nv12Image>| {
+        cn_ctl.store(ts_ctl.now_nanos(), Ordering::Release);
+        ts_ctl.advance(Duration::from_nanos(u64::try_from(period).unwrap_or(0)));
+    };
+
+    let stop = StopSignal::new();
+    let run = runtime.run_for_with_control(
+        publisher.as_ref(),
+        &stop,
+        ticks,
+        state_of,
+        |_f| None::<u64>,
+        control,
+    );
+    let outcome = tokio::time::timeout(Duration::from_secs(20), run).await;
+
+    // No run-ahead (postcondition deadline(result) <= now, never compose ahead).
+    let ahead = worst_ahead.load(Ordering::Acquire);
+    assert_ne!(ahead, i64::MIN, "no frame published — test wiring broke");
+    assert!(ahead <= 0, "ran ahead at the 1 GHz boundary by {ahead} ns");
+
+    // ONE-STEP resync: bounded repeats, completes the budget, and reached ~K (proves
+    // it floored to wall-clock in one step rather than grinding from `next`).
+    let outcome = outcome
+        .expect("the 1 GHz resync must complete, not grind/park")
+        .expect("the bounded run must return Ok");
+    assert_eq!(outcome.ticks, ticks, "completes the bounded budget");
+    assert!(
+        runtime.frames_repeated() <= u64::from(MAX_REPEATS_PER_TICK),
+        "one-step resync stays within a cap's worth of repeats"
+    );
+    assert!(
+        max_pts.load(Ordering::Acquire) >= oracle_pts_ns((K - 16) as i64, cadence),
+        "the resync reached the wall-clock floor near tick K (one step, no grind)"
+    );
+}
