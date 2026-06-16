@@ -67,12 +67,19 @@ target **must be the floor** — the greatest `idx` with `deadline_nanos(idx) <=
 `to_tick(elapsed)`. A real jump (VM pause / `CLOCK_MONOTONIC` leap) is arbitrary, never
 period-aligned, so the fractional case `elapsed = (N + r)·period, r >= 0.5` is the common one;
 the nearest rounding gives `N+1`, and composing tick `N+1` (deadline in the future) runs ahead
-exactly as D1 described. The cap path takes the nearest candidate and steps it down to the floor
-with a single guarded decrement (bounded, re-checks `deadline_nanos(candidate) <= now`, never
-below `next`). The skip stays a genuine forward jump because the cap only fires once
-`deadline_nanos(next+1) <= now`, so the floor is `>= next+1`. (Regression risk: an *integer*-period
-jump test cannot catch this — floor == nearest on an integer — so the guard is a *fractional*-jump
-test asserting no fresh tick is published ahead of its compose-instant deadline.)
+exactly as D1 described. The cap path computes the floor in **O(1) on the hot path** — integer
+division `elapsed / period_nanos` (`period_nanos = pts_at(1)`), **not a decrement loop** whose
+length would depend on the (only `> 0`-validated, unbounded) cadence. Because `deadline_nanos`
+recomputes `pts_at` with rounding rather than a strict `idx·period`, the estimate can sit ±1 off
+the exact floor for a non-integer cadence, so a **single** exact down-correction (one comparison)
+drops it to a truly-passed deadline, and a **single** exact backstop (one comparison) falls back to
+`next` should the estimate ever be >1 high (unreachable at any real `idx` — u64 ticks span ~9.7
+billion years at 60 fps — but never depended on). The skip stays a genuine forward jump because the
+cap only fires once `deadline_nanos(next+1) <= now`, so the floor is `>= next+1`, and the final
+`skip_to` target always has `deadline_nanos(target) <= now` (never a run-ahead). (Regression risk:
+an *integer*-period jump test cannot catch the over-round — floor == nearest on an integer — so the
+guard is a *fractional*-jump test asserting no fresh tick is published ahead of its compose-instant
+deadline, with a hard bounded-completion assert so a no-run-ahead-but-parks regression also fails.)
 
 ## Consequences
 
