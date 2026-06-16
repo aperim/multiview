@@ -1715,4 +1715,37 @@ mod tests {
         assert!(b64url("aGVsbG8").is_some());
         assert!(b64url("not base64!").is_none());
     }
+
+    #[test]
+    fn transport_serialises_to_exactly_the_three_wire_values() {
+        // The transport is a CLOSED enum: it can only ever serialise to one of the
+        // three Conspect-accepted channel labels, so an out-of-enum value can never
+        // be put on the wire (a future 422 is structurally impossible).
+        assert_eq!(
+            serde_json::to_string(&Transport::Direct).expect("serialise"),
+            "\"direct\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Transport::Relay).expect("serialise"),
+            "\"relay\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Transport::File).expect("serialise"),
+            "\"file\""
+        );
+    }
+
+    #[test]
+    fn transport_default_is_direct() {
+        // The phone-home channel: a direct device→server heartbeat.
+        assert_eq!(Transport::default(), Transport::Direct);
+    }
+
+    #[test]
+    fn an_unknown_transport_label_does_not_deserialise() {
+        // A value outside the closed set is rejected — the enum is the full,
+        // exhaustive wire vocabulary, never an open string.
+        assert!(serde_json::from_str::<Transport>("\"webrtc\"").is_err());
+        assert!(serde_json::from_str::<Transport>("\"direct\"").is_ok());
+    }
 }

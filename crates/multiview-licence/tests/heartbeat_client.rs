@@ -231,6 +231,115 @@ async fn the_heartbeat_request_carries_no_raw_identifier() {
     }
 }
 
+// --- Round-5c: RENEW-ONLY. With no binding (empty store + unconfigured binding)
+//     the client makes NO mutation, installs nothing, and keeps output on-air. ---
+
+#[tokio::test]
+async fn run_once_with_no_binding_performs_no_mutation_and_installs_nothing() {
+    // The operator decision: the device client is RENEW-ONLY. Online-activate is
+    // deferred (the server-issued `serverNonce` is not yet available — ADR-I006
+    // decision point 11). A device with no established binding (an empty store AND
+    // no configured/learned binding) MUST NOT call activate (or any mutation): it
+    // no-ops the cycle and keeps last-good. A lease arrives via an install surface
+    // (control-upload / file-drop / mesh relay), and the next cycle renews it.
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    // No binding configured → activate would have fired here in the old design.
+    let mut identity = test_identity();
+    identity.binding_id = None;
+    let pinned = server.pinned_root();
+    let client = HeartbeatClient::new(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        pinned,
+        test_config(),
+        identity,
+    );
+
+    assert!(store.status().is_none(), "store starts empty");
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang")
+        .expect("a no-binding cycle is a benign no-op, not an error");
+
+    // RENEW-ONLY: nothing was installed, and NO mutation reached the server (no
+    // activate, no heartbeat) — the device cannot self-activate without a binding.
+    assert!(
+        store.status().is_none(),
+        "a no-binding cycle installs nothing (keeps last-good / output on-air)"
+    );
+    assert_eq!(
+        server.heartbeats.load(Ordering::SeqCst),
+        0,
+        "no heartbeat mutation is sent when there is no binding to renew"
+    );
+    assert!(
+        server.idempotency_keys().is_empty(),
+        "no mutation at all (no activate/heartbeat) is sent for a no-binding cycle"
+    );
+    assert!(
+        matches!(outcome, HeartbeatOutcome::NoBinding { .. }),
+        "a no-binding cycle reports NoBinding (await an install surface), got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_installed_lease_then_renews_on_the_next_cycle() {
+    // RENEW-ONLY end-to-end: a device with no binding no-ops; once a lease is
+    // installed via an install surface (here the upload/file-drop path that every
+    // surface shares), the next heartbeat cycle RENEWS it (the binding is read from
+    // the store) — proving the renew path is intact and drives install_binding.
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let mut identity = test_identity();
+    identity.binding_id = None; // unconfigured: relies on the store for the binding
+    let pinned = server.pinned_root();
+    let client = HeartbeatClient::new(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        pinned,
+        test_config(),
+        identity,
+    );
+
+    // Cycle 1: no binding → no-op (no mutation).
+    tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .unwrap()
+        .expect("no-binding cycle is a no-op");
+    assert_eq!(server.heartbeats.load(Ordering::SeqCst), 0);
+
+    // A lease arrives via an install surface (control-upload / file-drop / relay) —
+    // it anchors this device's binding in the store.
+    let (binding, upload_pinned) = fake::upload_binding_for(server.kit(), server.kit().binding_id());
+    store
+        .install_binding(&binding, &upload_pinned, store.now())
+        .expect("an install surface installs the binding");
+    assert!(
+        store.current_binding_id().is_some(),
+        "the install surface anchored the device binding"
+    );
+
+    // Cycle 2: now the store holds a binding → the client RENEWS via heartbeat.
+    server.clear_last_binding_id();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .unwrap()
+        .expect("the renewal heartbeat succeeds");
+    assert!(matches!(outcome, HeartbeatOutcome::Installed { .. }));
+    assert_eq!(
+        server.heartbeats.load(Ordering::SeqCst),
+        1,
+        "the next cycle renews via heartbeat once a binding exists"
+    );
+    assert_eq!(
+        server.last_binding_id().expect("a binding id was sent"),
+        server.kit().binding_id(),
+        "the renewal addresses the binding by the server's instanceBindingId"
+    );
+}
+
 // --- never-off-air chaos: SIGKILL/stall/partition the heartbeat task ----------
 
 #[tokio::test]
