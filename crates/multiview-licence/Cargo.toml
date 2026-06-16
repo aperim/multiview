@@ -46,6 +46,35 @@ ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] 
 # the portal and the machine agree byte-for-byte on the challenge format.
 ciborium = "0.2.2"
 
+# --- The `heartbeat` device-licensing client (CONSPECT-3, ADR-0096) ---
+# All OFF by default: the default `cargo check --workspace` + `cargo deny check`
+# stay a pure, LGPL-clean, network-free shell (mirrors `multiview-mesh`'s `mdns`
+# gate). The feature adds the Conspect key-trust verifier + the heartbeat loop;
+# the live HTTP transport stays at the cli/app boundary (it owns `reqwest`), so
+# this leaf crate never links an HTTP client — under `heartbeat` it gains ONLY
+# pure-Rust crypto + `tokio` (the loop's sleep), never a socket of its own.
+#
+# `p256` (RustCrypto): ECDSA-P256/SHA-256 verification of the well-known
+# intermediate-key attestations against the pinned root (D1). Its closure
+# (`ecdsa`, `elliptic-curve`, `sec1`, `primeorder`, `rfc6979`, `sha2`, `hmac`,
+# `der`, `spki`, `crypto-bigint`, `ff`, `group`, `base16ct`, `generic-array`,
+# `typenum`, `zeroize`, `subtle`, `const-oid`) is entirely `MIT`/`Apache-2.0`/
+# `BSD-3-Clause`/`BSD-1-Clause`, all on the deny.toml allowlist (verified with
+# `cargo metadata`). Verification-only — no key generation, no RNG in non-test
+# code. Default features disabled; only `ecdsa` (verify) is enabled.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"], optional = true }
+# STANDARD-base64 (RFC 4648 §4) decode of `leaseBytes` + base64url decode of the
+# well-known key material/signatures (D3). `MIT OR Apache-2.0`, deny-clean, pure
+# Rust, no native deps.
+base64 = { version = "0.22", default-features = false, features = ["alloc"], optional = true }
+# Lower-case hex decode of the bare-Ed25519 lease `signature` (64 bytes). `MIT OR
+# Apache-2.0`, deny-clean, pure Rust.
+hex = { version = "0.4", default-features = false, features = ["alloc"], optional = true }
+# The heartbeat loop sleeps to `nextDue` and is `tokio::spawn`'d by the cli. Only
+# the `rt`/`time` slices are needed (no socket — the leaf crate never opens one).
+# `MIT`, deny-clean, already in the workspace graph.
+tokio = { workspace = true, optional = true }
+
 [dev-dependencies]
 proptest = "1.11.0"
 serde_json = { workspace = true }
@@ -54,6 +83,25 @@ serde_json = { workspace = true }
 # the non-test library never depends on an RNG.
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc", "rand_core"] }
 rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
+# Test-only signing of golden leases/attestations for the `heartbeat` tests:
+# `p256`'s `arithmetic` + RustCrypto `signature` give an ECDSA-P256 signer for
+# fabricating a fake root-attested keyset, and `ed25519-dalek/rand_core` signs the
+# fake server lease. `tokio` macros/rt drive the async loop test deterministically.
+# Dev-only: the non-test library has no signer.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+
+[features]
+default = []
+# The Conspect device-licensing heartbeat client (CONSPECT-3, ADR-0096): the
+# key-trust verifier (pinned-root ECDSA-P256 → attested Ed25519 intermediates,
+# dual-pin + revocation, RFC 8949 §4.2.1 deterministic-CBOR pre-image) + the
+# bare-Ed25519 signed-lease verifier + the `LicenceServer` trait + the
+# `HeartbeatClient` loop + an in-process `FakeLicenceServer` for tests. OFF by
+# default so the baseline build is network-free and `cargo deny`-clean; the cli
+# `heartbeat` feature (the shipped deploy presets) turns it on and supplies the
+# live HTTP transport. The pure data/verify model stays compiled either way.
+heartbeat = ["dep:p256", "dep:base64", "dep:hex", "dep:tokio"]
 
 [lints]
 workspace = true
