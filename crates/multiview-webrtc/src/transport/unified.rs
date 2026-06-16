@@ -428,9 +428,14 @@ impl UnifiedEndpoint {
         let started = Instant::now();
         let mut read_count = 0usize;
         loop {
-            // RED (pre-fix, finding #1): NO per-wake budget -> unbounded drain that
-            // a sustained/hostile flood rides forever, starving the driver.
-            let _ = (started, MAX_DATAGRAMS_PER_WAKE, MAX_DRAIN_TIME);
+            if read_count >= MAX_DATAGRAMS_PER_WAKE || started.elapsed() >= MAX_DRAIN_TIME {
+                // Budget hit while the socket may still hold data: break to
+                // pump/yield; the caller re-arms the `select!` (defect #1 fix).
+                return DrainOutcome {
+                    read_count,
+                    budget_exhausted: true,
+                };
+            }
             let read = socket.try_io(tokio::io::Interest::READABLE, || {
                 crate::transport::local_addr::recv_from_with_local(
                     &socket2::SockRef::from(socket),

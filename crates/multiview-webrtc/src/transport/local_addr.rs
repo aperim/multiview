@@ -299,9 +299,15 @@ mod unix {
         let len = usize::try_from(n)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "recvmsg: negative length"))?;
 
-        // RED (pre-fix, finding #5): MSG_CTRUNC is NOT checked here, so truncated
-        // ancillary data silently falls back to the bound addr below.
-        let _ = msg.msg_flags;
+        // Reject truncated ancillary data: the PKTINFO cmsg may be incomplete, so
+        // the recovered destination is untrustworthy. Drop the datagram (a
+        // receive-side error) rather than fall back to the unspecified bind addr.
+        if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "recvmsg: ancillary data truncated (MSG_CTRUNC)",
+            ));
+        }
 
         // SAFETY: the kernel set `msg_namelen` to the bytes of source address it
         // wrote into `src_store`; `SockAddr::new` reads exactly that many.
@@ -400,9 +406,12 @@ mod unix {
     /// IPv4-mapped `::ffff:a.b.c.d` to a real IPv4 addr so it matches a gathered
     /// IPv4 candidate (dual-stack reports v4 peers as v4-mapped).
     fn v6_dest(addr: [u8; 16], port: u16) -> SocketAddr {
-        // RED (pre-fix, finding #4): no IPv4-mapped un-map; v4-mapped leaks as v6.
         let v6 = Ipv6Addr::from(addr);
-        SocketAddr::new(IpAddr::V6(v6), port)
+        if let Some(v4) = v6.to_ipv4_mapped() {
+            SocketAddr::new(IpAddr::V4(v4), port)
+        } else {
+            SocketAddr::new(IpAddr::V6(v6), port)
+        }
     }
 
     #[cfg(test)]
