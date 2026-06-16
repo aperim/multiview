@@ -216,6 +216,15 @@ pub struct LeaseStore {
     /// serials/MACs. `RwLock` for the same read-mostly, off-hot-loop reason as
     /// `active` (invariant #10).
     fingerprint_score: RwLock<Option<u8>>,
+    /// The server-issued `instanceBindingId` of the currently-active lease, when a
+    /// producer recorded it (the heartbeat client records it on a genuine install).
+    /// `None` until a binding-aware install records one. This is the device's
+    /// durable instance identity: the heartbeat client reads it back to anchor the
+    /// cross-instance-replay guard even on the activation path (a device that
+    /// already holds a lease is never "fresh"). An opaque id, never a raw
+    /// identifier (brief §8). `RwLock` for the same read-mostly, off-hot-loop
+    /// reason as `active` (invariant #10).
+    instance_binding_id: RwLock<Option<String>>,
     /// The injected clock; the store never reads a system clock directly.
     clock: Clock,
 }
@@ -246,6 +255,7 @@ impl LeaseStore {
             gpus_in_use: RwLock::new(0),
             installed_at: RwLock::new(None),
             fingerprint_score: RwLock::new(None),
+            instance_binding_id: RwLock::new(None),
             clock,
         }
     }
@@ -269,6 +279,29 @@ impl LeaseStore {
     #[must_use]
     pub fn installed_at(&self) -> Option<DateTime<Utc>> {
         self.installed_at.read().ok().and_then(|g| *g)
+    }
+
+    /// The server-issued `instanceBindingId` recorded for the currently-active
+    /// lease (the heartbeat client records it on a genuine install), or `None`
+    /// when no binding-aware install has occurred. This is the device's durable
+    /// instance identity — the heartbeat client reads it to anchor its
+    /// cross-instance-replay guard even on the activation path. A poisoned lock
+    /// fails toward "unknown" (`None`), never a panic.
+    #[must_use]
+    pub fn current_binding_id(&self) -> Option<String> {
+        self.instance_binding_id.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Record the server-issued `instanceBindingId` of the currently-active lease.
+    /// The heartbeat client calls this **only on a genuine install** so the
+    /// device's instance identity is durable for the cross-instance-replay guard.
+    /// A poisoned lock is recovered by replacing the inner value (the store is a
+    /// single-value cache; there is no invariant to lose).
+    pub fn record_binding_id(&self, instance_binding_id: &str) {
+        match self.instance_binding_id.write() {
+            Ok(mut guard) => *guard = Some(instance_binding_id.to_owned()),
+            Err(poisoned) => *poisoned.into_inner() = Some(instance_binding_id.to_owned()),
+        }
     }
 
     /// "Now" as the store sees it, via the injected [`Clock`] seam.

@@ -1024,6 +1024,26 @@ pub enum HeartbeatOutcome {
 /// time) deterministically.
 pub type NowMs = Arc<dyn Fn() -> i64 + Send + Sync>;
 
+/// The result of an [`HeartbeatClient::install`] attempt — distinguishes a GENUINE
+/// install (the lease entered the store) from the benign STALE no-op (the store
+/// already held a newer lease and kept it). The caller learns the device binding
+/// id ONLY on a genuine install; a stale no-op installed nothing, so learning its
+/// binding would poison the device identity with a non-installed (possibly foreign)
+/// lease.
+enum InstallOutcome {
+    /// The verified lease was installed into the store.
+    Installed {
+        /// The installed lease serial.
+        serial: String,
+    },
+    /// The store already held a newer lease (a benign no-op — never off air).
+    /// Nothing was installed; the binding id is NOT learned from this.
+    StaleNoop {
+        /// The (not-installed) incoming lease serial.
+        serial: String,
+    },
+}
+
 /// The device heartbeat client: drives the verified-lease install convergence and
 /// nothing else. Holds only the server handle, the shared lease store, the pinned
 /// root, config, and identity — **no engine handle** (invariant #10).
@@ -1130,18 +1150,26 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// [`HeartbeatError`] on transport / trust / verification failure. The caller
     /// (the loop) treats every error as "keep last-good and back off".
     pub async fn run_once(&self) -> Result<HeartbeatOutcome, HeartbeatError> {
-        // 1. Fetch + verify the key-trust chain (fail closed on trust).
+        // 1. Fetch + verify the key-trust chain (fail closed on trust). This is a
+        //    pre-network fast-fail; trust is RE-EVALUATED with a fresh clock read
+        //    at lease-acceptance time (step 4) so a signer that expires/revokes
+        //    during a stalled call cannot validate the returned lease (no TOCTOU).
         let keys = self.server.fetch_keys().await?;
-        let now_ms = unix_millis_now();
-        let trusted = TrustedKeys::verify(&keys, &self.pinned, now_ms)?;
+        let now_ms = (self.now_ms)();
+        let _ = TrustedKeys::verify(&keys, &self.pinned, now_ms)?;
 
         // 2. Heartbeat (or activate when no binding is known yet). The binding is
         //    addressed by the server-issued instanceBindingId — NEVER the lease
         //    serial (a different object). `established_binding` is this device's
-        //    locally-anchored identity (configured, or learned from a prior
-        //    install); it is the gate install() enforces against a returned body.
+        //    locally-anchored identity: the configured/learned heartbeat binding,
+        //    OR — when neither is set but a local lease already exists — the
+        //    store's current lease binding. So a device that already holds a lease
+        //    is NEVER "fresh": a foreign-binding lease is rejected even on the
+        //    activate path (it has an identity to violate).
         let held_serial = self.store.current().map(|e| e.lease.serial);
-        let established_binding = self.binding_id();
+        let established_binding = self
+            .binding_id()
+            .or_else(|| self.store.current_binding_id());
 
         let (lease, state, next_due) = if established_binding.is_none() {
             // No binding known yet → activate (free auto-issue when no claim code).
@@ -1175,10 +1203,31 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         //    SUCCESSFUL install do we learn the binding id — a rejected
         //    (expired/stale/cross-instance) lease must never mutate the learned
         //    identity (no reject-path poisoning).
+        // Re-evaluate the key-trust chain with a FRESH clock read at lease
+        // ACCEPTANCE time (not the pre-network instant). A signer whose signed
+        // validity window elapsed — or that was revoked — DURING an arbitrarily
+        // stalled network call must not validate the returned lease (no TOCTOU).
+        // The revocation list is re-read from the SAME fetched document; the
+        // time-sensitive validity window is what a stall can cross, and it is now
+        // evaluated against `now()` at acceptance.
+        let accept_now_ms = (self.now_ms)();
+        let trusted = TrustedKeys::verify(&keys, &self.pinned, accept_now_ms)?;
         let body = verify_signed_lease_chain(&server_lease, &trusted)?;
-        let serial = self.install(&server_lease, &body, established_binding.as_deref())?;
-        self.remember_binding_id(&body.instance_binding_id);
-        Ok(HeartbeatOutcome::Installed { serial, next_due })
+        // Install ANCHORED to this device's identity. `remember_binding_id` fires
+        // ONLY on a GENUINE install — never on the stale no-op (a Stale outcome
+        // means the store kept a newer lease; nothing was installed, so learning a
+        // binding from it would poison identity with a non-installed lease).
+        match self.install(&server_lease, &body, established_binding.as_deref())? {
+            InstallOutcome::Installed { serial } => {
+                self.remember_binding_id(&body.instance_binding_id);
+                Ok(HeartbeatOutcome::Installed { serial, next_due })
+            }
+            InstallOutcome::StaleNoop { serial } => {
+                // The store already holds a newer lease — a benign no-op, never off
+                // air. Do NOT learn the binding (nothing was installed).
+                Ok(HeartbeatOutcome::Installed { serial, next_due })
+            }
+        }
     }
 
     /// Translate a verified server lease into a [`LeaseBinding`] and drive
@@ -1194,18 +1243,22 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// valid lease minted for another device must not install here); the
     /// fingerprint-strong stamp is only applied to a binding-matched body.
     ///
+    /// Returns an [`InstallOutcome`] distinguishing a GENUINE install from the
+    /// benign stale no-op (the store already held a newer lease). The caller learns
+    /// the binding id ONLY on a genuine install — never on the stale no-op (which
+    /// installed nothing, so learning its binding would poison identity).
+    ///
     /// # Errors
     /// [`HeartbeatError::BindingMismatch`] for a cross-instance lease;
     /// [`HeartbeatError::LeaseExpired`] for an expired/replayed signed lease;
     /// [`HeartbeatError::SignedLease`] if the local re-verification (which cannot
-    /// fail for a body we just signed) rejects it. A stale grant is folded into a
-    /// successful no-op (the store keeps the newer lease — never off air).
+    /// fail for a body we just signed) rejects it.
     fn install(
         &self,
         server: &ServerLease,
         body: &LeaseBody,
         established_binding: Option<&str>,
-    ) -> Result<String, HeartbeatError> {
+    ) -> Result<InstallOutcome, HeartbeatError> {
         // CROSS-INSTANCE REPLAY DEFENCE: once this device has an established
         // binding, a returned lease MUST bind that same instance. A valid
         // Conspect-signed lease minted for another device's binding is refused
@@ -1221,7 +1274,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         // (NOT system_now()+35d): a short-lived or replayed-old signed lease must
         // never become a fresh 35-day term. An already-expired signed lease is
         // rejected (keep last-good, never off air).
-        let now_ms = unix_millis_now();
+        let now_ms = (self.now_ms)();
         let lease = Lease::new_online_expiring_at(
             body.serial.clone(),
             body.not_after,
@@ -1256,11 +1309,21 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         {
             Ok(installed) => {
                 let _ = server;
-                Ok(installed.serial)
+                // Record the installed binding id in the store so the device's
+                // identity is durable across heartbeat-client instances within this
+                // process (the activate-path anchor reads it back). Recorded ONLY on
+                // a genuine install — never on the stale no-op below.
+                self.store.record_binding_id(&body.instance_binding_id);
+                Ok(InstallOutcome::Installed {
+                    serial: installed.serial,
+                })
             }
-            // A stale grant means the store already holds a newer lease — that is
-            // a benign no-op, never an error that could take the machine off air.
-            Err(crate::store::InstallError::Stale { .. }) => Ok(body.serial.clone()),
+            // A stale grant means the store already holds a NEWER lease — a benign
+            // no-op, never off air. This is NOT an install: the caller must NOT
+            // learn the binding from it (the Stale->Ok fold was the round-3 poison).
+            Err(crate::store::InstallError::Stale { .. }) => Ok(InstallOutcome::StaleNoop {
+                serial: body.serial.clone(),
+            }),
             // The device's fingerprint did not clear the store's continuity gate
             // (the score we stamped is below threshold) — a real keep-last-good
             // outcome now that the score is the device's actual one, not a

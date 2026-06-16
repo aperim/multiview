@@ -694,7 +694,7 @@ async fn a_signer_that_expires_during_the_call_is_rejected_at_acceptance() {
     assert!(
         matches!(
             res,
-            Err(HeartbeatError::KeyTrust(_)) | Err(HeartbeatError::SignedLease(_))
+            Err(HeartbeatError::KeyTrust(_) | HeartbeatError::SignedLease(_))
         ),
         "a signer that expired between trust-eval and acceptance must be rejected, got {res:?}"
     );

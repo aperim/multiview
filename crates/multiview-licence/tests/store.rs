@@ -230,3 +230,31 @@ fn the_store_retains_the_verified_fingerprint_score_for_support_context() {
         "the store retains the exact verified score the install accepted"
     );
 }
+
+#[test]
+fn the_store_records_and_reports_the_instance_binding_id() {
+    // The heartbeat client records the server-issued instanceBindingId on a
+    // genuine install so the device's instance identity is durable (the
+    // cross-instance-replay guard reads it back). `None` until one is recorded.
+    let now = epoch();
+    let store = LeaseStore::with_clock(Arc::new(move || now));
+    assert_eq!(
+        store.current_binding_id(),
+        None,
+        "no binding recorded yet → None (the device is genuinely fresh)"
+    );
+    store.record_binding_id("ib_device_0001");
+    assert_eq!(
+        store.current_binding_id(),
+        Some("ib_device_0001".to_owned()),
+        "the store reports the recorded instance binding id"
+    );
+    // A later genuine install of a different binding (same device, re-bound)
+    // overwrites it — the store is a single-value cache of the current identity.
+    store.record_binding_id("ib_device_0002");
+    assert_eq!(
+        store.current_binding_id(),
+        Some("ib_device_0002".to_owned()),
+        "recording overwrites — the store holds the current binding identity"
+    );
+}
