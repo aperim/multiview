@@ -507,12 +507,17 @@ async fn fractional_huge_jump_resync_never_composes_a_tick_before_its_deadline()
         monotonic_ok.load(Ordering::Acquire),
         "pts must be strictly increasing across the resync (forward-only, inv #3)"
     );
-    // A correct (floor) loop also COMPLETES the bounded run; record that as a softer
-    // signal (the hard signal is the run-ahead assertion, which holds either way).
-    if let Ok(Ok(o)) = outcome {
-        assert_eq!(
-            o.ticks, ticks,
-            "the correct floor resync completes the bounded run"
-        );
-    }
+    // HARD completion assert (matches the integer `huge_time_jump` test): the bounded
+    // run must finish — `tokio::time::timeout` returns Ok, the inner run returns Ok,
+    // and exactly `ticks` frames were emitted. This catches a regression that avoids
+    // run-ahead but PARKS/SPINS the loop (which would make `timeout` return Err); the
+    // run-ahead assertion above and this completion assertion together cover both the
+    // "composed ahead" and the "stalled" failure modes.
+    let outcome = outcome
+        .expect("the bounded run must complete, not park/spin past the 20 s wall-clock timeout")
+        .expect("the bounded run must return Ok");
+    assert_eq!(
+        outcome.ticks, ticks,
+        "the floor resync must complete the bounded run at exactly the tick budget"
+    );
 }

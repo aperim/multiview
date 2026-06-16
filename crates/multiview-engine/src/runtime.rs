@@ -41,7 +41,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use multiview_compositor::pipeline::Nv12Image;
-use multiview_core::time::MediaTime;
 
 use crate::clock::{OutputClock, Tick, TimeSource};
 use crate::drive::{CompositedFrame, CompositorDrive};
@@ -570,25 +569,49 @@ impl<P: Pacer> EngineRuntime<P> {
                         // ahead, violating invariant #1 ("one frame per tick at its
                         // exact deadline; never ahead when not stopping"). A VM pause is
                         // arbitrary, not period-aligned, so the fractional case is the
-                        // common one. The nearest candidate is at most one tick high, so
-                        // a single guarded decrement yields the exact floor; the bounded
-                        // loop is belt-and-braces and re-checks the deadline each step.
-                        // This restores the floor-not-nearest discipline of the normal
-                        // repeat predicate above (ADR-T018 fix-D1) on the cap path too.
-                        let elapsed = now.saturating_sub(self.seed_nanos);
-                        let mut target = u64::try_from(
-                            MediaTime::from_nanos(elapsed).to_tick(self.clock.cadence()),
-                        )
-                        .unwrap_or(0);
-                        // Step the candidate down to the floor: drop any tick whose
-                        // deadline is still in the future. Bounded by the candidate
-                        // itself; in practice at most one iteration.
-                        while target > next
-                            && self.clock.deadline_nanos(target, self.seed_nanos) > now
-                        {
-                            target = target.saturating_sub(1);
+                        // common one. This restores the floor-not-nearest discipline of
+                        // the normal repeat predicate above (ADR-T018 fix-D1).
+                        //
+                        // Computed in O(1) on the hot path — NO decrement loop whose
+                        // length would depend on the (only `>0`-validated, unbounded)
+                        // cadence. Integer division `elapsed / period_nanos` lands on
+                        // the floor tick directly; `period_nanos` is `pts_at(1)` (one
+                        // tick span). The clock's per-tick `deadline_nanos(idx) =
+                        // seed + pts_at(idx)` recomputes `pts_at` with rounding rather
+                        // than a strict `idx·period`, so for a non-integer cadence the
+                        // estimate can sit ±1 off the exact floor; a SINGLE exact
+                        // down-correction (one comparison, never a loop) drops it to a
+                        // tick whose deadline has truly passed, guaranteeing we never
+                        // skip onto a future deadline (no run-ahead, inv #1). An
+                        // *under*-estimate is harmless — it resyncs one tick early and
+                        // the loop catches up — so only the down direction is corrected.
+                        // Clamp to `>= next`: forward-only, never rewinds (it is in fact
+                        // always `>= next+1`, since the cap fires only after the break
+                        // predicate failed: `now >= deadline_nanos(next+1)`). A
+                        // degenerate `<= 0` period (impossible — `OutputClock::new`
+                        // rejects it) falls back to no skip.
+                        let elapsed = now.saturating_sub(self.seed_nanos).max(0);
+                        let period_nanos = self.clock.pts_at(1).as_nanos();
+                        if period_nanos > 0 {
+                            let estimate = u64::try_from(elapsed / period_nanos).unwrap_or(0);
+                            let mut floor_idx = estimate.max(next);
+                            // Single exact down-correction for the ±1 rounding case.
+                            if floor_idx > next
+                                && self.clock.deadline_nanos(floor_idx, self.seed_nanos) > now
+                            {
+                                floor_idx = floor_idx.saturating_sub(1);
+                            }
+                            // Provable never-ahead backstop: if the estimate were ever
+                            // more than one tick high (cannot happen for any reachable
+                            // idx — at 60 fps u64 ticks span ~9.7 billion years — but we
+                            // do not depend on that), fall back to `next`, whose deadline
+                            // is guaranteed `<= now` (the cap fired after the break
+                            // predicate `now >= deadline_nanos(next+1)`). O(1), no loop.
+                            if self.clock.deadline_nanos(floor_idx, self.seed_nanos) > now {
+                                floor_idx = next;
+                            }
+                            self.clock.skip_to(floor_idx);
                         }
-                        self.clock.skip_to(target);
                         break;
                     }
                     // Re-emit last-good under the fresh tick: the held canvas is
