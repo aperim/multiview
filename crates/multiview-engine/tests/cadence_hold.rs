@@ -28,7 +28,7 @@
 )]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -356,6 +356,162 @@ async fn huge_time_jump_resyncs_with_bounded_repeats_and_no_spin() {
         assert!(
             w[1] > w[0],
             "pts must be strictly increasing across the resync"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fractional_huge_jump_resync_never_composes_a_tick_before_its_deadline() {
+    // Invariant #1 on the CAP path: a real VM pause / CLOCK_MONOTONIC leap is
+    // arbitrary, never period-aligned. When the cap (`repeats >= MAX_REPEATS_PER_TICK`)
+    // fires after a FRACTIONAL jump — elapsed = (K + 0.6)·period — the resync must
+    // land on the FLOOR tick (deadline already passed), NOT the nearest. The buggy
+    // cap path used `MediaTime::to_tick`, which rounds HALF-AWAY-FROM-ZERO: it rounds
+    // (K + 0.6) UP to K+1 and `skip_to(K+1)`, then step-2 composes tick K+1 BEFORE
+    // its deadline `pts_at(K+1) > now` — running AHEAD, violating invariant #1. (The
+    // exact-integer-jump test above can never catch this: `to_tick` lands on the
+    // integer, so floor == nearest.)
+    //
+    // We assert the invariant AT ITS SOURCE, inside the publish closure: at the
+    // instant each frame is published, its pts must not exceed the elapsed wall-clock
+    // (`pts <= now - seed`). The worst run-ahead is recorded into a shared atomic the
+    // MOMENT it happens, so the regression is captured even though the buggy
+    // skip-ahead then parks the bounded loop on an unreachable deadline (we bound the
+    // whole run in a wall-clock timeout — the assertion, not run completion, is the
+    // signal).
+    const HUGE: i64 = 10_000;
+    let ticks: u64 = u64::from(MAX_REPEATS_PER_TICK) + 16;
+    // EXACT-period cadence (25 fps → 40,000,000 ns/tick): whole-period advances land
+    // precisely on the clock's exact deadlines, so the ONLY fractional component is
+    // the deliberate 0.6-period priming below — isolating the cap-path over-round.
+    let cadence = Rational::new(25, 1);
+    let period = oracle_pts_ns(1, cadence);
+
+    let time_source = Arc::new(ManualTimeSource::new());
+    let ts: Arc<dyn TimeSource> = time_source.clone();
+    let publisher: Arc<EnginePublisher<u64, u64>> = Arc::new(EnginePublisher::new(8));
+    let mut runtime = EngineRuntime::new(
+        OutputClock::new(cadence).unwrap(),
+        build_drive(16, 16),
+        ts,
+        CooperativePacer,
+    );
+    let seed = runtime.seed_nanos();
+
+    // Prime a 0.6-period offset so the post-jump elapsed is (K + 0.6)·period — the
+    // fractional remainder that `to_tick` rounds UP and the floor rounds DOWN.
+    time_source.advance(Duration::from_nanos((period * 6 / 10) as u64));
+
+    // `compose_now` carries the wall-clock instant captured at the START of the
+    // control hook — which the drive loop runs AFTER `clock.tick()` and immediately
+    // BEFORE `compose()` + the publish closure, ONCE per FRESH tick (repeats do not
+    // run the hook). So for each fresh tick it is exactly the "about to compose this
+    // tick" instant — the moment its deadline must already have passed. We measure
+    // run-ahead = pts - (compose_now - seed) for FRESH ticks only (detected by
+    // compose_now changing since the last measurement); repeats reuse the prior
+    // fresh tick's compose_now and are skipped — they are provably never ahead (a
+    // repeat's pts <= the elapsed wall-clock that triggered it). Measuring at the
+    // hook instant (not the live clock at publish) is what makes a one-tick
+    // over-round visible: the hook then advances the clock to simulate THIS compose's
+    // duration, which would otherwise mask it.
+    let compose_now = Arc::new(AtomicI64::new(i64::MIN));
+    let last_measured = Arc::new(AtomicI64::new(i64::MIN));
+    let worst_ahead = Arc::new(AtomicI64::new(i64::MIN));
+    let max_pts_seen = Arc::new(AtomicI64::new(i64::MIN));
+    let prev_pts = Arc::new(AtomicI64::new(i64::MIN));
+    let monotonic_ok = Arc::new(AtomicBool::new(true));
+    let cn_s = Arc::clone(&compose_now);
+    let lm_s = Arc::clone(&last_measured);
+    let worst_s = Arc::clone(&worst_ahead);
+    let maxpts_s = Arc::clone(&max_pts_seen);
+    let prev_s = Arc::clone(&prev_pts);
+    let mono_s = Arc::clone(&monotonic_ok);
+    let state_of = move |f: &CompositedFrame| -> u64 {
+        let pts = f.pts().as_nanos();
+        let cn = cn_s.load(Ordering::Acquire);
+        // Only the FRESH tick right after a hook (compose_now advanced) is measured;
+        // repeats (same compose_now) are skipped.
+        if cn != i64::MIN && lm_s.swap(cn, Ordering::AcqRel) != cn {
+            worst_s.fetch_max(pts - (cn - seed), Ordering::AcqRel);
+        }
+        maxpts_s.fetch_max(pts, Ordering::AcqRel);
+        let prior = prev_s.swap(pts, Ordering::AcqRel);
+        if prior != i64::MIN && pts <= prior {
+            mono_s.store(false, Ordering::Release);
+        }
+        f.tick.index
+    };
+
+    // Hook schedule: warmups (n=0,1) advance one period each (heal the 0.6 priming
+    // into steady pacing); the THIRD (n=2) jumps HUGE periods (the pathological
+    // leap); the rest advance one period each so a CORRECT (floor) loop catches up
+    // and finishes fast. The hook FIRST records the compose-time `now` (before
+    // advancing), so the publish closure measures each fresh tick against the instant
+    // it is composed — exposing a cap-path over-round that this tick's own advance
+    // would otherwise hide.
+    let ts_ctl = Arc::clone(&time_source);
+    let cn_ctl = Arc::clone(&compose_now);
+    let calls = Arc::new(AtomicU64::new(0));
+    let calls_ctl = Arc::clone(&calls);
+    let control = move |_d: &mut CompositorDrive<Nv12Image>| {
+        cn_ctl.store(ts_ctl.now_nanos(), Ordering::Release);
+        let n = calls_ctl.fetch_add(1, Ordering::AcqRel);
+        let mult = if n == 2 { HUGE } else { 1 };
+        ts_ctl.advance(Duration::from_nanos((mult * period) as u64));
+    };
+
+    let stop = StopSignal::new();
+    // Bound the whole run: the assertion below is the signal, not completion. A
+    // correct loop finishes in well under a second; the buggy run-ahead parks, and
+    // the timeout simply ends the run after the run-ahead was already recorded.
+    let run = runtime.run_for_with_control(
+        publisher.as_ref(),
+        &stop,
+        ticks,
+        state_of,
+        |_f| None::<u64>,
+        control,
+    );
+    let outcome = tokio::time::timeout(Duration::from_secs(20), run).await;
+
+    // THE BLOCKER ASSERTION: no tick is ever composed ahead of its deadline. The
+    // buggy cap path emits the resync tick at pts_at(K+1) while elapsed = (K+0.6)
+    // ·period, i.e. ~0.4 period ahead — caught as a positive worst_ahead.
+    let ahead = worst_ahead.load(Ordering::Acquire);
+    assert_ne!(
+        ahead,
+        i64::MIN,
+        "no frame was ever published — test wiring broke"
+    );
+    assert!(
+        ahead <= 0,
+        "a tick was composed AHEAD of its deadline (run-ahead, inv #1 violated): \
+         worst pts-vs-elapsed = +{ahead} ns ≈ {:.3} period — the cap-path resync \
+         rounded the fractional jump UP instead of flooring it",
+        ahead as f64 / period as f64
+    );
+
+    // The cap path actually fired and resynced near wall-clock, so the assertion was
+    // exercised on the real post-cap resync tick (not a trivially-ahead-free run).
+    let repeated = runtime.frames_repeated();
+    assert!(
+        repeated > 0 && repeated <= u64::from(MAX_REPEATS_PER_TICK),
+        "the fractional jump must trigger a BOUNDED cadence-hold (got {repeated}, cap {MAX_REPEATS_PER_TICK})"
+    );
+    assert!(
+        max_pts_seen.load(Ordering::Acquire) >= oracle_pts_ns(HUGE / 2, cadence),
+        "the clock must have resynced near wall-clock — proves the resync tick was reached"
+    );
+    assert!(
+        monotonic_ok.load(Ordering::Acquire),
+        "pts must be strictly increasing across the resync (forward-only, inv #3)"
+    );
+    // A correct (floor) loop also COMPLETES the bounded run; record that as a softer
+    // signal (the hard signal is the run-ahead assertion, which holds either way).
+    if let Ok(Ok(o)) = outcome {
+        assert_eq!(
+            o.ticks, ticks,
+            "the correct floor resync completes the bounded run"
         );
     }
 }
