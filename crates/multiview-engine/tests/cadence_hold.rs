@@ -521,3 +521,114 @@ async fn fractional_huge_jump_resync_never_composes_a_tick_before_its_deadline()
         "the floor resync must complete the bounded run at exactly the tick budget"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_integer_cadence_large_index_resync_floors_exactly_and_does_not_grind() {
+    // The boundedness proof at a NON-INTEGER cadence and a LARGE tick index — the
+    // case the 25 fps (integer-ns) tests structurally cannot reach. 23.976 fps
+    // (24000/1001) has an exact period of 41 708 333.333… ns; `pts_at(1)` ROUNDS that
+    // to 41 708 333. Dividing `elapsed` by the rounded period drifts from the true
+    // floor without bound as the index grows: at K = 300_000_000 it is +2 high, and a
+    // fixed ±1 correction cannot recover it — the old code's never-ahead backstop then
+    // collapses the resync target to `next`, so `skip_to(next)` advances only
+    // MAX_REPEATS_PER_TICK+1 ticks per outer iteration and GRINDS the 300M-tick backlog
+    // frame-by-frame (the bounded run never reaches its budget → timeout). The exact
+    // rational floor (`elapsed·num / (1e9·den)`) has zero drift, so it resyncs to the
+    // true wall-clock floor in one step and the bounded run completes.
+    //
+    // Assert BOTH: (a) no fresh tick is composed before its deadline (no run-ahead),
+    // and (b) the run COMPLETES at exactly `ticks` (hard) — i.e. it floored to ~K in
+    // one resync rather than collapsing to `next` and grinding.
+    const K: u64 = 300_000_000;
+    let ticks: u64 = u64::from(MAX_REPEATS_PER_TICK) + 16;
+    let cadence = Rational::new(24000, 1001); // 23.976 fps — non-integer ns period
+    let period = oracle_pts_ns(1, cadence);
+
+    let time_source = Arc::new(ManualTimeSource::new());
+    let ts: Arc<dyn TimeSource> = time_source.clone();
+    let publisher: Arc<EnginePublisher<u64, u64>> = Arc::new(EnginePublisher::new(8));
+    let mut runtime = EngineRuntime::new(
+        OutputClock::new(cadence).unwrap(),
+        build_drive(16, 16),
+        ts,
+        CooperativePacer,
+    );
+    let seed = runtime.seed_nanos();
+
+    // Prime the clock to a LARGE fractional elapsed: exactly tick K's deadline plus
+    // 0.6 of a period. The first catch-up after tick 0 sees this huge gap, hits the
+    // cap, and must resync to the floor (~K) — not collapse to `next`.
+    let prime = oracle_pts_ns(K as i64, cadence)
+        .saturating_add(period * 6 / 10)
+        .saturating_sub(seed);
+    time_source.advance(Duration::from_nanos(u64::try_from(prime).unwrap_or(0)));
+
+    // Compose-instant run-ahead measurement (fresh ticks only — see the fractional
+    // test above for why the live clock at publish would mask a one-tick over-round).
+    let compose_now = Arc::new(AtomicI64::new(i64::MIN));
+    let last_measured = Arc::new(AtomicI64::new(i64::MIN));
+    let worst_ahead = Arc::new(AtomicI64::new(i64::MIN));
+    let cn_s = Arc::clone(&compose_now);
+    let lm_s = Arc::clone(&last_measured);
+    let worst_s = Arc::clone(&worst_ahead);
+    let state_of = move |f: &CompositedFrame| -> u64 {
+        let pts = f.pts().as_nanos();
+        let cn = cn_s.load(Ordering::Acquire);
+        if cn != i64::MIN && lm_s.swap(cn, Ordering::AcqRel) != cn {
+            worst_s.fetch_max(pts - (cn - seed), Ordering::AcqRel);
+        }
+        f.tick.index
+    };
+
+    // Each fresh compose records the compose-time `now` (before advancing) then
+    // advances one period, so after the one-step resync to ~K a CORRECT floor lets the
+    // loop catch up and finish fast; a grinding (collapsed-to-`next`) loop never does.
+    let ts_ctl = Arc::clone(&time_source);
+    let cn_ctl = Arc::clone(&compose_now);
+    let control = move |_d: &mut CompositorDrive<Nv12Image>| {
+        cn_ctl.store(ts_ctl.now_nanos(), Ordering::Release);
+        ts_ctl.advance(Duration::from_nanos(u64::try_from(period).unwrap_or(0)));
+    };
+
+    let stop = StopSignal::new();
+    let run = runtime.run_for_with_control(
+        publisher.as_ref(),
+        &stop,
+        ticks,
+        state_of,
+        |_f| None::<u64>,
+        control,
+    );
+    let outcome = tokio::time::timeout(Duration::from_secs(20), run).await;
+
+    // (a) No run-ahead at the resync (the exact floor never overshoots its deadline).
+    let ahead = worst_ahead.load(Ordering::Acquire);
+    assert_ne!(
+        ahead,
+        i64::MIN,
+        "no frame was ever published — test wiring broke"
+    );
+    assert!(
+        ahead <= 0,
+        "a tick was composed AHEAD of its deadline at a non-integer cadence \
+         (run-ahead, inv #1): worst pts-vs-elapsed = +{ahead} ns ≈ {:.3} period",
+        ahead as f64 / period as f64
+    );
+
+    // (b) BOUNDED resync: the run completes at exactly `ticks`. The old rounded-period
+    // floor collapsed to `next` here and ground the 300M-tick backlog → this would
+    // time out (Err) and fail. A hard assert, matching `huge_time_jump`.
+    let outcome = outcome
+        .expect("resync collapsed to `next` and ground the backlog (timed out) instead of flooring to wall-clock")
+        .expect("the bounded run must return Ok");
+    assert_eq!(
+        outcome.ticks, ticks,
+        "the exact-rational floor must resync to the wall-clock floor in one step and complete the budget"
+    );
+    // And it really did resync far forward (proves it floored to ~K, did not grind):
+    // the last emitted pts is out near tick K, not crawling up from 0.
+    assert!(
+        runtime.frames_repeated() <= u64::from(MAX_REPEATS_PER_TICK),
+        "the large-index resync must stay bounded to one cap's worth of repeats, not grind"
+    );
+}
