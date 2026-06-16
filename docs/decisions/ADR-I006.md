@@ -73,10 +73,11 @@ mirrors `mesh-mdns`). The implementation makes these concrete decisions:
    (hardened after the rule-21 Codex panel — the crypto chain is correct, but the
    guarantees must not be dropped at the mapping). Binding rules:
    - **Key-purpose binding:** a `root_sig`-attested intermediate is trusted as a
-     lease signer **only** when its signed pre-image declared `key_type == "lease"`
-     **and** its `status ∈ {current, next}` (dual-pin). A root-attested key minted
-     for another purpose (e.g. an `update` key) or in a `retired`/unknown status is
-     never a lease signer (a skip, not a keyset-poisoning reject).
+     lease signer **only** when its signed pre-image declared `key_type == "lease"`.
+     A root-attested key minted for another purpose (e.g. an `update` key) is never
+     a lease signer (a skip, not a keyset-poisoning reject). **The unsigned `status`
+     field is NOT a trust gate** (see decision point #7): trust rests only on signed
+     fields — `key_type`, the validity window, and the revocation list.
    - **Signed expiry is authoritative:** the installed lease's `expires_at` is the
      cryptographically-signed `not_after` (`Lease::new_online_expiring_at`
      back-derives `granted_at = not_after − 35d`), **never** `system_now() + 35d`.
@@ -96,6 +97,38 @@ mirrors `mesh-mdns`). The implementation makes these concrete decisions:
    The never-off-air isolation is re-proven with a **genuine in-flight stall**
    (a black-holed transport call), asserting a concurrent store reader and the
    output clock are never blocked while a heartbeat call is parked (inv #10).
+7. **Identity anchoring + signed-only trust** (hardened after the **round-2**
+   rule-21 panel, which confirmed #1–#6 correct and found deeper holes). Binding
+   rules:
+   - **Cross-instance replay defence:** `install()` is anchored to this device's
+     established binding (configured, or learned from a prior successful install).
+     Once a binding is established, a returned body whose `instance_binding_id`
+     differs is rejected (`HeartbeatError::BindingMismatch`) — a valid
+     Conspect-signed lease minted for **another device** cannot be replayed here.
+   - **Real fingerprint gate:** `seal_for_install` stamps the device's **actual**
+     `identity.fingerprint_score`, never an unconditional `FINGERPRINT_MATCH_STRONG`.
+     The store's fingerprint-continuity gate then genuinely rejects a non-matching
+     machine (`HeartbeatError::FingerprintMismatch`, keep last-good).
+   - **No reject-path identity poisoning:** the server-issued `instanceBindingId`
+     is learned (`remember_binding_id`) **only after** a successful `install()`.
+     A rejected (expired / foreign / stale) lease never mutates the learned
+     binding, so the next renewal still addresses the legitimate binding.
+   - **`status` is not a security gate (cryptographic binding):** the well-known
+     `status` field is **not** in the root-signed key pre-image (`map(6)`:
+     `key_id,key_type,statement,public_key,valid_from,valid_until`), so a MITM /
+     compromised document can flip a retired key's `status` to `current` without
+     breaking `root_sig`. Trust therefore rests on **signed** fields only:
+     `key_type == "lease"` ∧ `now ∈ [valid_from, valid_until]` ∧ not in the signed
+     revocation list. Retirement is expressed via the signed validity window or the
+     signed revocation list — never the unsigned `status` (operational hint only).
+   - **`gpu_limit` fails closed:** a **present-but-invalid** `gpu_limit` (negative,
+     non-integer, or `> u32::MAX`) is `MalformedBody`; only an **absent** `gpu_limit`
+     means `Unlimited`. A malformed-but-signed body can no longer install unlimited
+     GPUs (the least-restrictive value).
+   - **Deterministic expiry test:** the round-1 replay test passed via
+     `InstallError::Stale` (a fixed-future fake epoch masked the path); a lease with
+     an absolute-past `not_after` now deterministically exercises
+     `HeartbeatError::LeaseExpired`.
 
 New deps behind `heartbeat`: `p256`, `base64`, `hex` (all `MIT`/`Apache-2.0`, with
 the ECDSA closure resolving to `MIT`/`Apache-2.0`/`BSD-3-Clause`/`BSD-1-Clause`),
@@ -132,6 +165,9 @@ so none enter the scanned default graph.
 | Mint the installed lease term from `system_now() + 35d` (ignoring the signed `not_after`) | Defeats the licensing crypto: a short-lived or **replayed older** still-Ed25519-valid lease would become a fresh 35-day entitlement (signed-expiry bypass / lease replay). The installed `expires_at` MUST be the signed `not_after`, and an already-expired signed lease is rejected. |
 | Trust any `root_sig`-attested intermediate as a lease signer (ignore `key_type`/`status`) | A root may attest keys for several purposes; accepting a non-lease (e.g. `update`) key — or a `retired` key — as a lease signer is a key-purpose bypass that the signed `key_type` field exists to prevent. Enforce `key_type == "lease"` ∧ `status ∈ {current,next}`. |
 | Default omitted/empty `instance_binding_id`/`serial` to `""` (`unwrap_or_default`) | A signed-but-malformed body would install with an empty id and mis-bind enforcement/renewals. Required identity fields fail closed. |
+| Trust a lease for any binding (no install-time identity check) + stamp `FINGERPRINT_MATCH_STRONG` | Cross-instance replay: a valid Conspect-signed lease minted for another device installs onto this one, and the hardcoded strong stamp bypasses the store's fingerprint gate. Anchor install to the established binding + stamp the real fingerprint score. |
+| Use the well-known `status` field to gate lease-signer trust | `status` is NOT in the root-signed pre-image, so a MITM can flip a retired key to `current` without breaking `root_sig`. Only signed fields (`key_type`, validity window, revocation list) may gate trust; `status` is an operational hint. |
+| Learn `instanceBindingId` before/independently of a successful install | Reject-path identity poisoning: a rejected (expired/foreign) lease would still mutate the learned binding, redirecting the next renewal to the attacker's binding. Learn only after `install()` returns `Ok`. |
 
 ## Consequences
 
