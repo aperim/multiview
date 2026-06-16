@@ -88,6 +88,16 @@ frame. The fix is to **never compute a rounded index**: gate each repeat strictl
   or loop on the drive path can spin**: a stop is honoured within ~one poll interval regardless of
   clock state. The stop flag is a wait-free atomic the engine *reads* — it never awaits a client, so
   inv #10 is preserved.
+- **`skip_to` drops ticks, so deterministic bounded harnesses must pace per tick, not jump.** The cap
+  resync deliberately advances the tick *counter* past `emitted` (it drops the skipped ticks; PTS
+  jumps once). A deterministic sleep-free harness that drives a fixed `max_ticks` budget under a
+  `ManualTimeSource` must therefore **advance the clock one period per fresh compose**, never jump it
+  once to `pts_at(max_ticks)`: a single up-front jump is read as overload, fires the cap+`skip_to` for
+  any `max_ticks > MAX_REPEATS_PER_TICK`, advances the counter past `emitted`, and the bounded run can
+  then never reach its budget (it parks on a post-skip deadline the frozen clock never covers — a
+  hang). The engine's own tick tests and `SoftwareEngine::run_for*` pace one period per fresh compose
+  for exactly this reason; the `huge_time_jump` resync test instead advances the clock per compose via
+  its control hook, so its post-`skip_to` deadlines are met and the bounded run still completes.
 - **Scope honesty:** this relieves **compositor** load (fewer composites under load). Re-emitted
   ticks still flow to the bake/encode consumer, so **encoder** load per tick is unchanged; under
   encode-bound overload the cadence-hold manifests as repeats feeding the existing
