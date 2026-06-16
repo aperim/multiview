@@ -44,9 +44,23 @@ function reviewItem(it) {
     () => single('Lens: correctness & concurrency/TOCTOU/race/timing.', '-a'),
     () => single('Lens: security & authorization (BOLA/per-object authz) & input hardening.', '-b'),
     () => single('Lens: spec-conformance & the Multiview invariants (#1 output-clock, #10 isolation) & data-plane bounded-queue discipline.', '-c'),
-  ]).then((panel) => agent(
-    `Aggregate this 3-reviewer panel for high-risk item "${it.id}" into one verdict. A defect raised by ANY reviewer stands. blocked = true if any reviewer flagged a blocker/major. reviewer="codex+panel". Panel:\n${JSON.stringify(panel.filter(Boolean))}`,
-    { label: `panel:${it.id}`, phase: 'Review', schema: VERDICT }))
+  ]).then((panel) => {
+    // Deterministic code-aggregation. An LLM aggregator over the embedded panel JSON is
+    // fragile — its StructuredOutput call can fail to parse and lose the whole verdict.
+    // A defect from ANY lens stands; blocked if any lens blocked or raised a blocker/major;
+    // ranOk only if every lens actually ran (fail-closed otherwise).
+    const vs = panel.filter(Boolean)
+    const defects = vs.flatMap((x) => x.defects || [])
+    const blocked = vs.some((x) => x.blocked) || defects.some((d) => d.severity === 'blocker' || d.severity === 'major')
+    return {
+      id: it.id,
+      reviewer: 'codex+panel',
+      ranOk: vs.length > 0 && vs.every((x) => x.ranOk !== false),
+      defects,
+      highestResidualRisk: vs.map((x) => x.highestResidualRisk).filter(Boolean).join('  ||  ') || 'panel produced no residual-risk statement',
+      blocked,
+    }
+  })
 }
 
 phase('Review')
