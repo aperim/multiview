@@ -36,3 +36,8 @@ control routes/web screens.
 Depth: [conspect-account-architecture](../../docs/research/conspect-account-architecture.md) (§2
 constants, §6 ladder, §8 fingerprint, §12 state machines) ·
 [ADR-0050](../../docs/decisions/ADR-0050.md) · [conventions](../../docs/architecture/conventions.md).
+
+**Before the heartbeat client (CONSPECT-3):** the device-side wire/CBOR/key-pinning depth is
+[licensing-runtime](../../docs/research/licensing-runtime.md), and the live wire is **gated** on the
+Conspect API finalization — read [ADR-0096](../../docs/decisions/ADR-0096.md) (the D1/D2/D3 + O1-O4
+gate + the verification checklist) first; do not guess the protocol or ship a stub (rule 6).
