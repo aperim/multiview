@@ -61,6 +61,19 @@ frame. The fix is to **never compute a rounded index**: gate each repeat strictl
 `now >= deadline(next+1)` (the already-proven exact deadline primitive). Off the overload path
 (`now < deadline(next+1)`) the skip branch is dormant and behavior is byte-identical to today.
 
+**The same flooring discipline binds the cap-path resync.** When the per-iteration repeat count
+hits `MAX_REPEATS_PER_TICK`, the loop resyncs the counter to wall-clock in one `skip_to`. That
+target **must be the floor** — the greatest `idx` with `deadline_nanos(idx) <= now` — not
+`to_tick(elapsed)`. A real jump (VM pause / `CLOCK_MONOTONIC` leap) is arbitrary, never
+period-aligned, so the fractional case `elapsed = (N + r)·period, r >= 0.5` is the common one;
+the nearest rounding gives `N+1`, and composing tick `N+1` (deadline in the future) runs ahead
+exactly as D1 described. The cap path takes the nearest candidate and steps it down to the floor
+with a single guarded decrement (bounded, re-checks `deadline_nanos(candidate) <= now`, never
+below `next`). The skip stays a genuine forward jump because the cap only fires once
+`deadline_nanos(next+1) <= now`, so the floor is `>= next+1`. (Regression risk: an *integer*-period
+jump test cannot catch this — floor == nearest on an integer — so the guard is a *fractional*-jump
+test asserting no fresh tick is published ahead of its compose-instant deadline.)
+
 ## Consequences
 
 - **Inv #1 strengthened to its true meaning:** output PTS tracks wall-clock at exactly 1.0×
@@ -123,6 +136,11 @@ frame. The fix is to **never compute a rounded index**: gate each repeat strictl
    unreachable deadline; confirm it is genuinely parked (no further ticks across a settle window),
    raise stop, and require a prompt return — the whole test under a bounded wall-clock
    `tokio::time::timeout` so a stop-blind pacer regression fails in seconds instead of hanging CI.
+8. `fractional_huge_jump_resync_never_composes_a_tick_before_its_deadline` (failing-first): prime a
+   0.6-period offset so the cap-path resync fires at a fractional elapsed `(K + 0.6)·period`, and
+   assert at each fresh tick's compose-instant that its pts never exceeds elapsed wall-clock (no
+   run-ahead). Catches the cap-path `to_tick` over-round that the integer-jump test (#5) cannot —
+   floor == nearest on an integer. Fails at +0.4-period run-ahead before the floor fix, ok after.
 
 Plus a CI chaos/soak gate running the engine under synthetic CPU starvation asserting cadence held
 + bounded lag + frames-repeated-not-slipped, and a hardware soak on a deliberately-loaded box.
