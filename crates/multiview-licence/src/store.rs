@@ -230,7 +230,7 @@ struct Installed {
     /// When this lease was installed (the `now` passed to `install_binding`) — the
     /// honest local "last contact" the heartbeat-status surface reports, distinct
     /// from the lease's server-side `granted_at`.
-    installed_at: DateTime<Utc>,
+    at: DateTime<Utc>,
     /// The salted hardware-fingerprint **score** (0–100) that cleared the match
     /// threshold at install — a score, never a raw identifier (brief §8).
     fingerprint_score: u8,
@@ -312,7 +312,7 @@ impl LeaseStore {
         self.installed
             .read()
             .ok()
-            .and_then(|g| g.as_ref().map(|i| i.installed_at))
+            .and_then(|g| g.as_ref().map(|i| i.at))
     }
 
     /// The server-issued `instanceBindingId` recorded for the currently-active
@@ -430,7 +430,7 @@ impl LeaseStore {
         let lease = binding.entitlement.lease.clone();
         let snapshot = Installed {
             entitlement: binding.entitlement.clone(),
-            installed_at: now,
+            at: now,
             fingerprint_score: binding.fingerprint_score,
             instance_binding_id: binding.instance_binding_id.clone(),
         };

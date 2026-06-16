@@ -1251,10 +1251,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         // `wrapping_add`) so the monotonic guarantee never wraps back to a reused
         // low value. Commit the new high-water durably AT MINT (before the request),
         // so even a crash mid-operation cannot let the next process reuse it.
-        let counter = guard
-            .counter
-            .max(self.nonce_store.load())
-            .saturating_add(1);
+        let counter = guard.counter.max(self.nonce_store.load()).saturating_add(1);
         guard.counter = counter;
         self.nonce_store.commit(counter);
         let key = format!("mv-{}-{counter}", self.identity.machine_id);

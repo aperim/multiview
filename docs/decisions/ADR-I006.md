@@ -203,6 +203,42 @@ mirrors `mesh-mdns`). The implementation makes these concrete decisions:
      **only after a fully-successful contact** (install / stale-no-op / withheld
      lease). An error *after* the mutation landed does not rotate, so its retry
      also replays — the server dedupes, never duplicating a binding/lease.
+10. **Atomic install publish + durable idempotency nonce** (hardened after the
+    **round-5** rule-21 panel, which confirmed #1–#9's intent but found the
+    binding-anchor + idempotency fixes incomplete). Binding rules:
+    - **The install publishes ONE atomic snapshot:** `LeaseStore` previously wrote
+      `active` / `installed_at` / `fingerprint_score` / `instance_binding_id` in
+      four separate `RwLock` critical sections, so a concurrent reader could observe
+      `current().is_some()` while `current_binding_id()` was still `None` — a torn
+      install that makes a freshly-licensed device look "fresh" to the heartbeat
+      client (`established_binding == None`) and SKIP the cross-instance guard. The
+      four fields are collapsed into one `Installed` struct behind a single
+      `RwLock<Option<Installed>>`; `install_binding` publishes it in one write and
+      every reader reads that one lock, so no reader sees a torn state. The round-4
+      "recorded atomically" comment (false then) is now true. The dead
+      `record_binding_id` standalone setter — which modelled exactly the
+      binding-without-lease partial state — is removed (no production callers after
+      #9 moved anchoring into `install_binding`).
+    - **The binding anchor is bound into the SIGNED lease bytes** (the #9 follow-up,
+      see commit history): `SignedLease::signing_bytes` covers `instance_binding_id`
+      (presence tag + length-prefixed bytes); `verify_signed_lease` recomputes over
+      the binding id `install_binding` will anchor, so a tampered CBOR binding id on
+      the file-drop / mesh-relay path (inner lease otherwise validly signed) fails
+      `SignatureInvalid` and never anchors — proven via the `from_bytes`→install
+      tamper test.
+    - **The idempotency mint counter is durable across restart:** the round-4
+      counter lived in an in-memory `IdempotencyState` that reset to 0 on restart,
+      so a post-restart op reused `mv-{machine}-1` and collided with a prior
+      lifetime's first op. The counter is now seeded from — and committed to — a
+      durable `NonceStore` seam (the leaf crate does no I/O; the cli supplies a
+      file-backed `idempotency-nonce` beside the lease state, write-temp-then-rename,
+      fail-open to 0). A new key is minted strictly above both the in-process and
+      durable high-water (`saturating_add`) and the high-water is committed AT MINT,
+      so a restart never reuses a prior lifetime's key. Within a process the round-4
+      retry-replay is unchanged. Scope: this closes cross-restart key COLLISION (the
+      distinctness test); replaying an *unacknowledged in-flight* op across a crash
+      (persisting the in-flight key) is a heavier tier, not required here and not
+      claimed.
 
 New deps behind `heartbeat`: `p256`, `base64`, `hex` (all `MIT`/`Apache-2.0`, with
 the ECDSA closure resolving to `MIT`/`Apache-2.0`/`BSD-3-Clause`/`BSD-1-Clause`),
@@ -248,6 +284,9 @@ so none enter the scanned default graph.
 | Record the binding anchor only from the heartbeat genuine-install path (`store.record_binding_id`) | A lease installed via the control-route/offline upload, the file-drop watcher, or the mesh relay leaves `current_binding_id() == None`, so the device looks "fresh" and a foreign-binding activate skips the cross-instance guard (identity poisoning). Carry the id on `LeaseBinding` and record it atomically inside the single `install_binding` chokepoint every surface converges on. |
 | Anchor identity from the `LeaseBinding.instance_binding_id` field as an unsigned sidecar | The field sat outside the crate's `SignedLease` envelope (serial+source+dates only), so the offline/file-drop/relay surface could anchor an attacker-chosen binding id (identity poisoning / renewal DoS). Bind `instance_binding_id` into `signing_bytes` (presence tag + bytes) and verify it in `install_binding`, so the anchor always rests on signed material; a grafted id fails `SignatureInvalid`. |
 | Mint the Idempotency-Key from `unix_millis_now()` per call | A retry of the same logical operation mints a NEW key, so a lost response can create a DUPLICATE binding/lease ("replay, never re-issue" violated). Use a per-operation key from a monotonic counter + the device id, replayed on retry and rotated only after a successful contact. |
+| Write the install's lease / install-instant / fingerprint / binding-anchor in separate `RwLock` sections | A concurrent reader can observe a torn state — `current().is_some()` while `current_binding_id()` is still `None` — so a freshly-licensed device looks "fresh" and the cross-instance guard is skipped. Publish one `Installed` snapshot under a single lock so a reader never sees a partial install. |
+| Keep the idempotency counter in memory only (rotate on success) | Retry-stable within a process but the counter resets to 0 on restart, so a post-restart op reuses `mv-{machine}-1` and collides with a prior lifetime's first op (cross-restart duplicate mutation). Seed + commit the counter via a durable `NonceStore` seam (file-backed at the cli boundary); mint strictly above the durable high-water and commit at mint. |
+| Persist the idempotency nonce inside `multiview-licence` | Breaks the leaf crate's no-I/O invariant. The crate exposes a `NonceStore` seam (like the clock); the file-backed implementation lives at the cli boundary. |
 
 ## Consequences
 

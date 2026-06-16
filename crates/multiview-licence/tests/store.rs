@@ -188,7 +188,9 @@ fn a_tampered_instance_binding_id_in_a_cbor_payload_is_rejected_on_the_file_drop
     let lease = lease_at("serial-CBOR", now);
     // A legitimate, fully-signed binding for THIS device's real binding id.
     let genuine = binding_with_id(&key, &lease, 100, "ib_real_device");
-    let bytes = genuine.to_cbor().expect("encode the genuine binding to CBOR");
+    let bytes = genuine
+        .to_cbor()
+        .expect("encode the genuine binding to CBOR");
 
     // The attacker decodes it and grafts a foreign binding id (the CBOR field is
     // not covered by re-signing — only the inner lease bytes are signed).
@@ -329,7 +331,11 @@ fn the_store_records_and_reports_the_instance_binding_id_from_an_install() {
     );
     let lease1 = lease_at("serial-BIND01", now);
     store
-        .install_binding(&binding_with_id(&key, &lease1, 100, "ib_device_0001"), &pinned, now)
+        .install_binding(
+            &binding_with_id(&key, &lease1, 100, "ib_device_0001"),
+            &pinned,
+            now,
+        )
         .expect("the first binding installs");
     assert_eq!(
         store.current_binding_id(),
@@ -341,7 +347,11 @@ fn the_store_records_and_reports_the_instance_binding_id_from_an_install() {
     // current identity, published atomically with the lease.
     let lease2 = lease_at("serial-BIND02", now + Duration::seconds(1));
     store
-        .install_binding(&binding_with_id(&key, &lease2, 100, "ib_device_0002"), &pinned, now)
+        .install_binding(
+            &binding_with_id(&key, &lease2, 100, "ib_device_0002"),
+            &pinned,
+            now,
+        )
         .expect("the newer binding installs");
     assert_eq!(
         store.current_binding_id(),
