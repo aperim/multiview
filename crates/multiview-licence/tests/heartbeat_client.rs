@@ -25,6 +25,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{TimeZone as _, Utc};
 use multiview_licence::heartbeat::{
     DeviceIdentity, HeartbeatClient, HeartbeatConfig, HeartbeatOutcome,
 };
@@ -348,7 +349,6 @@ async fn the_installed_lease_expiry_is_the_signed_not_after() {
     // not_after — NOT system_now()+35d. The fake signs a fixed-epoch not_after
     // (year ~2026, distinct from the real wall clock), so an installer that minted
     // a fresh now()+35d term would land far from the signed instant.
-    use chrono::{TimeZone, Utc};
     let server = shared_fake();
     let store = Arc::new(LeaseStore::new());
     let client = client(Arc::clone(&server), Arc::clone(&store));
@@ -394,7 +394,6 @@ async fn replaying_an_older_signed_lease_does_not_re_extend_entitlement() {
     );
     // The replay's signed not_after is 5 days in the past relative to the fake's
     // epoch; the live lease must still be the GOOD (future-of-epoch) one.
-    use chrono::{TimeZone, Utc};
     let replay_not_after = Utc
         .timestamp_millis_opt(server.kit().now_ms() - 5 * 86_400_000)
         .single()

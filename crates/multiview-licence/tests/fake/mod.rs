@@ -18,6 +18,9 @@
     clippy::indexing_slicing,
     clippy::as_conversions,
     clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::doc_markdown,
+    clippy::needless_pass_by_value,
     clippy::unused_self,
     clippy::missing_panics_doc
 )]

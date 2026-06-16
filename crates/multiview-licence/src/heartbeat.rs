@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::ACTIVATION_WINDOW_DAYS;
 use crate::entitlement::{Entitlement, EntitlementFlags, GpuLimit, HardwareClass, Tier};
-use crate::lease::{Lease, LeaseSource};
+use crate::lease::Lease;
 use crate::store::{system_now, LeaseBinding, LeaseStore};
 use crate::verify::{PinnedKey, SignedLease};
 
@@ -365,6 +365,15 @@ impl TrustedKeys {
                 b64url(&ik.public_key).ok_or_else(|| KeyTrustError::IntermediateNotAttested {
                     kid: ik.kid.clone(),
                 })?;
+            // Reject a non-sensical (negative) validity window up front: a negative
+            // epoch-ms cannot be a real Conspect timestamp, and the canonical-CBOR
+            // uint encoder would otherwise coerce it (a forged/garbled key must not
+            // be silently normalised into something the root could appear to sign).
+            if ik.valid_from < 0 || ik.valid_until < 0 {
+                return Err(KeyTrustError::IntermediateNotAttested {
+                    kid: ik.kid.clone(),
+                });
+            }
             let pre = canonical_key_preimage(
                 &ik.kid,
                 &ik.key_type,
@@ -381,6 +390,20 @@ impl TrustedKeys {
                 return Err(KeyTrustError::IntermediateNotAttested {
                     kid: ik.kid.clone(),
                 });
+            }
+            // Attested — but attestation is PURPOSE-BOUND. Only a key whose
+            // root-signed pre-image declared `key_type == "lease"` is a lease
+            // signer; a root-attested key minted for any other purpose (e.g. an
+            // update/signing key) must NOT be accepted to sign leases. Likewise
+            // only the dual-pin `current`/`next` rotation statuses are live signers
+            // (a `retired`/unknown status is excluded). These are SKIPS, not hard
+            // rejects: an unrelated non-lease key in the document does not poison
+            // the whole keyset, it is simply never trusted as a lease signer.
+            if ik.key_type != "lease" {
+                continue;
+            }
+            if ik.status != "current" && ik.status != "next" {
+                continue;
             }
             // Attested. Add to the trusted set only if in-validity and not revoked.
             if revoked.iter().any(|r| r == &ik.kid) {
@@ -604,8 +627,13 @@ pub fn verify_signed_lease_chain(
         .try_into()
         .map_err(|_| SignedLeaseError::MalformedSignature)?;
     let signature = EdSignature::from_bytes(&sig_arr);
+    // Decode the received STANDARD-base64 (RFC 4648 §4) EXACTLY — the signature
+    // covers these bytes. Do NOT strip '=' first: a canonically-padded body (CBOR
+    // length % 3 != 0) carries real padding, and stripping it makes the input
+    // non-canonical so `STANDARD` (RequireCanonical) would wrongly reject a valid
+    // lease. `.trim()` only removes incidental surrounding whitespace.
     let body_bytes = base64::engine::general_purpose::STANDARD
-        .decode(lease.lease_bytes.trim_end_matches('='))
+        .decode(lease.lease_bytes.trim())
         .map_err(|_| SignedLeaseError::MalformedBody)?;
     vk.verify_strict(&body_bytes, &signature)
         .map_err(|_| SignedLeaseError::BadSignature)?;
@@ -623,23 +651,28 @@ fn parse_lease_body(bytes: &[u8]) -> Result<LeaseBody, SignedLeaseError> {
             .find(|(k, _)| k.as_text() == Some(key))
             .map(|(_, v)| v)
     };
-    let text = |key: &str| -> Result<String, SignedLeaseError> {
-        get(key)
-            .and_then(ciborium::value::Value::as_text)
-            .map(str::to_owned)
-            .ok_or(SignedLeaseError::MalformedBody)
+    // A REQUIRED text field: must be present AND non-empty. Fail closed — a
+    // signed-but-malformed body (a field omitted, or present-but-empty) is
+    // rejected, never installed with an empty id that could mis-bind enforcement.
+    let required_text = |key: &str| -> Result<String, SignedLeaseError> {
+        match get(key).and_then(ciborium::value::Value::as_text) {
+            Some(s) if !s.is_empty() => Ok(s.to_owned()),
+            _ => Err(SignedLeaseError::MalformedBody),
+        }
     };
     let integer = |key: &str| -> Option<i64> {
         get(key)
             .and_then(ciborium::value::Value::as_integer)
             .and_then(|i| i64::try_from(i).ok())
     };
-    let licence_id = text("licence_id")?;
-    let instance_binding_id = text("instance_binding_id").unwrap_or_default();
-    let serial = text("serial").unwrap_or_default();
+    let licence_id = required_text("licence_id")?;
+    let instance_binding_id = required_text("instance_binding_id")?;
+    let serial = required_text("serial")?;
     let not_after = integer("not_after").ok_or(SignedLeaseError::MalformedBody)?;
     let gpu_limit = integer("gpu_limit").and_then(|g| u32::try_from(g).ok());
-    let hardware_class = text("hardware_class").ok();
+    let hardware_class = get("hardware_class")
+        .and_then(ciborium::value::Value::as_text)
+        .map(str::to_owned);
     Ok(LeaseBody {
         licence_id,
         instance_binding_id,
@@ -868,6 +901,11 @@ pub enum HeartbeatError {
     /// The returned signed lease failed to verify.
     #[error("signed lease verification failed: {0}")]
     SignedLease(#[from] SignedLeaseError),
+    /// The signed lease is already expired (its cryptographically-signed
+    /// `not_after` is at or before now) — a stale or replayed signed lease is
+    /// rejected, never installed as a fresh term. The last-good lease is kept.
+    #[error("signed lease is already expired (not_after in the past); keeping last-good")]
+    LeaseExpired,
 }
 
 /// The device identity material the requests carry — salted digests + opaque ids
@@ -963,6 +1001,11 @@ pub struct HeartbeatClient<S: LicenceServer> {
     pinned: PinnedRoot,
     config: HeartbeatConfig,
     identity: DeviceIdentity,
+    /// The server-issued `instanceBindingId` learned from a verified lease body
+    /// (or the configured identity). Renewals address the binding by THIS id —
+    /// **never** the lease serial (a different object). Control-plane only; the
+    /// loop is the sole writer/reader, so a plain `Mutex` is correct (no hot path).
+    learned_binding_id: std::sync::Mutex<Option<String>>,
 }
 
 impl<S: LicenceServer> HeartbeatClient<S> {
@@ -975,12 +1018,29 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         config: HeartbeatConfig,
         identity: DeviceIdentity,
     ) -> Self {
+        let learned_binding_id = std::sync::Mutex::new(identity.binding_id.clone());
         Self {
             server,
             store,
             pinned,
             config,
             identity,
+            learned_binding_id,
+        }
+    }
+
+    /// The binding id to address renewals by: the learned/configured
+    /// `instanceBindingId`, or `None` until activation discovers it. NEVER the
+    /// lease serial.
+    fn binding_id(&self) -> Option<String> {
+        self.learned_binding_id.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Record the server-issued `instanceBindingId` from a verified lease body so
+    /// the next renewal addresses the binding by id.
+    fn remember_binding_id(&self, binding_id: &str) {
+        if let Ok(mut g) = self.learned_binding_id.lock() {
+            *g = Some(binding_id.to_owned());
         }
     }
 
@@ -1015,16 +1075,14 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         let now_ms = unix_millis_now();
         let trusted = TrustedKeys::verify(&keys, &self.pinned, now_ms)?;
 
-        // 2. Heartbeat (or activate when no binding/lease is held yet).
+        // 2. Heartbeat (or activate when no binding is known yet). The binding is
+        //    addressed by the server-issued instanceBindingId — NEVER the lease
+        //    serial (a different object).
         let held_serial = self.store.current().map(|e| e.lease.serial);
-        let binding_id = self
-            .identity
-            .binding_id
-            .clone()
-            .or_else(|| self.store.current().map(|e| e.lease.serial.clone()));
+        let binding_id = self.binding_id();
 
-        let (lease, state, next_due) = if binding_id.is_none() && held_serial.is_none() {
-            // No binding yet → activate (free auto-issue when no claim code).
+        let (lease, state, next_due) = if binding_id.is_none() {
+            // No binding known yet → activate (free auto-issue when no claim code).
             let req = self.build_activate_request();
             let resp = self
                 .server
@@ -1046,9 +1104,11 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             return Ok(HeartbeatOutcome::LeaseWithheld { state, next_due });
         };
 
-        // 4. Verify the returned signed lease against the trusted intermediates,
-        //    then drive the install convergence.
+        // 4. Verify the returned signed lease against the trusted intermediates.
+        //    Learn the server-issued instanceBindingId from the SIGNED body (so
+        //    the next renewal addresses the binding by id), then install.
         let body = verify_signed_lease_chain(&server_lease, &trusted)?;
+        self.remember_binding_id(&body.instance_binding_id);
         let serial = self.install(&server_lease, &body)?;
         Ok(HeartbeatOutcome::Installed { serial, next_due })
     }
@@ -1065,12 +1125,18 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// successful no-op (the store keeps the newer lease — never off air).
     fn install(&self, server: &ServerLease, body: &LeaseBody) -> Result<String, HeartbeatError> {
         let granted_at = system_now();
-        let lease = Lease::new_full(
+        // The installed lease's expiry IS the cryptographically-signed `not_after`
+        // (NOT system_now()+35d): a short-lived or replayed-old signed lease must
+        // never become a fresh 35-day term. An already-expired signed lease is
+        // rejected (keep last-good, never off air).
+        let now_ms = unix_millis_now();
+        let lease = Lease::new_online_expiring_at(
             body.serial.clone(),
-            granted_at,
-            LeaseSource::Online,
+            body.not_after,
+            now_ms,
             ACTIVATION_WINDOW_DAYS,
-        );
+        )
+        .ok_or(HeartbeatError::LeaseExpired)?;
         let gpu_limit = body
             .gpu_limit
             .map_or(GpuLimit::Unlimited, GpuLimit::Limited);

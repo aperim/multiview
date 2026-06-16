@@ -88,22 +88,31 @@ segment_ms = 1000
 struct HostileServer {
     /// When true, every call hangs until cancelled (a stall / black hole).
     stall: AtomicBool,
+    /// Set true once a stalled call is genuinely parked in flight (so a test can
+    /// wait for a real concurrent stall rather than racing).
+    in_flight: AtomicBool,
 }
 
 impl HostileServer {
     fn stalling() -> Self {
         Self {
             stall: AtomicBool::new(true),
+            in_flight: AtomicBool::new(false),
         }
     }
     fn partitioning() -> Self {
         Self {
             stall: AtomicBool::new(false),
+            in_flight: AtomicBool::new(false),
         }
+    }
+    fn is_in_flight(&self) -> bool {
+        self.in_flight.load(Ordering::SeqCst)
     }
     async fn maybe_stall(&self) {
         if self.stall.load(Ordering::SeqCst) {
             // Hang "forever" — the test aborts the task; never resolves on its own.
+            self.in_flight.store(true, Ordering::SeqCst);
             std::future::pending::<()>().await;
         }
     }
@@ -245,5 +254,67 @@ async fn a_partitioned_heartbeat_loop_runs_alongside_the_clock_without_effect() 
     assert!(
         store.status().is_none(),
         "a partitioned heartbeat never changes the store (withholds, never tightens)"
+    );
+}
+
+/// THE IN-FLIGHT STALL GATE: the output clock keeps ticking WHILE a heartbeat
+/// call is genuinely BLACK-HOLED in flight (not aborted, not erroring — parked
+/// forever mid-call). This is the strongest invariant-#10 proof: a stalled
+/// licence-server call cannot back-pressure the output clock.
+#[tokio::test]
+async fn the_output_clock_ticks_while_a_heartbeat_call_is_stalled_in_flight() {
+    let store = Arc::new(LeaseStore::new());
+    let mut engine = SoftwareEngine::build_gated(&small_config(), Some(EnforcementLevel::Active))
+        .expect("build");
+
+    // Start a heartbeat whose first server call black-holes forever.
+    let server = Arc::new(HostileServer::stalling());
+    let hb = client(Arc::clone(&server), Arc::clone(&store));
+    let handle = tokio::spawn(async move { hb.run_forever().await });
+
+    // Wait until the heartbeat call is genuinely parked in flight (not a race).
+    let parked = tokio::time::timeout(Duration::from_secs(5), async {
+        while !server.is_in_flight() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(
+        parked.is_ok(),
+        "the heartbeat call must reach an in-flight stall"
+    );
+    assert!(
+        !handle.is_finished(),
+        "the heartbeat is stalled (has not returned)"
+    );
+
+    // WHILE the heartbeat is stalled in flight, drive the output clock. It must
+    // emit exactly one frame per tick and never falter.
+    let time = Arc::new(ManualTimeSource::new());
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.run_for(time, CooperativePacer, 50),
+    )
+    .await
+    .expect("the engine run must not hang while a heartbeat call is stalled")
+    .expect("the engine drives regardless of an in-flight stalled heartbeat");
+    assert_eq!(
+        report.frames, 50,
+        "one frame per tick while a heartbeat call is stalled in flight"
+    );
+    assert!(
+        !report.faltered,
+        "the output clock never falters during the stall"
+    );
+    assert!(
+        !handle.is_finished(),
+        "the heartbeat is STILL stalled while the clock ran the whole way"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    assert!(
+        store.status().is_none(),
+        "the stalled heartbeat installed/removed nothing"
     );
 }
