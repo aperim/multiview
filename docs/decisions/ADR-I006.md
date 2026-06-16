@@ -180,6 +180,19 @@ mirrors `mesh-mdns`). The implementation makes these concrete decisions:
      `install_binding` records it **atomically with the install**, so **every**
      surface anchors the device identity uniformly; the now-redundant
      heartbeat-path `record_binding_id` call is removed (no double-record).
+   - **The anchor comes from SIGNED material (never an unsigned sidecar):** the
+     panel's follow-up flagged that `LeaseBinding.instance_binding_id` was outside
+     the crate's `SignedLease` envelope (which covered serial+source+dates only),
+     so the offline/file-drop/relay surface could anchor an attacker-chosen binding
+     id. `SignedLease::signing_bytes` now also covers `instance_binding_id` (a
+     1-byte presence tag + length-prefixed bytes, so `None`, `Some("")`, and
+     `Some("x")` are distinct signed values), `verify_signed_lease` recomputes
+     over the binding id the caller will anchor, and `install_binding` passes
+     `binding.instance_binding_id` into that check — so a grafted/tampered or
+     absent-vs-present binding id fails `SignatureInvalid` and never anchors. Every
+     producer signs over the id it carries (`seal_for_install`, the offline/relay
+     minters). A binding-less (`None`) producer still installs and anchors nothing
+     — forward-compatible with a server later signing a binding id.
    - **The Idempotency-Key is retry-stable per logical operation:** the round-3
      key was `format!("mv-{}", unix_millis_now())` — minted fresh per call inline,
      so a retry of the same logical operation issued a **new** key, defeating "a
@@ -233,6 +246,7 @@ so none enter the scanned default graph.
 | Evaluate signer time-validity / revocation only once, with the pre-network timestamp | Key-trust TOCTOU: a signer whose signed `valid_until` elapses (or that is revoked) **during** an arbitrarily-stalled network call still validates the returned lease, because the frozen `trusted` set is reused and `verify_signed_lease_chain` checks only the Ed25519 signature. Re-evaluate trust with a fresh `now()` at lease-acceptance. |
 | Re-check acceptance trust with a fresh clock against the **same** fetched key document (round-3) | Catches only an elapsed validity *window*; revocation is set-membership over the signed document, so a signer added to the revocation list **during** a stalled call is never observed against the stale doc. Re-FETCH the key document at acceptance and re-verify the fresh one (root + revocation-sig + intermediates + window + revocation set). |
 | Record the binding anchor only from the heartbeat genuine-install path (`store.record_binding_id`) | A lease installed via the control-route/offline upload, the file-drop watcher, or the mesh relay leaves `current_binding_id() == None`, so the device looks "fresh" and a foreign-binding activate skips the cross-instance guard (identity poisoning). Carry the id on `LeaseBinding` and record it atomically inside the single `install_binding` chokepoint every surface converges on. |
+| Anchor identity from the `LeaseBinding.instance_binding_id` field as an unsigned sidecar | The field sat outside the crate's `SignedLease` envelope (serial+source+dates only), so the offline/file-drop/relay surface could anchor an attacker-chosen binding id (identity poisoning / renewal DoS). Bind `instance_binding_id` into `signing_bytes` (presence tag + bytes) and verify it in `install_binding`, so the anchor always rests on signed material; a grafted id fails `SignatureInvalid`. |
 | Mint the Idempotency-Key from `unix_millis_now()` per call | A retry of the same logical operation mints a NEW key, so a lost response can create a DUPLICATE binding/lease ("replay, never re-issue" violated). Use a per-operation key from a monotonic counter + the device id, replayed on retry and rotated only after a successful contact. |
 
 ## Consequences
