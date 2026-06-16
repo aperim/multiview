@@ -34,7 +34,7 @@ function reviewItem(it) {
     `1. Build the diff. If ref "${it.ref}" is all digits it is a PR: \`gh pr diff ${it.ref} > /tmp/rv-${it.id}${idSuffix}.diff\`. Else: \`git diff origin/main...${it.ref} > /tmp/rv-${it.id}${idSuffix}.diff\`.\n` +
     `2. Discover the right non-interactive Codex invocation: \`codex --help\` then \`codex exec --help\` (or \`codex e --help\`). Use the read-only/non-interactive exec form (e.g. \`codex exec --sandbox read-only "<prompt>"\`). The prompt must tell Codex to read /tmp/rv-${it.id}${idSuffix}.diff and review it.\n` +
     `3. Prompt Codex: "Adversarially review this diff. Spec: ${it.spec}. ${lensNote} ${CHECKLIST}". Capture Codex's full output (give it a generous timeout).\n` +
-    `4. If Codex ran, set reviewer="codex"${idSuffix ? ' (lens: ' + lensNote + ')' : ''}, ranOk=true, and STRUCTURE CODEX'S findings into the verdict (do not invent defects Codex did not raise; do not drop ones it did). If Codex could NOT be run after a genuine attempt (report the error), fall back to performing the review yourself in this fresh context, set reviewer="claude-fallback", ranOk=false, and note the error in highestResidualRisk.\n` +
+    `4. If Codex ran, set reviewer="codex"${idSuffix ? ' (lens: ' + lensNote + ')' : ''}, ranOk=true, and STRUCTURE CODEX'S findings into the verdict (do not invent defects Codex did not raise; do not drop ones it did). If Codex could NOT be run after a genuine attempt (report the error), fall back to performing the review yourself in this fresh context, set reviewer="claude-fallback", ranOk=false, set blocked=true (a fallback is not cross-vendor and must fail closed), and note the error in highestResidualRisk.\n` +
     `Return the structured verdict for id "${it.id}${idSuffix}".`,
     { label: `review:${it.id}${idSuffix}`, phase: 'Review', schema: VERDICT })
 
@@ -52,4 +52,9 @@ function reviewItem(it) {
 phase('Review')
 const items = (args && args.items) || []
 const verdicts = await pipeline(items, reviewItem)
-return { verdicts: verdicts.filter(Boolean) }
+// Fail closed: a fallback verdict (ranOk=false → not actually cross-vendor) can NEVER
+// clear the merge gate, regardless of whether the fallback reviewer found a defect.
+// The gate keys off `blocked`, so couple it to ranOk here rather than trusting prose
+// (codex-review runbook + orchestrate skill: "never merge on a fallback verdict").
+const enforced = verdicts.filter(Boolean).map((v) => (v.ranOk === false ? { ...v, blocked: true } : v))
+return { verdicts: enforced }
