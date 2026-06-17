@@ -566,10 +566,11 @@ fn select_admission_pick(
     // A conservative per-engine budget large enough not to gate a typical
     // multiview on a real GPU; the LIVE 4060-vs-P2000 routing on the contended
     // box rests on the VRAM headroom gate (the 95%-full 4060 exceeds the 0.85
-    // ceiling) + VRAM-dominant scoring, which need no perf-class table. A real
-    // per-GPU perf-class `CostBudget` table is the documented Tier-2 refinement
-    // (ADR-0035 §5) — until then every candidate shares this permissive budget,
-    // so the budget gate is effectively inert and the headroom/score do the work.
+    // ceiling) + VRAM-dominant scoring, which need no perf-class table. ADR-0018
+    // makes the hard gates (headroom + capability + NVENC-session) "the real
+    // safety", so this permissive Mpix/s budget is effectively inert and the
+    // headroom/score do the work. A real per-GPU perf-class `CostBudget` table
+    // is future work (not yet built).
     let budget = CostBudget::new(100_000.0, 100_000.0, 100_000.0);
 
     // One candidate per visible GPU. We treat each as capable of the whole island
@@ -736,9 +737,18 @@ fn select_live_decode_pick(
     };
 
     let canvas_res = Resolution::new(canvas_w.max(1), canvas_h.max(1));
-    // The same conservative per-engine budget the startup admission uses (the
-    // real per-GPU perf-class table is the documented Tier-2 refinement); the
-    // headroom ceiling + VRAM-dominant scoring do the actual gating.
+    // The same conservative per-engine budget the startup admission uses. The
+    // per-engine Mpix/s budget is intentionally permissive: ADR-0018 makes the
+    // VRAM-headroom hard gate + VRAM-dominant score the real safety net ("hard
+    // gates are the real safety"), so this Mpix/s budget does not gate a typical
+    // multiview on a real GPU — a real per-GPU perf-class budget table is future
+    // work, not yet built. KNOWN RESIDUAL (disclosed): a VRAM-roomy but
+    // decode-engine-saturated GPU passes both this budget and the headroom gate,
+    // so a live add CAN be admitted onto a GPU that cannot sustain another
+    // decode. That is acceptable for this ship: the never-off-air contract holds
+    // (an over-subscribed decode degrades the NEW tile, never the program — the
+    // output clock samples last-good, inv #1/#2) and invariant #9's closed-loop
+    // degradation sheds the cheapest tile if the saturation bites.
     let budget = CostBudget::new(100_000.0, 100_000.0, 100_000.0);
     let cap = |stage: Stage| {
         Capability::new(
