@@ -554,6 +554,10 @@ pub struct FakeLicenceServer {
     /// Every `Idempotency-Key` the server has received, in order (the idempotency
     /// test asserts retries of the same logical op reuse one key).
     idempotency_keys: std::sync::Mutex<Vec<String>>,
+    /// Every heartbeat request BODY the server received, in order — so the
+    /// retry-coupling test can assert a lost-response retry replays the SAME body
+    /// bytes (same PoP nonce), not a freshly-nonce'd body under the same key.
+    bodies: std::sync::Mutex<Vec<Vec<u8>>>,
     /// When > 0, the next N heartbeat calls record their Idempotency-Key and then
     /// return a transport error (a lost-response analogue) — decremented per call.
     fail_after_recording: AtomicU64,
@@ -607,6 +611,7 @@ impl FakeLicenceServer {
             revoke_signer_after_first_fetch: AtomicBool::new(false),
             key_fetches: AtomicU64::new(0),
             idempotency_keys: std::sync::Mutex::new(Vec::new()),
+            bodies: std::sync::Mutex::new(Vec::new()),
             fail_after_recording: AtomicU64::new(0),
             heartbeats: AtomicU64::new(0),
             next_due_ms: AtomicU64::new(FAB_NOW_MS as u64 + 30 * 86_400_000),
@@ -813,6 +818,10 @@ impl FakeLicenceServer {
     pub fn idempotency_keys(&self) -> Vec<String> {
         self.idempotency_keys.lock().expect("poisoned").clone()
     }
+    /// Every heartbeat request body the server received, in order.
+    pub fn bodies(&self) -> Vec<Vec<u8>> {
+        self.bodies.lock().expect("poisoned").clone()
+    }
     /// Make the next `n` heartbeat calls record their Idempotency-Key, then return
     /// a transport error (a lost-response analogue) — for the retry-stability test.
     pub fn set_fail_after_recording_idempotency(&self, n: u64) {
@@ -911,6 +920,10 @@ impl LicenceServer for FakeLicenceServer {
         pop_header: &str,
     ) -> Result<HeartbeatResponse, HeartbeatError> {
         self.maybe_block().await;
+        // Record the EXACT body bytes BEFORE any maybe-fail, so a lost-response
+        // attempt's body is captured and the retry-coupling test can compare it to
+        // the retry's body.
+        self.bodies.lock().expect("poisoned").push(body.clone());
         if let Some(err) = self.record_idempotency_then_maybe_fail(idempotency_key) {
             return Err(err);
         }

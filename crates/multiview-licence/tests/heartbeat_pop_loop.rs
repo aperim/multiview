@@ -276,3 +276,52 @@ async fn an_already_expired_fresh_challenge_is_not_signed_or_sent() {
         "an expired-fresh-challenge cycle keeps the last-good lease (never off air)"
     );
 }
+
+#[tokio::test]
+async fn a_lost_response_retry_replays_the_same_idempotency_key_and_body_and_nonce() {
+    // Panel round-2 major #1: the Idempotency-Key is retry-stable, but the PoP nonce
+    // (a body field hashed into the proof) must ALSO be pinned to the in-flight
+    // attempt — otherwise a lost-response-after-commit retry POSTs the SAME key with
+    // a DIFFERENT body (fresh nonce), which a strict server rejects as an idempotency
+    // body-mismatch and strands the client. So a retry of an ambiguous/failed contact
+    // MUST replay the SAME {idempotency-key, body, nonce} as the attempt that may have
+    // landed on the server.
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = pop_client(Arc::clone(&server), Arc::clone(&store));
+
+    // The first heartbeat records its key+body, then returns a transport error (a
+    // lost response: the server may have committed + burned the nonce, but the device
+    // never saw the 200). The NEXT cycle is a retry of the SAME logical operation.
+    server.set_fail_after_recording_idempotency(1);
+
+    // Cycle 1: lost response (records key #1 + body #1, then errors → keep last-good).
+    let r1 = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(r1.is_err(), "the lost-response cycle surfaces an error");
+
+    // Cycle 2: the retry. It must NOT mint a fresh nonce/body under a replayed key.
+    let r2 = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(r2.is_ok(), "the retry succeeds once the server stops failing");
+
+    let keys = server.idempotency_keys();
+    let bodies = server.bodies();
+    assert!(
+        keys.len() >= 2 && bodies.len() >= 2,
+        "the server saw the lost-response attempt + the retry (keys={}, bodies={})",
+        keys.len(),
+        bodies.len()
+    );
+    assert_eq!(
+        keys[0], keys[1],
+        "the retry must replay the SAME Idempotency-Key (server dedup)"
+    );
+    assert_eq!(
+        bodies[0], bodies[1],
+        "the retry must replay the SAME body bytes (same PoP nonce) — not a fresh \
+         nonce under the replayed key (a strict server would reject the mismatch)"
+    );
+}

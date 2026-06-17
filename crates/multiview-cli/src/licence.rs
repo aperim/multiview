@@ -1671,4 +1671,32 @@ mod tests {
             "the durably-persisted seed must be exactly the one the returned signer holds"
         );
     }
+
+    #[cfg(all(feature = "heartbeat", unix))]
+    #[test]
+    fn device_key_load_rejects_a_symlink_at_the_key_path() {
+        // LOAD-SIDE TOCTOU (panel round-2 major #2): the perm-check + read must bind
+        // to the SAME opened inode, and a symlink at the key path must be rejected
+        // explicitly (a symlink is the classic swap vector — its target can be
+        // replaced between checks, and following it reads bytes from an inode whose
+        // mode we never verified). A symlink → a perfectly-valid 0600 seed elsewhere
+        // must still be refused (we will not follow it).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real-seed");
+        std::fs::write(&real, [9u8; 32]).expect("write a valid seed elsewhere");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600))
+                .expect("0600 the real seed");
+        }
+        let key_path = dir.path().join("device-key.ed25519");
+        std::os::unix::fs::symlink(&real, &key_path).expect("plant a symlink at the key path");
+        let res = DeviceKeyStore::load_or_generate(dir.path().to_str().expect("utf8 path"));
+        assert!(
+            res.is_err(),
+            "a symlink at the device-key path must be refused (no symlink-following; \
+             the perm-check must bind to the opened inode, not a swappable path)"
+        );
+    }
 }
