@@ -152,10 +152,18 @@ operator re-routes that cell — held, never a panic, never a falter.
   principle: candidates/pins are **pinned to the running island's device**
   (`Pins::pin_pipeline(island_device)`) — a runtime add may never fragment or migrate the island —
   and the demand is the island's current tile set **plus** the new decode (`TileLoad::new(Decode,
-  …)`), re-polling NVML at decision time. An admit stamps the island's `cuda_ordinal` on the new
-  `IngestPlan` (NVDEC co-located, ADR-0035 Tier-1/Tier-2 affinity + perf-class budget); a reject
-  (budget/headroom) degrades **that source only** to software decode (`cuda_ordinal: None`) with a
-  loud warning — the island is never overcommitted and the output never falters.
+  …)`), re-polling NVML at decision time. The outcome is the explicit tri-state
+  `DecodePlacement::{Default, Pinned(ordinal), SoftwareOnly}` on the new `IngestPlan` (NOT
+  `Option<ordinal>`): an admit stamps `Pinned(island ordinal)` (NVDEC co-located, ADR-0035
+  Tier-1 affinity), or `Default` when the island resolved no ordinal (lockstep with startup); a
+  reject (budget/headroom) **or** the island-vanished case stamps `SoftwareOnly`, and the
+  `decoder_open_args` gate FORCES that one source's decoder open to software — `(want_hw=false,
+  None)` — with a loud warning. This is the load-bearing distinction: encoding a reject as "no
+  ordinal" would let `new_preferring_hw(.., want_hw=true, None)` open NVDEC on libav's **default**
+  device, which on a single-GPU host IS the over-headroom island (overcommit) and on a multi-GPU
+  host may be a **different** GPU (silent fragmentation, forbidden by ADR-0018). The island is
+  never overcommitted, never fragmented, and the output never falters. The operator
+  `MULTIVIEW_DISABLE_NVDEC` opt-out still wins over a pin.
 - **Removal returns its budget implicitly:** the startup path books nothing — placement decisions
   read *measured* NVML load per decision, so a removed source's NVDEC/VRAM consumption disappears
   from the next decision's inputs when its decoder closes. There is **no allocation ledger** to
@@ -183,9 +191,9 @@ removal for all kinds), **level 4** (live edit synthetic→synthetic via store-r
 (`rtsp`/`hls`/`ts`/`srt`/`rtmp`/`rist`/`file`) live-add/edit on the running full-pipeline engine
 through **one uniform ingest path**: `Pipeline::live_ingest_spawner()` hands the live-source hub an
 `IngestSpawner` that builds the plan with the **same** `ingest_plan_for` construction, consults the
-**same** admission scorer pinned to the running island's device (`select_live_decode_pick`, §7
-below), and runs the **same** supervised `ingest_loop` the startup path runs — never a
-second-quality copy. The run-path capability `LiveSourceCapability` (derived from
+**same** admission scorer pinned to the running island's device (`select_live_decode_placement`
+→ the explicit `DecodePlacement` tri-state, §7 below), and runs the **same** supervised
+`ingest_loop` the startup path runs — never a second-quality copy. The run-path capability `LiveSourceCapability` (derived from
 `ingest.is_some()`) flips the header to `live` for network kinds exactly when a real spawner backs
 it; `rist` is included (it lowers to a `rist://` AVIO URL and rides the identical ingest path). The
 software engine (no decoder) and the `ndi`/`youtube`/`aes67` kinds (runtime machinery the live path

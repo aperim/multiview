@@ -700,21 +700,25 @@ fn select_admission_pick(
 ///   already open and counted in the *measured* snapshot — modelling it again
 ///   would double-count it against the session ceiling).
 ///
-/// An **admit** returns the island's CUDA ordinal (NVDEC co-located with the
-/// compositor — ADR-0035 affinity); a **reject** (budget / headroom / the
-/// island gone from the snapshot) returns `None` — that one source degrades to
-/// software decode with a loud warning, the island is never overcommitted, and
-/// the output never falters (inv #1).
+/// An **admit** returns [`DecodePlacement::Pinned`] with the island's CUDA
+/// ordinal (NVDEC co-located with the compositor — ADR-0035 affinity), or
+/// [`DecodePlacement::Default`] when the island resolved no ordinal (lockstep
+/// with the startup plans). A **reject** (budget / headroom / the island gone
+/// from the snapshot) returns [`DecodePlacement::SoftwareOnly`] — the decoder
+/// open for that one source is FORCED to software (the [`decoder_open_args`]
+/// gate; never NVDEC on the default device, which would overcommit a
+/// single-GPU island or fragment onto a different GPU), with a loud warning.
+/// The island is never overcommitted and the output never falters (inv #1).
 ///
 /// Runs on the hub worker thread only (it polls NVML) — never on the clock.
 #[cfg(feature = "gpu")]
-fn select_live_decode_pick(
+fn select_live_decode_placement(
     load_source: &dyn multiview_hal::LoadSource,
     island: &LiveIsland,
     canvas_w: u32,
     canvas_h: u32,
     cadence: Rational,
-) -> Option<String> {
+) -> DecodePlacement {
     use multiview_core::pixel::PixelFormat;
     use multiview_core::traits::BackendKind;
     use multiview_hal::{
@@ -731,9 +735,10 @@ fn select_live_decode_pick(
         tracing::warn!(
             island = island.device.stable_id(),
             "live decode placement: the island device is absent from the load \
-             snapshot at decision time; this source decodes in software"
+             snapshot at decision time; FORCING software decode for this source \
+             (hardware on the default device could overcommit or fragment the island)"
         );
-        return None;
+        return DecodePlacement::SoftwareOnly;
     };
 
     let canvas_res = Resolution::new(canvas_w.max(1), canvas_h.max(1));
@@ -798,17 +803,20 @@ fn select_live_decode_pick(
                 "live decode placement: admitted onto the running island device \
                  (NVDEC co-located, ADR-W018 §7)"
             );
-            island.cuda_ordinal.clone()
+            island
+                .cuda_ordinal
+                .clone()
+                .map_or(DecodePlacement::Default, DecodePlacement::Pinned)
         }
         Err(reason) => {
             tracing::warn!(
                 island = island.device.stable_id(),
                 ?reason,
-                "live decode placement REJECTED for this source: it decodes in \
-                 software (the island is never overcommitted; the output never \
-                 falters — ADR-W018 §7)"
+                "live decode placement REJECTED for this source: its decoder \
+                 open is FORCED to software (the island is never overcommitted \
+                 and never fragmented; the output never falters — ADR-W018 §7)"
             );
-            None
+            DecodePlacement::SoftwareOnly
         }
     }
 }
@@ -994,12 +1002,13 @@ mod admission_target_tests {
     }
 
     #[test]
-    fn live_decode_pick_admits_onto_the_idle_island_and_returns_its_ordinal() {
+    fn live_decode_placement_admits_onto_the_idle_island_pinned_to_its_ordinal() {
         // The island is the idle P2000: the consult (island tile set + the new
-        // decode, fresh load poll) admits, and the ADMITTED ordinal is the
-        // ISLAND's — NVDEC co-locates with the running compositor, never a
-        // different GPU (even though the fake topology has two).
-        let ordinal = super::select_live_decode_pick(
+        // decode, fresh load poll) admits as `Pinned` with the ISLAND's
+        // ordinal — NVDEC co-locates with the running compositor, never a
+        // different GPU (even though the fake topology has two) — and the
+        // decode-open gate keeps the hardware preference + threads the pin.
+        let placement = super::select_live_decode_placement(
             &FakeTwoGpu,
             &island(FakeTwoGpu::GPU1_UUID, 1, "1"),
             1920,
@@ -1007,44 +1016,68 @@ mod admission_target_tests {
             Rational::new(25, 1),
         );
         assert_eq!(
-            ordinal.as_deref(),
-            Some("1"),
+            placement,
+            super::DecodePlacement::Pinned("1".to_owned()),
             "an admitted live decode must be pinned to the ISLAND device's ordinal"
+        );
+        let (want_hw, ordinal) = super::decoder_open_args(&placement, None);
+        assert_eq!(
+            want_hw,
+            multiview_ffmpeg::want_hw_decode(None),
+            "an admitted placement keeps the canonical hardware preference"
+        );
+        assert_eq!(
+            ordinal,
+            Some("1"),
+            "the island ordinal reaches the decoder open"
         );
     }
 
     #[test]
-    fn live_decode_pick_rejects_an_over_headroom_island_to_software() {
+    fn live_decode_placement_rejects_an_over_headroom_island_to_forced_software() {
         // The island is the 95%-VRAM 4060 (over the 0.85 headroom ceiling):
         // the consult REJECTS — and because the candidate set is exactly the
         // island device, the scorer cannot escape to the idle P2000 (that
-        // would fragment the pipeline). The source decodes in software.
-        let ordinal = super::select_live_decode_pick(
+        // would fragment the pipeline). The reject is the EXPLICIT
+        // `SoftwareOnly` placement, and the decode-open gate turns it into a
+        // software open (want_hw = false, no ordinal) even though NVDEC is
+        // otherwise enabled — `None` ordinal alone would have opened NVDEC on
+        // the DEFAULT device, i.e. the over-headroom island itself.
+        let placement = super::select_live_decode_placement(
             &FakeTwoGpu,
             &island(FakeTwoGpu::GPU0_UUID, 0, "0"),
             1920,
             1080,
             Rational::new(25, 1),
         );
-        assert!(
-            ordinal.is_none(),
-            "an over-headroom island must reject the live decode to software — \
-             never migrate it to another GPU"
+        assert_eq!(
+            placement,
+            super::DecodePlacement::SoftwareOnly,
+            "an over-headroom island must FORCE software decode — never \
+             overcommit the island or migrate to another GPU"
+        );
+        assert_eq!(
+            super::decoder_open_args(&placement, None),
+            (false, None),
+            "the rejected source's decoder open must not WANT hardware at all"
         );
     }
 
     #[test]
-    fn live_decode_pick_degrades_to_software_when_the_island_vanishes() {
+    fn live_decode_placement_forces_software_when_the_island_vanishes() {
         // No load snapshot carries the island device (NVML gone, device lost):
-        // the consult cannot verify the pin and degrades to software decode.
-        let ordinal = super::select_live_decode_pick(
+        // the consult cannot verify the pin — hardware on the default device
+        // could overcommit or fragment the (unverifiable) island, so the
+        // placement is the explicit forced-software outcome.
+        let placement = super::select_live_decode_placement(
             &NullLoadPoller::new(),
             &island(FakeTwoGpu::GPU1_UUID, 1, "1"),
             1920,
             1080,
             Rational::new(25, 1),
         );
-        assert!(ordinal.is_none());
+        assert_eq!(placement, super::DecodePlacement::SoftwareOnly);
+        assert_eq!(super::decoder_open_args(&placement, None), (false, None));
     }
 
     /// A spy [`LoadSource`]: counts polls (proof the spawn path re-polls the
@@ -1559,6 +1592,57 @@ pub struct Pipeline {
 
 type HashMapStores = std::collections::HashMap<String, Arc<TileStore<Nv12Image>>>;
 
+/// Where a source's video decode is allowed to open — the explicit tri-state
+/// outcome of decode placement (ADR-W018 §7 / ADR-0018's never-fragment rule).
+///
+/// `Option<ordinal>` cannot express this: "no ordinal" must distinguish *no
+/// placement decision* (hardware on libav's default device is fine — today's
+/// GPU-free behaviour) from *placement rejected* (hardware must NOT open: on a
+/// single-GPU host the default device IS the over-headroom island — admitting
+/// would overcommit it — and on a multi-GPU host the default device may be a
+/// **different** GPU, silently fragmenting the pipeline island). The
+/// tri-state is closed by design (no `#[non_exhaustive]`): a placement
+/// outcome is exactly one of default / pinned / forced-software.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DecodePlacement {
+    /// No placement decision: hardware decode (when the build/runtime offers
+    /// it) on libav's default device — the GPU-free / no-admission path.
+    #[default]
+    Default,
+    /// Pinned to the admission-chosen island device's CUDA enumeration
+    /// ordinal: NVDEC opens co-located with the compositor (affinity).
+    Pinned(String),
+    /// Placement REJECTED this source: the decoder open is forced to
+    /// **software** regardless of the build's hardware capability, so the
+    /// island is never overcommitted and never fragmented.
+    SoftwareOnly,
+}
+
+/// The `(want_hw, cuda_device)` pair [`open_and_stream`] hands
+/// [`StreamVideoDecoder::new_preferring_hw`] for a plan's [`DecodePlacement`].
+///
+/// This is **the** decode-open gate for placement (ADR-W018 §7):
+/// [`DecodePlacement::SoftwareOnly`] forces `(false, None)` — the hardware
+/// path is never attempted, even when NVDEC is compiled, present, and not
+/// env-disabled. The other placements keep the canonical hardware preference
+/// ([`multiview_ffmpeg::want_hw_decode`] over the `MULTIVIEW_DISABLE_NVDEC`
+/// reading) and thread the pinned ordinal through when one exists (the
+/// operator opt-out still wins over a pin).
+#[must_use]
+pub fn decoder_open_args<'p>(
+    placement: &'p DecodePlacement,
+    nvdec_disable_env: Option<&str>,
+) -> (bool, Option<&'p str>) {
+    match placement {
+        DecodePlacement::SoftwareOnly => (false, None),
+        DecodePlacement::Pinned(ordinal) => (
+            multiview_ffmpeg::want_hw_decode(nvdec_disable_env),
+            Some(ordinal.as_str()),
+        ),
+        DecodePlacement::Default => (multiview_ffmpeg::want_hw_decode(nvdec_disable_env), None),
+    }
+}
+
 /// Everything one source needs to be ingested on its own decode thread: where
 /// its media lives, the store to publish into, the tile size to scale to, the
 /// canvas color tag, and whether it is a live (never-ending) source.
@@ -1599,17 +1683,18 @@ struct IngestPlan {
     canvas_color: CanvasColor,
     /// The output cadence a synthetic generator paces its publishes to.
     cadence: Rational,
-    /// The CUDA enumeration **ordinal** (e.g. `Some("1")`) the NVDEC `*_cuvid`
-    /// decoder for this source is pinned to — the SAME GPU the load-aware
-    /// admission pick pinned the compositor to (ADR-0035 Tier-1 / the
-    /// GPU-placement principle: decode + composite + encode follow one chosen
-    /// device, never split across GPUs). Stamped from the admission selection in
-    /// [`Pipeline::drive_streaming`] before the ingest threads spawn; `None` when
-    /// admission named no specific device (no NVML / GPU-free / scorer rejection)
-    /// — in **lockstep** with the compositor's `None`, so neither stage pins a GPU
-    /// and decode opens libav's default CUDA device (today's behaviour). Consumed
-    /// by [`open_and_stream`] → [`StreamVideoDecoder::new_preferring_hw`].
-    cuda_ordinal: Option<String>,
+    /// Where this source's video decode opens ([`DecodePlacement`]):
+    /// [`DecodePlacement::Pinned`] to the admission-chosen island device
+    /// (ADR-0035 Tier-1 — stamped in [`Pipeline::drive_streaming`] before the
+    /// startup threads spawn, or by the live placement consult on an admitted
+    /// runtime add), [`DecodePlacement::Default`] when no placement decision
+    /// exists (GPU-free / no NVML — in lockstep with the compositor's default
+    /// adapter), or [`DecodePlacement::SoftwareOnly`] when the live consult
+    /// REJECTED this source (ADR-W018 §7 — hardware decode must not open at
+    /// all, lest it land back on the over-headroom island or fragment onto a
+    /// different GPU). Consumed by [`open_and_stream`] → [`decoder_open_args`]
+    /// → [`StreamVideoDecoder::new_preferring_hw`].
+    decode_placement: DecodePlacement,
     /// The shared WHIP publisher rendezvous (ADR-T014), present only for a
     /// `webrtc` source under `webrtc-native`: [`drive_webrtc`] samples this
     /// registry for the source's connected publisher (the negotiated RTP ring).
@@ -2589,12 +2674,12 @@ impl Pipeline {
             );
             // Stamp the chosen device's CUDA ordinal onto every ingest plan BEFORE
             // the threads spawn, so decode co-locates with the compositor on the
-            // one chosen GPU (affinity). `None` leaves the plans on the default
-            // CUDA device — in lockstep with `wgpu_target` being `None`, so neither
-            // stage pins a GPU.
+            // one chosen GPU (affinity). No ordinal leaves the plans on
+            // `DecodePlacement::Default` (libav's default CUDA device) — in
+            // lockstep with `wgpu_target` being `None`, so neither stage pins a GPU.
             if let Some(ordinal) = pick.cuda_ordinal.as_deref() {
                 for plan in &mut self.ingest_plans {
-                    plan.cuda_ordinal = Some(ordinal.to_owned());
+                    plan.decode_placement = DecodePlacement::Pinned(ordinal.to_owned());
                 }
             }
             // Publish the pinned island (ADR-W018 §7) so every RUNTIME-added
@@ -5387,7 +5472,7 @@ fn spawn_ingest_producer(
 /// live-source hub by the binary: it turns a runtime
 /// [`SourceSpawn`](crate::live_sources::SourceSpawn) into a running producer
 /// through **exactly** the startup construction — [`ingest_plan_for`] builds
-/// the plan, [`select_live_decode_pick`] consults the same admission scorer
+/// the plan, [`select_live_decode_placement`] consults the same admission scorer
 /// (pinned to the running island's device), and [`spawn_ingest_producer`]
 /// spawns the same supervised [`ingest_loop`]. Runs on the hub worker thread
 /// only — heavy/blocking work never touches the output clock (inv #1).
@@ -5446,11 +5531,13 @@ impl crate::live_sources::IngestSpawner for LiveIngestSpawner {
         // Hardware re-assessment on every change (ADR-W018 §7): consult the
         // same admission path startup decode placement uses, pinned to the
         // running island's device. No pinned island (GPU-free / no NVML / a
-        // startup scorer rejection) ⇒ no consult — the decode opens on the
-        // default device, in lockstep with the startup plans' `None`.
+        // startup scorer rejection) ⇒ no consult — the plan keeps
+        // `DecodePlacement::Default` (libav's default device), in lockstep with
+        // the startup plans. An admit pins the island ordinal; a reject forces
+        // `SoftwareOnly` so the decode never lands on the over-headroom island.
         #[cfg(feature = "gpu")]
         if let Some(island) = self.island.load_full() {
-            plan.cuda_ordinal = select_live_decode_pick(
+            plan.decode_placement = select_live_decode_placement(
                 self.load_source.as_ref(),
                 &island,
                 self.layout.canvas.width,
@@ -7038,11 +7125,12 @@ fn ingest_plan_for(
         embedded_cc: None,
         canvas_color,
         cadence,
-        // No GPU pinned yet: the load-aware admission pick (decide-once, in
-        // `drive_streaming`) stamps the chosen device's CUDA ordinal onto every
-        // plan before the ingest threads spawn. `None` is the default-device /
-        // GPU-free path, in lockstep with the compositor's `None`.
-        cuda_ordinal: None,
+        // No placement decision yet: the load-aware admission pick (decide-
+        // once, in `drive_streaming`) stamps `Pinned(ordinal)` onto every plan
+        // before the startup threads spawn; the live consult stamps a runtime
+        // add's outcome. `Default` is the default-device / GPU-free path, in
+        // lockstep with the compositor's default adapter.
+        decode_placement: DecodePlacement::Default,
         // The WHIP publisher rendezvous + audio store are stamped after build
         // (the registry/store are owned by the run wiring), like `cuda_ordinal`.
         #[cfg(feature = "webrtc-native")]
@@ -8625,17 +8713,17 @@ fn open_and_stream(
     // the tile keeps running (invariants #1/#2). Decoded CUDA surfaces are
     // downloaded to host NV12 inside the decoder (the budgeted CPU↔GPU copy), so
     // the rest of the pipeline is unchanged (invariant #5).
-    let want_hw = multiview_ffmpeg::want_hw_decode(
-        std::env::var(multiview_ffmpeg::NVDEC_DISABLE_ENV)
-            .ok()
-            .as_deref(),
-    );
-    // Pin NVDEC to the load-aware admission pick's CUDA ordinal so decode opens on
-    // the SAME physical GPU the compositor was pinned to — the whole pipeline
-    // follows one chosen device (affinity; ADR-0035 Tier-1 / the GPU-placement
-    // principle). `None` (no admission pick / GPU-free) selects libav's default
-    // CUDA device, in lockstep with the compositor's `None`.
-    let cuda_ordinal = plan.cuda_ordinal.as_deref();
+    // The placement-aware decode-open gate (ADR-W018 §7): a `Pinned` plan
+    // opens NVDEC on the admission-chosen island device (affinity; ADR-0035
+    // Tier-1); a `Default` plan keeps the env-gated hardware preference on
+    // libav's default device (the GPU-free / no-admission path); a
+    // `SoftwareOnly` plan (a live placement REJECT) never attempts hardware —
+    // NVDEC on the default device would overcommit a single-GPU island or
+    // fragment onto a different GPU (ADR-0018 never-fragment). On a GPU-free box
+    // or any hardware-open failure the open degrades to software gracefully —
+    // the tile keeps running (invariants #1/#2).
+    let nvdec_env = std::env::var(multiview_ffmpeg::NVDEC_DISABLE_ENV).ok();
+    let (want_hw, cuda_ordinal) = decoder_open_args(&plan.decode_placement, nvdec_env.as_deref());
     let (decoder, used_hw) =
         StreamVideoDecoder::new_preferring_hw(params, time_base, want_hw, cuda_ordinal)
             .map_err(|e| e.to_string())?;
