@@ -163,7 +163,8 @@ pub use router::{
 pub use routing::{classify, DestinationProfile, RouteClass, RoutePlan, RouteRequest, RouteTarget};
 pub use salvo_store::{InMemorySalvoStore, SalvoRepository, VersionedSalvo, SALVO_KIND};
 pub use state::{
-    seed_resources, AckClock, AppState, EngineStateSnapshot, LicenceState, SeededResources,
+    seed_resources, AckClock, AppState, EngineStateSnapshot, LicenceState, LiveSourceCapability,
+    SeededResources,
 };
 pub use support_bundle::{
     compose_bundle, redact_config, redact_config_for_export, Bundle, BundleInclude,
