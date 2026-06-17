@@ -55,7 +55,8 @@ segment_ms = 1000
 /// POST an rtsp source over a raw HTTP/1.0 connection and return the full
 /// response text (status line + headers + body).
 async fn post_rtsp_source(addr: std::net::SocketAddr, token: &str) -> String {
-    let body = r#"{"name":"Cam","body":{"id":"cam1","kind":"rtsp","url":"rtsp://[2001:db8::1]/cam1"}}"#;
+    let body =
+        r#"{"name":"Cam","body":{"id":"cam1","kind":"rtsp","url":"rtsp://[2001:db8::1]/cam1"}}"#;
     let req = format!(
         "POST /api/v1/sources/cam1 HTTP/1.0\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -90,12 +91,18 @@ async fn header_for(capability: LiveSourceCapability) -> Option<String> {
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(8));
     let (commands, _command_rx) = command_bus(8);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let (addr, server) = control::bind_and_serve(
+    let (addr, server, _state) = control::bind_and_serve(
         "[::1]:0",
         &cfg,
         publisher,
         commands,
         multiview_control::no_preview(),
+        None, // whep
+        None, // whip
+        None, // whep_output
+        None, // licence
+        None, // mesh
+        multiview_control::LiveApplyCaps::default(),
         capability,
         async move {
             let _ = shutdown_rx.await;

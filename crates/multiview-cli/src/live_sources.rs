@@ -103,10 +103,61 @@ pub struct SynthSpawn {
     pub cadence: Rational,
 }
 
+/// Everything the hub needs to spawn a **decoded** (network/file) producer
+/// (ADR-W018 level 2): the validated source document and the store the drain
+/// registered. The wired [`IngestSpawner`] derives the rest (tile geometry,
+/// canvas colour, cadence, decode placement) from the running pipeline —
+/// exactly the startup construction.
+pub struct SourceSpawn {
+    /// The validated source document (a network/file kind).
+    pub source: multiview_config::Source,
+    /// The per-source last-good store the ingest thread publishes into
+    /// (already registered with the compositor drive by the drain; reused on
+    /// an edit so the tile holds last-good through the producer swap).
+    pub store: Arc<TileStore<Nv12Image>>,
+}
+
+/// One spawned producer thread: its per-source stop flag (already registered
+/// in the run's [`StopRegistry`] by the spawner) and the join handle the hub
+/// owns for bounded teardown.
+pub struct SpawnedProducer {
+    /// The producer's stop flag (raise to request a cooperative stop).
+    pub stop: Arc<AtomicBool>,
+    /// The producer thread's join handle.
+    pub handle: JoinHandle<()>,
+}
+
+/// The run-path seam that turns a [`SourceSpawn`] into a running **decoded**
+/// producer thread (ADR-W018 level 2).
+///
+/// The full-pipeline run wires the pipeline's spawner
+/// (`Pipeline::live_ingest_spawner`), which builds the plan with the **same**
+/// `ingest_plan_for` construction, consults the **same** GPU admission path
+/// startup decode placement uses (pinned to the running island's device), and
+/// spawns the **same** supervised `ingest_loop` — one uniform ingest path. The
+/// software run wires none (`None`), so a decoded spawn request is held with a
+/// warning and the tile rides the slate (the route's capability signal already
+/// answered `restart` for those kinds there).
+///
+/// Implementations run on the hub worker thread only — heavy/blocking work
+/// (placement polling, thread spawn) is allowed; the output clock never waits
+/// on it (invariant #1).
+pub trait IngestSpawner: Send + Sync {
+    /// Build the ingest plan and spawn the supervised producer thread,
+    /// registering its stop flag under the source id in `registry`. Returns
+    /// `None` when the spawn failed (logged by the implementation; the tile
+    /// rides the slate honestly).
+    fn spawn(&self, spawn: SourceSpawn, registry: &StopRegistry) -> Option<SpawnedProducer>;
+}
+
 /// A request travelling from the frame-boundary drain to the hub worker.
 enum HubRequest {
     /// Spawn (or replace — a live **edit**) the producer for a synthetic source.
     SpawnSynth(SynthSpawn),
+    /// Spawn (or replace — a live **edit**) the supervised ingest producer for
+    /// a decoded network/file source (ADR-W018 level 2). Boxed: the spawn
+    /// carries a full config `Source`, much larger than the other variants.
+    SpawnSource(Box<SourceSpawn>),
     /// Tear down the producer for `id` (live remove): raise its registry stop
     /// flag, join a hub-owned thread (bounded), drop the preview entry.
     Teardown {
@@ -161,6 +212,15 @@ impl LiveSourceHandle {
         Self::submit_outcome(&self.tx.try_send(HubRequest::SpawnSynth(spawn)))
     }
 
+    /// Request a decoded (network/file) producer spawn or replacement
+    /// (ADR-W018 level 2). Never blocks; a shed request is reported as
+    /// [`HubSubmit::Full`]/[`HubSubmit::Gone`] (the tile rides the slate).
+    #[must_use]
+    pub fn request_spawn_source(&self, spawn: SourceSpawn) -> HubSubmit {
+        let request = HubRequest::SpawnSource(Box::new(spawn));
+        Self::submit_outcome(&self.tx.try_send(request))
+    }
+
     /// Request a producer teardown for `id` (raising the id's stop flag AND
     /// every `{id}/`-prefixed companion flag, e.g. the caption reader's).
     /// Never blocks; a shed request is reported as
@@ -193,19 +253,35 @@ pub struct LiveSourceHub {
 
 impl LiveSourceHub {
     /// Start the hub worker over the run's shared `registry` (per-source stop
-    /// flags, also fed by the startup supervisors) and `preview` store map.
+    /// flags, also fed by the startup supervisors) and `preview` store map,
+    /// with **no** decoded-ingest spawner (the software run path): synthetic
+    /// spawns work; a decoded spawn request is held with a warning.
     pub fn start(registry: StopRegistry, preview: SharedStores) -> Self {
+        Self::start_with_ingest(registry, preview, None)
+    }
+
+    /// Start the hub worker, optionally wiring the run's decoded-ingest
+    /// spawner (ADR-W018 level 2; the full-pipeline run passes
+    /// `Pipeline::live_ingest_spawner`). The capability the binary declares to
+    /// the control plane must mirror `ingest.is_some()` — the header claims
+    /// `live` for network kinds only when this seam can actually spawn them.
+    pub fn start_with_ingest(
+        registry: StopRegistry,
+        preview: SharedStores,
+        ingest: Option<Arc<dyn IngestSpawner>>,
+    ) -> Self {
         let (tx, rx) = sync_channel(HUB_QUEUE_DEPTH);
         let builder = std::thread::Builder::new().name("multiview-live-sources".to_owned());
-        let worker = match builder.spawn(move || worker_loop(&rx, &registry, &preview)) {
-            Ok(handle) => Some(handle),
-            Err(e) => {
-                // Without a worker every request is shed (the channel fills) and
-                // live adds degrade to slate tiles — logged loudly, never a panic.
-                tracing::error!(error = %e, "could not spawn the live-source hub worker");
-                None
-            }
-        };
+        let worker =
+            match builder.spawn(move || worker_loop(&rx, &registry, &preview, ingest.as_deref())) {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    // Without a worker every request is shed (the channel fills) and
+                    // live adds degrade to slate tiles — logged loudly, never a panic.
+                    tracing::error!(error = %e, "could not spawn the live-source hub worker");
+                    None
+                }
+            };
         Self { tx, worker }
     }
 
@@ -247,7 +323,12 @@ struct Producer {
 
 /// The hub worker: serially apply spawn/teardown requests until the channel
 /// closes, then tear down every owned producer.
-fn worker_loop(rx: &Receiver<HubRequest>, registry: &StopRegistry, preview: &SharedStores) {
+fn worker_loop(
+    rx: &Receiver<HubRequest>,
+    registry: &StopRegistry,
+    preview: &SharedStores,
+    ingest: Option<&dyn IngestSpawner>,
+) {
     let mut owned: HashMap<String, Producer> = HashMap::new();
     while let Ok(request) = rx.recv() {
         match request {
@@ -257,6 +338,13 @@ fn worker_loop(rx: &Receiver<HubRequest>, registry: &StopRegistry, preview: &Sha
                 // store (the drain reused it, so the tile holds last-good).
                 teardown(&spawn.id, &mut owned, registry);
                 spawn_synth(spawn, &mut owned, registry, preview);
+            }
+            HubRequest::SpawnSource(spawn) => {
+                // The decoded-kind edit mirror of SpawnSynth: stop the old
+                // producer first, then spawn the replacement ingest thread
+                // into the SAME reused store (the tile holds last-good).
+                teardown(&spawn.source.id, &mut owned, registry);
+                spawn_decoded(*spawn, ingest, &mut owned, registry, preview);
             }
             HubRequest::Teardown { id } => {
                 teardown(&id, &mut owned, registry);
@@ -269,6 +357,44 @@ fn worker_loop(rx: &Receiver<HubRequest>, registry: &StopRegistry, preview: &Sha
     for (id, producer) in owned {
         producer.stop.store(true, Ordering::Release);
         join_bounded(&id, producer.handle);
+    }
+}
+
+/// Spawn one decoded (network/file) producer through the run's
+/// [`IngestSpawner`] (ADR-W018 level 2): the spawner builds the plan with the
+/// SAME `ingest_plan_for` construction, consults the SAME admission path
+/// startup decode placement uses, and runs the SAME supervised `ingest_loop`.
+/// With no spawner wired (the software run) the request is held with a
+/// warning — the tile rides the slate and the stored document applies on
+/// restart, exactly what the route's capability-driven header declared.
+fn spawn_decoded(
+    spawn: SourceSpawn,
+    ingest: Option<&dyn IngestSpawner>,
+    owned: &mut HashMap<String, Producer>,
+    registry: &StopRegistry,
+    preview: &SharedStores,
+) {
+    let id = spawn.source.id.clone();
+    let Some(spawner) = ingest else {
+        tracing::warn!(
+            source = %id,
+            "no live ingest spawner on this run path (software engine): the tile \
+             rides the slate; the stored document applies on restart"
+        );
+        preview_insert(preview, &id, &spawn.store);
+        return;
+    };
+    preview_insert(preview, &id, &spawn.store);
+    match spawner.spawn(spawn, registry) {
+        Some(SpawnedProducer { stop, handle }) => {
+            owned.insert(id, Producer { stop, handle });
+        }
+        None => {
+            // The spawner logged the cause; the tile rides the slate and a
+            // re-apply retries. The registration stays consistent (store
+            // registered, no thread — teardown is then a no-op join).
+            tracing::warn!(source = %id, "live ingest producer spawn failed; the tile rides the slate");
+        }
     }
 }
 

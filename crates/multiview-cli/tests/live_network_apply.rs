@@ -13,7 +13,7 @@
 //! * a live-added FILE source (a deterministic local fixture — the same libav
 //!   open/decode/scale/publish path every network kind rides) reaches **LIVE**,
 //!   observed via the engine's own `tile.state` events;
-//! * a live REMOVE returns the bound cell to **NO_SIGNAL** (slate);
+//! * a live REMOVE returns the bound cell to **`NO_SIGNAL`** (slate);
 //! * rapid add/remove churn of the decoded source never falters the output
 //!   clock (invariants #1 + #10).
 #![cfg(feature = "ffmpeg")]
@@ -130,8 +130,13 @@ fn wait_state(
 
 /// REALTIME PROOF (ADR-W018 level 2): on a real libav pipeline run, a
 /// live-added file source's tile reaches LIVE via the uniform hub-spawned
-/// `ingest_loop`, a live remove returns it to NO_SIGNAL, and rapid add/remove
+/// `ingest_loop`, a live remove returns it to `NO_SIGNAL`, and rapid add/remove
 /// churn of the decoded source never falters the output clock.
+// reason: one end-to-end proof that drives the full add -> live -> remove ->
+// slate -> churn lifecycle on a REAL pipeline in a single observation window;
+// splitting it would duplicate the costly pipeline build/run scaffold and
+// scatter one coherent realtime assertion across helpers.
+#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn live_added_file_source_goes_live_then_remove_slates_never_faltering() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -177,7 +182,9 @@ async fn live_added_file_source_goes_live_then_remove_slates_never_faltering() {
         };
 
         // Live-add the file source and bind the cell to it.
-        commands.try_submit(upsert("live_clip")).expect("submit upsert");
+        commands
+            .try_submit(upsert("live_clip"))
+            .expect("submit upsert");
         commands
             .try_submit(Command::SwapSource {
                 op: OperationId::new(),

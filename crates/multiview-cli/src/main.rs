@@ -230,6 +230,12 @@ struct ControlPlaneWiring {
     stores: std::collections::HashMap<String, Arc<multiview_framestore::TileStore<Nv12Image>>>,
     /// The per-source producer stop registry (shared with the live-source hub).
     registry: multiview_cli::live_sources::StopRegistry,
+    /// The run's decoded-ingest spawner (ADR-W018 level 2): the full-pipeline
+    /// path passes `Pipeline::live_ingest_spawner` so network/file sources
+    /// spawn the same supervised `ingest_loop` live; the software path passes
+    /// `None`. The live-apply capability declared to the control plane is
+    /// **derived from it** — `Some` ⇔ network kinds flip to `live`.
+    ingest: Option<Arc<dyn multiview_cli::live_sources::IngestSpawner>>,
     /// What the running engine can take live (per-collection header honesty).
     live_apply: multiview_control::LiveApplyCaps,
     /// The Conspect local entitlement plane (ADR-0050): the verified-lease store
@@ -299,6 +305,7 @@ async fn serve_control_plane(
         program_slot,
         stores,
         registry,
+        ingest,
         live_apply,
         licence,
         mesh,
@@ -310,11 +317,21 @@ async fn serve_control_plane(
         program_audio,
     } = wiring;
     let (commands, command_rx) = command_bus(64);
+    // The honesty keystone (ADR-W018): network kinds are declared live-appliable
+    // exactly when the hub below carries a real ingest spawner.
+    let live_capability = if ingest.is_some() {
+        multiview_control::LiveSourceCapability::synthetic_and_network()
+    } else {
+        multiview_control::LiveSourceCapability::synthetic_only()
+    };
     // The live-source hub (ADR-W018): owns runtime producer spawn/teardown +
     // the SHARED, live-updatable preview store map, off the clock thread.
     let shared_stores = multiview_cli::live_sources::shared_stores(stores);
-    let hub =
-        multiview_cli::live_sources::LiveSourceHub::start(registry, Arc::clone(&shared_stores));
+    let hub = multiview_cli::live_sources::LiveSourceHub::start_with_ingest(
+        registry,
+        Arc::clone(&shared_stores),
+        ingest,
+    );
     // ALL native WebRTC roles ride ONE shared dual-stack UDP socket (ADR-0048 §4,
     // box-validation defect B): preview WHEP egress (ADR-P006), WHIP ingest
     // (ADR-T014), WHEP-serve + `whip_push` outputs (ADR-0049). One bind, one driver
@@ -360,6 +377,7 @@ async fn serve_control_plane(
         licence,
         mesh,
         live_apply,
+        live_capability,
         async move {
             let _ = shutdown_rx.await;
         },
@@ -468,6 +486,10 @@ async fn run_pipeline_until_ctrl_c(
                     program_slot: Arc::clone(&preview_slot),
                     stores: pipeline.preview_stores(),
                     registry: pipeline.stop_registry(),
+                    // The real decoded-ingest spawner (ADR-W018 level 2):
+                    // network/file sources live-apply through the SAME
+                    // supervised ingest_loop the startup path builds.
+                    ingest: Some(pipeline.live_ingest_spawner()),
                     live_apply,
                     licence: Some(multiview_control::LicenceState::new(
                         Arc::clone(&plane.store),
@@ -802,6 +824,10 @@ async fn run_software_until_ctrl_c(
                     program_slot: engine.program_preview(),
                     stores: engine.preview_stores(),
                     registry: engine.stop_registry(),
+                    // The software engine has no decoder: no ingest spawner, so
+                    // the capability (and the apply header) honestly stays
+                    // synthetic-only (ADR-W018 level 2).
+                    ingest: None,
                     // The software engine has no bake stage: no overlay
                     // document renders on this path, so the honest default
                     // (everything `restart`) is the truth (ADR-W022).

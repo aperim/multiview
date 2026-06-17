@@ -113,6 +113,11 @@ pub async fn bind_and_serve<F>(
     licence: Option<multiview_control::LicenceState>,
     mesh: Option<Arc<multiview_mesh::MeshState>>,
     live_apply: multiview_control::LiveApplyCaps,
+    // The run-path live-apply capability (ADR-W018): which source kinds the
+    // RUNNING engine can take live. The binary derives it from the seams it
+    // actually wired (network kinds iff the hub has an ingest spawner), so
+    // the X-Multiview-Apply header never over-claims.
+    live_sources: multiview_control::LiveSourceCapability,
     shutdown: F,
 ) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>, AppState)>
 where
@@ -203,6 +208,11 @@ where
     // so a browser served from a web origin can WHIP-publish / WHEP-play.
     .with_cors_allow_origins(config.webrtc.cors_allow_origins.clone())
     .with_live_apply(live_apply)
+    // The run-path live-apply capability (ADR-W018): which source kinds the
+    // running engine can take live — synthetic always, network/file only when
+    // a real ingest spawner backs them. The header consults this before
+    // promising `live` (never over-claims).
+    .with_live_sources(live_sources)
     // The `[discovery]` browse configuration: the operator-configured
     // zowietek-control service type (the vendor's type is unverified — only a
     // configured string is ever recognised) plus any extra DNS-SD types.
@@ -1483,14 +1493,15 @@ impl CommandDrain {
             );
             return;
         };
-        let Some(kind) = crate::synth::SyntheticKind::from_source_kind(&source.kind) else {
+        let synthetic = crate::synth::SyntheticKind::from_source_kind(&source.kind);
+        if synthetic.is_none() && !source.kind.is_network_media() {
             tracing::warn!(
                 source = %source.id,
-                "upsert_source held: this kind is not live-appliable yet \
-                 (network live-add is the next ADR-W018 slice); it applies on restart"
+                "upsert_source held: this kind is not live-appliable \
+                 (ndi/youtube/aes67 apply on restart)"
             );
             return;
-        };
+        }
         let id = source.id.clone();
         // Reuse the registered store on an edit-by-id so the tile holds
         // last-good while the hub swaps the producer behind it.
@@ -1506,20 +1517,28 @@ impl CommandDrain {
         );
         // Heavy half off-thread FIRST: the hub tears down any previous
         // producer under this id (and its `{id}/` companions) before spawning
-        // the SAME generator_loop the startup path runs, and RCUs the preview
-        // map. Requesting this BEFORE the binding mutations below gives the
-        // hub a head start on stopping a replaced producer, shrinking the
-        // bounded window in which old and new frames can interleave in the
-        // reused store on an edit (ADR-W018 §5).
-        match seam.request_spawn_synth(crate::live_sources::SynthSpawn {
-            id: id.clone(),
-            kind,
-            store: Arc::clone(&store),
-            width: self.config.canvas.width,
-            height: self.config.canvas.height,
-            canvas: multiview_compositor::pipeline::CanvasColor::default(),
-            cadence: self.config.canvas.fps.rational(),
-        }) {
+        // the replacement — the SAME generator_loop (synthetic) or the SAME
+        // supervised ingest_loop (network/file) the startup path runs — and
+        // RCUs the preview map. Requesting this BEFORE the binding mutations
+        // below gives the hub a head start on stopping a replaced producer,
+        // shrinking the bounded window in which old and new frames can
+        // interleave in the reused store on an edit (ADR-W018 §5).
+        let submitted = match synthetic {
+            Some(kind) => seam.request_spawn_synth(crate::live_sources::SynthSpawn {
+                id: id.clone(),
+                kind,
+                store: Arc::clone(&store),
+                width: self.config.canvas.width,
+                height: self.config.canvas.height,
+                canvas: multiview_compositor::pipeline::CanvasColor::default(),
+                cadence: self.config.canvas.fps.rational(),
+            }),
+            None => seam.request_spawn_source(crate::live_sources::SourceSpawn {
+                source: source.clone(),
+                store: Arc::clone(&store),
+            }),
+        };
+        match submitted {
             crate::live_sources::HubSubmit::Accepted => {}
             crate::live_sources::HubSubmit::Full => {
                 tracing::warn!(
@@ -2638,6 +2657,7 @@ input_id = "in_b"
             None,
             None,
             multiview_control::LiveApplyCaps::default(),
+            multiview_control::LiveSourceCapability::synthetic_only(),
             async move {
                 let _ = shutdown_rx.await;
             },
