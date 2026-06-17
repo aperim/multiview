@@ -177,7 +177,7 @@ fn nv12_uv_means(frame: &Video) -> (f64, f64) {
 
 /// THE DEFECT-A ROOT-CAUSE PIN (hardware run 2026-06-11): an **identity**
 /// request (same format, same geometry — NV12 -> NV12 at one size) must hand
-/// back the input picture intact. libswscale's no-op converter on FFmpeg 7/8
+/// back the input picture intact. libswscale's no-op converter on `FFmpeg` 7/8
 /// copies the luma plane but leaves the interleaved NV12 chroma plane ZEROED
 /// (Cb=Cr=0 ⇒ the saturated green/magenta the live-added tile showed), so the
 /// wrapper must never route an identity request through `sws_scale`.

@@ -112,7 +112,7 @@ impl Scaler {
     /// **Identity requests bypass libswscale.** When the source and destination
     /// specs are equal (same format, same geometry) the conversion is a plane
     /// copy, performed here via `av_frame_copy` (the [`Video::clone`] deep
-    /// copy). libswscale's no-op converter on FFmpeg 7/8 copies the luma plane
+    /// copy). libswscale's no-op converter on `FFmpeg` 7/8 copies the luma plane
     /// of a semi-planar (NV12/P010) frame but leaves the interleaved chroma
     /// plane **zeroed** — Cb=Cr=0, a saturated green/magenta picture (the
     /// on-hardware live-add Defect A, 2026-06-11) — so an identity request must
@@ -131,6 +131,10 @@ impl Scaler {
                 "input geometry/format differs from the scaler's source spec",
             ));
         }
+        // The identity predicate is `ScaleSpec` equality (format + geometry) —
+        // the complete set of fields this wrapper feeds into `sws_scale`. If the
+        // scaler ever gains colour/range/matrix conversion, extend `ScaleSpec`'s
+        // `Eq` to cover those axes, or this short-circuit could skip a real convert.
         if self.src == self.dst {
             // Identity: a deep plane copy (alloc + `av_frame_copy` +
             // `av_frame_copy_props`), never the broken libswscale no-op path.
