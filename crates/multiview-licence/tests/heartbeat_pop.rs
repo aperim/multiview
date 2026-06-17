@@ -99,7 +99,11 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-const NONCE_HEX: &str = "9f3a2b6e1c0e9b41a4c92d7e3b8f10c25e6a7d3f49b0c81e2f5a6d7c8b9e0f1a2";
+// A valid 64-char (32-byte) lower-case-hex nonce. NOTE: the spec's own DeviceChallenge
+// `example` value is 65 chars — it violates its own `^[0-9a-f]{64}$` pattern (the spec
+// examples are illustrative/unreliable, like the `g1gg…` header example). We use a
+// genuinely-64-char value so the test exercises the real wire shape.
+const NONCE_HEX: &str = "9f3a2b6e1c0e9b41a4c92d7e3b8f10c25e6a7d3f49b0c81e2f5a6d7c8b9e0f1a";
 
 #[test]
 fn the_pop_pre_image_is_a_byte_exact_canonical_cbor_map() {

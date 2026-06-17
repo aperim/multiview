@@ -188,6 +188,163 @@ pub fn canonical_revocation_preimage(
 }
 
 // ===========================================================================
+// Device proof-of-possession (PoP) — the canonical pre-image + COSE_Sign1 proof
+// (CONSPECT-3 D2, ADR-I007; Conspect API v0.9.0 enforces device-PoP).
+// ===========================================================================
+//
+// The `Conspect-Device-PoP` header on each device-mutating op is a base64
+// COSE_Sign1 the device signs over the canonical PoP pre-image
+// `htm | htu | sha256(body) | instance_id | nonce | iat` with its Ed25519 device
+// key. The server recomputes the pre-image from the actual request, verifies the
+// COSE_Sign1 against the bound device key (continuity), checks the iat ±60s
+// leeway, and burns the single-use nonce. This module owns the PURE crypto: the
+// byte-exact pre-image (a deterministic-CBOR map, hand-rolled like the key
+// pre-image) and the COSE_Sign1 envelope. Key GENERATION + durable PERSISTENCE is
+// the cli's (it does the I/O + the only RNG); the device key reaches this module
+// through the [`DeviceSigner`] seam (Ed25519 signing is deterministic — RFC 8032 —
+// so this stays no-RNG in non-test code).
+
+/// A device proof-of-possession failure. None of these tighten the machine — the
+/// caller skips this heartbeat cycle and keeps last-good (never off air, inv
+/// #1/#10).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PopError {
+    /// The challenge nonce was not 32 bytes of lower-case hex (`^[0-9a-f]{64}$`) —
+    /// a malformed/absent nonce, never a silently truncated pre-image.
+    #[error("device-PoP nonce is not 64 lower-case hex: {0}")]
+    Nonce(String),
+    /// The COSE_Sign1 proof could not be assembled/serialised (not expected for a
+    /// well-formed pre-image, but the guardrails forbid `unwrap`/`expect`).
+    #[error("device-PoP COSE_Sign1 could not be built: {0}")]
+    Cose(String),
+}
+
+/// The device key seam: the bound Ed25519 device keypair the PoP proof is signed
+/// with. The cli implements this over a generated + durably-persisted keypair (the
+/// I/O + RNG live there); the leaf crate only ever **signs** (Ed25519 signing is
+/// deterministic — RFC 8032 — so no RNG enters non-test code) and reads the public
+/// point. A test backs it with a fixed seed so it can sign a proof AND verify it.
+pub trait DeviceSigner: Send + Sync {
+    /// The raw 32-byte Ed25519 public point — the device key the server has bound
+    /// (its base64url is `devicePublicKey`; its RFC 7638 thumbprint is the lease
+    /// `cnf_jkt`).
+    fn public_key_raw(&self) -> [u8; 32];
+    /// A deterministic Ed25519 signature (64 bytes) over `message` (RFC 8032 — no
+    /// RNG). `message` is the COSE `Sig_structure` (`Signature1`) the library hands
+    /// us; we never sign anything else.
+    fn sign(&self, message: &[u8]) -> [u8; 64];
+}
+
+/// Decode a `^[0-9a-f]{64}$` nonce to its 32 raw bytes, rejecting anything else
+/// (fail closed — never a truncated/zero-padded pre-image). Lower-case only, to
+/// match the server's canonical form exactly.
+fn nonce_hex_to_raw(nonce_hex: &str) -> Result<[u8; 32], PopError> {
+    if nonce_hex.len() != 64 || !nonce_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(PopError::Nonce(format!(
+            "expected 64 hex chars, got {} chars",
+            nonce_hex.len()
+        )));
+    }
+    // Lower-case only (the wire is lower-case hex); an upper-case digit is rejected
+    // so the device and server agree byte-for-byte.
+    if nonce_hex.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Err(PopError::Nonce("nonce must be lower-case hex".to_owned()));
+    }
+    let bytes = hex::decode(nonce_hex).map_err(|e| PopError::Nonce(e.to_string()))?;
+    let mut out = [0u8; 32];
+    if bytes.len() != 32 {
+        return Err(PopError::Nonce(format!(
+            "decoded to {} bytes, expected 32",
+            bytes.len()
+        )));
+    }
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// The SHA-256 of the request body — the `sha256(body)` term of the pre-image.
+fn sha256_body(body: &[u8]) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(body);
+    hasher.finalize().into()
+}
+
+/// The deterministic-CBOR **device-PoP pre-image** the server recomputes and the
+/// COSE_Sign1 signs over (ADR-I007): a `map(6)` over
+/// `htm | htu | sha256(body) | instance_id | nonce | iat` in that order. `htm` is
+/// the upper-case HTTP method, `htu` the full request URI (no query); `sha256_body`
+/// and `nonce` are CBOR **byte strings** (raw 32 bytes each — the nonce decoded
+/// from its 64-hex form), `iat` an unsigned int (epoch **seconds** — the server
+/// checks ±60s).
+///
+/// # Errors
+/// [`PopError::Nonce`] if `nonce_hex` is not 64 lower-case hex.
+pub fn canonical_pop_preimage(
+    htm: &str,
+    htu: &str,
+    body: &[u8],
+    instance_id: &str,
+    nonce_hex: &str,
+    iat: i64,
+) -> Result<Vec<u8>, PopError> {
+    let nonce_raw = nonce_hex_to_raw(nonce_hex)?;
+    let body_hash = sha256_body(body);
+    let mut out = Vec::with_capacity(160);
+    cbor_head(&mut out, 5, 6); // map(6)
+    cbor_tstr(&mut out, "htm");
+    cbor_tstr(&mut out, htm);
+    cbor_tstr(&mut out, "htu");
+    cbor_tstr(&mut out, htu);
+    cbor_tstr(&mut out, "sha256_body");
+    cbor_bstr(&mut out, &body_hash);
+    cbor_tstr(&mut out, "instance_id");
+    cbor_tstr(&mut out, instance_id);
+    cbor_tstr(&mut out, "nonce");
+    cbor_bstr(&mut out, &nonce_raw);
+    cbor_tstr(&mut out, "iat");
+    cbor_uint(&mut out, iat);
+    Ok(out)
+}
+
+/// Build the `Conspect-Device-PoP` header value: a **standard-base64** (RFC 4648
+/// §4) COSE_Sign1 the `signer` signs over the [`canonical_pop_preimage`]. The
+/// protected header pins `alg = EdDSA`; the payload is the pre-image (attached), so
+/// the server recomputes the same pre-image and verifies the signature against the
+/// bound device key. The result is the untagged 4-element COSE_Sign1 array.
+///
+/// # Errors
+/// [`PopError::Nonce`] if `nonce_hex` is malformed; [`PopError::Cose`] if the
+/// COSE_Sign1 fails to serialise (not expected for a well-formed pre-image).
+pub fn pop_header_value(
+    signer: &dyn DeviceSigner,
+    htm: &str,
+    htu: &str,
+    body: &[u8],
+    instance_id: &str,
+    nonce_hex: &str,
+    iat: i64,
+) -> Result<String, PopError> {
+    use coset::{iana, CborSerializable as _, CoseSign1Builder, HeaderBuilder};
+
+    let preimage = canonical_pop_preimage(htm, htu, body, instance_id, nonce_hex, iat)?;
+    let protected = HeaderBuilder::new()
+        .algorithm(iana::Algorithm::EdDSA)
+        .build();
+    // `create_signature` hands the closure the COSE Sig_structure ("Signature1")
+    // bytes; the device key signs exactly those. The empty AAD matches the server's
+    // recompute (no external_aad).
+    let sign1 = CoseSign1Builder::new()
+        .protected(protected)
+        .payload(preimage)
+        .create_signature(b"", |tbs| signer.sign(tbs).to_vec())
+        .build();
+    let bytes = sign1.to_vec().map_err(|e| PopError::Cose(e.to_string()))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+// ===========================================================================
 // The published well-known key-trust document.
 // ===========================================================================
 
