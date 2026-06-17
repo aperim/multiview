@@ -1342,6 +1342,16 @@ pub struct HeartbeatClient<S: LicenceServer> {
     /// a plain `Mutex` is correct (no hot path). `None` until the first
     /// `/challenge` / response, and cleared when the server rejects it.
     pop_nonce: std::sync::Mutex<Option<PopNonce>>,
+    /// The in-flight heartbeat attempt, pinned across retries (ADR-I007 retry
+    /// coupling). The Idempotency-Key, the EXACT serialised body bytes, the PoP
+    /// challenge nonce, and the COSE_Sign1 proof are ONE immutable unit: a retry of
+    /// an ambiguous/failed contact replays this verbatim (so a lost-response retry
+    /// presents the SAME key with the SAME body — never the same key with a fresh
+    /// nonce, which a strict server rejects as an idempotency body-mismatch and
+    /// could strand the client). It is set when a NEW logical operation is built and
+    /// cleared ONLY on a successful contact (then the next cycle mints afresh).
+    /// Control-plane only; the loop is the sole accessor.
+    pending: std::sync::Mutex<Option<PendingAttempt>>,
 }
 
 /// A held device-PoP challenge nonce + the instant it expires (epoch ms), so the
@@ -1353,6 +1363,23 @@ struct PopNonce {
     /// When it expires (epoch ms); `0` when unknown (a `nextNonce` carries no
     /// explicit expiry — it is used once on the next cycle, well within the TTL).
     expires_at_ms: i64,
+}
+
+/// The pinned in-flight heartbeat attempt — `{Idempotency-Key, body bytes, PoP
+/// nonce, COSE_Sign1 proof}` as ONE retry unit (ADR-I007). A retry of a
+/// failed/ambiguous contact replays exactly these bytes; only a successful contact
+/// clears it so the next cycle builds a fresh attempt.
+#[derive(Debug, Clone)]
+struct PendingAttempt {
+    /// The retry-stable Idempotency-Key (also tracked in [`IdempotencyState`]).
+    idempotency_key: String,
+    /// The EXACT JSON body bytes the transport POSTs verbatim (the PoP signed
+    /// `sha256` of these).
+    body: Vec<u8>,
+    /// The single-use PoP challenge nonce bound into this body + proof.
+    nonce: String,
+    /// The base64 `COSE_Sign1` `Conspect-Device-PoP` header for this body.
+    pop_header: String,
 }
 
 /// A durable backing store for the idempotency-key **mint counter**, so the
@@ -1632,6 +1659,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             nonce_store,
             device_signer,
             pop_nonce: std::sync::Mutex::new(None),
+            pending: std::sync::Mutex::new(None),
         }
     }
 
@@ -1691,6 +1719,36 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             Ok(mut g) => g.current = None,
             Err(poisoned) => poisoned.into_inner().current = None,
         }
+    }
+
+    /// The pinned in-flight attempt to REPLAY on a retry, or `None` for a fresh
+    /// logical operation. A poisoned lock recovers by reading the inner value.
+    fn pinned_attempt(&self) -> Option<PendingAttempt> {
+        match self.pending.lock() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Pin the attempt so any retry of an ambiguous/failed contact replays the SAME
+    /// `{Idempotency-Key, body, nonce, proof}` (ADR-I007 retry coupling).
+    fn pin_attempt(&self, attempt: PendingAttempt) {
+        match self.pending.lock() {
+            Ok(mut g) => *g = Some(attempt),
+            Err(poisoned) => *poisoned.into_inner() = Some(attempt),
+        }
+    }
+
+    /// Clear the pinned attempt AND rotate the Idempotency-Key on a SUCCESSFUL
+    /// contact — they are one retry unit, so the next cycle builds a wholly fresh
+    /// attempt (fresh nonce + body + key). Called once per success, before the
+    /// install-outcome handling below.
+    fn clear_pending(&self) {
+        match self.pending.lock() {
+            Ok(mut g) => *g = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+        self.rotate_idempotency();
     }
 
     /// Obtain the single-use device-PoP challenge nonce for THIS heartbeat:
@@ -1885,40 +1943,61 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         let now_ms = (self.now_ms)();
         let _ = TrustedKeys::verify(&keys, &self.pinned, now_ms)?;
 
-        // 3. DEVICE-PoP (v0.9.0 enforced, ADR-I007). Obtain the single-use challenge
-        //    nonce (held `nextNonce`, or a cold-start `GET /challenge`), build the
-        //    request body WITH that nonce, serialise it ONCE, and sign the
-        //    `Conspect-Device-PoP` COSE_Sign1 over `sha256(body)` + the canonical
-        //    pre-image. EVERY PoP step fails closed BEFORE the mutation (and before
-        //    minting the idempotency key, so a PoP failure never burns a counter):
-        //    `?` propagates and NO heartbeat is sent — keep last-good, retry next
-        //    cycle (fetching a fresh challenge), never off air (inv #1/#10).
-        let held_serial = self.store.current().map(|e| e.lease.serial);
-        let pop_nonce = self.obtain_pop_nonce(&self.config.org_id).await?;
-        let req = Self::build_heartbeat_request_for(
-            &self.identity,
-            held_serial,
-            Some(established_binding.clone()),
-            pop_nonce,
-        );
-        // Serialise the body ONCE — the transport sends THESE bytes verbatim and the
-        // PoP signs `sha256` of THESE bytes, so device + server hash the same body.
-        let body = serde_json::to_vec(&req)
-            .map_err(|e| HeartbeatError::Malformed(format!("heartbeat body serialise: {e}")))?;
-        let pop_header = self.build_pop_header(&body, &req.nonce)?;
+        // 3. Build (or REPLAY) the in-flight attempt as ONE retry unit (ADR-I007).
+        //    A retry of a prior failed/ambiguous contact replays the SAME
+        //    {Idempotency-Key, body bytes, PoP nonce, COSE_Sign1 proof} verbatim —
+        //    so the server sees the same key with the SAME body (it dedupes, never a
+        //    duplicate lease, never an idempotency body-mismatch). Only a genuinely
+        //    NEW logical operation (no pinned attempt) builds fresh: it obtains the
+        //    single-use challenge nonce (held `nextNonce`, or a cold-start `GET
+        //    /challenge`), serialises the body ONCE, signs the `Conspect-Device-PoP`
+        //    proof over `sha256(body)` + the canonical pre-image, and mints the
+        //    durable Idempotency-Key. EVERY build step fails closed BEFORE the
+        //    mutation (a PoP/challenge/nonce-store failure `?`-propagates and sends
+        //    nothing) — keep last-good, retry next cycle, never off air (inv #1/#10).
+        let attempt = match self.pinned_attempt() {
+            Some(pinned) => pinned,
+            None => {
+                let held_serial = self.store.current().map(|e| e.lease.serial);
+                let pop_nonce = self.obtain_pop_nonce(&self.config.org_id).await?;
+                let req = Self::build_heartbeat_request_for(
+                    &self.identity,
+                    held_serial,
+                    Some(established_binding.clone()),
+                    pop_nonce,
+                );
+                // Serialise ONCE — the transport sends THESE bytes verbatim and the
+                // PoP signs `sha256` of THESE bytes (device + server hash the same).
+                let body = serde_json::to_vec(&req).map_err(|e| {
+                    HeartbeatError::Malformed(format!("heartbeat body serialise: {e}"))
+                })?;
+                let pop_header = self.build_pop_header(&body, &req.nonce)?;
+                // Mint the durable Idempotency-Key LAST (after the fallible PoP build,
+                // so a PoP failure never burns a counter), then PIN the whole unit so
+                // any retry replays it byte-for-byte.
+                let idempotency_key = self.idempotency_key()?;
+                let attempt = PendingAttempt {
+                    idempotency_key,
+                    body,
+                    nonce: req.nonce,
+                    pop_header,
+                };
+                self.pin_attempt(attempt.clone());
+                attempt
+            }
+        };
 
-        // 4. RENEW the held lease. One retry-stable Idempotency-Key for this whole
-        //    logical operation: the heartbeat mutation replays the SAME key on a
-        //    retry (the server dedupes — never a duplicate lease on a lost
-        //    response), and it rotates only after a successful contact below. The
-        //    mint is GATED on a durable commit (fail closed): if the durable nonce
-        //    store cannot be trusted, `?` propagates BEFORE the heartbeat call, so
-        //    NO mutation is sent (a non-persisted key could collide across a
-        //    restart) — keep last-good, retry next cycle (inv #1/#10).
-        let idempotency_key = self.idempotency_key()?;
+        // 4. RENEW the held lease by sending the pinned attempt. On a transport
+        //    failure the `?` propagates with the attempt STILL pinned, so the next
+        //    cycle replays it (same key + same body) — never off air.
         let resp = self
             .server
-            .heartbeat(&self.config.org_id, body, &idempotency_key, &pop_header)
+            .heartbeat(
+                &self.config.org_id,
+                attempt.body.clone(),
+                &attempt.idempotency_key,
+                &attempt.pop_header,
+            )
             .await?;
         let (lease, state, next_due, next_nonce) = (
             resp.lease,
@@ -1926,15 +2005,18 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             resp.next_due,
             resp.next_nonce,
         );
-        // The contact succeeded → remember the server's `nextNonce` for the NEXT
-        // heartbeat (steady-state DPoP-nonce; an empty one cold-starts next cycle).
+        // The contact succeeded → this logical operation is DONE. Clear the pinned
+        // attempt + rotate the Idempotency-Key so the next cycle is a fresh unit, and
+        // remember the server's `nextNonce` for it (steady-state DPoP-nonce; an empty
+        // one cold-starts next cycle). The success-clear happens here for the
+        // withheld-lease early return below AND every install outcome.
+        self.clear_pending();
         self.remember_next_nonce(&next_nonce);
 
         // 5. A withheld lease (revocation by non-reissue) is a normal outcome:
-        //    keep last-good, never tighten. The contact succeeded, so the logical
-        //    operation is done — rotate the idempotency key for the next cycle.
+        //    keep last-good, never tighten. The contact already succeeded, so
+        //    `clear_pending` above rotated the key + cleared the attempt.
         let Some(server_lease) = lease else {
-            self.rotate_idempotency();
             return Ok(HeartbeatOutcome::LeaseWithheld { state, next_due });
         };
 
@@ -1963,11 +2045,12 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         // Install ANCHORED to this device's identity. `remember_binding_id` fires
         // ONLY on a GENUINE install — never on the stale no-op (a Stale outcome
         // means the store kept a newer lease; nothing was installed, so learning a
-        // binding from it would poison identity with a non-installed lease). Any
-        // install rejection propagates via `?` WITHOUT rotating the idempotency key
-        // (the mutation already landed on the server under that key; a retry must
-        // replay it so the server dedupes, never mint a fresh key that could
-        // duplicate the binding).
+        // binding from it would poison identity with a non-installed lease). An
+        // install rejection (expired/cross-instance/fingerprint) propagates via `?`;
+        // the retry unit was ALREADY cleared/rotated on the successful contact above
+        // (the server committed the mutation under that key + returned this lease;
+        // re-presenting the same key would just return the same rejectable lease), so
+        // the next cycle is a genuinely-new heartbeat.
         let serial = match self.install(&server_lease, &body, Some(established_binding.as_str()))? {
             InstallOutcome::Installed { serial } => {
                 self.remember_binding_id(&body.instance_binding_id);
@@ -1977,9 +2060,6 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             // air. Do NOT learn the binding (nothing was installed).
             InstallOutcome::StaleNoop { serial } => serial,
         };
-        // The logical operation succeeded end-to-end — rotate the idempotency key
-        // so the NEXT cycle is a fresh logical operation.
-        self.rotate_idempotency();
         Ok(HeartbeatOutcome::Installed { serial, next_due })
     }
 

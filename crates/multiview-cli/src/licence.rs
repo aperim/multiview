@@ -862,41 +862,74 @@ impl DeviceKeyStore {
     }
 
     /// Load an EXISTING device key, fail-closed on a weak-perm / corrupt / unreadable
-    /// file; `Ok(None)` only when the file is genuinely ABSENT (a fresh device).
+    /// / symlinked file; `Ok(None)` only when the file is genuinely ABSENT (a fresh
+    /// device).
     ///
-    /// **Weak-perm rejection (panel major #2):** an existing key whose mode is not
-    /// `0600` (e.g. a world-readable `0644` signing secret) is REFUSED — a leaked
-    /// private key must never be trusted as the device identity.
+    /// **Inode-bound, no TOCTOU (panel round-2 major #2):** on Unix the file is
+    /// opened ONCE with `O_NOFOLLOW` (a symlink at the path is refused — the classic
+    /// swap vector), then the **open fd** is `fstat`'d (via `File::metadata`) to
+    /// verify it is a **regular file** with **exactly** mode `0600`, and the bytes
+    /// are read from that **same fd**. So the perms checked and the bytes accepted
+    /// provably come from one inode — a concurrent replacer cannot swap the path
+    /// between the check and the read. A broader mode (e.g. world-readable `0644`)
+    /// means the signing secret is exposed → fail closed (never trust, never
+    /// regenerate — that would break server-side key continuity).
     fn load_existing(
         path: &std::path::Path,
     ) -> Result<Option<ed25519_dalek::SigningKey>, multiview_licence::heartbeat::HeartbeatError>
     {
+        use std::io::Read as _;
+
         use multiview_licence::heartbeat::HeartbeatError;
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+
+        // Open ONCE. On Unix open via `rustix` with `O_NOFOLLOW` so a symlink at the
+        // key path is refused (ELOOP) rather than followed — the classic swap vector
+        // — and so the fd, the fstat below, and the read all bind to ONE inode (no
+        // `unsafe`; rustix is a SAFE wrapper, already a dep for flock). On a non-Unix
+        // target the mode concept does not apply — a plain `std::fs` open is used.
+        #[cfg(unix)]
+        let mut file: std::fs::File = match rustix::fs::open(
+            path,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(fd) => std::fs::File::from(fd),
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
             Err(e) => {
                 return Err(HeartbeatError::Transport(format!(
-                    "could not read the device key file {}: {e}",
+                    "could not open the device key file {} (symlinked? unreadable?): {e}",
                     path.display()
                 )))
             }
         };
-        // The signing secret must be owner-only (0600). A broader mode means the
-        // private key is exposed — fail closed (do NOT trust it, do NOT regenerate).
+        #[cfg(not(unix))]
+        let mut file: std::fs::File = match std::fs::OpenOptions::new().read(true).open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(HeartbeatError::Transport(format!(
+                    "could not open the device key file {}: {e}",
+                    path.display()
+                )))
+            }
+        };
+        // fstat the OPEN fd (not the path) — binds the checks to this exact inode.
+        let meta = file.metadata().map_err(|e| {
+            HeartbeatError::Transport(format!(
+                "could not stat the open device key file {}: {e}",
+                path.display()
+            ))
+        })?;
+        if !meta.is_file() {
+            return Err(HeartbeatError::Transport(format!(
+                "device key path {} is not a regular file; refusing to use it",
+                path.display()
+            )));
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(path)
-                .map_err(|e| {
-                    HeartbeatError::Transport(format!(
-                        "could not stat the device key file {}: {e}",
-                        path.display()
-                    ))
-                })?
-                .permissions()
-                .mode()
-                & 0o777;
+            let mode = meta.permissions().mode() & 0o777;
             if mode != 0o600 {
                 return Err(HeartbeatError::Transport(format!(
                     "device key file {} has insecure permissions {mode:#o} (want 0600); \
@@ -905,9 +938,19 @@ impl DeviceKeyStore {
                 )));
             }
         }
-        // A PRESENT key file MUST be exactly a 32-byte seed — anything else is
-        // corruption/tamper and fails closed (never a silent regenerate that would
-        // change the device identity and break server-side key continuity).
+        // Read from the SAME fd we fstat'd. Cap the read so a (corrupt) huge file
+        // can't balloon memory — the seed is exactly 33 bytes' worth at most; 33
+        // lets us detect "too long" as corruption rather than silently truncating.
+        let mut bytes = Vec::with_capacity(33);
+        file.take(33).read_to_end(&mut bytes).map_err(|e| {
+            HeartbeatError::Transport(format!(
+                "could not read the device key file {}: {e}",
+                path.display()
+            ))
+        })?;
+        // A PRESENT key file MUST be exactly a 32-byte seed — anything else (short,
+        // long, empty) is corruption/tamper and fails closed (never a silent
+        // regenerate that would change the device identity and break continuity).
         let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
             HeartbeatError::Transport(format!(
                 "device key file {} is present but is not a 32-byte seed \
