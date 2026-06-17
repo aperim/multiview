@@ -960,9 +960,11 @@ pub enum Transport {
 
 /// The `POST /organisations/{orgId}/heartbeat` request body (verbatim field
 /// names) — the minimal licensing keep-alive: the binding id, the lease serial
-/// head of the chain, the salted fingerprint digest, the app version, and the
-/// transport. **No** raw identifier, **no** telemetry (heartbeat ≠ telemetry).
-#[derive(Debug, Clone, Serialize)]
+/// head of the chain, the salted fingerprint digest, the app version, the
+/// transport, and the single-use PoP `nonce`. **No** raw identifier, **no**
+/// telemetry (heartbeat ≠ telemetry). `Deserialize` so the in-process fake (and
+/// any body-inspecting test) can parse the exact serialised bytes back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct HeartbeatRequest {
@@ -978,6 +980,39 @@ pub struct HeartbeatRequest {
     /// The channel the heartbeat arrived on (a closed enum — never an open
     /// string, so an out-of-vocabulary value cannot be sent).
     pub transport: Transport,
+    /// The single-use device-PoP challenge nonce (lower-case hex) bound into the
+    /// signed PoP pre-image — the `nextNonce` from the prior response, or a fresh
+    /// `GET /challenge` at cold start (ADR-I007). v0.9.0 requires it on every
+    /// heartbeat; the matching `Conspect-Device-PoP` header carries the proof.
+    pub nonce: String,
+}
+
+/// A `GET /v0/devices/licence/challenge` response (ADR-I007): a freshly-minted
+/// single-use device-PoP challenge nonce + its short expiry. The client fetches
+/// one only at cold start / when it has no usable `nextNonce`; steady-state it
+/// reuses the prior heartbeat response's `nextNonce` (RFC 9449 DPoP-nonce style).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct DeviceChallenge {
+    /// The single-use challenge nonce (`^[0-9a-f]{64}$`, 32 bytes / 64 lower-case
+    /// hex). Signed inside the PoP pre-image; burned on the first successful proof.
+    pub nonce: String,
+    /// When the nonce expires (epoch milliseconds) — issued + ~120 s. A proof
+    /// presented after this is rejected; the client fetches a fresh challenge.
+    pub expires_at_ms: i64,
+}
+
+impl DeviceChallenge {
+    /// Assemble a challenge (the in-process fake + the cli transport build it
+    /// explicitly; the type is `#[non_exhaustive]`).
+    #[must_use]
+    pub fn new(nonce: String, expires_at_ms: i64) -> Self {
+        Self {
+            nonce,
+            expires_at_ms,
+        }
+    }
 }
 
 /// The `POST …/heartbeat` response.
@@ -994,6 +1029,14 @@ pub struct HeartbeatResponse {
     /// When the next monthly heartbeat is due (epoch milliseconds). The loop
     /// sleeps to this instant.
     pub next_due: i64,
+    /// The NEXT single-use device-PoP challenge nonce (RFC 9449 DPoP-nonce style,
+    /// ADR-I007): signed on the following heartbeat so the steady-state hot path
+    /// needs no extra `GET /challenge` round-trip. Single-use; burned on the next
+    /// successful proof. `#[serde(default)]` so a server that omits it (or an older
+    /// server) leaves it empty — the client then fetches a fresh `/challenge` next
+    /// cycle (fail closed: a missing nextNonce never reuses a prior one).
+    #[serde(default)]
+    pub next_nonce: String,
 }
 
 impl HeartbeatResponse {
@@ -1005,11 +1048,13 @@ impl HeartbeatResponse {
         lease: Option<ServerLease>,
         enforcement_state: EnforcementState,
         next_due: i64,
+        next_nonce: String,
     ) -> Self {
         Self {
             lease,
             enforcement_state,
             next_due,
+            next_nonce,
         }
     }
 }
@@ -1032,12 +1077,31 @@ pub trait LicenceServer: Send + Sync {
         &self,
     ) -> impl std::future::Future<Output = Result<LicensingKeys, HeartbeatError>> + Send;
 
-    /// `POST /organisations/{org}/heartbeat` with a required `Idempotency-Key`.
+    /// `GET /v0/devices/licence/challenge?orgId={org}` — a fresh single-use
+    /// device-PoP challenge nonce (ADR-I007). Consulted only at cold start / when
+    /// no usable `nextNonce` is held; steady-state the prior response's `nextNonce`
+    /// is reused. A transport failure here keeps last-good (the caller skips the
+    /// cycle, never off air).
+    fn fetch_challenge(
+        &self,
+        org: &str,
+    ) -> impl std::future::Future<Output = Result<DeviceChallenge, HeartbeatError>> + Send;
+
+    /// `POST /organisations/{org}/heartbeat` with a required `Idempotency-Key` and
+    /// the required `Conspect-Device-PoP` header (`pop_header`, a base64 COSE_Sign1
+    /// over the canonical pre-image — ADR-I007).
+    ///
+    /// `body` is the EXACT JSON bytes the leaf crate serialised the request to and
+    /// computed `sha256(body)` over for the PoP pre-image — the transport sends
+    /// these bytes **verbatim** (content-type `application/json`), so the device and
+    /// the server hash byte-for-byte the same body (no re-serialisation drift). The
+    /// body carries the matching single-use `nonce`.
     fn heartbeat(
         &self,
         org: &str,
-        req: HeartbeatRequest,
+        body: Vec<u8>,
         idempotency_key: &str,
+        pop_header: &str,
     ) -> impl std::future::Future<Output = Result<HeartbeatResponse, HeartbeatError>> + Send;
 }
 
@@ -1081,6 +1145,13 @@ pub enum HeartbeatError {
     /// cycle retries. A nonce-store I/O failure never tightens output (inv #1/#10).
     #[error("durable idempotency nonce unavailable; not sending a mutation: {0}")]
     NonceStore(#[from] NonceError),
+    /// The device proof-of-possession could not be built (a malformed/absent PoP
+    /// challenge nonce, or a COSE_Sign1 assembly failure). The heartbeat mutation
+    /// is NOT sent this cycle; the last-good lease is kept and the cycle retries
+    /// (it fetches a fresh challenge next time). A PoP failure never tightens output
+    /// (inv #1/#10) — this is the v0.9.0 enforced-PoP fail-closed path.
+    #[error("device proof-of-possession unavailable; not sending a mutation: {0}")]
+    Pop(#[from] PopError),
 }
 
 /// The device identity material — salted digests + opaque ids only (data
@@ -1138,6 +1209,13 @@ pub struct HeartbeatConfig {
     /// auto-issue default org is an external-doc residual), with a clearly-named
     /// placeholder default rather than a hard-coded guess.
     pub org_id: String,
+    /// The Conspect API base URL (e.g. `https://api.conspect.studio/v0`), trailing
+    /// slash trimmed. Carried here so the device-PoP `htu` the loop signs is the
+    /// REAL request URI the cli's transport POSTs to (ADR-I007) — the signed `htu`
+    /// and the actual URL must agree byte-for-byte, so both derive from this base +
+    /// `org_id`. Empty when the heartbeat is unconfigured (no PoP `htu` is built —
+    /// the renew path is not reached without a configured server).
+    pub api_base: String,
     /// The minimum sleep between contacts when the server does not dictate a
     /// `nextDue` (or on the backoff floor).
     pub min_interval: Duration,
@@ -1152,6 +1230,7 @@ impl Default for HeartbeatConfig {
             // surfaces this as a config field; an unset value means "no free
             // default configured" (ADR-0096 O4).
             org_id: "org-unset".to_owned(),
+            api_base: String::new(),
             min_interval: Duration::from_secs(60),
             max_backoff: Duration::from_secs(3600),
         }
@@ -1249,6 +1328,31 @@ pub struct HeartbeatClient<S: LicenceServer> {
     /// key). A SEAM: the cli supplies a file-backed impl; the in-memory default is
     /// used otherwise.
     nonce_store: SharedNonceStore,
+    /// The bound Ed25519 device key for the v0.9.0 device-PoP proof (ADR-I007). A
+    /// SEAM: the cli supplies a generated + durably-persisted keypair; signing is
+    /// deterministic (RFC 8032 — no RNG in the leaf crate). `None` only for the
+    /// pre-PoP constructors retained for the existing lease/trust/idempotency tests
+    /// (those never reach the heartbeat mutation against a real server); a `None`
+    /// signer on the renew path is a `PopError` (fail closed — keep last-good),
+    /// never a heartbeat without a proof.
+    device_signer: Option<Arc<dyn DeviceSigner>>,
+    /// The held single-use device-PoP challenge nonce for the NEXT heartbeat — the
+    /// `nextNonce` from the prior response (RFC 9449 DPoP-nonce style), or freshly
+    /// fetched at cold start. Control-plane only; the loop is the sole accessor, so
+    /// a plain `Mutex` is correct (no hot path). `None` until the first
+    /// `/challenge` / response, and cleared when the server rejects it.
+    pop_nonce: std::sync::Mutex<Option<PopNonce>>,
+}
+
+/// A held device-PoP challenge nonce + the instant it expires (epoch ms), so the
+/// client can discard an expired nonce before signing (the server's ~120 s TTL).
+#[derive(Debug, Clone)]
+struct PopNonce {
+    /// The single-use challenge nonce (lower-case hex).
+    nonce: String,
+    /// When it expires (epoch ms); `0` when unknown (a `nextNonce` carries no
+    /// explicit expiry — it is used once on the next cycle, well within the TTL).
+    expires_at_ms: i64,
 }
 
 /// A durable backing store for the idempotency-key **mint counter**, so the
@@ -1426,6 +1530,95 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         now_ms: NowMs,
         nonce_store: SharedNonceStore,
     ) -> Self {
+        Self::assemble(
+            server,
+            store,
+            pinned,
+            config,
+            identity,
+            now_ms,
+            nonce_store,
+            None,
+        )
+    }
+
+    /// Assemble a heartbeat client with a bound device-PoP signer (ADR-I007) — the
+    /// production constructor under v0.9.0 enforced PoP. The cli supplies a
+    /// generated + durably-persisted Ed25519 keypair (the I/O + the only RNG live
+    /// at the cli boundary); the loop signs the COSE_Sign1 proof with it on every
+    /// heartbeat. Uses the production wall clock + the given durable nonce store.
+    #[must_use]
+    pub fn with_device_signer(
+        server: Arc<S>,
+        store: Arc<LeaseStore>,
+        pinned: PinnedRoot,
+        config: HeartbeatConfig,
+        identity: DeviceIdentity,
+        device_signer: Arc<dyn DeviceSigner>,
+    ) -> Self {
+        Self::assemble(
+            server,
+            store,
+            pinned,
+            config,
+            identity,
+            Arc::new(unix_millis_now),
+            Arc::new(InMemoryNonceStore::default()),
+            Some(device_signer),
+        )
+    }
+
+    /// Assemble a heartbeat client with BOTH a durable nonce store AND a bound
+    /// device-PoP signer — the cli's production wiring (a file-backed nonce store
+    /// so the idempotency key survives a restart, and the persisted device keypair
+    /// for the PoP proof).
+    #[must_use]
+    pub fn with_nonce_and_signer(
+        server: Arc<S>,
+        store: Arc<LeaseStore>,
+        pinned: PinnedRoot,
+        config: HeartbeatConfig,
+        identity: DeviceIdentity,
+        nonce_store: SharedNonceStore,
+        device_signer: Arc<dyn DeviceSigner>,
+    ) -> Self {
+        Self::assemble(
+            server,
+            store,
+            pinned,
+            config,
+            identity,
+            Arc::new(unix_millis_now),
+            nonce_store,
+            Some(device_signer),
+        )
+    }
+
+    /// Attach (or replace) the bound device-PoP signer on an already-constructed
+    /// client (a chainable builder). The production constructors
+    /// ([`with_device_signer`](Self::with_device_signer) /
+    /// [`with_nonce_and_signer`](Self::with_nonce_and_signer)) set it directly; this
+    /// lets a caller layer a signer onto a clock-/nonce-injecting constructor
+    /// (e.g. `with_clock(..).with_signer(..)`).
+    #[must_use]
+    pub fn with_signer(mut self, device_signer: Arc<dyn DeviceSigner>) -> Self {
+        self.device_signer = Some(device_signer);
+        self
+    }
+
+    /// The single struct-initialising constructor every other delegates to.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)] // a wide assemble seam fed by the named constructors above; the public API stays narrow.
+    fn assemble(
+        server: Arc<S>,
+        store: Arc<LeaseStore>,
+        pinned: PinnedRoot,
+        config: HeartbeatConfig,
+        identity: DeviceIdentity,
+        now_ms: NowMs,
+        nonce_store: SharedNonceStore,
+        device_signer: Option<Arc<dyn DeviceSigner>>,
+    ) -> Self {
         let learned_binding_id = std::sync::Mutex::new(identity.binding_id.clone());
         Self {
             server,
@@ -1437,6 +1630,8 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             now_ms,
             idempotency: std::sync::Mutex::new(IdempotencyState::default()),
             nonce_store,
+            device_signer,
+            pop_nonce: std::sync::Mutex::new(None),
         }
     }
 
@@ -1498,6 +1693,103 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         }
     }
 
+    /// Obtain the single-use device-PoP challenge nonce for THIS heartbeat:
+    /// steady-state the held `nextNonce` (RFC 9449 DPoP-nonce style); cold start (no
+    /// held nonce, or a held nonce already expired) a fresh `GET /challenge`.
+    ///
+    /// **Fail closed (ADR-I007).** A `/challenge` transport failure (or a malformed
+    /// challenge) propagates as [`HeartbeatError`]; `run_once` then sends NO
+    /// heartbeat mutation this cycle and keeps last-good (never off air). The held
+    /// nonce is consumed (taken) so a failed cycle re-fetches cleanly next time
+    /// rather than re-presenting a possibly-burned nonce.
+    async fn obtain_pop_nonce(&self, org: &str) -> Result<String, HeartbeatError> {
+        let now_ms = (self.now_ms)();
+        // Take any held nonce; an expired one (server ~120 s TTL) is discarded.
+        let held = {
+            let mut guard = match self.pop_nonce.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            match guard.take() {
+                Some(p) if p.expires_at_ms == 0 || p.expires_at_ms > now_ms => Some(p.nonce),
+                // Expired or none: fall through to a fresh fetch.
+                _ => None,
+            }
+        };
+        if let Some(nonce) = held {
+            return Ok(nonce);
+        }
+        // Cold start / expired: fetch a fresh challenge. A transport failure here is
+        // a normal keep-last-good outcome (the loop backs off and retries).
+        let challenge = self.server.fetch_challenge(org).await?;
+        Ok(challenge.nonce)
+    }
+
+    /// Remember the server-issued `nextNonce` for the NEXT heartbeat (steady-state
+    /// DPoP-nonce). An empty `next_nonce` (a server that omitted it) clears the
+    /// held nonce so the next cycle cold-starts a fresh `/challenge` — never reuse
+    /// a prior, already-burned nonce.
+    fn remember_next_nonce(&self, next_nonce: &str) {
+        let mut guard = match self.pop_nonce.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = if next_nonce.is_empty() {
+            None
+        } else {
+            Some(PopNonce {
+                nonce: next_nonce.to_owned(),
+                // A nextNonce carries no explicit expiry; it is used once on the
+                // immediately-following cycle, well within the server TTL.
+                expires_at_ms: 0,
+            })
+        };
+    }
+
+    /// Build the `Conspect-Device-PoP` header for a heartbeat: the base64 COSE_Sign1
+    /// over the canonical pre-image (`htm | htu | sha256(body) | instance_id | nonce
+    /// | iat`). `body` is the EXACT serialized request body the transport sends, so
+    /// the device and server hash the same bytes; `iat` is the current epoch seconds.
+    ///
+    /// **Fail closed.** A missing device signer, or a COSE/nonce error, is a
+    /// [`HeartbeatError::Pop`] — `run_once` sends no mutation this cycle (never off
+    /// air). The renew path is never taken without a proof.
+    fn build_pop_header(
+        &self,
+        body: &[u8],
+        nonce_hex: &str,
+    ) -> Result<String, HeartbeatError> {
+        let signer = self
+            .device_signer
+            .as_ref()
+            .ok_or_else(|| PopError::Cose("no device signer configured".to_owned()))?;
+        let htu = format!(
+            "{}/organisations/{}/heartbeat",
+            self.api_base_for_pop(),
+            self.config.org_id
+        );
+        let iat = (self.now_ms)() / 1000; // epoch seconds (server checks ±60s)
+        let header = pop_header_value(
+            signer.as_ref(),
+            "POST",
+            &htu,
+            body,
+            &self.identity.instance_id,
+            nonce_hex,
+            iat,
+        )?;
+        Ok(header)
+    }
+
+    /// The API base the PoP `htu` is built from. The leaf crate does not own the
+    /// live URL (the cli's transport does), so the `htu` it signs must match the URL
+    /// the transport actually POSTs to — they agree because both derive it from the
+    /// same `org_id` against the same base. The base is carried on the config so the
+    /// signed `htu` is the real request URI (not a placeholder).
+    fn api_base_for_pop(&self) -> &str {
+        self.config.api_base.as_str()
+    }
+
     /// The binding id to address renewals by: the learned/configured
     /// `instanceBindingId`, or `None` until activation discovers it. NEVER the
     /// lease serial.
@@ -1514,12 +1806,14 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     }
 
     /// Build the minimal heartbeat request from the identity (data minimisation:
-    /// only the binding id, lease serial, salted digest, app version, transport).
-    /// `lease_serial` is the head of the device's current lease chain, if any.
+    /// only the binding id, lease serial, salted digest, app version, transport, and
+    /// the single-use PoP `nonce`). `lease_serial` is the head of the device's
+    /// current lease chain, if any.
     #[must_use]
     pub fn build_heartbeat_request(
         identity: &DeviceIdentity,
         lease_serial: Option<String>,
+        nonce: String,
     ) -> HeartbeatRequest {
         HeartbeatRequest {
             binding_id: identity.binding_id.clone().unwrap_or_default(),
@@ -1527,6 +1821,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             fingerprint_digest: identity.fingerprint_digest.clone(),
             app_version: identity.app_version.clone(),
             transport: Transport::Direct,
+            nonce,
         }
     }
 
@@ -1582,7 +1877,29 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         let now_ms = (self.now_ms)();
         let _ = TrustedKeys::verify(&keys, &self.pinned, now_ms)?;
 
-        // 3. RENEW the held lease. One retry-stable Idempotency-Key for this whole
+        // 3. DEVICE-PoP (v0.9.0 enforced, ADR-I007). Obtain the single-use challenge
+        //    nonce (held `nextNonce`, or a cold-start `GET /challenge`), build the
+        //    request body WITH that nonce, serialise it ONCE, and sign the
+        //    `Conspect-Device-PoP` COSE_Sign1 over `sha256(body)` + the canonical
+        //    pre-image. EVERY PoP step fails closed BEFORE the mutation (and before
+        //    minting the idempotency key, so a PoP failure never burns a counter):
+        //    `?` propagates and NO heartbeat is sent — keep last-good, retry next
+        //    cycle (fetching a fresh challenge), never off air (inv #1/#10).
+        let held_serial = self.store.current().map(|e| e.lease.serial);
+        let pop_nonce = self.obtain_pop_nonce(&self.config.org_id).await?;
+        let req = Self::build_heartbeat_request_for(
+            &self.identity,
+            held_serial,
+            Some(established_binding.clone()),
+            pop_nonce,
+        );
+        // Serialise the body ONCE — the transport sends THESE bytes verbatim and the
+        // PoP signs `sha256` of THESE bytes, so device + server hash the same body.
+        let body = serde_json::to_vec(&req)
+            .map_err(|e| HeartbeatError::Malformed(format!("heartbeat body serialise: {e}")))?;
+        let pop_header = self.build_pop_header(&body, &req.nonce)?;
+
+        // 4. RENEW the held lease. One retry-stable Idempotency-Key for this whole
         //    logical operation: the heartbeat mutation replays the SAME key on a
         //    retry (the server dedupes — never a duplicate lease on a lost
         //    response), and it rotates only after a successful contact below. The
@@ -1590,20 +1907,22 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         //    store cannot be trusted, `?` propagates BEFORE the heartbeat call, so
         //    NO mutation is sent (a non-persisted key could collide across a
         //    restart) — keep last-good, retry next cycle (inv #1/#10).
-        let held_serial = self.store.current().map(|e| e.lease.serial);
         let idempotency_key = self.idempotency_key()?;
-        let req = Self::build_heartbeat_request_for(
-            &self.identity,
-            held_serial,
-            Some(established_binding.clone()),
-        );
         let resp = self
             .server
-            .heartbeat(&self.config.org_id, req, &idempotency_key)
+            .heartbeat(&self.config.org_id, body, &idempotency_key, &pop_header)
             .await?;
-        let (lease, state, next_due) = (resp.lease, resp.enforcement_state, resp.next_due);
+        let (lease, state, next_due, next_nonce) = (
+            resp.lease,
+            resp.enforcement_state,
+            resp.next_due,
+            resp.next_nonce,
+        );
+        // The contact succeeded → remember the server's `nextNonce` for the NEXT
+        // heartbeat (steady-state DPoP-nonce; an empty one cold-starts next cycle).
+        self.remember_next_nonce(&next_nonce);
 
-        // 3. A withheld lease (revocation by non-reissue) is a normal outcome:
+        // 5. A withheld lease (revocation by non-reissue) is a normal outcome:
         //    keep last-good, never tighten. The contact succeeded, so the logical
         //    operation is done — rotate the idempotency key for the next cycle.
         let Some(server_lease) = lease else {
@@ -1805,6 +2124,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         identity: &DeviceIdentity,
         held_serial: Option<String>,
         binding_id: Option<String>,
+        nonce: String,
     ) -> HeartbeatRequest {
         HeartbeatRequest {
             binding_id: binding_id.unwrap_or_default(),
@@ -1812,6 +2132,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             fingerprint_digest: identity.fingerprint_digest.clone(),
             app_version: identity.app_version.clone(),
             transport: Transport::Direct,
+            nonce,
         }
     }
 }

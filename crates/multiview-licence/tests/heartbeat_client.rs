@@ -65,7 +65,17 @@ fn client(
     store: Arc<LeaseStore>,
 ) -> HeartbeatClient<FakeLicenceServer> {
     let pinned = server.pinned_root();
-    HeartbeatClient::new(server, store, pinned, test_config(), test_identity())
+    // v0.9.0 enforces device-PoP: every client carries a bound device signer (the
+    // fake verifies the proof). The shared `pop_test_signer` matches the key the
+    // fake checks against.
+    HeartbeatClient::with_device_signer(
+        server,
+        store,
+        pinned,
+        test_config(),
+        test_identity(),
+        std::sync::Arc::new(fake::pop_test_signer()),
+    )
 }
 
 #[tokio::test]
@@ -110,7 +120,8 @@ async fn a_tampered_lease_from_the_server_is_rejected_and_nothing_is_installed()
         pinned,
         test_config(),
         test_identity(),
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
     let outcome = tokio::time::timeout(Duration::from_secs(5), client.run_once())
         .await
         .expect("run_once must not hang")
@@ -194,7 +205,12 @@ async fn the_heartbeat_request_carries_no_raw_identifier() {
     // id, the salted fingerprint digest, the app version, the lease serial, and
     // the transport — never a raw serial/MAC/UUID/hostname.
     let identity = test_identity();
-    let req = HeartbeatClient::<FakeLicenceServer>::build_heartbeat_request(&identity, None);
+    // v0.9.0 adds the single-use PoP `nonce` to the body (still no raw identifier).
+    let req = HeartbeatClient::<FakeLicenceServer>::build_heartbeat_request(
+        &identity,
+        None,
+        "9f3a2b6e1c0e9b41a4c92d7e3b8f10c25e6a7d3f49b0c81e2f5a6d7c8b9e0f1a".to_owned(),
+    );
     let json = serde_json::to_string(&req).unwrap();
 
     // The salted digest IS present; a raw MAC/serial pattern is NOT.
@@ -223,7 +239,8 @@ async fn the_heartbeat_request_carries_no_raw_identifier() {
                 "leaseSerial",
                 "fingerprintDigest",
                 "appVersion",
-                "transport"
+                "transport",
+                "nonce"
             ]
             .contains(&k.as_str()),
             "unexpected heartbeat payload field {k:?} (data minimisation)"
@@ -254,7 +271,8 @@ async fn run_once_with_no_binding_performs_no_mutation_and_installs_nothing() {
         pinned,
         test_config(),
         identity,
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
 
     assert!(store.status().is_none(), "store starts empty");
 
@@ -301,7 +319,8 @@ async fn an_installed_lease_then_renews_on_the_next_cycle() {
         pinned,
         test_config(),
         identity,
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
 
     // Cycle 1: no binding → no-op (no mutation).
     tokio::time::timeout(Duration::from_secs(5), client.run_once())
@@ -389,7 +408,8 @@ async fn aborting_the_heartbeat_task_leaves_the_store_untouched() {
             FakeLicenceServer::new().pinned_root(),
             test_config(),
             test_identity(),
-        );
+        )
+        .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
         client.run_forever().await;
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -564,7 +584,8 @@ async fn a_lease_for_another_devices_binding_is_rejected_not_installed() {
         pinned,
         test_config(),
         identity,
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
     server.set_foreign_binding(true); // body.instance_binding_id = someone else's
 
     let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
@@ -598,7 +619,8 @@ async fn a_rejected_lease_does_not_poison_the_learned_binding_id() {
         pinned,
         test_config(),
         identity,
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
 
     // The server hands a lease whose body carries a DIFFERENT (attacker) binding
     // AND is already expired (so install rejects it). The reject path must not
@@ -684,6 +706,7 @@ async fn a_stale_foreign_lease_against_a_store_anchored_binding_does_not_poison_
             test_config(),
             id,
         )
+        .with_signer(std::sync::Arc::new(fake::pop_test_signer()))
     };
     tokio::time::timeout(Duration::from_secs(5), seed_client.run_once())
         .await
@@ -710,7 +733,8 @@ async fn a_stale_foreign_lease_against_a_store_anchored_binding_does_not_poison_
             id.binding_id = None; // unconfigured: anchors to the store's binding
             id
         },
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
     server.set_foreign_binding(true);
     server.set_replay_stale(true); // older granted_at than the seeded lease
     let res = tokio::time::timeout(Duration::from_secs(5), attack_client.run_once())
@@ -779,7 +803,8 @@ async fn a_signer_that_expires_during_the_call_is_rejected_at_acceptance() {
         test_config(),
         test_identity(),
         clock,
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
 
     let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
         .await
@@ -890,7 +915,8 @@ async fn a_lease_installed_via_the_upload_surface_anchors_identity_against_a_for
             id.binding_id = None;
             id
         },
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
     server.set_foreign_binding(true);
     let res = tokio::time::timeout(Duration::from_secs(5), attack.run_once())
         .await
@@ -983,7 +1009,8 @@ async fn the_idempotency_nonce_is_distinct_across_a_restart() {
         test_identity(),
         Arc::new(unix_millis_for_test()),
         Arc::new(nonce.clone()),
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
     tokio::time::timeout(Duration::from_secs(5), client_a.run_once())
         .await
         .unwrap()
@@ -1006,7 +1033,8 @@ async fn the_idempotency_nonce_is_distinct_across_a_restart() {
         test_identity(),
         Arc::new(unix_millis_for_test()),
         Arc::new(nonce.clone()),
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
     tokio::time::timeout(Duration::from_secs(5), client_b.run_once())
         .await
         .unwrap()
@@ -1092,7 +1120,8 @@ async fn a_failing_durable_nonce_store_keeps_last_good_and_sends_no_mutation() {
         test_identity(),
         Arc::new(unix_millis_for_test()),
         Arc::new(FailingNonceStore),
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
 
     let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
         .await
@@ -1131,7 +1160,8 @@ async fn a_nonce_commit_failure_blocks_the_mutation_fail_closed() {
         test_identity(),
         Arc::new(unix_millis_for_test()),
         Arc::new(UncommittableNonceStore),
-    );
+    )
+    .with_signer(std::sync::Arc::new(fake::pop_test_signer()));
 
     let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
         .await

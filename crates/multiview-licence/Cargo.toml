@@ -84,6 +84,11 @@ coset = { version = "0.4", optional = true }
 # its `digest` trait) is `MIT OR Apache-2.0`, deny-clean, and ALREADY in this
 # crate's graph (the `p256` ECDSA closure pulls it), so it adds no new crate.
 sha2 = { version = "0.10", default-features = false, optional = true }
+# Serialise the heartbeat request body to the EXACT bytes the PoP `sha256(body)`
+# covers and the transport sends verbatim (ADR-I007 — no re-serialisation drift).
+# `MIT OR Apache-2.0`, deny-clean, ALREADY in the workspace graph (and this crate's
+# dev-deps); pure Rust, no native deps.
+serde_json = { workspace = true, optional = true }
 # The heartbeat loop sleeps to `nextDue` and is `tokio::spawn`'d by the cli. Only
 # the `rt`/`time` slices are needed (no socket — the leaf crate never opens one).
 # `MIT`, deny-clean, already in the workspace graph.
@@ -115,7 +120,7 @@ default = []
 # default so the baseline build is network-free and `cargo deny`-clean; the cli
 # `heartbeat` feature (the shipped deploy presets) turns it on and supplies the
 # live HTTP transport. The pure data/verify model stays compiled either way.
-heartbeat = ["dep:p256", "dep:base64", "dep:hex", "dep:tokio", "dep:coset", "dep:sha2"]
+heartbeat = ["dep:p256", "dep:base64", "dep:hex", "dep:tokio", "dep:coset", "dep:sha2", "dep:serde_json"]
 
 [lints]
 workspace = true
