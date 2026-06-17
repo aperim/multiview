@@ -67,9 +67,23 @@ p256 = { version = "0.13", default-features = false, features = ["ecdsa"], optio
 # well-known key material/signatures (D3). `MIT OR Apache-2.0`, deny-clean, pure
 # Rust, no native deps.
 base64 = { version = "0.22", default-features = false, features = ["alloc"], optional = true }
-# Lower-case hex decode of the bare-Ed25519 lease `signature` (64 bytes). `MIT OR
-# Apache-2.0`, deny-clean, pure Rust.
+# Lower-case hex decode of the bare-Ed25519 lease `signature` (64 bytes) + the
+# device-PoP challenge nonce (32 raw bytes from 64-hex). `MIT OR Apache-2.0`,
+# deny-clean, pure Rust.
 hex = { version = "0.4", default-features = false, features = ["alloc"], optional = true }
+# COSE_Sign1 construction for the device-PoP proof (CONSPECT-3 D2, ADR-I007): the
+# `Conspect-Device-PoP` header is a base64 COSE_Sign1 over the canonical PoP
+# pre-image, signed EdDSA with the device key. `coset` is `Apache-2.0` (deny-clean,
+# already on the allowlist); its ONLY runtime deps are `ciborium` + `ciborium-io`,
+# BOTH already in this crate's graph (the lease/challenge CBOR), so it adds ZERO new
+# transitive crates. We build the structure (set protected `alg = EdDSA`, payload =
+# pre-image) and sign via the closure seam; the Ed25519 SIGNING is deterministic
+# (RFC 8032 — no RNG), so the leaf crate stays no-RNG in non-test code.
+coset = { version = "0.4", optional = true }
+# SHA-256 of the request body for the PoP pre-image (`sha256(body)`). `sha2` (and
+# its `digest` trait) is `MIT OR Apache-2.0`, deny-clean, and ALREADY in this
+# crate's graph (the `p256` ECDSA closure pulls it), so it adds no new crate.
+sha2 = { version = "0.10", default-features = false, optional = true }
 # The heartbeat loop sleeps to `nextDue` and is `tokio::spawn`'d by the cli. Only
 # the `rt`/`time` slices are needed (no socket — the leaf crate never opens one).
 # `MIT`, deny-clean, already in the workspace graph.
@@ -101,7 +115,7 @@ default = []
 # default so the baseline build is network-free and `cargo deny`-clean; the cli
 # `heartbeat` feature (the shipped deploy presets) turns it on and supplies the
 # live HTTP transport. The pure data/verify model stays compiled either way.
-heartbeat = ["dep:p256", "dep:base64", "dep:hex", "dep:tokio"]
+heartbeat = ["dep:p256", "dep:base64", "dep:hex", "dep:tokio", "dep:coset", "dep:sha2"]
 
 [lints]
 workspace = true
