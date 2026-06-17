@@ -1197,16 +1197,44 @@ impl ConspectHttpServer {
             .send()
             .await
             .map_err(|e| HeartbeatError::Transport(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(HeartbeatError::Transport(format!(
-                "{} returned HTTP {}",
-                url,
-                resp.status()
-            )));
+        let status = resp.status();
+        if !status.is_success() {
+            // STATUS-AWARE retry (ADR-I007 §8, round 3): a RECEIVED 4xx is a DEFINITIVE
+            // server rejection (the server processed + rejected THIS request — 401
+            // pop-invalid/pop-required, 409 idempotency/body-mismatch); the single-use PoP
+            // nonce is burned, so the leaf drops the pinned attempt + nonce and recovers
+            // with a fresh challenge (never replay a burned nonce). A 5xx is AMBIGUOUS (the
+            // mutation may have committed) → Transport, replayed verbatim under the same
+            // Idempotency-Key (the server dedupes; a burned nonce then surfaces as a 4xx
+            // next cycle → recovery). A no-response transport error stays Transport (above).
+            return Err(heartbeat_status_error(status, &url));
         }
         resp.json::<T>()
             .await
             .map_err(|e| HeartbeatError::Malformed(e.to_string()))
+    }
+}
+
+/// Classify a non-2xx heartbeat-POST response into the STATUS-AWARE retry error
+/// (ADR-I007 §8, round 3). A RECEIVED 4xx client error is a DEFINITIVE server rejection —
+/// the server processed and rejected this exact request (401 `pop-invalid`/`pop-required`,
+/// 409 idempotency/body-mismatch) — so the single-use PoP nonce is burned and the leaf
+/// discards the pinned retry attempt ([`HeartbeatError::ServerRejected`]) and recovers with
+/// a fresh `/challenge` next cycle (never replay a burned nonce). A 5xx is AMBIGUOUS (the
+/// mutation may have committed before the server errored) → [`HeartbeatError::Transport`],
+/// replayed verbatim under the same `Idempotency-Key` (the server dedupes; a burned nonce
+/// then surfaces as a 4xx next cycle → recovery).
+#[cfg(feature = "heartbeat")]
+fn heartbeat_status_error(
+    status: reqwest::StatusCode,
+    url: &str,
+) -> multiview_licence::heartbeat::HeartbeatError {
+    use multiview_licence::heartbeat::HeartbeatError;
+    let detail = format!("{url} returned HTTP {status}");
+    if status.is_client_error() {
+        HeartbeatError::ServerRejected(detail)
+    } else {
+        HeartbeatError::Transport(detail)
     }
 }
 
@@ -1298,6 +1326,38 @@ fn hex_upper_nibble(n: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn a_received_4xx_is_a_definitive_server_rejection_5xx_is_ambiguous_transport() {
+        use multiview_licence::heartbeat::HeartbeatError;
+        // ADR-I007 §8 round-3: a RECEIVED 4xx (401 pop-invalid/pop-required, 409
+        // idempotency/body-mismatch, and other client errors) is DEFINITIVE → ServerRejected,
+        // so the leaf discards the burned nonce + pinned attempt and recovers with a fresh
+        // challenge; it must NOT be replayed verbatim.
+        for code in [400u16, 401, 403, 404, 409, 422] {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            assert!(
+                matches!(
+                    heartbeat_status_error(status, "https://x/y"),
+                    HeartbeatError::ServerRejected(_)
+                ),
+                "HTTP {code} (a received client-error response) must be a definitive ServerRejected",
+            );
+        }
+        // A 5xx is AMBIGUOUS (the mutation may have committed) → Transport, so the SAME
+        // idempotency-keyed body + nonce is replayed verbatim (the server dedupes).
+        for code in [500u16, 502, 503, 504] {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            assert!(
+                matches!(
+                    heartbeat_status_error(status, "https://x/y"),
+                    HeartbeatError::Transport(_)
+                ),
+                "HTTP {code} (a server error) must stay ambiguous Transport (replay-safe)",
+            );
+        }
+    }
 
     #[test]
     fn a_clean_signal_does_not_watermark() {

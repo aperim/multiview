@@ -941,10 +941,14 @@ impl LicenceServer for FakeLicenceServer {
         *self.last_request_nonce.lock().expect("poisoned") = Some(req.nonce.clone());
         let verified = self.verify_pop(pop_header, &body, &req.nonce);
         self.last_pop_verified.store(verified, Ordering::SeqCst);
-        // `pop-invalid` (401): the server rejects the proof. Either the knob forces
-        // it, or the proof genuinely failed to verify (a real server would too).
+        // `pop-invalid` (401): the server rejects the proof — a DEFINITIVE rejection
+        // (an HTTP response WAS received). Either the knob forces it, or the proof
+        // genuinely failed to verify (a real server would 401 it too). Surfaced as
+        // `ServerRejected` so the client drops the burned nonce + recovers with a
+        // fresh /challenge next cycle (round-3) — NOT a `Transport` (ambiguous) error
+        // that would replay the burned nonce forever.
         if self.reject_pop.load(Ordering::SeqCst) || !verified {
-            return Err(HeartbeatError::Transport(
+            return Err(HeartbeatError::ServerRejected(
                 "fake heartbeat returned HTTP 401 pop-invalid".to_owned(),
             ));
         }

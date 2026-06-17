@@ -203,6 +203,27 @@ Two further majors from the round-2 review:
   swap the path between the check and the read. (The install side already used
   `O_EXCL` + `hard_link` + explicit `0600`.)
 
+#### Round 3 — status-aware retry (replay only on an ambiguous failure)
+
+The round-2 coupling replayed the pinned `PendingAttempt` verbatim on **every** failed contact.
+That is correct for an *ambiguous* failure (no response — the mutation may have committed) but
+wrong for a **definitive** server rejection: a `401 pop-invalid`/`pop-required` (or `409`
+body-mismatch) means the single-use nonce was **seen and burned**, so replaying it loops
+`pop-invalid` forever and renewal is permanently stranded (the lease drifts to expiry while
+last-good silently holds). The retry is now **status-aware**:
+
+- The cli transport (`ConspectHttpServer::post_raw_json`, via the pure `heartbeat_status_error`
+  helper) maps a **received 4xx** to a new `HeartbeatError::ServerRejected` (definitive) and a
+  **5xx** to `Transport` (ambiguous); a no-response send error stays `Transport`. The leaf crate
+  stays I/O-free — it only **matches** the variant.
+- `run_once`: an **ambiguous** `Transport` keeps the attempt pinned and replays it verbatim; a
+  **definitive** `ServerRejected` calls `reset_on_rejection` (drop the pinned attempt **and** the
+  burned nonce) so the next cycle fetches a fresh `/challenge` and signs a fresh proof — the
+  device key is untouched. Both keep last-good, back off, never panic.
+
+**Invariant:** a single-use PoP nonce the server has seen and rejected is burned and must never
+be replayed; replay only when it is unknown whether the server received the request.
+
 ## Rationale
 
 - **The leaf-crate invariant is preserved exactly.** Generation (RNG) + persistence (I/O) — the

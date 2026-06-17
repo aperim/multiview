@@ -1110,9 +1110,25 @@ pub trait LicenceServer: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum HeartbeatError {
-    /// A transport-level failure (connection, TLS, timeout, non-success status).
+    /// An **ambiguous** failure where **no HTTP response was received** — a
+    /// connection error, TLS handshake failure, timeout, DNS failure, or a `5xx`
+    /// (the server may or may not have processed the request). On a heartbeat
+    /// mutation the device does NOT know whether the server received + committed it,
+    /// so a pinned attempt is REPLAYED verbatim next cycle (same Idempotency-Key +
+    /// same body + same single-use nonce) — the server dedupes, never a duplicate
+    /// lease, never a stranding mismatch (ADR-I007 §8).
     #[error("licence-server transport error: {0}")]
     Transport(String),
+    /// A **definitive** server rejection where an HTTP RESPONSE WAS received with a
+    /// status the device cannot fix by replaying the same bytes — `401`
+    /// `pop-invalid`/`pop-required` (the single-use PoP nonce was SEEN + burned) or
+    /// `409` idempotency/body-mismatch. The device KNOWS the server processed +
+    /// rejected this attempt, so the pinned attempt is DROPPED and the burned nonce
+    /// discarded → the next cycle fetches a FRESH `/challenge` and signs a FRESH
+    /// proof (recovery). The device **key is unchanged** (only the nonce burned).
+    /// Keeps last-good, never off air (ADR-I007 §8, round 3).
+    #[error("licence-server rejected the request (definitive, response received): {0}")]
+    ServerRejected(String),
     /// The server response could not be parsed.
     #[error("malformed licence-server response: {0}")]
     Malformed(String),
@@ -1751,6 +1767,28 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         self.rotate_idempotency();
     }
 
+    /// Recover from a DEFINITIVE server rejection (`ServerRejected` — 401
+    /// pop-invalid/pop-required or 409 body-mismatch; ADR-I007 §8, round 3). The
+    /// single-use PoP nonce was SEEN + burned server-side, so:
+    /// 1. drop the pinned attempt + rotate the Idempotency-Key ([`clear_pending`]) —
+    ///    the burned attempt must NEVER be replayed (a verbatim replay loops
+    ///    pop-invalid forever and strands renewal);
+    /// 2. clear any held PoP nonce so the next cycle COLD-STARTS a fresh
+    ///    `GET /challenge` and signs a FRESH proof.
+    ///
+    /// The device **key is untouched** — only the single-use nonce is burned. Keeps
+    /// last-good (never off air): the cycle still returns an error, the loop backs
+    /// off, and the NEXT cycle recovers cleanly.
+    fn reset_on_rejection(&self) {
+        self.clear_pending();
+        // Drop the held nextNonce — it is either the just-burned one or stale; the
+        // next cycle must fetch a fresh challenge, never present a burned nonce.
+        match self.pop_nonce.lock() {
+            Ok(mut g) => *g = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+    }
+
     /// Obtain the single-use device-PoP challenge nonce for THIS heartbeat:
     /// steady-state the held `nextNonce` (RFC 9449 DPoP-nonce style); cold start (no
     /// held nonce, or a held nonce already expired) a fresh `GET /challenge`.
@@ -1986,10 +2024,20 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             attempt
         };
 
-        // 4. RENEW the held lease by sending the pinned attempt. On a transport
-        //    failure the `?` propagates with the attempt STILL pinned, so the next
-        //    cycle replays it (same key + same body) — never off air.
-        let resp = self
+        // 4. RENEW the held lease by sending the pinned attempt. STATUS-AWARE retry
+        //    (ADR-I007 §8, round 3):
+        //    * AMBIGUOUS failure (`Transport` — NO response: conn/timeout/DNS/5xx):
+        //      the server may or may not have committed it, so KEEP the attempt
+        //      pinned; the next cycle REPLAYS it verbatim (same key + body + nonce)
+        //      and the server dedupes.
+        //    * DEFINITIVE rejection (`ServerRejected` — a response WAS received,
+        //      401 pop-invalid/pop-required or 409 body-mismatch): the single-use
+        //      nonce was SEEN + burned, so the attempt MUST NOT be replayed. Drop
+        //      the pinned attempt + the burned nonce (`reset_on_rejection`) so the
+        //      next cycle fetches a FRESH `/challenge` and signs a FRESH proof
+        //      (recovery). The device key is untouched.
+        //    Both keep last-good, back off, never panic (never off air, inv #1/#10).
+        let resp = match self
             .server
             .heartbeat(
                 &self.config.org_id,
@@ -1997,7 +2045,19 @@ impl<S: LicenceServer> HeartbeatClient<S> {
                 &attempt.idempotency_key,
                 &attempt.pop_header,
             )
-            .await?;
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err @ HeartbeatError::ServerRejected(_)) => {
+                // INVARIANT: a single-use PoP nonce the server has SEEN + REJECTED is
+                // burned — never replay it. Drop the pinned attempt + burned nonce so
+                // the next cycle recovers with a fresh challenge.
+                self.reset_on_rejection();
+                return Err(err);
+            }
+            // Ambiguous (no response): leave the attempt pinned to replay verbatim.
+            Err(err) => return Err(err),
+        };
         let (lease, state, next_due, next_nonce) = (
             resp.lease,
             resp.enforcement_state,

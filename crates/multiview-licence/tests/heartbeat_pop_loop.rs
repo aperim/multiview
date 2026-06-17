@@ -173,7 +173,15 @@ async fn an_unreachable_challenge_keeps_last_good_no_mutation() {
 }
 
 #[tokio::test]
-async fn a_server_rejected_nonce_pop_invalid_keeps_last_good() {
+async fn a_server_rejected_nonce_pop_invalid_keeps_last_good_and_recovers() {
+    // Panel round-3 (the convergence finding): a DEFINITIVE pop-invalid REJECTION
+    // (an HTTP response was received) burns the single-use nonce server-side, so the
+    // client must NOT replay that burned nonce+proof — it must DROP the pinned
+    // attempt and, next cycle, fetch a FRESH /challenge and sign a FRESH proof
+    // (RECOVERY). A verbatim replay would loop pop-invalid forever and strand the
+    // lease silently. The INVARIANT: a nonce the server has SEEN + REJECTED is
+    // burned and must never be replayed; only an AMBIGUOUS (no-response) failure
+    // replays the pinned unit.
     let server = shared_fake();
     let store = Arc::new(LeaseStore::new());
     let client = pop_client(Arc::clone(&server), Arc::clone(&store));
@@ -185,7 +193,7 @@ async fn a_server_rejected_nonce_pop_invalid_keeps_last_good() {
         .unwrap();
     let serial = store.current().unwrap().lease.serial;
 
-    // The server now rejects the heartbeat as pop-invalid (401).
+    // The server rejects the heartbeat as pop-invalid (401, response received).
     server.set_reject_pop(true);
     let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
         .await
@@ -195,6 +203,32 @@ async fn a_server_rejected_nonce_pop_invalid_keeps_last_good() {
         store.current().unwrap().lease.serial,
         serial,
         "a pop-invalid rejection keeps the last-good lease (never off air)"
+    );
+    let challenges_after_reject = server.challenge_fetches();
+    let rejected_nonce = server
+        .last_request_nonce()
+        .expect("the rejected attempt carried a nonce");
+
+    // RECOVERY: the server now accepts proofs again. The NEXT cycle must NOT replay
+    // the burned nonce — it must fetch a FRESH /challenge and sign a FRESH proof.
+    server.set_reject_pop(false);
+    let outcome = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang")
+        .expect("the client must RECOVER after a pop-invalid (fresh nonce), not loop");
+    assert!(matches!(outcome, HeartbeatOutcome::Installed { .. }));
+    assert!(
+        server.challenge_fetches() > challenges_after_reject,
+        "recovery must fetch a FRESH /challenge (a burned nonce is never replayed)"
+    );
+    assert_ne!(
+        server.last_request_nonce().as_deref(),
+        Some(rejected_nonce.as_str()),
+        "recovery must sign a FRESH nonce — never replay the server-burned one"
+    );
+    assert!(
+        server.last_pop_verified(),
+        "the recovery proof verifies against the device key"
     );
 }
 
