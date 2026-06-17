@@ -56,7 +56,7 @@ fn live_apply_upsert(
     let Some(source) = source else {
         return ApplyMode::Restart;
     };
-    if source.kind.is_synthetic() {
+    if state.live_sources.is_live(&source.kind) {
         let submitted = state
             .commands
             .try_submit(Command::UpsertSource {
@@ -70,7 +70,7 @@ fn live_apply_upsert(
             ApplyMode::Restart
         };
     }
-    if previous.is_some_and(|prev| prev.kind.is_synthetic()) {
+    if previous.is_some_and(|prev| state.live_sources.is_live(&prev.kind)) {
         // Synthetic -> decoded kind change: stop the running generator now;
         // the stored decoded source applies on restart. A shed submit is
         // surfaced (never silent): the stale generator keeps rendering until

@@ -362,23 +362,16 @@ fn seed_working_layout(
 /// ~2000 structured records are retained for `GET /api/v1/logs`, drop-oldest.
 const DEFAULT_LOG_RING_CAPACITY: usize = 2000;
 
-/// The shared application state.
-///
-/// Cloned cheaply (`Arc`) into every handler via axum's `State` extractor. It
-/// bundles:
-///
-/// * `engine` — the engine's outbound [`EnginePublisher`]: a wait-free
-///   latest-state slot plus a drop-oldest event broadcast. The control plane
-///   only ever **reads/subscribes**, never sends on a path the engine awaits.
 /// The source kinds the running engine can apply **live** (ADR-W018,
 /// invariant #11) — the run-path capability signal the binary threads into the
 /// control plane so the apply header stays honest per build/run flavour.
 ///
 /// * `synthetic` — `bars`/`solid`/`clock` spawn in-process generators through
 ///   the live-source hub (both run paths wire this).
-/// * `network` — `rtsp`/`hls`/`ts`/`srt`/`rtmp`/`file`/`rist` spawn the supervised
-///   `ingest_loop` through the hub's ingest spawner (the full-pipeline /
-///   `ffmpeg` run path only; the software engine has no decoder).
+/// * `network` — `rtsp`/`hls`/`ts`/`srt`/`rtmp`/`file`/`rist` spawn the
+///   supervised `ingest_loop` through the hub's ingest spawner (the
+///   full-pipeline / `ffmpeg` run path only; the software engine has no
+///   decoder).
 ///
 /// Kinds outside both sets (`ndi`, `youtube`, `aes67`) are never live-applied
 /// in this slice and always answer `restart`.
@@ -434,6 +427,14 @@ impl Default for LiveSourceCapability {
     }
 }
 
+/// The shared application state.
+///
+/// Cloned cheaply (`Arc`) into every handler via axum's `State` extractor. It
+/// bundles:
+///
+/// * `engine` — the engine's outbound [`EnginePublisher`]: a wait-free
+///   latest-state slot plus a drop-oldest event broadcast. The control plane
+///   only ever **reads/subscribes**, never sends on a path the engine awaits.
 /// * `commands` — the inbound [`CommandSender`] (bounded, non-blocking
 ///   `try_submit`): the only channel control->engine, designed so it can never
 ///   block the engine.
