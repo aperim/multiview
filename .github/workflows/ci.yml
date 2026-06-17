@@ -492,11 +492,20 @@ jobs:
         # or ADR) without pulling a Node/Ruby link-checker toolchain.
         run: ./scripts/check-markdown-links.sh
 
+  # ── web SPA gates (eslint + tsc + vitest + build) ────────────────────────────
+  # Gates the EXISTING web/ scripts (web/package.json): `lint` (eslint
+  # --max-warnings=0), an explicit `tsc --noEmit` typecheck, `test` (vitest run),
+  # and `build` (lingui compile && tsc --noEmit && vite build). `npm ci` honours
+  # the committed web/package-lock.json (rule 33 — deterministic builds), and the
+  # built-in setup-node npm cache (keyed on the lockfile) keeps the install fast.
+  # tsc is run as its own step (ahead of the heavier build) so a type error
+  # reports as a distinct, early failure even though `build` also runs tsc.
   web:
-    name: web build
+    name: web (eslint + tsc + vitest + build)
     runs-on: ubuntu-latest
-    # npm install + Vite production build (~1-5min). 20min absorbs a cold npm
-    # cache and a slow registry while still failing a wedge well under 6h.
+    # npm ci + eslint + tsc + vitest + Vite production build (~2-6min). 20min
+    # absorbs a cold npm cache and a slow registry while still failing a wedge
+    # well under 6h.
     timeout-minutes: 20
     needs: changes
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
@@ -505,9 +514,57 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: install
         working-directory: web
-        run: npm install
+        run: npm ci
+      - name: lint (eslint)
+        working-directory: web
+        run: npm run lint
+      - name: typecheck (tsc --noEmit)
+        working-directory: web
+        run: npx tsc --noEmit
+      - name: test (vitest)
+        working-directory: web
+        run: npm test
       - name: build
         working-directory: web
         run: npm run build
+
+  # ── web Playwright end-to-end (real browser) ─────────────────────────────────
+  # Drives the REAL built SPA in a real Chromium (the failure class these specs
+  # guard — e.g. the ResourceTable re-render-loop renderer OOM — only reproduces
+  # with real browser effects jsdom does not implement; see web/playwright.config.ts).
+  # The Playwright webServer builds the app and serves `dist` via `vite preview`,
+  # mocking the API per-test (page.route), so no backend is required. The runner's
+  # auto-set CI=true makes the config enforce forbidOnly + no server reuse. This is
+  # a separate (heavier: chromium download + browser run) job so it parallelises
+  # with the lint/tsc/vitest/build job above and stays legible.
+  web-e2e:
+    name: web e2e (Playwright)
+    runs-on: ubuntu-latest
+    # npm ci + chromium download (~110MB) + a build + 11 browser specs (~1-3min
+    # warm). 25min absorbs a cold npm + browser cache and the in-webServer build.
+    timeout-minutes: 25
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install
+        working-directory: web
+        run: npm ci
+      - name: install Playwright chromium
+        # --with-deps pulls the OS libraries Chromium needs on the ubuntu runner;
+        # the config launches with --no-sandbox for the containerised browser.
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: e2e (playwright)
+        # The webServer block builds the SPA and serves it; the specs mock the API.
+        working-directory: web
+        run: npm run test:e2e
