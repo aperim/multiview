@@ -2048,14 +2048,17 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             .await
         {
             Ok(resp) => resp,
-            Err(err @ HeartbeatError::ServerRejected(_)) => {
-                // INVARIANT: a single-use PoP nonce the server has SEEN + REJECTED is
-                // burned — never replay it. Drop the pinned attempt + burned nonce so
-                // the next cycle recovers with a fresh challenge.
+            Err(err @ (HeartbeatError::ServerRejected(_) | HeartbeatError::Malformed(_))) => {
+                // INVARIANT: a single-use PoP nonce the server has SEEN is burned — never
+                // replay it. A definitive 4xx (ServerRejected) OR a 2xx whose body will not
+                // parse (Malformed — post_raw_json emits it ONLY after a 2xx, so the server
+                // received the request and processed/burned the nonce) is a RECEIVED contact.
+                // Drop the pinned attempt + burned nonce so the next cycle recovers with a
+                // fresh challenge (a fresh idempotency-keyed unit; the lease re-renews safely).
                 self.reset_on_rejection();
                 return Err(err);
             }
-            // Ambiguous (no response): leave the attempt pinned to replay verbatim.
+            // Ambiguous (no response / 5xx): leave the attempt pinned to replay verbatim.
             Err(err) => return Err(err),
         };
         let (lease, state, next_due, next_nonce) = (

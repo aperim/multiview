@@ -592,6 +592,12 @@ pub struct FakeLicenceServer {
     /// When true, `heartbeat` returns a `pop-invalid`-style transport error (401)
     /// regardless of the proof — the server-rejected-nonce case.
     reject_pop: AtomicBool,
+    /// When true, `heartbeat` returns a `Malformed` error AFTER verifying the proof —
+    /// modelling a 2xx response whose body would not parse (`post_raw_json` emits
+    /// `Malformed` only after a 2xx). The server has SEEN + processed the request (the
+    /// nonce is burned), so the client must drop the pinned attempt and recover with a
+    /// fresh `/challenge`, never replay the burned nonce.
+    malformed_2xx: AtomicBool,
 }
 
 impl FakeLicenceServer {
@@ -625,6 +631,7 @@ impl FakeLicenceServer {
             fail_challenge: AtomicBool::new(false),
             drop_next_nonce: AtomicBool::new(false),
             reject_pop: AtomicBool::new(false),
+            malformed_2xx: AtomicBool::new(false),
         }
     }
 
@@ -715,6 +722,11 @@ impl FakeLicenceServer {
     /// Make the next heartbeat response carry an EMPTY `nextNonce`.
     pub fn set_drop_next_nonce(&self, on: bool) {
         self.drop_next_nonce.store(on, Ordering::SeqCst);
+    }
+    /// Make `heartbeat` return a `Malformed` error AFTER verifying the proof (a 2xx
+    /// whose body would not parse — a RECEIVED contact that burns the nonce).
+    pub fn set_malformed_2xx(&self, on: bool) {
+        self.malformed_2xx.store(on, Ordering::SeqCst);
     }
     /// Make `heartbeat` reject the proof as `pop-invalid` (401).
     pub fn set_reject_pop(&self, on: bool) {
@@ -950,6 +962,15 @@ impl LicenceServer for FakeLicenceServer {
         if self.reject_pop.load(Ordering::SeqCst) || !verified {
             return Err(HeartbeatError::ServerRejected(
                 "fake heartbeat returned HTTP 401 pop-invalid".to_owned(),
+            ));
+        }
+        // A 2xx whose body would not parse: the server PROCESSED the request (the nonce
+        // verified + recorded above is burned) but the client cannot read the lease —
+        // `post_raw_json` surfaces this as `Malformed`. A RECEIVED contact, so the client
+        // must recover with a fresh /challenge (round-4), never replay the burned nonce.
+        if self.malformed_2xx.load(Ordering::SeqCst) {
+            return Err(HeartbeatError::Malformed(
+                "fake heartbeat returned HTTP 200 with an unparseable body".to_owned(),
             ));
         }
         // Record the bindingId the client addressed us by (the renewal must use

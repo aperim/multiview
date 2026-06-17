@@ -233,6 +233,64 @@ async fn a_server_rejected_nonce_pop_invalid_keeps_last_good_and_recovers() {
 }
 
 #[tokio::test]
+async fn a_malformed_2xx_body_keeps_last_good_and_recovers_with_a_fresh_challenge() {
+    // Panel round-4: a 2xx whose body will not parse surfaces as HeartbeatError::Malformed
+    // (post_raw_json emits it ONLY after a 2xx). The server RECEIVED the request and
+    // processed/burned the single-use nonce, so — exactly like a 4xx rejection — the client
+    // must NOT replay the burned nonce: it must DROP the pinned attempt and, next cycle,
+    // fetch a FRESH /challenge and sign a FRESH proof (RECOVERY). Only an AMBIGUOUS
+    // (no-response/5xx) failure replays the pinned unit verbatim.
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = pop_client(Arc::clone(&server), Arc::clone(&store));
+
+    // Seed a healthy lease.
+    tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .unwrap()
+        .unwrap();
+    let serial = store.current().unwrap().lease.serial;
+
+    // The server returns a 2xx with an unparseable body (Malformed, response received).
+    server.set_malformed_2xx(true);
+    let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(res.is_err(), "a malformed 2xx body surfaces an error");
+    assert_eq!(
+        store.current().unwrap().lease.serial,
+        serial,
+        "a malformed 2xx response keeps the last-good lease (never off air)"
+    );
+    let challenges_after = server.challenge_fetches();
+    let burned_nonce = server
+        .last_request_nonce()
+        .expect("the malformed attempt carried a nonce");
+
+    // RECOVERY: the body parses again. The NEXT cycle must NOT replay the burned nonce —
+    // it must fetch a FRESH /challenge and sign a FRESH proof.
+    server.set_malformed_2xx(false);
+    let outcome = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang")
+        .expect("the client must RECOVER after a malformed 2xx (fresh nonce), not loop");
+    assert!(matches!(outcome, HeartbeatOutcome::Installed { .. }));
+    assert!(
+        server.challenge_fetches() > challenges_after,
+        "recovery must fetch a FRESH /challenge (a burned nonce is never replayed)"
+    );
+    assert_ne!(
+        server.last_request_nonce().as_deref(),
+        Some(burned_nonce.as_str()),
+        "recovery must sign a FRESH nonce — never replay the server-burned one"
+    );
+    assert!(
+        server.last_pop_verified(),
+        "the recovery proof verifies against the device key"
+    );
+}
+
+#[tokio::test]
 async fn no_binding_makes_no_challenge_and_no_pop() {
     // The renew-only client makes NO server call when there is no binding to renew
     // — so it must NOT fetch a challenge or build a PoP (a benign no-op).
