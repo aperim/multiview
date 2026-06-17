@@ -836,3 +836,92 @@ async fn live_kind_change_to_a_non_live_kind_stops_the_producer_but_stays_restar
         "a live->non-live kind change must stop the running producer, got {drained:?}"
     );
 }
+
+#[tokio::test]
+async fn rist_stays_restart_when_the_engine_build_lacks_the_rist_feature() {
+    // RIST is network media but needs the off-by-default `rist` feature in the
+    // engine build. An ffmpeg-without-rist run wires a real ingest spawner (so
+    // rtsp/hls/etc. flip to live) but a RIST spawn would REFUSE — so the header
+    // must keep RIST on `restart` and nothing rides the bus, never over-claiming
+    // a `live` that ends in a slate tile.
+    let mut h = support::harness_with(|state| {
+        state.with_live_sources(
+            multiview_control::LiveSourceCapability::synthetic_and_network().with_rist(false),
+        )
+    });
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/sources/rist1",
+            OPERATOR_TOKEN,
+            &json!({ "name": "RIST", "body": { "id": "rist1", "kind": "rist", "url": "rist://[2001:db8::5]:9001" } }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(
+        apply_header(&resp),
+        "restart",
+        "a RIST source must stay restart when the engine build lacks the rist feature"
+    );
+    let drained = h.commands.try_drain();
+    assert!(
+        !drained
+            .iter()
+            .any(|c| matches!(c, multiview_control::Command::UpsertSource { .. })),
+        "no UpsertSource may ride the bus for RIST without the rist feature, got {drained:?}"
+    );
+
+    // Sanity: a non-RIST network kind on the SAME (rist=false) capability still
+    // flips to live — only RIST is gated, the rest of the network set is not.
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/sources/cam1",
+            OPERATOR_TOKEN,
+            &json!({ "name": "Cam", "body": { "id": "cam1", "kind": "rtsp", "url": "rtsp://[2001:db8::1]/cam1" } }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(
+        apply_header(&resp),
+        "live",
+        "a non-RIST network kind stays live even when RIST is gated off"
+    );
+}
+
+#[tokio::test]
+async fn rist_applies_live_when_the_engine_build_carries_the_rist_feature() {
+    // With the rist feature compiled into the engine, RIST rides the same
+    // ingest_loop as the other network kinds — the header declares live and the
+    // validated source rides the bus as UpsertSource.
+    let mut h = support::harness_with(|state| {
+        state.with_live_sources(
+            multiview_control::LiveSourceCapability::synthetic_and_network().with_rist(true),
+        )
+    });
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/sources/rist1",
+            OPERATOR_TOKEN,
+            &json!({ "name": "RIST", "body": { "id": "rist1", "kind": "rist", "url": "rist://[2001:db8::5]:9001" } }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(
+        apply_header(&resp),
+        "live",
+        "a RIST source applies live when the engine build carries the rist feature"
+    );
+    let drained = h.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| matches!(
+            c,
+            multiview_control::Command::UpsertSource { source, .. } if source.id == "rist1"
+        )),
+        "RIST with the rist feature must enqueue UpsertSource, got {drained:?}"
+    );
+}

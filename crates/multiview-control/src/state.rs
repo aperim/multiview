@@ -379,9 +379,18 @@ const DEFAULT_LOG_RING_CAPACITY: usize = 2000;
 pub struct LiveSourceCapability {
     /// Synthetic kinds (`bars`/`solid`/`clock`) are live-appliable.
     pub synthetic: bool,
-    /// Network/file kinds (`rtsp`/`hls`/`ts`/`srt`/`rtmp`/`file`/`rist`) are
-    /// live-appliable.
+    /// Network/file kinds (`rtsp`/`hls`/`ts`/`srt`/`rtmp`/`file`) are
+    /// live-appliable. RIST is gated separately on [`Self::rist`] because it
+    /// needs the off-by-default `rist` feature in the engine build.
     pub network: bool,
+    /// RIST (`rist`) is live-appliable. RIST rides the same `ingest_loop` as
+    /// the other network kinds **only when the engine build carries the
+    /// off-by-default `rist` feature** (it lowers to a `rist://` AVIO URL via
+    /// `librist`); on an `ffmpeg`-without-`rist` build a RIST spawn is a typed
+    /// refusal, so the header must NOT claim `live` for it. The binary sets
+    /// this from `cfg!(feature = "rist")` (via [`Self::with_rist`]) — the
+    /// control plane cannot see the engine's compiled features.
+    pub rist: bool,
 }
 
 impl LiveSourceCapability {
@@ -392,24 +401,44 @@ impl LiveSourceCapability {
         Self {
             synthetic: true,
             network: false,
+            rist: false,
         }
     }
 
     /// The full-pipeline (`ffmpeg`) run path: a real ingest spawner is wired
-    /// into the live-source hub, so network/file kinds apply live too.
+    /// into the live-source hub, so network/file kinds apply live too. RIST is
+    /// included here for the canonical "full network" meaning; the binary
+    /// narrows it with [`Self::with_rist`] to the build's actual `rist`-feature
+    /// truth so the header never over-claims on an `ffmpeg`-without-`rist`
+    /// build.
     #[must_use]
     pub const fn synthetic_and_network() -> Self {
         Self {
             synthetic: true,
             network: true,
+            rist: true,
         }
+    }
+
+    /// Narrow (or widen) the RIST live-apply capability to the engine build's
+    /// actual `rist`-feature truth (the binary passes `cfg!(feature = "rist")`).
+    #[must_use]
+    pub const fn with_rist(mut self, rist: bool) -> Self {
+        self.rist = rist;
+        self
     }
 
     /// Whether the running engine can apply a mutation of this `kind` live.
     #[must_use]
-    pub const fn is_live(&self, kind: &multiview_config::SourceKind) -> bool {
+    pub fn is_live(&self, kind: &multiview_config::SourceKind) -> bool {
         if kind.is_synthetic() {
             return self.synthetic;
+        }
+        // RIST is network media but feature-gated: it is live only when the
+        // engine build actually carries the `rist` feature, else the header
+        // would over-claim `live` for a spawn that refuses (tile rides slate).
+        if matches!(kind, multiview_config::SourceKind::Rist { .. }) {
+            return self.rist;
         }
         if kind.is_network_media() {
             return self.network;

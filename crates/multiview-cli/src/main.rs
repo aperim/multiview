@@ -318,9 +318,14 @@ async fn serve_control_plane(
     } = wiring;
     let (commands, command_rx) = command_bus(64);
     // The honesty keystone (ADR-W018): network kinds are declared live-appliable
-    // exactly when the hub below carries a real ingest spawner.
+    // exactly when the hub below carries a real ingest spawner. RIST is narrowed
+    // to the build's actual `rist`-feature truth — an `ffmpeg`-without-`rist`
+    // build wires a real ingest spawner (so rtsp/hls/ts/srt/rtmp/file flip to
+    // `live`) but a RIST spawn would refuse (`librist` not built), so the header
+    // must keep RIST on `restart` there rather than over-claim.
     let live_capability = if ingest.is_some() {
         multiview_control::LiveSourceCapability::synthetic_and_network()
+            .with_rist(cfg!(feature = "rist"))
     } else {
         multiview_control::LiveSourceCapability::synthetic_only()
     };
