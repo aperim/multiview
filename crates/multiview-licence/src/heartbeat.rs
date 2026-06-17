@@ -1722,6 +1722,18 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         // Cold start / expired: fetch a fresh challenge. A transport failure here is
         // a normal keep-last-good outcome (the loop backs off and retries).
         let challenge = self.server.fetch_challenge(org).await?;
+        // Expiry-check the FRESH challenge too (not only a held nonce): a clock skew
+        // or a slow round-trip can hand back an already-expired nonce, and signing +
+        // POSTing it just earns a `pop-invalid`. Fail closed instead — skip this
+        // cycle, keep last-good (never off air); the next cycle fetches afresh. A
+        // re-read of `now` (not the pre-fetch sample) accounts for the round-trip.
+        let now_after = (self.now_ms)();
+        if challenge.expires_at_ms != 0 && challenge.expires_at_ms <= now_after {
+            return Err(HeartbeatError::Pop(PopError::Nonce(format!(
+                "fresh device-PoP challenge already expired (expiresAtMs {} <= now {now_after})",
+                challenge.expires_at_ms
+            ))));
+        }
         Ok(challenge.nonce)
     }
 

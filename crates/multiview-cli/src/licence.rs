@@ -819,11 +819,18 @@ impl DeviceKeyStore {
 
     /// Load the persisted device keypair, or generate + persist one on first boot.
     ///
+    /// **Concurrency-safe first boot (panel major #4):** generation uses an ATOMIC
+    /// create-once (`O_EXCL` on the final path) — the first process to win persists
+    /// its seed durably; every loser observes `AlreadyExists` and RELOADS the
+    /// winner, so all callers return a signer whose seed is exactly the one durably
+    /// on disk (no overwrite race, no signer holding a seed that isn't persisted).
+    ///
     /// # Errors
     /// [`HeartbeatError::Transport`](multiview_licence::heartbeat::HeartbeatError) (a
     /// generic boundary error type the caller already treats as keep-last-good) when
-    /// the lease dir cannot be created, a present key file is corrupt/unreadable, or
-    /// a freshly-generated key cannot be durably persisted — all fail closed.
+    /// the lease dir cannot be created, a present key file is corrupt / unreadable /
+    /// at weak permissions, or a freshly-generated key cannot be durably persisted —
+    /// all fail closed.
     fn load_or_generate(dir: &str) -> Result<Self, multiview_licence::heartbeat::HeartbeatError> {
         use multiview_licence::heartbeat::HeartbeatError;
         let dir_path = std::path::Path::new(dir);
@@ -831,87 +838,218 @@ impl DeviceKeyStore {
             HeartbeatError::Transport(format!("could not create the lease-state dir {dir}: {e}"))
         })?;
         let path = dir_path.join(Self::FILE);
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                // A PRESENT key file MUST parse to exactly a 32-byte seed — anything
-                // else is corruption/tamper and fails closed (never a silent
-                // regenerate that would change the device identity).
-                let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-                    HeartbeatError::Transport(format!(
-                        "device key file {} is present but is not a 32-byte seed \
-                         (corrupt/tamper); refusing to regenerate a new identity",
-                        path.display()
-                    ))
-                })?;
-                Ok(Self {
-                    key: ed25519_dalek::SigningKey::from_bytes(&seed),
-                })
-            }
-            // Absent on a genuinely-new device: generate + persist once.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-                Self::persist_seed(&path, &key.to_bytes())?;
-                Ok(Self { key })
-            }
-            Err(e) => Err(HeartbeatError::Transport(format!(
-                "could not read the device key file {}: {e}",
-                path.display()
-            ))),
+        // Fast path: an existing key. Verified for perms + shape, fail-closed.
+        match Self::load_existing(&path)? {
+            Some(key) => return Ok(Self { key }),
+            None => { /* absent — generate + atomically install below */ }
+        }
+        // Absent: generate a fresh key and try to install it atomically (O_EXCL).
+        let key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        match Self::install_new(&path, &key.to_bytes())? {
+            // We won the create-once race: our key is the durable identity.
+            InstallOutcome::Installed => Ok(Self { key }),
+            // A concurrent starter won — reload the durable winner (NOT our key).
+            InstallOutcome::AlreadyExists => match Self::load_existing(&path)? {
+                Some(key) => Ok(Self { key }),
+                // Vanished between AlreadyExists and the reload (extremely unlikely;
+                // a concurrent delete) — fail closed rather than silently regenerate.
+                None => Err(HeartbeatError::Transport(format!(
+                    "device key file {} vanished during a concurrent first-boot install; \
+                     keeping last-good",
+                    path.display()
+                ))),
+            },
         }
     }
 
-    /// Persist the 32-byte seed with `0600` perms via the crash-durable
-    /// write-temp → fsync → rename → fsync-parent protocol (same as the nonce
-    /// store): a crash leaves either no file or the complete seed, never a torn one.
-    fn persist_seed(
+    /// Load an EXISTING device key, fail-closed on a weak-perm / corrupt / unreadable
+    /// file; `Ok(None)` only when the file is genuinely ABSENT (a fresh device).
+    ///
+    /// **Weak-perm rejection (panel major #2):** an existing key whose mode is not
+    /// `0600` (e.g. a world-readable `0644` signing secret) is REFUSED — a leaked
+    /// private key must never be trusted as the device identity.
+    fn load_existing(
+        path: &std::path::Path,
+    ) -> Result<Option<ed25519_dalek::SigningKey>, multiview_licence::heartbeat::HeartbeatError>
+    {
+        use multiview_licence::heartbeat::HeartbeatError;
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(HeartbeatError::Transport(format!(
+                    "could not read the device key file {}: {e}",
+                    path.display()
+                )))
+            }
+        };
+        // The signing secret must be owner-only (0600). A broader mode means the
+        // private key is exposed — fail closed (do NOT trust it, do NOT regenerate).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(path)
+                .map_err(|e| {
+                    HeartbeatError::Transport(format!(
+                        "could not stat the device key file {}: {e}",
+                        path.display()
+                    ))
+                })?
+                .permissions()
+                .mode()
+                & 0o777;
+            if mode != 0o600 {
+                return Err(HeartbeatError::Transport(format!(
+                    "device key file {} has insecure permissions {mode:#o} (want 0600); \
+                     refusing to use an exposed signing secret",
+                    path.display()
+                )));
+            }
+        }
+        // A PRESENT key file MUST be exactly a 32-byte seed — anything else is
+        // corruption/tamper and fails closed (never a silent regenerate that would
+        // change the device identity and break server-side key continuity).
+        let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+            HeartbeatError::Transport(format!(
+                "device key file {} is present but is not a 32-byte seed \
+                 (corrupt/tamper); refusing to regenerate a new identity",
+                path.display()
+            ))
+        })?;
+        Ok(Some(ed25519_dalek::SigningKey::from_bytes(&seed)))
+    }
+
+    /// Atomically install the 32-byte `seed` as the device key, **failing closed**
+    /// and **refusing to overwrite** an existing key.
+    ///
+    /// Protocol (mirrors `FileNonceStore`'s crash-durable write, plus a create-once
+    /// guard): write the seed to a UNIQUE temp opened `O_EXCL` at mode `0600` (with
+    /// an explicit `fchmod` so a restrictive umask can't widen it and a hostile
+    /// pre-existing temp can't be reused — panel major #1), fsync the temp, then
+    /// `hard-link` it to the final path (atomic create-once: fails `AlreadyExists`
+    /// if a concurrent starter already created the key — panel major #4), unlink the
+    /// temp, and fsync the PARENT DIR so the new directory entry survives a crash
+    /// (the fsync Result is PROPAGATED, never swallowed — panel major #3 + rule-37).
+    /// A non-durable persist would risk a silent identity regenerate on the next
+    /// boot, breaking continuity (security-critical, ADR-I007).
+    fn install_new(
         path: &std::path::Path,
         seed: &[u8; 32],
-    ) -> Result<(), multiview_licence::heartbeat::HeartbeatError> {
+    ) -> Result<InstallOutcome, multiview_licence::heartbeat::HeartbeatError> {
         use std::io::Write as _;
 
         use multiview_licence::heartbeat::HeartbeatError;
-        let tmp = path.with_extension("tmp");
+        let parent = path.parent().ok_or_else(|| {
+            HeartbeatError::Transport(format!(
+                "device key path {} has no parent directory",
+                path.display()
+            ))
+        })?;
+        // A UNIQUE temp name (pid + a monotonic counter) so concurrent starters never
+        // collide on one temp, and a stale broad-perm temp at a fixed name can't be
+        // reused. Opened O_EXCL (`create_new`) so we never adopt a pre-existing file.
+        let unique = format!(
+            "{}.tmp.{}.{}",
+            Self::FILE,
+            std::process::id(),
+            DEVICE_KEY_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let tmp = parent.join(unique);
         let mut opts = std::fs::OpenOptions::new();
-        opts.create(true).write(true).truncate(true);
+        opts.write(true).create_new(true); // O_EXCL: refuse a pre-existing temp
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600); // owner read/write only — the signing secret
+            opts.mode(0o600);
         }
-        let mut file = opts.open(&tmp).map_err(|e| {
+        let file = opts.open(&tmp).map_err(|e| {
             HeartbeatError::Transport(format!(
                 "could not create the device key temp {}: {e}",
                 tmp.display()
             ))
         })?;
-        file.write_all(seed).map_err(|e| {
-            HeartbeatError::Transport(format!(
-                "could not write the device key seed to {}: {e}",
-                tmp.display()
-            ))
-        })?;
-        file.sync_all().map_err(|e| {
-            HeartbeatError::Transport(format!(
-                "could not fsync the device key temp {}: {e}",
-                tmp.display()
-            ))
-        })?;
-        drop(file);
-        std::fs::rename(&tmp, path).map_err(|e| {
-            HeartbeatError::Transport(format!(
-                "could not finalise the device key file {}: {e}",
-                path.display()
-            ))
-        })?;
-        if let Some(parent) = path.parent() {
-            // fsync the parent dir so the rename's directory entry is durable.
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
+        // Belt-and-braces: an explicit chmod so a restrictive (group/other) umask or
+        // any inherited mode can't leave the secret broader than 0600.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if let Err(e) =
+                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(HeartbeatError::Transport(format!(
+                    "could not set 0600 on the device key temp {}: {e}",
+                    tmp.display()
+                )));
             }
         }
-        Ok(())
+        // Write + fsync the temp BEFORE linking it into place, so the linked-in file
+        // is already on stable storage. On any failure, clean up the temp.
+        let write_then_sync = (|| -> std::io::Result<()> {
+            let mut file = file;
+            file.write_all(seed)?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(e) = write_then_sync {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(HeartbeatError::Transport(format!(
+                "could not write/fsync the device key temp {}: {e}",
+                tmp.display()
+            )));
+        }
+        // Atomic create-once: hard-link the temp to the final path. `link` fails with
+        // AlreadyExists if a concurrent starter already created the key — we then
+        // report AlreadyExists (the caller reloads the winner). Any OTHER error fails
+        // closed. The temp is always unlinked afterwards.
+        let link_result = std::fs::hard_link(&tmp, path);
+        let _ = std::fs::remove_file(&tmp);
+        match link_result {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(InstallOutcome::AlreadyExists);
+            }
+            Err(e) => {
+                return Err(HeartbeatError::Transport(format!(
+                    "could not install the device key file {}: {e}",
+                    path.display()
+                )));
+            }
+        }
+        // fsync the PARENT DIR so the new directory entry is durable (a crash right
+        // after link must not lose the device identity). PROPAGATE every failure —
+        // never swallow it (panel major #3 + rule-37): a non-durable identity risks a
+        // silent regenerate that breaks server-side key continuity.
+        let dir = std::fs::File::open(parent).map_err(|e| {
+            HeartbeatError::Transport(format!(
+                "could not open the lease-state dir {} to fsync: {e}",
+                parent.display()
+            ))
+        })?;
+        dir.sync_all().map_err(|e| {
+            HeartbeatError::Transport(format!(
+                "could not fsync the lease-state dir {}: {e}",
+                parent.display()
+            ))
+        })?;
+        Ok(InstallOutcome::Installed)
     }
 }
+
+/// The outcome of [`DeviceKeyStore::install_new`]: whether THIS call created the
+/// durable key, or a concurrent starter already had (so the caller reloads it).
+#[cfg(feature = "heartbeat")]
+enum InstallOutcome {
+    /// This call atomically created + durably persisted the key.
+    Installed,
+    /// A concurrent starter already created the key — reload the winner.
+    AlreadyExists,
+}
+
+/// A monotonic counter making each device-key temp name unique within a process
+/// (combined with the pid), so concurrent installs never collide on one temp.
+#[cfg(feature = "heartbeat")]
+static DEVICE_KEY_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(feature = "heartbeat")]
 impl multiview_licence::heartbeat::DeviceSigner for DeviceKeyStore {
