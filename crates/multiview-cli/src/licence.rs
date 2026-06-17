@@ -356,13 +356,34 @@ impl EntitlementPlane {
                     return;
                 }
             };
-        let client = HeartbeatClient::with_nonce(
+        // Device-PoP (v0.9.0 enforced, ADR-I007): load (or first-boot generate +
+        // persist) the per-instance Ed25519 device keypair beside the lease state.
+        // Fail closed: if it cannot be loaded/generated/persisted (e.g. a corrupt
+        // key file, or an unwritable dir) do NOT start a heartbeat that would be
+        // rejected `pop-required` every cycle — keep last-good (never off air). A
+        // present-but-corrupt key is NOT silently regenerated (that would change the
+        // device identity and break server-side key continuity).
+        let device_signer: std::sync::Arc<dyn multiview_licence::heartbeat::DeviceSigner> =
+            match DeviceKeyStore::load_or_generate(&lease_dir) {
+                Ok(store) => std::sync::Arc::new(store),
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        "Conspect heartbeat is OFF: could not load/generate the durable device \
+                         proof-of-possession keypair — keeping last-good (never a heartbeat \
+                         without a valid device-PoP proof)"
+                    );
+                    return;
+                }
+            };
+        let client = HeartbeatClient::with_nonce_and_signer(
             server,
             std::sync::Arc::clone(&self.store),
             pinned_root,
             settings.heartbeat_config(),
             settings.identity.clone(),
             nonce_store,
+            device_signer,
         );
         let org = settings.org_id.clone();
         tokio::spawn(async move {
@@ -557,6 +578,10 @@ impl HeartbeatSettings {
     pub fn heartbeat_config(&self) -> HeartbeatConfig {
         HeartbeatConfig {
             org_id: self.org_id.clone(),
+            // The PoP `htu` the loop signs is built from this base + org id, so it
+            // matches the URL the transport POSTs to byte-for-byte (ADR-I007). Trim
+            // the trailing slash to match the transport's normalisation.
+            api_base: self.api_base.trim_end_matches('/').to_owned(),
             ..HeartbeatConfig::default()
         }
     }
@@ -767,6 +792,138 @@ impl multiview_licence::heartbeat::NonceStore for FileNonceStore {
     }
 }
 
+/// The durable per-instance Ed25519 **device keypair** for the device-PoP proof
+/// (CONSPECT-3 D2, ADR-I007). Generated ONCE (the only RNG use in the product, at
+/// this cli boundary — the leaf crate stays no-RNG) and persisted beside the lease
+/// state (`<lease-dir>/device-key.ed25519`, the 32-byte seed, `0600`), so it
+/// survives a restart and the device keeps a **stable identity** (the server
+/// verifies continuity against the STORED key and binds its RFC 7638 thumbprint as
+/// the lease `cnf_jkt`). The leaf crate's [`DeviceSigner`](multiview_licence::heartbeat::DeviceSigner)
+/// seam is implemented over a LOADED key — Ed25519 signing is deterministic (RFC
+/// 8032), so no RNG enters the signing path.
+///
+/// **Fail closed (ADR-I007).** A present-but-corrupt/unreadable key file returns an
+/// `Err` (never a silent regenerate — a NEW key would break server-side continuity
+/// and be rejected as a different device); the caller then declines to start the
+/// heartbeat and keeps last-good (never off air). Only an ABSENT file generates a
+/// fresh keypair (a genuinely-new device's first boot).
+#[cfg(feature = "heartbeat")]
+struct DeviceKeyStore {
+    key: ed25519_dalek::SigningKey,
+}
+
+#[cfg(feature = "heartbeat")]
+impl DeviceKeyStore {
+    /// The persisted seed filename inside the lease-state dir.
+    const FILE: &'static str = "device-key.ed25519";
+
+    /// Load the persisted device keypair, or generate + persist one on first boot.
+    ///
+    /// # Errors
+    /// [`HeartbeatError::Transport`](multiview_licence::heartbeat::HeartbeatError) (a
+    /// generic boundary error type the caller already treats as keep-last-good) when
+    /// the lease dir cannot be created, a present key file is corrupt/unreadable, or
+    /// a freshly-generated key cannot be durably persisted — all fail closed.
+    fn load_or_generate(dir: &str) -> Result<Self, multiview_licence::heartbeat::HeartbeatError> {
+        use multiview_licence::heartbeat::HeartbeatError;
+        let dir_path = std::path::Path::new(dir);
+        std::fs::create_dir_all(dir_path).map_err(|e| {
+            HeartbeatError::Transport(format!("could not create the lease-state dir {dir}: {e}"))
+        })?;
+        let path = dir_path.join(Self::FILE);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                // A PRESENT key file MUST parse to exactly a 32-byte seed — anything
+                // else is corruption/tamper and fails closed (never a silent
+                // regenerate that would change the device identity).
+                let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                    HeartbeatError::Transport(format!(
+                        "device key file {} is present but is not a 32-byte seed \
+                         (corrupt/tamper); refusing to regenerate a new identity",
+                        path.display()
+                    ))
+                })?;
+                Ok(Self {
+                    key: ed25519_dalek::SigningKey::from_bytes(&seed),
+                })
+            }
+            // Absent on a genuinely-new device: generate + persist once.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+                Self::persist_seed(&path, &key.to_bytes())?;
+                Ok(Self { key })
+            }
+            Err(e) => Err(HeartbeatError::Transport(format!(
+                "could not read the device key file {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+
+    /// Persist the 32-byte seed with `0600` perms via the crash-durable
+    /// write-temp → fsync → rename → fsync-parent protocol (same as the nonce
+    /// store): a crash leaves either no file or the complete seed, never a torn one.
+    fn persist_seed(
+        path: &std::path::Path,
+        seed: &[u8; 32],
+    ) -> Result<(), multiview_licence::heartbeat::HeartbeatError> {
+        use std::io::Write as _;
+
+        use multiview_licence::heartbeat::HeartbeatError;
+        let tmp = path.with_extension("tmp");
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600); // owner read/write only — the signing secret
+        }
+        let mut file = opts.open(&tmp).map_err(|e| {
+            HeartbeatError::Transport(format!(
+                "could not create the device key temp {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        file.write_all(seed).map_err(|e| {
+            HeartbeatError::Transport(format!(
+                "could not write the device key seed to {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        file.sync_all().map_err(|e| {
+            HeartbeatError::Transport(format!(
+                "could not fsync the device key temp {}: {e}",
+                tmp.display()
+            ))
+        })?;
+        drop(file);
+        std::fs::rename(&tmp, path).map_err(|e| {
+            HeartbeatError::Transport(format!(
+                "could not finalise the device key file {}: {e}",
+                path.display()
+            ))
+        })?;
+        if let Some(parent) = path.parent() {
+            // fsync the parent dir so the rename's directory entry is durable.
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "heartbeat")]
+impl multiview_licence::heartbeat::DeviceSigner for DeviceKeyStore {
+    fn public_key_raw(&self) -> [u8; 32] {
+        self.key.verifying_key().to_bytes()
+    }
+    fn sign(&self, message: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer as _;
+        self.key.sign(message).to_bytes()
+    }
+}
+
 /// The live Conspect HTTP transport (the cli-boundary implementation of
 /// [`multiview_licence::heartbeat::LicenceServer`]). Owns the `reqwest` (rustls)
 /// client so the leaf crate stays socket-free; carries the account JWT bearer +
@@ -839,13 +996,16 @@ impl ConspectHttpServer {
             .map_err(|e| HeartbeatError::Malformed(e.to_string()))
     }
 
-    /// `POST` `body` as JSON with the required `Idempotency-Key`, JSON-decode the
-    /// response.
-    async fn post_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+    /// `POST` the EXACT `body` bytes (content-type `application/json`) with the
+    /// required `Idempotency-Key` and `Conspect-Device-PoP` headers, JSON-decode the
+    /// response. The body is sent verbatim (NOT re-serialised) so it is byte-for-byte
+    /// the bytes the device-PoP `sha256(body)` covered (ADR-I007 — no drift).
+    async fn post_raw_json<T: serde::de::DeserializeOwned>(
         &self,
         url: String,
-        body: &B,
+        body: Vec<u8>,
         idempotency_key: &str,
+        pop_header: &str,
     ) -> Result<T, multiview_licence::heartbeat::HeartbeatError> {
         use multiview_licence::heartbeat::HeartbeatError;
         let resp = self
@@ -853,7 +1013,9 @@ impl ConspectHttpServer {
             .post(&url)
             .bearer_auth(&self.bearer_token)
             .header("Idempotency-Key", idempotency_key)
-            .json(body)
+            .header("Conspect-Device-PoP", pop_header)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
             .send()
             .await
             .map_err(|e| HeartbeatError::Transport(e.to_string()))?;
@@ -888,21 +1050,70 @@ impl multiview_licence::heartbeat::LicenceServer for ConspectHttpServer {
             .await
     }
 
+    async fn fetch_challenge(
+        &self,
+        org: &str,
+    ) -> Result<
+        multiview_licence::heartbeat::DeviceChallenge,
+        multiview_licence::heartbeat::HeartbeatError,
+    > {
+        // GET /v0/devices/licence/challenge?orgId={org} (account-JWT bearer; the
+        // operator role floor). The org id is URL-encoded so a hostile value cannot
+        // break out of the query.
+        let org_q = urlencode_query(org);
+        self.get_json(format!(
+            "{}/devices/licence/challenge?orgId={org_q}",
+            self.api_base
+        ))
+        .await
+    }
+
     async fn heartbeat(
         &self,
         org: &str,
-        req: multiview_licence::heartbeat::HeartbeatRequest,
+        body: Vec<u8>,
         idempotency_key: &str,
+        pop_header: &str,
     ) -> Result<
         multiview_licence::heartbeat::HeartbeatResponse,
         multiview_licence::heartbeat::HeartbeatError,
     > {
-        self.post_json(
+        self.post_raw_json(
             format!("{}/organisations/{org}/heartbeat", self.api_base),
-            &req,
+            body,
             idempotency_key,
+            pop_header,
         )
         .await
+    }
+}
+
+/// Minimal URL query-component percent-encoding for the `orgId` value: encode every
+/// byte that is not an RFC 3986 unreserved character (`A-Za-z0-9-._~`). Total +
+/// panic-free; keeps a hostile org id from breaking out of the query string.
+#[cfg(feature = "heartbeat")]
+fn urlencode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push('%');
+            out.push(char::from(hex_upper_nibble(b >> 4)));
+            out.push(char::from(hex_upper_nibble(b & 0x0f)));
+        }
+    }
+    out
+}
+
+/// The upper-case hex digit for a nibble `0..=15` (total; `>15` clamps to `'0'`,
+/// which cannot occur for a masked nibble).
+#[cfg(feature = "heartbeat")]
+fn hex_upper_nibble(n: u8) -> u8 {
+    match n {
+        0..=9 => b'0' + n,
+        10..=15 => b'A' + (n - 10),
+        _ => b'0',
     }
 }
 
@@ -1114,31 +1325,96 @@ mod tests {
         // constructor FAILS CLOSED (no unwrap_or_default fallback that would drop
         // https_only), so a heartbeat against an http:// base is rejected at the
         // transport with NO plaintext request leaving the host.
-        use multiview_licence::heartbeat::{DeviceIdentity, HeartbeatClient, LicenceServer as _};
+        use multiview_licence::heartbeat::LicenceServer as _;
         let server = ConspectHttpServer::new(
             "http://insecure.example.invalid/v0".to_owned(),
             "super-secret-bearer".to_owned(),
         )
         .expect("an https-only client builds");
-        // `HeartbeatRequest` is #[non_exhaustive]; build it via the public builder.
-        let identity = DeviceIdentity {
-            machine_id: "m".to_owned(),
-            fingerprint_digest: "0".repeat(64),
-            fingerprint_score: 0,
-            binding_id: Some("ib_x".to_owned()),
-            app_version: "test".to_owned(),
-            instance_id: String::new(),
-            hardware_digest: String::new(),
-            instance_discriminator_hash: String::new(),
-            instance_discriminator_digest: String::new(),
-            device_public_key_b64url: String::new(),
-        };
-        let req = HeartbeatClient::<ConspectHttpServer>::build_heartbeat_request(&identity, None);
-        let res = server.heartbeat("org_x", req, "mv-m-1").await;
+        // The body bytes + a (dummy) PoP header — the https-only client must refuse
+        // the http:// base BEFORE any request leaves the host (so the dummy proof is
+        // never actually presented).
+        let body = br#"{"bindingId":"ib_x"}"#.to_vec();
+        let res = server.heartbeat("org_x", body, "mv-m-1", "g1g-dummy-pop").await;
         assert!(
             res.is_err(),
             "an http:// base must be refused by the https-only client (no plaintext \
              credential-carrying request)"
+        );
+    }
+
+    // --- CONSPECT-3 device-PoP: the durable device keypair (ADR-I007). -----------
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn device_key_store_generates_once_then_reloads_a_stable_identity() {
+        // The device keypair must be generated ONCE and persist across restarts —
+        // a stable device identity (the server verifies continuity against the
+        // STORED key). A second open of the same dir reloads the SAME public key,
+        // never a freshly-generated one.
+        use multiview_licence::heartbeat::DeviceSigner as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf8 path");
+        let first = DeviceKeyStore::load_or_generate(path).expect("first generate");
+        let pk1 = first.public_key_raw();
+        // A second open (simulating a restart) reloads the persisted key.
+        let second = DeviceKeyStore::load_or_generate(path).expect("reload persisted");
+        assert_eq!(
+            pk1,
+            second.public_key_raw(),
+            "the device key must be generate-once-then-reuse (stable identity across restart)"
+        );
+    }
+
+    #[cfg(all(feature = "heartbeat", unix))]
+    #[test]
+    fn device_key_store_persists_with_owner_only_permissions() {
+        // The private seed on disk must be 0600 (owner read/write only) — it is the
+        // device's signing secret.
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf8 path");
+        let _ = DeviceKeyStore::load_or_generate(path).expect("generate");
+        let key_path = dir.path().join("device-key.ed25519");
+        let mode = std::fs::metadata(&key_path)
+            .expect("key file exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "the device key seed must be 0600 (owner-only)");
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn device_key_store_signs_verifiably_with_the_persisted_key() {
+        // The loaded signer must sign with the SAME key it persisted — a signature
+        // verifies against the reloaded public key (continuity).
+        use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+        use multiview_licence::heartbeat::DeviceSigner as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf8 path");
+        let signer = DeviceKeyStore::load_or_generate(path).expect("generate");
+        let msg = b"the COSE Sig_structure bytes";
+        let sig = signer.sign(msg);
+        let vk = VerifyingKey::from_bytes(&signer.public_key_raw()).expect("vk");
+        vk.verify(msg, &Signature::from_bytes(&sig))
+            .expect("the persisted key's signature must verify against its public key");
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn device_key_store_fails_closed_on_a_corrupt_key_file() {
+        // A PRESENT-but-corrupt key file must FAIL CLOSED (Err), never silently
+        // regenerate a NEW identity — that would break server-side key continuity
+        // (the server would reject the new key as a different device). The caller
+        // then declines to start the heartbeat and keeps last-good (never off air).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key_path = dir.path().join("device-key.ed25519");
+        std::fs::write(&key_path, b"not-a-valid-32-byte-seed").expect("seed corrupt key");
+        let res = DeviceKeyStore::load_or_generate(dir.path().to_str().expect("utf8 path"));
+        assert!(
+            res.is_err(),
+            "a present-but-corrupt device key file must fail closed, never regenerate a new identity"
         );
     }
 }

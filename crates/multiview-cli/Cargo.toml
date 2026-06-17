@@ -109,6 +109,21 @@ tempfile = { version = "3", optional = true }
 # Optional + gated so the default build never pulls the `fs` surface.
 rustix = { workspace = true, features = ["fs"], optional = true }
 
+# Used ONLY by the `heartbeat` feature for the device-PoP keypair (CONSPECT-3,
+# ADR-I007): GENERATE (the only RNG in the product, at the cli boundary — the leaf
+# crate stays no-RNG) + LOAD a persisted Ed25519 device keypair and SIGN the
+# COSE_Sign1 proof with it. `ed25519-dalek` is `MIT OR Apache-2.0`, deny-clean, and
+# already in the workspace graph (the licence crate's verify path); `rand_core`
+# (`getrandom`) seeds the one-time keygen. Optional + gated so the default build
+# pulls no RNG/signing surface.
+ed25519-dalek = { version = "2", default-features = false, features = [
+    "alloc",
+    "rand_core",
+], optional = true }
+rand_core = { version = "0.6", default-features = false, features = [
+    "getrandom",
+], optional = true }
+
 # Used by the control bridge (the compact per-tick engine state snapshot the
 # control plane republishes is a `serde_json::Value`) and by the `overlay`
 # pipeline (reading kind-specific `[[overlays]]` params out of
@@ -331,7 +346,14 @@ mesh-mdns = ["multiview-mesh/mdns"]
 # `rustls-tls` backend (NEVER OpenSSL/native-tls) so the graph stays native-lib-
 # free; `cargo deny` runs `all-features = false` so this opt-in dep is not in the
 # scanned default graph. LGPL-clean.
-heartbeat = ["multiview-licence/heartbeat", "dep:reqwest", "reqwest?/json", "dep:rustix"]
+heartbeat = [
+    "multiview-licence/heartbeat",
+    "dep:reqwest",
+    "reqwest?/json",
+    "dep:rustix",
+    "dep:ed25519-dalek",
+    "dep:rand_core",
+]
 
 # Sample a PTP Hardware Clock (`[timing] ptp_phc`, e.g. /dev/ptp0) to discipline
 # the outbound presentation epoch's wall estimate (DEV-C1 / ADR-M010): PTP then
