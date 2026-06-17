@@ -12,6 +12,7 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::as_conversions,
+    clippy::doc_markdown,
     clippy::missing_panics_doc
 )]
 #![cfg(feature = "heartbeat")]

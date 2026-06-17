@@ -214,7 +214,7 @@ pub enum PopError {
     /// a malformed/absent nonce, never a silently truncated pre-image.
     #[error("device-PoP nonce is not 64 lower-case hex: {0}")]
     Nonce(String),
-    /// The COSE_Sign1 proof could not be assembled/serialised (not expected for a
+    /// The `COSE_Sign1` proof could not be assembled/serialised (not expected for a
     /// well-formed pre-image, but the guardrails forbid `unwrap`/`expect`).
     #[error("device-PoP COSE_Sign1 could not be built: {0}")]
     Cose(String),
@@ -272,7 +272,7 @@ fn sha256_body(body: &[u8]) -> [u8; 32] {
 }
 
 /// The deterministic-CBOR **device-PoP pre-image** the server recomputes and the
-/// COSE_Sign1 signs over (ADR-I007): a `map(6)` over
+/// `COSE_Sign1` signs over (ADR-I007): a `map(6)` over
 /// `htm | htu | sha256(body) | instance_id | nonce | iat` in that order. `htm` is
 /// the upper-case HTTP method, `htu` the full request URI (no query); `sha256_body`
 /// and `nonce` are CBOR **byte strings** (raw 32 bytes each — the nonce decoded
@@ -309,14 +309,14 @@ pub fn canonical_pop_preimage(
 }
 
 /// Build the `Conspect-Device-PoP` header value: a **standard-base64** (RFC 4648
-/// §4) COSE_Sign1 the `signer` signs over the [`canonical_pop_preimage`]. The
+/// §4) `COSE_Sign1` the `signer` signs over the [`canonical_pop_preimage`]. The
 /// protected header pins `alg = EdDSA`; the payload is the pre-image (attached), so
 /// the server recomputes the same pre-image and verifies the signature against the
-/// bound device key. The result is the untagged 4-element COSE_Sign1 array.
+/// bound device key. The result is the untagged 4-element `COSE_Sign1` array.
 ///
 /// # Errors
 /// [`PopError::Nonce`] if `nonce_hex` is malformed; [`PopError::Cose`] if the
-/// COSE_Sign1 fails to serialise (not expected for a well-formed pre-image).
+/// `COSE_Sign1` fails to serialise (not expected for a well-formed pre-image).
 pub fn pop_header_value(
     signer: &dyn DeviceSigner,
     htm: &str,
@@ -1088,7 +1088,7 @@ pub trait LicenceServer: Send + Sync {
     ) -> impl std::future::Future<Output = Result<DeviceChallenge, HeartbeatError>> + Send;
 
     /// `POST /organisations/{org}/heartbeat` with a required `Idempotency-Key` and
-    /// the required `Conspect-Device-PoP` header (`pop_header`, a base64 COSE_Sign1
+    /// the required `Conspect-Device-PoP` header (`pop_header`, a base64 `COSE_Sign1`
     /// over the canonical pre-image — ADR-I007).
     ///
     /// `body` is the EXACT JSON bytes the leaf crate serialised the request to and
@@ -1146,7 +1146,7 @@ pub enum HeartbeatError {
     #[error("durable idempotency nonce unavailable; not sending a mutation: {0}")]
     NonceStore(#[from] NonceError),
     /// The device proof-of-possession could not be built (a malformed/absent PoP
-    /// challenge nonce, or a COSE_Sign1 assembly failure). The heartbeat mutation
+    /// challenge nonce, or a `COSE_Sign1` assembly failure). The heartbeat mutation
     /// is NOT sent this cycle; the last-good lease is kept and the cycle retries
     /// (it fetches a fresh challenge next time). A PoP failure never tightens output
     /// (inv #1/#10) — this is the v0.9.0 enforced-PoP fail-closed path.
@@ -1545,7 +1545,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// Assemble a heartbeat client with a bound device-PoP signer (ADR-I007) — the
     /// production constructor under v0.9.0 enforced PoP. The cli supplies a
     /// generated + durably-persisted Ed25519 keypair (the I/O + the only RNG live
-    /// at the cli boundary); the loop signs the COSE_Sign1 proof with it on every
+    /// at the cli boundary); the loop signs the `COSE_Sign1` proof with it on every
     /// heartbeat. Uses the production wall clock + the given durable nonce store.
     #[must_use]
     pub fn with_device_signer(
@@ -1746,7 +1746,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         };
     }
 
-    /// Build the `Conspect-Device-PoP` header for a heartbeat: the base64 COSE_Sign1
+    /// Build the `Conspect-Device-PoP` header for a heartbeat: the base64 `COSE_Sign1`
     /// over the canonical pre-image (`htm | htu | sha256(body) | instance_id | nonce
     /// | iat`). `body` is the EXACT serialized request body the transport sends, so
     /// the device and server hash the same bytes; `iat` is the current epoch seconds.
@@ -1754,11 +1754,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// **Fail closed.** A missing device signer, or a COSE/nonce error, is a
     /// [`HeartbeatError::Pop`] — `run_once` sends no mutation this cycle (never off
     /// air). The renew path is never taken without a proof.
-    fn build_pop_header(
-        &self,
-        body: &[u8],
-        nonce_hex: &str,
-    ) -> Result<String, HeartbeatError> {
+    fn build_pop_header(&self, body: &[u8], nonce_hex: &str) -> Result<String, HeartbeatError> {
         let signer = self
             .device_signer
             .as_ref()

@@ -1335,7 +1335,9 @@ mod tests {
         // the http:// base BEFORE any request leaves the host (so the dummy proof is
         // never actually presented).
         let body = br#"{"bindingId":"ib_x"}"#.to_vec();
-        let res = server.heartbeat("org_x", body, "mv-m-1", "g1g-dummy-pop").await;
+        let res = server
+            .heartbeat("org_x", body, "mv-m-1", "g1g-dummy-pop")
+            .await;
         assert!(
             res.is_err(),
             "an http:// base must be refused by the https-only client (no plaintext \

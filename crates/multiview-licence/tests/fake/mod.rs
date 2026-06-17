@@ -723,13 +723,11 @@ impl FakeLicenceServer {
     ///      different body/nonce).
     fn verify_pop(&self, pop_header: &str, body: &[u8], nonce_hex: &str) -> bool {
         use coset::{CborSerializable as _, CoseSign1};
-        let cose_bytes = match base64::engine::general_purpose::STANDARD.decode(pop_header) {
-            Ok(b) => b,
-            Err(_) => return false,
+        let Ok(cose_bytes) = base64::engine::general_purpose::STANDARD.decode(pop_header) else {
+            return false;
         };
-        let sign1 = match CoseSign1::from_slice(&cose_bytes) {
-            Ok(s) => s,
-            Err(_) => return false,
+        let Ok(sign1) = CoseSign1::from_slice(&cose_bytes) else {
+            return false;
         };
         let vk = EdVerifyingKey::from_bytes(&pop_test_signer().public_key_raw()).expect("vk");
         let sig_ok = sign1
@@ -738,7 +736,8 @@ impl FakeLicenceServer {
                     Ok(s) => s,
                     Err(e) => return Err(format!("bad sig bytes: {e}")),
                 };
-                vk.verify(tbs, &signature).map_err(|e| format!("verify: {e}"))
+                vk.verify(tbs, &signature)
+                    .map_err(|e| format!("verify: {e}"))
             })
             .is_ok();
         if !sig_ok {
@@ -754,9 +753,8 @@ impl FakeLicenceServer {
             h.update(body);
             h.finalize()
         };
-        let nonce_raw = match hex::decode(nonce_hex) {
-            Ok(b) => b,
-            Err(_) => return false,
+        let Ok(nonce_raw) = hex::decode(nonce_hex) else {
+            return false;
         };
         windows_contains(payload, &body_hash) && windows_contains(payload, &nonce_raw)
     }

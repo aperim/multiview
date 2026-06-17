@@ -18,6 +18,10 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::doc_markdown,
+    clippy::items_after_statements,
     clippy::missing_panics_doc
 )]
 #![cfg(feature = "heartbeat")]
@@ -202,8 +206,7 @@ fn the_pop_header_is_a_self_verifiable_cose_sign1_over_the_pre_image() {
     let sign1 = CoseSign1::from_slice(&cose_bytes).expect("a valid COSE_Sign1");
 
     // The expected pre-image (what the server recomputes from the request).
-    let expected_pre =
-        canonical_pop_preimage(htm, htu, body, instance_id, NONCE_HEX, iat).unwrap();
+    let expected_pre = canonical_pop_preimage(htm, htu, body, instance_id, NONCE_HEX, iat).unwrap();
     // The COSE payload IS the pre-image (attached).
     assert_eq!(
         sign1.payload.as_deref(),
