@@ -35,11 +35,38 @@ use ed25519_dalek::{Signer as _, SigningKey as EdKey};
 // needed in p256 0.13); `Signature` is `P256Sig`.
 use p256::ecdsa::{Signature as P256Sig, SigningKey as P256Key};
 
+use ed25519_dalek::{Verifier as _, VerifyingKey as EdVerifyingKey};
 use multiview_licence::heartbeat::{
-    canonical_key_preimage, canonical_revocation_preimage, EnforcementState, HeartbeatError,
-    HeartbeatRequest, HeartbeatResponse, LeaseBodyFields, LicenceServer, LicensingKeys, PinnedRoot,
-    ServerLease, TrustedKeys,
+    canonical_key_preimage, canonical_revocation_preimage, DeviceChallenge, DeviceSigner,
+    EnforcementState, HeartbeatError, HeartbeatRequest, HeartbeatResponse, LeaseBodyFields,
+    LicenceServer, LicensingKeys, PinnedRoot, ServerLease, TrustedKeys,
 };
+
+/// The fixed device-key seed the PoP loop tests sign with, so the fake can verify
+/// the proof against the matching public key.
+pub const POP_DEVICE_SEED: [u8; 32] = [0x5a; 32];
+
+/// A deterministic device signer over [`POP_DEVICE_SEED`] for the PoP loop tests.
+pub struct PopTestSigner {
+    key: EdKey,
+}
+
+/// Build the shared PoP test signer (the client signs with this; the fake verifies
+/// the proof against its public key).
+pub fn pop_test_signer() -> PopTestSigner {
+    PopTestSigner {
+        key: EdKey::from_bytes(&POP_DEVICE_SEED),
+    }
+}
+
+impl DeviceSigner for PopTestSigner {
+    fn public_key_raw(&self) -> [u8; 32] {
+        self.key.verifying_key().to_bytes()
+    }
+    fn sign(&self, message: &[u8]) -> [u8; 64] {
+        self.key.sign(message).to_bytes()
+    }
+}
 
 /// The live production root verifying key (ECDSA P-256, base64url uncompressed),
 /// re-exported for the key-trust tests.
@@ -527,6 +554,10 @@ pub struct FakeLicenceServer {
     /// Every `Idempotency-Key` the server has received, in order (the idempotency
     /// test asserts retries of the same logical op reuse one key).
     idempotency_keys: std::sync::Mutex<Vec<String>>,
+    /// Every heartbeat request BODY the server received, in order — so the
+    /// retry-coupling test can assert a lost-response retry replays the SAME body
+    /// bytes (same PoP nonce), not a freshly-nonce'd body under the same key.
+    bodies: std::sync::Mutex<Vec<Vec<u8>>>,
     /// When > 0, the next N heartbeat calls record their Idempotency-Key and then
     /// return a transport error (a lost-response analogue) — decremented per call.
     fail_after_recording: AtomicU64,
@@ -534,6 +565,39 @@ pub struct FakeLicenceServer {
     pub heartbeats: AtomicU64,
     /// The `nextDue` (epoch ms) the server returns — the loop sleeps to it.
     next_due_ms: AtomicU64,
+    // --- device-PoP (ADR-I007) ---
+    /// Counts `fetch_challenge` calls (the loop test asserts cold-start fetches one
+    /// and steady-state fetches none).
+    challenge_fetches: AtomicU64,
+    /// A monotonic counter to mint distinct challenge nonces.
+    nonce_counter: AtomicU64,
+    /// The most recent challenge nonce this server ISSUED (via `fetch_challenge`).
+    last_issued_nonce: std::sync::Mutex<Option<String>>,
+    /// The `nonce` field the most recent heartbeat REQUEST body carried.
+    last_request_nonce: std::sync::Mutex<Option<String>>,
+    /// The `nextNonce` the most recent heartbeat RESPONSE returned.
+    last_next_nonce: std::sync::Mutex<Option<String>>,
+    /// Whether the most recent heartbeat's `Conspect-Device-PoP` proof VERIFIED
+    /// against the device public key over the recomputed pre-image.
+    last_pop_verified: AtomicBool,
+    /// When true, `fetch_challenge` returns a transport error (cold start can't get
+    /// a nonce → the client fails closed and keeps last-good).
+    fail_challenge: AtomicBool,
+    /// When true, `fetch_challenge` returns a challenge whose `expiresAtMs` is
+    /// already in the PAST — the client must NOT sign/send an expired fresh nonce.
+    challenge_expired: AtomicBool,
+    /// When true, the next heartbeat response carries an EMPTY `nextNonce` (the
+    /// client must cold-start a fresh `/challenge` next cycle, never reuse a nonce).
+    drop_next_nonce: AtomicBool,
+    /// When true, `heartbeat` returns a `pop-invalid`-style transport error (401)
+    /// regardless of the proof — the server-rejected-nonce case.
+    reject_pop: AtomicBool,
+    /// When true, `heartbeat` returns a `Malformed` error AFTER verifying the proof —
+    /// modelling a 2xx response whose body would not parse (`post_raw_json` emits
+    /// `Malformed` only after a 2xx). The server has SEEN + processed the request (the
+    /// nonce is burned), so the client must drop the pinned attempt and recover with a
+    /// fresh `/challenge`, never replay the burned nonce.
+    malformed_2xx: AtomicBool,
 }
 
 impl FakeLicenceServer {
@@ -553,9 +617,21 @@ impl FakeLicenceServer {
             revoke_signer_after_first_fetch: AtomicBool::new(false),
             key_fetches: AtomicU64::new(0),
             idempotency_keys: std::sync::Mutex::new(Vec::new()),
+            bodies: std::sync::Mutex::new(Vec::new()),
             fail_after_recording: AtomicU64::new(0),
             heartbeats: AtomicU64::new(0),
             next_due_ms: AtomicU64::new(FAB_NOW_MS as u64 + 30 * 86_400_000),
+            challenge_fetches: AtomicU64::new(0),
+            challenge_expired: AtomicBool::new(false),
+            nonce_counter: AtomicU64::new(0),
+            last_issued_nonce: std::sync::Mutex::new(None),
+            last_request_nonce: std::sync::Mutex::new(None),
+            last_next_nonce: std::sync::Mutex::new(None),
+            last_pop_verified: AtomicBool::new(false),
+            fail_challenge: AtomicBool::new(false),
+            drop_next_nonce: AtomicBool::new(false),
+            reject_pop: AtomicBool::new(false),
+            malformed_2xx: AtomicBool::new(false),
         }
     }
 
@@ -608,6 +684,107 @@ impl FakeLicenceServer {
     pub fn set_replay_stale(&self, on: bool) {
         self.replay_stale.store(on, Ordering::SeqCst);
     }
+
+    // --- device-PoP (ADR-I007) knobs + accessors ---
+    /// How many times `fetch_challenge` has been called.
+    pub fn challenge_fetches(&self) -> u64 {
+        self.challenge_fetches.load(Ordering::SeqCst)
+    }
+    /// The most recent challenge nonce this server issued (via `fetch_challenge`).
+    pub fn last_issued_nonce(&self) -> String {
+        self.last_issued_nonce
+            .lock()
+            .expect("poisoned")
+            .clone()
+            .unwrap_or_default()
+    }
+    /// The `nonce` field the most recent heartbeat request body carried.
+    pub fn last_request_nonce(&self) -> Option<String> {
+        self.last_request_nonce.lock().expect("poisoned").clone()
+    }
+    /// The `nextNonce` the most recent heartbeat response returned.
+    pub fn last_next_nonce(&self) -> Option<String> {
+        self.last_next_nonce.lock().expect("poisoned").clone()
+    }
+    /// Whether the most recent heartbeat's PoP proof verified.
+    pub fn last_pop_verified(&self) -> bool {
+        self.last_pop_verified.load(Ordering::SeqCst)
+    }
+    /// Make `fetch_challenge` fail (cold start can't get a nonce).
+    pub fn set_fail_challenge(&self, on: bool) {
+        self.fail_challenge.store(on, Ordering::SeqCst);
+    }
+    /// Make `fetch_challenge` issue an already-expired challenge (`expiresAtMs` in
+    /// the past) — the client must not sign/send it.
+    pub fn set_challenge_expired(&self, on: bool) {
+        self.challenge_expired.store(on, Ordering::SeqCst);
+    }
+    /// Make the next heartbeat response carry an EMPTY `nextNonce`.
+    pub fn set_drop_next_nonce(&self, on: bool) {
+        self.drop_next_nonce.store(on, Ordering::SeqCst);
+    }
+    /// Make `heartbeat` return a `Malformed` error AFTER verifying the proof (a 2xx
+    /// whose body would not parse — a RECEIVED contact that burns the nonce).
+    pub fn set_malformed_2xx(&self, on: bool) {
+        self.malformed_2xx.store(on, Ordering::SeqCst);
+    }
+    /// Make `heartbeat` reject the proof as `pop-invalid` (401).
+    pub fn set_reject_pop(&self, on: bool) {
+        self.reject_pop.store(on, Ordering::SeqCst);
+    }
+    /// Mint a fresh, distinct 64-hex challenge nonce (deterministic per counter).
+    fn mint_nonce(&self) -> String {
+        let n = self.nonce_counter.fetch_add(1, Ordering::SeqCst);
+        // 32 bytes: a fixed prefix + the counter in the tail, rendered lower-case hex.
+        let mut bytes = [0u8; 32];
+        bytes[24..32].copy_from_slice(&n.to_be_bytes());
+        hex::encode(bytes)
+    }
+    /// Verify a presented `Conspect-Device-PoP` header against the device public key
+    /// — exactly the check the server performs. Returns true iff:
+    ///   1. the COSE_Sign1 signature is valid for the bound device key over the
+    ///      payload (proves the device key signed THIS pre-image), AND
+    ///   2. the signed payload BINDS this request — it contains `sha256(body)` and
+    ///      the raw 32-byte challenge nonce (so a proof cannot be replayed onto a
+    ///      different body/nonce).
+    fn verify_pop(&self, pop_header: &str, body: &[u8], nonce_hex: &str) -> bool {
+        use coset::{CborSerializable as _, CoseSign1};
+        let Ok(cose_bytes) = base64::engine::general_purpose::STANDARD.decode(pop_header) else {
+            return false;
+        };
+        let Ok(sign1) = CoseSign1::from_slice(&cose_bytes) else {
+            return false;
+        };
+        let vk = EdVerifyingKey::from_bytes(&pop_test_signer().public_key_raw()).expect("vk");
+        let sig_ok = sign1
+            .verify_signature(b"", |sig, tbs| {
+                let signature = match ed25519_dalek::Signature::from_slice(sig) {
+                    Ok(s) => s,
+                    Err(e) => return Err(format!("bad sig bytes: {e}")),
+                };
+                vk.verify(tbs, &signature)
+                    .map_err(|e| format!("verify: {e}"))
+            })
+            .is_ok();
+        if !sig_ok {
+            return false;
+        }
+        let Some(payload) = sign1.payload.as_deref() else {
+            return false;
+        };
+        // The signed payload must bind THIS body + THIS nonce.
+        let body_hash = {
+            use sha2::{Digest as _, Sha256};
+            let mut h = Sha256::new();
+            h.update(body);
+            h.finalize()
+        };
+        let Ok(nonce_raw) = hex::decode(nonce_hex) else {
+            return false;
+        };
+        windows_contains(payload, &body_hash) && windows_contains(payload, &nonce_raw)
+    }
+
     /// The binding id the current knobs select for the served lease body.
     fn served_binding(&self) -> &'static str {
         if self.foreign_binding.load(Ordering::SeqCst) {
@@ -652,6 +829,10 @@ impl FakeLicenceServer {
     /// Every `Idempotency-Key` the server received, in order.
     pub fn idempotency_keys(&self) -> Vec<String> {
         self.idempotency_keys.lock().expect("poisoned").clone()
+    }
+    /// Every heartbeat request body the server received, in order.
+    pub fn bodies(&self) -> Vec<Vec<u8>> {
+        self.bodies.lock().expect("poisoned").clone()
     }
     /// Make the next `n` heartbeat calls record their Idempotency-Key, then return
     /// a transport error (a lost-response analogue) — for the retry-stability test.
@@ -721,18 +902,76 @@ impl LicenceServer for FakeLicenceServer {
         Ok(self.kit.keys())
     }
 
+    async fn fetch_challenge(&self, _org: &str) -> Result<DeviceChallenge, HeartbeatError> {
+        self.maybe_block().await;
+        self.challenge_fetches.fetch_add(1, Ordering::SeqCst);
+        if self.fail_challenge.load(Ordering::SeqCst) || self.fail.load(Ordering::SeqCst) {
+            return Err(HeartbeatError::Transport(
+                "fake /challenge offline".to_owned(),
+            ));
+        }
+        let nonce = self.mint_nonce();
+        *self.last_issued_nonce.lock().expect("poisoned") = Some(nonce.clone());
+        // Normally issued generously-future (the client reads the real wall clock,
+        // so i64::MAX is never treated as expired). The `challenge_expired` knob
+        // returns a clearly-past expiry (1970) so the client's fresh-nonce expiry
+        // check rejects it.
+        let expires_at_ms = if self.challenge_expired.load(Ordering::SeqCst) {
+            1_000_000 // 1970-01-01T00:16:40Z — before any real clock
+        } else {
+            i64::MAX
+        };
+        Ok(DeviceChallenge::new(nonce, expires_at_ms))
+    }
+
     async fn heartbeat(
         &self,
         _org: &str,
-        req: HeartbeatRequest,
+        body: Vec<u8>,
         idempotency_key: &str,
+        pop_header: &str,
     ) -> Result<HeartbeatResponse, HeartbeatError> {
         self.maybe_block().await;
+        // Record the EXACT body bytes BEFORE any maybe-fail, so a lost-response
+        // attempt's body is captured and the retry-coupling test can compare it to
+        // the retry's body.
+        self.bodies.lock().expect("poisoned").push(body.clone());
         if let Some(err) = self.record_idempotency_then_maybe_fail(idempotency_key) {
             return Err(err);
         }
         if self.fail.load(Ordering::SeqCst) {
             return Err(HeartbeatError::Transport("fake offline".to_owned()));
+        }
+        // Parse the EXACT body bytes the transport sent (the same bytes the PoP
+        // signed over) to read the request fields.
+        let req: HeartbeatRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => return Err(HeartbeatError::Malformed(format!("fake body parse: {e}"))),
+        };
+        // Record + VERIFY the device-PoP proof against the device key over the
+        // recomputed pre-image (sha256 of THESE body bytes + the request nonce).
+        *self.last_request_nonce.lock().expect("poisoned") = Some(req.nonce.clone());
+        let verified = self.verify_pop(pop_header, &body, &req.nonce);
+        self.last_pop_verified.store(verified, Ordering::SeqCst);
+        // `pop-invalid` (401): the server rejects the proof — a DEFINITIVE rejection
+        // (an HTTP response WAS received). Either the knob forces it, or the proof
+        // genuinely failed to verify (a real server would 401 it too). Surfaced as
+        // `ServerRejected` so the client drops the burned nonce + recovers with a
+        // fresh /challenge next cycle (round-3) — NOT a `Transport` (ambiguous) error
+        // that would replay the burned nonce forever.
+        if self.reject_pop.load(Ordering::SeqCst) || !verified {
+            return Err(HeartbeatError::ServerRejected(
+                "fake heartbeat returned HTTP 401 pop-invalid".to_owned(),
+            ));
+        }
+        // A 2xx whose body would not parse: the server PROCESSED the request (the nonce
+        // verified + recorded above is burned) but the client cannot read the lease —
+        // `post_raw_json` surfaces this as `Malformed`. A RECEIVED contact, so the client
+        // must recover with a fresh /challenge (round-4), never replay the burned nonce.
+        if self.malformed_2xx.load(Ordering::SeqCst) {
+            return Err(HeartbeatError::Malformed(
+                "fake heartbeat returned HTTP 200 with an unparseable body".to_owned(),
+            ));
         }
         // Record the bindingId the client addressed us by (the renewal must use
         // the server's instanceBindingId, never the lease serial).
@@ -756,12 +995,31 @@ impl LicenceServer for FakeLicenceServer {
             // else a healthy 35-day lease for this device).
             (Some(self.served_lease()), EnforcementState::Compliant)
         };
+        // Mint the NEXT single-use nonce (DPoP-nonce style) — UNLESS the knob drops
+        // it, forcing the client to cold-start a fresh /challenge next cycle.
+        let next_nonce = if self.drop_next_nonce.load(Ordering::SeqCst) {
+            String::new()
+        } else {
+            self.mint_nonce()
+        };
+        *self.last_next_nonce.lock().expect("poisoned") = if next_nonce.is_empty() {
+            None
+        } else {
+            Some(next_nonce.clone())
+        };
         Ok(HeartbeatResponse::new(
             lease,
             state,
             self.next_due_ms.load(Ordering::SeqCst) as i64,
+            next_nonce,
         ))
     }
+}
+
+/// Whether `haystack` contains the contiguous `needle` (for asserting the PoP
+/// payload binds a body hash / nonce).
+fn windows_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Shareable handle for the loop test.
