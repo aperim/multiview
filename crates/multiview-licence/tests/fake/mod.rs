@@ -579,6 +579,9 @@ pub struct FakeLicenceServer {
     /// When true, `fetch_challenge` returns a transport error (cold start can't get
     /// a nonce → the client fails closed and keeps last-good).
     fail_challenge: AtomicBool,
+    /// When true, `fetch_challenge` returns a challenge whose `expiresAtMs` is
+    /// already in the PAST — the client must NOT sign/send an expired fresh nonce.
+    challenge_expired: AtomicBool,
     /// When true, the next heartbeat response carries an EMPTY `nextNonce` (the
     /// client must cold-start a fresh `/challenge` next cycle, never reuse a nonce).
     drop_next_nonce: AtomicBool,
@@ -608,6 +611,7 @@ impl FakeLicenceServer {
             heartbeats: AtomicU64::new(0),
             next_due_ms: AtomicU64::new(FAB_NOW_MS as u64 + 30 * 86_400_000),
             challenge_fetches: AtomicU64::new(0),
+            challenge_expired: AtomicBool::new(false),
             nonce_counter: AtomicU64::new(0),
             last_issued_nonce: std::sync::Mutex::new(None),
             last_request_nonce: std::sync::Mutex::new(None),
@@ -697,6 +701,11 @@ impl FakeLicenceServer {
     /// Make `fetch_challenge` fail (cold start can't get a nonce).
     pub fn set_fail_challenge(&self, on: bool) {
         self.fail_challenge.store(on, Ordering::SeqCst);
+    }
+    /// Make `fetch_challenge` issue an already-expired challenge (`expiresAtMs` in
+    /// the past) — the client must not sign/send it.
+    pub fn set_challenge_expired(&self, on: bool) {
+        self.challenge_expired.store(on, Ordering::SeqCst);
     }
     /// Make the next heartbeat response carry an EMPTY `nextNonce`.
     pub fn set_drop_next_nonce(&self, on: bool) {
@@ -882,10 +891,16 @@ impl LicenceServer for FakeLicenceServer {
         }
         let nonce = self.mint_nonce();
         *self.last_issued_nonce.lock().expect("poisoned") = Some(nonce.clone());
-        // Issued + ~120s; the fake's clock base is FAB_NOW_MS but the client reads
-        // the real wall clock, so make it generously future so the held nonce is not
-        // treated as expired by the client's real-clock check.
-        Ok(DeviceChallenge::new(nonce, i64::MAX))
+        // Normally issued generously-future (the client reads the real wall clock,
+        // so i64::MAX is never treated as expired). The `challenge_expired` knob
+        // returns a clearly-past expiry (1970) so the client's fresh-nonce expiry
+        // check rejects it.
+        let expires_at_ms = if self.challenge_expired.load(Ordering::SeqCst) {
+            1_000_000 // 1970-01-01T00:16:40Z — before any real clock
+        } else {
+            i64::MAX
+        };
+        Ok(DeviceChallenge::new(nonce, expires_at_ms))
     }
 
     async fn heartbeat(

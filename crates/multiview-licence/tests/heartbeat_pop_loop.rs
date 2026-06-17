@@ -228,3 +228,49 @@ async fn no_binding_makes_no_challenge_and_no_pop() {
     );
     assert_eq!(server.heartbeats.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn an_already_expired_fresh_challenge_is_not_signed_or_sent() {
+    // Panel minor #5: a freshly-fetched /challenge nonce whose expiresAtMs is
+    // already in the past must NOT be signed + POSTed (the asymmetry: a HELD nonce
+    // was expiry-checked, a fresh one was not). Fail closed — no heartbeat mutation
+    // this cycle, keep last-good (never off air).
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = pop_client(Arc::clone(&server), Arc::clone(&store));
+
+    // Seed a healthy lease so there is a last-good to keep.
+    tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .unwrap()
+        .unwrap();
+    let serial = store.current().unwrap().lease.serial;
+    let heartbeats_before = server.heartbeats.load(Ordering::SeqCst);
+
+    // Drop the held nextNonce (force a cold-start /challenge next cycle) AND make
+    // the issued challenge already-expired.
+    server.set_drop_next_nonce(true);
+    tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .unwrap()
+        .unwrap(); // this cycle succeeds; it leaves no usable nextNonce
+    server.set_challenge_expired(true);
+
+    let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang");
+    assert!(
+        res.is_err(),
+        "an already-expired fresh challenge must fail closed (not be signed/sent)"
+    );
+    assert_eq!(
+        server.heartbeats.load(Ordering::SeqCst),
+        heartbeats_before,
+        "no heartbeat mutation is sent when the fresh challenge is already expired"
+    );
+    assert_eq!(
+        store.current().unwrap().lease.serial,
+        serial,
+        "an expired-fresh-challenge cycle keeps the last-good lease (never off air)"
+    );
+}

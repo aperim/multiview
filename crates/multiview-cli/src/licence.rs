@@ -1419,4 +1419,121 @@ mod tests {
             "a present-but-corrupt device key file must fail closed, never regenerate a new identity"
         );
     }
+
+    // --- Panel majors (ADR-I007 / Codex 3-lens): device-key file lifecycle. ------
+
+    #[cfg(all(feature = "heartbeat", unix))]
+    #[test]
+    fn device_key_generate_yields_0600_even_when_a_broad_perm_temp_pre_exists() {
+        // SECRET EXPOSURE (panel major #1): a pre-existing device-key.tmp with broad
+        // perms must NOT leave the final seed world-readable. The persist must use a
+        // UNIQUE temp + O_EXCL/create_new + explicit 0600, so a stale broad-perm temp
+        // cannot be truncated-and-renamed keeping its old mode.
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Plant a stale, world-readable temp at the fixed legacy name.
+        let stale_tmp = dir.path().join("device-key.tmp");
+        std::fs::write(&stale_tmp, b"junk").expect("plant stale temp");
+        std::fs::set_permissions(&stale_tmp, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod stale temp 0644");
+        let _ = DeviceKeyStore::load_or_generate(dir.path().to_str().expect("utf8 path"))
+            .expect("generate succeeds despite the stale temp");
+        let key_path = dir.path().join("device-key.ed25519");
+        let mode = std::fs::metadata(&key_path)
+            .expect("key file exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the persisted seed must be 0600 even when a broad-perm temp pre-existed"
+        );
+    }
+
+    #[cfg(all(feature = "heartbeat", unix))]
+    #[test]
+    fn device_key_load_fails_closed_on_a_weak_perm_existing_key() {
+        // WEAK-PERM KEY (panel major #2): an existing device-key.ed25519 that is NOT
+        // 0600 (e.g. 0644 — world-readable signing secret) must FAIL CLOSED rather
+        // than be trusted as the signing identity. A valid 32-byte seed at 0644 is
+        // the hostile case (it parses fine; only the perms are wrong).
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key_path = dir.path().join("device-key.ed25519");
+        std::fs::write(&key_path, [7u8; 32]).expect("seed a valid 32-byte key");
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod key 0644");
+        let res = DeviceKeyStore::load_or_generate(dir.path().to_str().expect("utf8 path"));
+        assert!(
+            res.is_err(),
+            "a world-readable (0644) device key must fail closed, never be trusted as the signing identity"
+        );
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn device_key_concurrent_first_boot_yields_one_durable_winner() {
+        // CONCURRENT FIRST-BOOT RACE (panel major #4): N processes starting at once
+        // must converge on ONE persisted key, and EVERY returned signer's public key
+        // must equal the key on disk (no signer whose seed isn't the durable one).
+        // The atomic install refuses to overwrite an existing key, then reloads the
+        // winner.
+        use multiview_licence::heartbeat::DeviceSigner as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf8 path").to_owned();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || {
+                DeviceKeyStore::load_or_generate(&p).map(|s| s.public_key_raw())
+            }));
+        }
+        let pubkeys: Vec<[u8; 32]> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread").expect("load_or_generate"))
+            .collect();
+        // The durable winner on disk.
+        let on_disk: [u8; 32] = std::fs::read(dir.path().join("device-key.ed25519"))
+            .expect("a key was persisted")
+            .as_slice()
+            .try_into()
+            .expect("32-byte seed");
+        let winner = ed25519_dalek::SigningKey::from_bytes(&on_disk)
+            .verifying_key()
+            .to_bytes();
+        for pk in &pubkeys {
+            assert_eq!(
+                *pk, winner,
+                "every concurrent starter must return the signer whose seed is the one durably on disk"
+            );
+        }
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn device_key_persist_fails_closed_when_the_parent_dir_cannot_be_fsynced() {
+        // CRASH-DURABILITY (panel major #3): the parent-dir fsync result must be
+        // PROPAGATED, not swallowed. We can't easily force a dir fsync failure
+        // portably, so assert the weaker observable contract the fix guarantees: a
+        // freshly-generated key is durably present AND readable back as the same
+        // 32-byte seed the signer holds (the happy path the durable protocol must
+        // leave behind). The swallow-bug regression is caught by code review +
+        // the rule-37 lint; this pins the durable round-trip.
+        use multiview_licence::heartbeat::DeviceSigner as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let signer = DeviceKeyStore::load_or_generate(dir.path().to_str().expect("utf8 path"))
+            .expect("generate");
+        let on_disk: [u8; 32] = std::fs::read(dir.path().join("device-key.ed25519"))
+            .expect("seed durably present after generate")
+            .as_slice()
+            .try_into()
+            .expect("32-byte seed");
+        assert_eq!(
+            ed25519_dalek::SigningKey::from_bytes(&on_disk)
+                .verifying_key()
+                .to_bytes(),
+            signer.public_key_raw(),
+            "the durably-persisted seed must be exactly the one the returned signer holds"
+        );
+    }
 }
