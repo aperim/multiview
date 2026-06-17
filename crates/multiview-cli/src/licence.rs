@@ -839,9 +839,8 @@ impl DeviceKeyStore {
         })?;
         let path = dir_path.join(Self::FILE);
         // Fast path: an existing key. Verified for perms + shape, fail-closed.
-        match Self::load_existing(&path)? {
-            Some(key) => return Ok(Self { key }),
-            None => { /* absent — generate + atomically install below */ }
+        if let Some(key) = Self::load_existing(&path)? {
+            return Ok(Self { key });
         }
         // Absent: generate a fresh key and try to install it atomically (O_EXCL).
         let key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
@@ -973,9 +972,7 @@ impl DeviceKeyStore {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            if let Err(e) =
-                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            {
+            if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
                 let _ = std::fs::remove_file(&tmp);
                 return Err(HeartbeatError::Transport(format!(
                     "could not set 0600 on the device key temp {}: {e}",

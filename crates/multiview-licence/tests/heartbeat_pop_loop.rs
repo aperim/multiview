@@ -245,15 +245,17 @@ async fn an_already_expired_fresh_challenge_is_not_signed_or_sent() {
         .unwrap()
         .unwrap();
     let serial = store.current().unwrap().lease.serial;
-    let heartbeats_before = server.heartbeats.load(Ordering::SeqCst);
 
-    // Drop the held nextNonce (force a cold-start /challenge next cycle) AND make
-    // the issued challenge already-expired.
+    // Drop the held nextNonce (force a cold-start /challenge next cycle). This cycle
+    // itself still sends a heartbeat (and leaves no usable nextNonce).
     server.set_drop_next_nonce(true);
     tokio::time::timeout(Duration::from_secs(5), client.run_once())
         .await
         .unwrap()
-        .unwrap(); // this cycle succeeds; it leaves no usable nextNonce
+        .unwrap();
+    // Capture the count AFTER the drop cycle — so the assertion measures ONLY the
+    // expired-challenge cycle below.
+    let heartbeats_before = server.heartbeats.load(Ordering::SeqCst);
     server.set_challenge_expired(true);
 
     let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
