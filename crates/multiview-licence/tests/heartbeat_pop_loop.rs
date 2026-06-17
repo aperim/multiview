@@ -305,7 +305,10 @@ async fn a_lost_response_retry_replays_the_same_idempotency_key_and_body_and_non
     let r2 = tokio::time::timeout(Duration::from_secs(5), client.run_once())
         .await
         .expect("run_once must not hang");
-    assert!(r2.is_ok(), "the retry succeeds once the server stops failing");
+    assert!(
+        r2.is_ok(),
+        "the retry succeeds once the server stops failing"
+    );
 
     let keys = server.idempotency_keys();
     let bodies = server.bodies();

@@ -1343,10 +1343,10 @@ pub struct HeartbeatClient<S: LicenceServer> {
     /// `/challenge` / response, and cleared when the server rejects it.
     pop_nonce: std::sync::Mutex<Option<PopNonce>>,
     /// The in-flight heartbeat attempt, pinned across retries (ADR-I007 retry
-    /// coupling). The Idempotency-Key, the EXACT serialised body bytes, the PoP
-    /// challenge nonce, and the COSE_Sign1 proof are ONE immutable unit: a retry of
-    /// an ambiguous/failed contact replays this verbatim (so a lost-response retry
-    /// presents the SAME key with the SAME body — never the same key with a fresh
+    /// coupling). The Idempotency-Key, the EXACT serialised body bytes (which carry
+    /// the PoP challenge nonce), and the `COSE_Sign1` proof are ONE immutable unit: a
+    /// retry of an ambiguous/failed contact replays this verbatim (so a lost-response
+    /// retry presents the SAME key with the SAME body — never the same key with a fresh
     /// nonce, which a strict server rejects as an idempotency body-mismatch and
     /// could strand the client). It is set when a NEW logical operation is built and
     /// cleared ONLY on a successful contact (then the next cycle mints afresh).
@@ -1365,19 +1365,19 @@ struct PopNonce {
     expires_at_ms: i64,
 }
 
-/// The pinned in-flight heartbeat attempt — `{Idempotency-Key, body bytes, PoP
-/// nonce, COSE_Sign1 proof}` as ONE retry unit (ADR-I007). A retry of a
+/// The pinned in-flight heartbeat attempt — the Idempotency-Key, the body bytes,
+/// and the `COSE_Sign1` proof as ONE retry unit (ADR-I007). A retry of a
 /// failed/ambiguous contact replays exactly these bytes; only a successful contact
-/// clears it so the next cycle builds a fresh attempt.
+/// clears it so the next cycle builds a fresh attempt. The PoP challenge nonce is
+/// not stored separately — it is already embedded in `body` (and hashed into
+/// `pop_header`), so pinning the body pins the nonce.
 #[derive(Debug, Clone)]
 struct PendingAttempt {
     /// The retry-stable Idempotency-Key (also tracked in [`IdempotencyState`]).
     idempotency_key: String,
     /// The EXACT JSON body bytes the transport POSTs verbatim (the PoP signed
-    /// `sha256` of these).
+    /// `sha256` of these; carries the single-use nonce).
     body: Vec<u8>,
-    /// The single-use PoP challenge nonce bound into this body + proof.
-    nonce: String,
     /// The base64 `COSE_Sign1` `Conspect-Device-PoP` header for this body.
     pop_header: String,
 }
@@ -1955,36 +1955,35 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         //    durable Idempotency-Key. EVERY build step fails closed BEFORE the
         //    mutation (a PoP/challenge/nonce-store failure `?`-propagates and sends
         //    nothing) — keep last-good, retry next cycle, never off air (inv #1/#10).
-        let attempt = match self.pinned_attempt() {
-            Some(pinned) => pinned,
-            None => {
-                let held_serial = self.store.current().map(|e| e.lease.serial);
-                let pop_nonce = self.obtain_pop_nonce(&self.config.org_id).await?;
-                let req = Self::build_heartbeat_request_for(
-                    &self.identity,
-                    held_serial,
-                    Some(established_binding.clone()),
-                    pop_nonce,
-                );
-                // Serialise ONCE — the transport sends THESE bytes verbatim and the
-                // PoP signs `sha256` of THESE bytes (device + server hash the same).
-                let body = serde_json::to_vec(&req).map_err(|e| {
-                    HeartbeatError::Malformed(format!("heartbeat body serialise: {e}"))
-                })?;
-                let pop_header = self.build_pop_header(&body, &req.nonce)?;
-                // Mint the durable Idempotency-Key LAST (after the fallible PoP build,
-                // so a PoP failure never burns a counter), then PIN the whole unit so
-                // any retry replays it byte-for-byte.
-                let idempotency_key = self.idempotency_key()?;
-                let attempt = PendingAttempt {
-                    idempotency_key,
-                    body,
-                    nonce: req.nonce,
-                    pop_header,
-                };
-                self.pin_attempt(attempt.clone());
-                attempt
-            }
+        let attempt = if let Some(pinned) = self.pinned_attempt() {
+            // A retry of an in-flight attempt — replay it verbatim.
+            pinned
+        } else {
+            // A genuinely-new logical operation — build a fresh attempt + pin it.
+            let held_serial = self.store.current().map(|e| e.lease.serial);
+            let pop_nonce = self.obtain_pop_nonce(&self.config.org_id).await?;
+            let req = Self::build_heartbeat_request_for(
+                &self.identity,
+                held_serial,
+                Some(established_binding.clone()),
+                pop_nonce,
+            );
+            // Serialise ONCE — the transport sends THESE bytes verbatim and the PoP
+            // signs `sha256` of THESE bytes (device + server hash the same body).
+            let body = serde_json::to_vec(&req)
+                .map_err(|e| HeartbeatError::Malformed(format!("heartbeat body serialise: {e}")))?;
+            let pop_header = self.build_pop_header(&body, &req.nonce)?;
+            // Mint the durable Idempotency-Key LAST (after the fallible PoP build, so
+            // a PoP failure never burns a counter), then PIN the whole unit so any
+            // retry replays it byte-for-byte.
+            let idempotency_key = self.idempotency_key()?;
+            let attempt = PendingAttempt {
+                idempotency_key,
+                body,
+                pop_header,
+            };
+            self.pin_attempt(attempt.clone());
+            attempt
         };
 
         // 4. RENEW the held lease by sending the pinned attempt. On a transport

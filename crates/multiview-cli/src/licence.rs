@@ -888,7 +888,7 @@ impl DeviceKeyStore {
         // `unsafe`; rustix is a SAFE wrapper, already a dep for flock). On a non-Unix
         // target the mode concept does not apply — a plain `std::fs` open is used.
         #[cfg(unix)]
-        let mut file: std::fs::File = match rustix::fs::open(
+        let file: std::fs::File = match rustix::fs::open(
             path,
             rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::empty(),
@@ -903,7 +903,7 @@ impl DeviceKeyStore {
             }
         };
         #[cfg(not(unix))]
-        let mut file: std::fs::File = match std::fs::OpenOptions::new().read(true).open(path) {
+        let file: std::fs::File = match std::fs::OpenOptions::new().read(true).open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
