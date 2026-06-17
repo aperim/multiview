@@ -182,6 +182,27 @@ paths — a new `HeartbeatError::Pop(PopError)` variant joins the existing fail-
   backoff. A keypair the cli cannot generate/persist → the heartbeat declines to start (fail
   closed) and the machine runs unlicensed-honest, never a crash.
 
+### 8. Cross-vendor-panel hardening (round 2)
+
+Two further majors from the round-2 review:
+
+- **Retry coupling — `{Idempotency-Key, body, nonce, proof}` is ONE retry unit.** The
+  Idempotency-Key is retry-stable, but the single-use PoP `nonce` is a **body field** hashed
+  into the proof, so a fresh nonce changes the serialised body. A lost-response-after-commit
+  retry that re-presented the same key with a *freshly-nonce'd* body would be rejected by a
+  strict server as an idempotency body-mismatch and could strand the device. Fix: the loop pins
+  a `PendingAttempt { idempotency_key, body, nonce, pop_header }` and **replays it verbatim** on
+  a retry; only a genuinely-new logical operation builds fresh. The pin is cleared + the key
+  rotated together (`clear_pending`) on a **successful server contact** — the server commits the
+  mutation under the key regardless of whether the device then accepts the returned lease, so
+  the contact (not the local install outcome) is the right success boundary.
+- **Load-side TOCTOU — inode-bind the key read.** `DeviceKeyStore::load_existing` opens the key
+  ONCE with `O_NOFOLLOW` (a symlink at the path is refused — the swap vector), `fstat`s the
+  **open fd** (regular file + exactly `0600`), and reads from that **same fd**. So the perms
+  checked and the bytes accepted provably come from one inode — a concurrent replacer cannot
+  swap the path between the check and the read. (The install side already used
+  `O_EXCL` + `hard_link` + explicit `0600`.)
+
 ## Rationale
 
 - **The leaf-crate invariant is preserved exactly.** Generation (RNG) + persistence (I/O) — the
