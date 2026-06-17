@@ -80,6 +80,25 @@ on restart gives a **stable device identity** (continuity — the server verifie
 generate-once-then-reuse `DeviceKeyStore` at the cli boundary owns this; the leaf crate receives
 a loaded signer through a seam.
 
+**Provisioning model — client-generated, persisted on first run (SSH-host-key style).** The
+device keypair is **minted by the device on first boot** and reused forever after, exactly like
+an SSH host key. The generated **public** key is the device's identity: it is what populates
+`devicePublicKey` (base64url raw-32) on the eventual activate, and its RFC 7638 thumbprint is the
+lease `cnf_jkt` (holder-of-key) the server binds. This **supersedes the existing captured-but-
+unused `MULTIVIEW_LICENCE_DEVICE_KEY` placeholder** (`DeviceIdentity::device_public_key_b64url`):
+that env var carried only a **public-key string** (forward-compat for the deferred activate, and
+never sent on the renew path) — a public key cannot sign a PoP, so it was never the credential.
+The authoritative device key is now the **generated + persisted private** key in `DeviceKeyStore`;
+the `MULTIVIEW_LICENCE_DEVICE_KEY` placeholder is inert for PoP and is a deprecation candidate
+(left in place this slice to avoid churning the cli config contract, since it is not load-bearing
+for PoP). **No operator-provisioned device key is supported** — there is no secure way for an
+operator to hand a *private* key in via the current env/config surface (env vars are gitignored
++ read-denied but still process-visible; the secret belongs only on the device's disk), and the
+SSH-host-key model needs none. If an operator-provisioned model is ever wanted (e.g. a
+pre-seeded fleet image), it would drop a `device-key.ed25519` seed into the lease dir before
+first boot and `DeviceKeyStore::load_or_generate` would load it unchanged — but that is out of
+scope here and not built.
+
 ### 3. The signer seam — `DeviceSigner` (leaf crate), implemented by the cli
 
 ```rust
