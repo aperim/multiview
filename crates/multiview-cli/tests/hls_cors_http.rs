@@ -153,6 +153,7 @@ async fn control_listener_serves_hls_outputs_with_cors() {
         None, // licence
         None, // mesh
         multiview_control::LiveApplyCaps::default(),
+        multiview_control::LiveSourceCapability::synthetic_only(),
         async move {
             let _ = shutdown_rx.await;
         },

@@ -35,15 +35,18 @@ fn parse_stored_source(body: &serde_json::Value) -> Option<multiview_config::Sou
 /// can take it live (ADR-W018, invariant #11), returning the apply semantics
 /// the response must declare.
 ///
-/// * A **synthetic** kind (`bars`/`solid`/`clock`) is enqueued as
-///   [`Command::UpsertSource`]; the engine drain registers it at a frame
-///   boundary → `live`.
-/// * A kind change **off** synthetic (`previous` synthetic, new kind not)
-///   enqueues [`Command::RemoveSource`] — the running generator stops (a stale
-///   picture pretending to be the new URL would be dishonest) — but the new
-///   document itself still applies on `restart`.
-/// * Network/decoded kinds, a full/closed bus (no engine draining), or an
-///   unparseable stored doc → `restart`, honestly.
+/// * A kind the run declared **live-appliable**
+///   ([`AppState::live_sources`](crate::LiveSourceCapability) — synthetic kinds
+///   on every run; network/file kinds when the run wired a real ingest spawner
+///   into its live-source hub) is enqueued as [`Command::UpsertSource`]; the
+///   engine drain registers it at a frame boundary → `live`.
+/// * A kind change from a live-appliable kind to one the run **cannot** apply
+///   live (e.g. `rtsp` → `ndi`) enqueues [`Command::RemoveSource`] — the
+///   running producer stops (a stale picture pretending to be the new feed
+///   would be dishonest) — but the new document itself applies on `restart`.
+/// * Non-live kinds (`ndi`/`youtube`/`aes67`, or network kinds on a run with
+///   no decoder), a full/closed bus (no engine draining), or an unparseable
+///   stored doc → `restart`, honestly.
 ///
 /// Submission is `try_submit` (bounded, non-blocking, ADR-W008): control can
 /// never block on the engine (invariant #10); a shed submit degrades the
@@ -56,7 +59,7 @@ fn live_apply_upsert(
     let Some(source) = source else {
         return ApplyMode::Restart;
     };
-    if source.kind.is_synthetic() {
+    if state.live_sources.is_live(&source.kind) {
         let submitted = state
             .commands
             .try_submit(Command::UpsertSource {
@@ -70,7 +73,7 @@ fn live_apply_upsert(
             ApplyMode::Restart
         };
     }
-    if previous.is_some_and(|prev| prev.kind.is_synthetic()) {
+    if previous.is_some_and(|prev| state.live_sources.is_live(&prev.kind)) {
         // Synthetic -> decoded kind change: stop the running generator now;
         // the stored decoded source applies on restart. A shed submit is
         // surfaced (never silent): the stale generator keeps rendering until
@@ -182,7 +185,7 @@ pub(crate) async fn get_source(
         params(("id" = String, Path, description = "Source id.")),
         request_body = crate::openapi_schemas::SourceResourceInputDoc,
         responses(
-            (status = 201, description = "The created source (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` for synthetic kinds (bars/solid/clock) applied to the running engine at a frame boundary, `restart` otherwise (ADR-W018).", body = crate::resource_store::Resource),
+            (status = 201, description = "The created source (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine applies it at a frame boundary — synthetic kinds (bars/solid/clock) on every run, network/file kinds (rtsp/hls/ts/srt/rtmp/rist/file) on a full-engine run — `restart` otherwise (ndi/youtube/aes67, or a run without the decoder; ADR-W018).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
             (status = 422, description = "The body is not a valid source document (detail names the field path).", body = crate::problem::Problem),
@@ -226,7 +229,7 @@ pub(crate) async fn create_source(
         params(("id" = String, Path, description = "Source id.")),
         request_body = crate::openapi_schemas::SourceResourceInputDoc,
         responses(
-            (status = 200, description = "The replaced source (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` for synthetic kinds applied to the running engine, `restart` otherwise (ADR-W018).", body = crate::resource_store::Resource),
+            (status = 200, description = "The replaced source (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine applies it at a frame boundary (synthetic kinds on every run; network/file kinds on a full-engine run — an edit swaps the producer behind the same tile store), `restart` otherwise (ADR-W018).", body = crate::resource_store::Resource),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
             (status = 403, description = "Not authorized to write.", body = crate::problem::Problem),
             (status = 404, description = "No source with that id.", body = crate::problem::Problem),

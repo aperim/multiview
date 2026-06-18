@@ -909,14 +909,16 @@ export function SourcesPage(): JSX.Element {
               Synthetic sources (bars, solid colour, clock, timer) apply to the
               running engine immediately when saved, and deleting any source
               removes it from the running engine immediately. Network and file
-              sources are stored and go live via config export + restart. Each
-              save response declares which applied (X-Multiview-Apply: live or
-              restart).
+              sources (RTSP, HLS, MPEG-TS, SRT, RTMP, RIST, file) also apply live
+              on a full-engine run; on the software engine, and for NDI / YouTube
+              / AES67, they are stored and go live via config export + restart.
+              Each save response declares which applied (X-Multiview-Apply: live
+              or restart).
             </Trans>
           }
         />
       }
-      savedDescription={t`Stored. Synthetic sources (bars, solid colour, clock, timer) apply to the running engine immediately; other kinds go live via config export + restart.`}
+      savedDescription={t`Stored. Synthetic sources (bars, solid colour, clock, timer) and — on a full-engine run — network/file sources apply to the running engine immediately; NDI / YouTube / AES67 (and any kind on the software engine) go live via config export + restart. The response header declares which applied.`}
       deletedDescription={t`Removed. The running engine drops the source immediately (the response header confirms) — tiles bound to it show the no-signal slate until re-routed.`}
       list={sources.data ?? []}
       isPending={sources.isPending}

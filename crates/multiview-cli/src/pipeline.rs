@@ -466,7 +466,40 @@ struct AdmissionPick {
     /// The chosen device's CUDA enumeration ordinal (e.g. `Some("1")`) for the
     /// NVDEC decode + NVENC encode pin, or `None` in lockstep with `wgpu_target`.
     cuda_ordinal: Option<String>,
+    /// The chosen device's stable identity — the **island device** every later
+    /// runtime decode placement is pinned to (ADR-W018 §7 / ADR-0018: a
+    /// runtime add never fragments or migrates the island). `None` in lockstep
+    /// with `wgpu_target`.
+    device: Option<multiview_hal::DeviceId>,
 }
+
+/// The running pipeline's pinned **island** (ADR-W018 §7): the device the
+/// decide-once admission pick placed the whole `decode → composite → encode`
+/// island on, its CUDA ordinal, and the tile count the startup demand modelled.
+/// Published by `drive_streaming` into a shared slot the
+/// [`LiveIngestSpawner`] reads, so every runtime decode placement consults the
+/// same admission scorer **pinned to this device** — never a different GPU,
+/// never a migration.
+#[cfg(feature = "gpu")]
+#[derive(Debug, Clone)]
+struct LiveIsland {
+    /// The island device's stable identity (the runtime-placement pin).
+    device: multiview_hal::DeviceId,
+    /// The island device's CUDA enumeration ordinal (stamped onto an admitted
+    /// runtime decode so NVDEC co-locates with the compositor). `None` when
+    /// the device resolved no ordinal — then an admit keeps the default CUDA
+    /// device, in lockstep with the startup plans.
+    cuda_ordinal: Option<String>,
+    /// The startup island's tile count (the layout's cells) — the base demand
+    /// a runtime add extends by one decode.
+    tile_count: usize,
+}
+
+/// The shared slot `drive_streaming` publishes the pinned [`LiveIsland`] into
+/// (empty until — and unless — admission names a device). Lock-free reads on
+/// the hub worker; never touched by the output clock.
+#[cfg(feature = "gpu")]
+type LiveIslandSlot = Arc<arc_swap::ArcSwapOption<LiveIsland>>;
 
 /// Choose the GPU to host the whole pipeline island at **admission** — the
 /// load-aware, decide-once pick (ADR-0035 Tier-1, ADR-0018; the GPU-placement
@@ -533,10 +566,11 @@ fn select_admission_pick(
     // A conservative per-engine budget large enough not to gate a typical
     // multiview on a real GPU; the LIVE 4060-vs-P2000 routing on the contended
     // box rests on the VRAM headroom gate (the 95%-full 4060 exceeds the 0.85
-    // ceiling) + VRAM-dominant scoring, which need no perf-class table. A real
-    // per-GPU perf-class `CostBudget` table is the documented Tier-2 refinement
-    // (ADR-0035 §5) — until then every candidate shares this permissive budget,
-    // so the budget gate is effectively inert and the headroom/score do the work.
+    // ceiling) + VRAM-dominant scoring, which need no perf-class table. ADR-0018
+    // makes the hard gates (headroom + capability + NVENC-session) "the real
+    // safety", so this permissive Mpix/s budget is effectively inert and the
+    // headroom/score do the work. A real per-GPU perf-class `CostBudget` table
+    // is future work (not yet built).
     let budget = CostBudget::new(100_000.0, 100_000.0, 100_000.0);
 
     // One candidate per visible GPU. We treat each as capable of the whole island
@@ -645,6 +679,161 @@ fn select_admission_pick(
     AdmissionPick {
         wgpu_target: Some(target),
         cuda_ordinal: info.cuda_ordinal,
+        device: Some(selection.device),
+    }
+}
+
+/// Place ONE runtime-added decode (ADR-W018 §7, level 2): consult the **same**
+/// [`multiview_hal::select_device`] scorer the startup admission uses, with two
+/// changes honouring the GPU-placement principle:
+///
+/// * the candidate set is **exactly the running island's device** — a runtime
+///   add may never fragment or migrate the island, and a single-candidate
+///   consult makes naming any other GPU impossible. (ADR-W018 §7 sketched
+///   `Pins::pin_pipeline`; a pin deliberately *bypasses* the headroom ceiling
+///   — operator-pins-always-win — which would defeat the §7 reject →
+///   software-decode ladder, so the implementation restricts the candidate set
+///   instead: identical never-fragment guarantee, headroom still gates.)
+/// * the demand is the island's current tile set **plus** the new decode
+///   (`TileLoad::new(Decode, …)`), re-polling NVML at decision time. The
+///   demand opens **no** new encode session (the island's NVENC session is
+///   already open and counted in the *measured* snapshot — modelling it again
+///   would double-count it against the session ceiling).
+///
+/// An **admit** returns [`DecodePlacement::Pinned`] with the island's CUDA
+/// ordinal (NVDEC co-located with the compositor — ADR-0035 affinity). A
+/// **reject** (budget / headroom / the island gone from the snapshot) — AND an
+/// admit where the island resolved **no** CUDA ordinal — returns
+/// [`DecodePlacement::SoftwareOnly`]: the decoder open for that one source is
+/// FORCED to software (the [`decoder_open_args`] gate). This NEVER returns
+/// `Default` on the live path: `Default` opens NVDEC on libav's default device,
+/// which here is fragmentation/overcommit — the compositor island is *already*
+/// pinned at runtime, so an un-pinnable (no-ordinal) admit cannot co-locate
+/// NVDEC with it and must fall to software, not the default GPU. (`Default` is
+/// correct only at startup, where nothing is pinned yet.) The island is never
+/// overcommitted or fragmented and the output never falters (inv #1).
+///
+/// Runs on the hub worker thread only (it polls NVML) — never on the clock.
+#[cfg(feature = "gpu")]
+fn select_live_decode_placement(
+    load_source: &dyn multiview_hal::LoadSource,
+    island: &LiveIsland,
+    canvas_w: u32,
+    canvas_h: u32,
+    cadence: Rational,
+) -> DecodePlacement {
+    use multiview_core::pixel::PixelFormat;
+    use multiview_core::traits::BackendKind;
+    use multiview_hal::{
+        select_device, Capability, CostBudget, GpuCandidate, Pins, PipelineDemand, PlacementPolicy,
+        Resolution, Stage, StageCaps, TileLoad,
+    };
+
+    // Fresh measured load at decision time (the ADR-W018 §7 re-poll): a
+    // removed source's NVDEC/VRAM consumption has already vanished from these
+    // counters when its decoder closed — the measured-load model needs no
+    // booking ledger to return budget.
+    let loads = load_source.poll();
+    let Some(island_load) = loads.iter().find(|l| l.device_id == island.device) else {
+        tracing::warn!(
+            island = island.device.stable_id(),
+            "live decode placement: the island device is absent from the load \
+             snapshot at decision time; FORCING software decode for this source \
+             (hardware on the default device could overcommit or fragment the island)"
+        );
+        return DecodePlacement::SoftwareOnly;
+    };
+
+    let canvas_res = Resolution::new(canvas_w.max(1), canvas_h.max(1));
+    // The same conservative per-engine budget the startup admission uses. The
+    // per-engine Mpix/s budget is intentionally permissive: ADR-0018 makes the
+    // VRAM-headroom hard gate + VRAM-dominant score the real safety net ("hard
+    // gates are the real safety"), so this Mpix/s budget does not gate a typical
+    // multiview on a real GPU — a real per-GPU perf-class budget table is future
+    // work, not yet built. KNOWN RESIDUAL (disclosed): a VRAM-roomy but
+    // decode-engine-saturated GPU passes both this budget and the headroom gate,
+    // so a live add CAN be admitted onto a GPU that cannot sustain another
+    // decode. That is acceptable for this ship: the never-off-air contract holds
+    // (an over-subscribed decode degrades the NEW tile, never the program — the
+    // output clock samples last-good, inv #1/#2) and invariant #9's closed-loop
+    // degradation sheds the cheapest tile if the saturation bites.
+    let budget = CostBudget::new(100_000.0, 100_000.0, 100_000.0);
+    let cap = |stage: Stage| {
+        Capability::new(
+            BackendKind::Cuda,
+            stage,
+            canvas_res,
+            vec![PixelFormat::Nv12],
+        )
+    };
+    // ONE candidate: the island device. select_device physically cannot name
+    // another GPU — the affinity hard constraint by construction.
+    let candidates = vec![GpuCandidate {
+        device_id: island_load.device_id.clone(),
+        stage_caps: StageCaps::new(
+            cap(Stage::Decode),
+            cap(Stage::Composite),
+            cap(Stage::Encode),
+        ),
+        budget,
+    }];
+
+    // Demand: the island's current tile set PLUS the new decode. The +2 covers
+    // the island's composite + encode loads, exactly as the startup demand
+    // models them. `opens_encode_session = false`: no NEW session is opened by
+    // a decode-only add (the running session is in the measured snapshot).
+    let mut tile_loads: Vec<TileLoad> = Vec::with_capacity(island.tile_count.saturating_add(3));
+    for _ in 0..island.tile_count.max(1) {
+        tile_loads.push(TileLoad::new(Stage::Decode, canvas_res));
+    }
+    tile_loads.push(TileLoad::new(Stage::Decode, canvas_res)); // the new source
+    tile_loads.push(TileLoad::new(Stage::Composite, canvas_res));
+    tile_loads.push(TileLoad::new(Stage::Encode, canvas_res));
+    let demand = PipelineDemand::new(cadence, tile_loads, canvas_res, PixelFormat::Nv12, 0, false);
+
+    match select_device(
+        &candidates,
+        &demand,
+        &loads,
+        &Pins::none(),
+        PlacementPolicy::default(),
+    ) {
+        Ok(selection) => {
+            if let Some(ordinal) = island.cuda_ordinal.clone() {
+                tracing::info!(
+                    island = island.device.stable_id(),
+                    cuda_ordinal = %ordinal,
+                    score = selection.score,
+                    "live decode placement: admitted onto the running island device \
+                     (NVDEC co-located, ADR-W018 §7)"
+                );
+                DecodePlacement::Pinned(ordinal)
+            } else {
+                // Admitted by budget/headroom, but the island device resolved
+                // no CUDA ordinal — on the LIVE path the compositor island is
+                // already pinned, so an un-pinnable decode cannot co-locate and
+                // `Default` (libav's default device) would fragment/overcommit.
+                // Fail closed to software for this one source (ADR-W018 §7).
+                tracing::warn!(
+                    island = island.device.stable_id(),
+                    score = selection.score,
+                    "live decode placement: admitted but the island resolved no \
+                     CUDA ordinal; FORCING software decode for this source (the \
+                     default device would fragment/overcommit the pinned island)"
+                );
+                DecodePlacement::SoftwareOnly
+            }
+        }
+        Err(reason) => {
+            tracing::warn!(
+                island = island.device.stable_id(),
+                ?reason,
+                "live decode placement REJECTED for this source: its decoder \
+                 open is FORCED to software (the island is never overcommitted \
+                 and never fragmented; the output never falters — ADR-W018 §7)"
+            );
+            DecodePlacement::SoftwareOnly
+        }
     }
 }
 
@@ -809,6 +998,321 @@ mod admission_target_tests {
         // that pins nothing — so the caller keeps the default adapter.
         let target = gpu_target_from_info(&GpuTargetInfo::default());
         assert!(!target.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-W018 §7 — the LIVE decode placement consult (level 2): a runtime
+    // add consults the SAME select_device scorer, candidate-restricted to the
+    // running island's device (never fragments/migrates), and a reject
+    // degrades THAT source to software decode only.
+    // -----------------------------------------------------------------------
+
+    use super::{LiveIngestSpawner, LiveIsland};
+
+    fn island(uuid: &str, index: u32, ordinal: &str) -> LiveIsland {
+        LiveIsland {
+            device: DeviceId::new(Vendor::Nvidia, uuid, index),
+            cuda_ordinal: Some(ordinal.to_owned()),
+            tile_count: 4,
+        }
+    }
+
+    /// An island whose device admits by headroom but resolved NO CUDA ordinal
+    /// — the admit-with-no-pin case (finding #2): on the live path this must
+    /// fall to software, never the default device.
+    fn island_no_ordinal(uuid: &str, index: u32) -> LiveIsland {
+        LiveIsland {
+            device: DeviceId::new(Vendor::Nvidia, uuid, index),
+            cuda_ordinal: None,
+            tile_count: 4,
+        }
+    }
+
+    #[test]
+    fn live_decode_placement_admits_but_forces_software_when_the_island_has_no_ordinal() {
+        // The idle P2000 PASSES the headroom/budget gate, but its LiveIsland
+        // resolved no CUDA ordinal. On the live path the compositor island is
+        // already pinned, so an un-pinnable admit must NOT fall to
+        // `Default` (= libav default-device NVDEC, fragment/overcommit) — it
+        // must FORCE software (finding #2). The decode-open gate confirms
+        // (want_hw=false, no ordinal).
+        let placement = super::select_live_decode_placement(
+            &FakeTwoGpu,
+            &island_no_ordinal(FakeTwoGpu::GPU1_UUID, 1),
+            1920,
+            1080,
+            Rational::new(25, 1),
+        );
+        assert_eq!(
+            placement,
+            super::DecodePlacement::SoftwareOnly,
+            "an admitted-but-un-pinnable live decode must force software, never Default"
+        );
+        assert_eq!(
+            super::decoder_open_args(&placement, None),
+            (false, None),
+            "the un-pinnable admit's decoder open must not WANT hardware at all"
+        );
+    }
+
+    #[test]
+    fn live_decode_placement_admits_onto_the_idle_island_pinned_to_its_ordinal() {
+        // The island is the idle P2000: the consult (island tile set + the new
+        // decode, fresh load poll) admits as `Pinned` with the ISLAND's
+        // ordinal — NVDEC co-locates with the running compositor, never a
+        // different GPU (even though the fake topology has two) — and the
+        // decode-open gate keeps the hardware preference + threads the pin.
+        let placement = super::select_live_decode_placement(
+            &FakeTwoGpu,
+            &island(FakeTwoGpu::GPU1_UUID, 1, "1"),
+            1920,
+            1080,
+            Rational::new(25, 1),
+        );
+        assert_eq!(
+            placement,
+            super::DecodePlacement::Pinned("1".to_owned()),
+            "an admitted live decode must be pinned to the ISLAND device's ordinal"
+        );
+        let (want_hw, ordinal) = super::decoder_open_args(&placement, None);
+        assert_eq!(
+            want_hw,
+            multiview_ffmpeg::want_hw_decode(None),
+            "an admitted placement keeps the canonical hardware preference"
+        );
+        assert_eq!(
+            ordinal,
+            Some("1"),
+            "the island ordinal reaches the decoder open"
+        );
+    }
+
+    #[test]
+    fn live_decode_placement_rejects_an_over_headroom_island_to_forced_software() {
+        // The island is the 95%-VRAM 4060 (over the 0.85 headroom ceiling):
+        // the consult REJECTS — and because the candidate set is exactly the
+        // island device, the scorer cannot escape to the idle P2000 (that
+        // would fragment the pipeline). The reject is the EXPLICIT
+        // `SoftwareOnly` placement, and the decode-open gate turns it into a
+        // software open (want_hw = false, no ordinal) even though NVDEC is
+        // otherwise enabled — `None` ordinal alone would have opened NVDEC on
+        // the DEFAULT device, i.e. the over-headroom island itself.
+        let placement = super::select_live_decode_placement(
+            &FakeTwoGpu,
+            &island(FakeTwoGpu::GPU0_UUID, 0, "0"),
+            1920,
+            1080,
+            Rational::new(25, 1),
+        );
+        assert_eq!(
+            placement,
+            super::DecodePlacement::SoftwareOnly,
+            "an over-headroom island must FORCE software decode — never \
+             overcommit the island or migrate to another GPU"
+        );
+        assert_eq!(
+            super::decoder_open_args(&placement, None),
+            (false, None),
+            "the rejected source's decoder open must not WANT hardware at all"
+        );
+    }
+
+    #[test]
+    fn live_decode_placement_forces_software_when_the_island_vanishes() {
+        // No load snapshot carries the island device (NVML gone, device lost):
+        // the consult cannot verify the pin — hardware on the default device
+        // could overcommit or fragment the (unverifiable) island, so the
+        // placement is the explicit forced-software outcome.
+        let placement = super::select_live_decode_placement(
+            &NullLoadPoller::new(),
+            &island(FakeTwoGpu::GPU1_UUID, 1, "1"),
+            1920,
+            1080,
+            Rational::new(25, 1),
+        );
+        assert_eq!(placement, super::DecodePlacement::SoftwareOnly);
+        assert_eq!(super::decoder_open_args(&placement, None), (false, None));
+    }
+
+    #[test]
+    fn live_spawner_forces_software_when_no_island_was_admitted() {
+        // FINDING #1 — empty island must FAIL CLOSED. Under `gpu`, startup
+        // admission published NO island (scorer rejection / no NVML / no
+        // admissible GPU), so the slot is empty. A runtime-added decode must
+        // NOT keep the constructor `Default` (= libav default-device NVDEC, the
+        // very GPU admission declined) — it must force `SoftwareOnly`. We also
+        // confirm the consult is SKIPPED (no load poll) on the empty path.
+        use multiview_compositor::pipeline::CanvasColor;
+
+        let doc = r##"schema_version = 1
+[canvas]
+width = 320
+height = 240
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "in_a"
+kind = "bars"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[outputs]]
+kind = "hls"
+path = "/tmp/live-spawner-empty-island.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##;
+        let config =
+            multiview_config::MultiviewConfig::load_from_toml(doc).expect("test config parses");
+        let layout = config.solve_layout().expect("test layout solves");
+
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spawner = LiveIngestSpawner {
+            layout: std::sync::Arc::new(layout),
+            canvas_color: CanvasColor::default(),
+            cadence: Rational::new(25, 1),
+            // EMPTY island slot — admission named no device.
+            island: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
+            load_source: Box::new(CountingLoadSource {
+                polls: std::sync::Arc::clone(&polls),
+            }),
+        };
+
+        let placement = spawner.decode_placement_for("live1");
+        assert_eq!(
+            placement,
+            super::DecodePlacement::SoftwareOnly,
+            "an empty island (admission named none) must FORCE software, never Default"
+        );
+        assert_eq!(
+            super::decoder_open_args(&placement, None),
+            (false, None),
+            "the empty-island decode open must not WANT hardware at all"
+        );
+        assert_eq!(
+            polls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the empty-island path must SKIP the admission consult (no load poll)"
+        );
+    }
+
+    /// A spy [`LoadSource`]: counts polls (proof the spawn path re-polls the
+    /// admission inputs at decision time) and otherwise answers as the fake
+    /// two-GPU host.
+    struct CountingLoadSource {
+        polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl LoadSource for CountingLoadSource {
+        fn poll(&self) -> Vec<DeviceLoad> {
+            self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            FakeTwoGpu.poll()
+        }
+
+        fn device_target(&self, device: &DeviceId) -> Option<GpuTargetInfo> {
+            FakeTwoGpu.device_target(device)
+        }
+    }
+
+    #[test]
+    fn live_spawner_consults_the_admission_path_on_every_decoded_spawn() {
+        // THE SEAM PIN (ADR-W018 §7): `LiveIngestSpawner::spawn` — the hub's
+        // decoded-producer path — must consult the admission scorer (observed
+        // via the injected load-source spy: exactly one fresh poll per spawn)
+        // when an island is pinned, and still spawn the SAME supervised
+        // ingest producer either way.
+        use crate::live_sources::{SourceSpawn, SpawnedProducer};
+        use multiview_compositor::pipeline::CanvasColor;
+
+        let doc = r##"schema_version = 1
+[canvas]
+width = 320
+height = 240
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "in_a"
+kind = "bars"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[outputs]]
+kind = "hls"
+path = "/tmp/live-spawner-consult.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##;
+        let config =
+            multiview_config::MultiviewConfig::load_from_toml(doc).expect("test config parses");
+        let layout = config.solve_layout().expect("test layout solves");
+
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spawner = LiveIngestSpawner {
+            layout: std::sync::Arc::new(layout),
+            canvas_color: CanvasColor::default(),
+            cadence: Rational::new(25, 1),
+            island: std::sync::Arc::new(arc_swap::ArcSwapOption::from_pointee(island(
+                FakeTwoGpu::GPU1_UUID,
+                1,
+                "1",
+            ))),
+            load_source: Box::new(CountingLoadSource {
+                polls: std::sync::Arc::clone(&polls),
+            }),
+        };
+
+        let source: multiview_config::Source = serde_json::from_value(serde_json::json!({
+            "id": "live1", "kind": "file", "path": "/nonexistent/clip.ts"
+        }))
+        .expect("test source parses");
+        let store = std::sync::Arc::new(
+            multiview_framestore::TileStore::<super::Nv12Image>::with_defaults("live1"),
+        );
+        let registry = crate::live_sources::stop_registry();
+        let produced = crate::live_sources::IngestSpawner::spawn(
+            &spawner,
+            SourceSpawn { source, store },
+            &registry,
+        );
+
+        assert_eq!(
+            polls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the decoded spawn path must consult the admission inputs exactly \
+             once (a fresh measured-load poll at decision time)"
+        );
+        let Some(SpawnedProducer { stop, handle }) = produced else {
+            panic!("the spawner must spawn the supervised ingest producer");
+        };
+        assert!(
+            registry.lock().is_ok_and(|map| map.contains_key("live1")),
+            "the spawned producer registers its per-source stop flag"
+        );
+        // The nonexistent file fails its open and the finite ingest thread
+        // ends on its own; raise the flag anyway and join (bounded by the
+        // thread's own prompt exit) so the test leaks nothing.
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        handle.join().expect("ingest thread joins");
     }
 }
 
@@ -1094,6 +1598,12 @@ pub struct Pipeline {
     /// thread registers its flag here, and the live-source hub shares the same
     /// registry, so a live `RemoveSource` can tear down exactly one producer.
     stop_registry: crate::live_sources::StopRegistry,
+    /// The pinned island slot (ADR-W018 §7): `drive_streaming` publishes the
+    /// admission pick's device here so the [`LiveIngestSpawner`] places every
+    /// runtime-added decode on the SAME island device (never a fragment/
+    /// migration). Empty until — and unless — admission names a device.
+    #[cfg(feature = "gpu")]
+    live_island: LiveIslandSlot,
     /// Per-source streaming ingest plans: how to open + decode each source, and
     /// the tile size its frames are scaled to. The drive starts one decode
     /// thread per plan; the threads publish into [`Self::stores`] as frames
@@ -1208,6 +1718,57 @@ pub struct Pipeline {
 
 type HashMapStores = std::collections::HashMap<String, Arc<TileStore<Nv12Image>>>;
 
+/// Where a source's video decode is allowed to open — the explicit tri-state
+/// outcome of decode placement (ADR-W018 §7 / ADR-0018's never-fragment rule).
+///
+/// `Option<ordinal>` cannot express this: "no ordinal" must distinguish *no
+/// placement decision* (hardware on libav's default device is fine — today's
+/// GPU-free behaviour) from *placement rejected* (hardware must NOT open: on a
+/// single-GPU host the default device IS the over-headroom island — admitting
+/// would overcommit it — and on a multi-GPU host the default device may be a
+/// **different** GPU, silently fragmenting the pipeline island). The
+/// tri-state is closed by design (no `#[non_exhaustive]`): a placement
+/// outcome is exactly one of default / pinned / forced-software.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DecodePlacement {
+    /// No placement decision: hardware decode (when the build/runtime offers
+    /// it) on libav's default device — the GPU-free / no-admission path.
+    #[default]
+    Default,
+    /// Pinned to the admission-chosen island device's CUDA enumeration
+    /// ordinal: NVDEC opens co-located with the compositor (affinity).
+    Pinned(String),
+    /// Placement REJECTED this source: the decoder open is forced to
+    /// **software** regardless of the build's hardware capability, so the
+    /// island is never overcommitted and never fragmented.
+    SoftwareOnly,
+}
+
+/// The `(want_hw, cuda_device)` pair [`open_and_stream`] hands
+/// [`StreamVideoDecoder::new_preferring_hw`] for a plan's [`DecodePlacement`].
+///
+/// This is **the** decode-open gate for placement (ADR-W018 §7):
+/// [`DecodePlacement::SoftwareOnly`] forces `(false, None)` — the hardware
+/// path is never attempted, even when NVDEC is compiled, present, and not
+/// env-disabled. The other placements keep the canonical hardware preference
+/// ([`multiview_ffmpeg::want_hw_decode`] over the `MULTIVIEW_DISABLE_NVDEC`
+/// reading) and thread the pinned ordinal through when one exists (the
+/// operator opt-out still wins over a pin).
+#[must_use]
+pub fn decoder_open_args<'p>(
+    placement: &'p DecodePlacement,
+    nvdec_disable_env: Option<&str>,
+) -> (bool, Option<&'p str>) {
+    match placement {
+        DecodePlacement::SoftwareOnly => (false, None),
+        DecodePlacement::Pinned(ordinal) => (
+            multiview_ffmpeg::want_hw_decode(nvdec_disable_env),
+            Some(ordinal.as_str()),
+        ),
+        DecodePlacement::Default => (multiview_ffmpeg::want_hw_decode(nvdec_disable_env), None),
+    }
+}
+
 /// Everything one source needs to be ingested on its own decode thread: where
 /// its media lives, the store to publish into, the tile size to scale to, the
 /// canvas color tag, and whether it is a live (never-ending) source.
@@ -1248,17 +1809,18 @@ struct IngestPlan {
     canvas_color: CanvasColor,
     /// The output cadence a synthetic generator paces its publishes to.
     cadence: Rational,
-    /// The CUDA enumeration **ordinal** (e.g. `Some("1")`) the NVDEC `*_cuvid`
-    /// decoder for this source is pinned to — the SAME GPU the load-aware
-    /// admission pick pinned the compositor to (ADR-0035 Tier-1 / the
-    /// GPU-placement principle: decode + composite + encode follow one chosen
-    /// device, never split across GPUs). Stamped from the admission selection in
-    /// [`Pipeline::drive_streaming`] before the ingest threads spawn; `None` when
-    /// admission named no specific device (no NVML / GPU-free / scorer rejection)
-    /// — in **lockstep** with the compositor's `None`, so neither stage pins a GPU
-    /// and decode opens libav's default CUDA device (today's behaviour). Consumed
-    /// by [`open_and_stream`] → [`StreamVideoDecoder::new_preferring_hw`].
-    cuda_ordinal: Option<String>,
+    /// Where this source's video decode opens ([`DecodePlacement`]):
+    /// [`DecodePlacement::Pinned`] to the admission-chosen island device
+    /// (ADR-0035 Tier-1 — stamped in [`Pipeline::drive_streaming`] before the
+    /// startup threads spawn, or by the live placement consult on an admitted
+    /// runtime add), [`DecodePlacement::Default`] when no placement decision
+    /// exists (GPU-free / no NVML — in lockstep with the compositor's default
+    /// adapter), or [`DecodePlacement::SoftwareOnly`] when the live consult
+    /// REJECTED this source (ADR-W018 §7 — hardware decode must not open at
+    /// all, lest it land back on the over-headroom island or fragment onto a
+    /// different GPU). Consumed by [`open_and_stream`] → [`decoder_open_args`]
+    /// → [`StreamVideoDecoder::new_preferring_hw`].
+    decode_placement: DecodePlacement,
     /// The shared WHIP publisher rendezvous (ADR-T014), present only for a
     /// `webrtc` source under `webrtc-native`: [`drive_webrtc`] samples this
     /// registry for the source's connected publisher (the negotiated RTP ring).
@@ -1602,6 +2164,8 @@ impl Pipeline {
             program_spec,
             stores,
             stop_registry: crate::live_sources::stop_registry(),
+            #[cfg(feature = "gpu")]
+            live_island: Arc::new(arc_swap::ArcSwapOption::empty()),
             ingest_plans,
             #[cfg(feature = "webrtc-native")]
             webrtc_registry,
@@ -1766,6 +2330,26 @@ impl Pipeline {
     #[must_use]
     pub fn stop_registry(&self) -> crate::live_sources::StopRegistry {
         Arc::clone(&self.stop_registry)
+    }
+
+    /// The run's decoded-ingest spawner for the live-source hub (ADR-W018
+    /// level 2): hand this to
+    /// [`LiveSourceHub::start_with_ingest`](crate::live_sources::LiveSourceHub::start_with_ingest)
+    /// so a runtime-added network/file source spawns the **same** supervised
+    /// [`ingest_loop`] the startup path runs (one uniform ingest path), with
+    /// its decode placement consulted against the **same** admission scorer —
+    /// pinned to the running island's device — that placed the startup island.
+    #[must_use]
+    pub fn live_ingest_spawner(&self) -> Arc<dyn crate::live_sources::IngestSpawner> {
+        Arc::new(LiveIngestSpawner {
+            layout: Arc::clone(&self.layout),
+            canvas_color: self.canvas_color,
+            cadence: self.cadence,
+            #[cfg(feature = "gpu")]
+            island: Arc::clone(&self.live_island),
+            #[cfg(feature = "gpu")]
+            load_source: crate::system_metrics::default_load_source(),
+        })
     }
 
     /// The shared WHIP publisher rendezvous registry (ADR-T014). The run wiring
@@ -2216,13 +2800,25 @@ impl Pipeline {
             );
             // Stamp the chosen device's CUDA ordinal onto every ingest plan BEFORE
             // the threads spawn, so decode co-locates with the compositor on the
-            // one chosen GPU (affinity). `None` leaves the plans on the default
-            // CUDA device — in lockstep with `wgpu_target` being `None`, so neither
-            // stage pins a GPU.
+            // one chosen GPU (affinity). No ordinal leaves the plans on
+            // `DecodePlacement::Default` (libav's default CUDA device) — in
+            // lockstep with `wgpu_target` being `None`, so neither stage pins a GPU.
             if let Some(ordinal) = pick.cuda_ordinal.as_deref() {
                 for plan in &mut self.ingest_plans {
-                    plan.cuda_ordinal = Some(ordinal.to_owned());
+                    plan.decode_placement = DecodePlacement::Pinned(ordinal.to_owned());
                 }
+            }
+            // Publish the pinned island (ADR-W018 §7) so every RUNTIME-added
+            // decode consults the same admission scorer pinned to THIS device —
+            // a live add never fragments or migrates the island. Stays empty
+            // when admission named no device (the live spawner then skips the
+            // consult, in lockstep with the startup plans' `None`).
+            if let Some(device) = pick.device.clone() {
+                self.live_island.store(Some(Arc::new(LiveIsland {
+                    device,
+                    cuda_ordinal: pick.cuda_ordinal.clone(),
+                    tile_count: self.layout.cells.len(),
+                })));
             }
             // The pinned chosen device, or `GpuTarget::none()` (prefer the GPU at
             // the default adapter) when admission did not name a specific GPU — so
@@ -4799,9 +5395,6 @@ impl IngestSupervisor {
                 .saturating_add(caption_plans.len()),
         );
         for plan in plans {
-            let stop = Arc::new(AtomicBool::new(false));
-            let id = plan.id.clone();
-            crate::live_sources::register_stop(registry, &id, &stop);
             // IN-5b: spawn the PROACTIVE youtube re-resolution loop as a supervised
             // SIBLING of this source's decode thread (before the decode thread takes
             // ownership of `plan`). It shares the plan's lock-free swappable-URL slot
@@ -4815,17 +5408,24 @@ impl IngestSupervisor {
             #[cfg(feature = "youtube")]
             if let SourceLocation::Youtube { watch_url } = &plan.location {
                 if let Some(slot) = plan.youtube_url_slot.clone() {
+                    let id = plan.id.clone();
                     let watch_url = watch_url.clone();
                     let rr_stop = Arc::new(AtomicBool::new(false));
-                    crate::live_sources::register_stop(
+                    let rr_exited = crate::live_sources::register_stop(
                         registry,
                         &format!("{id}/youtube-reresolve"),
                         &rr_stop,
                     );
+                    // Build the ExitGuard BEFORE spawn: its Drop flips `exited` whether the
+                    // thread runs (drops on exit) OR Builder::spawn fails (the closure owning
+                    // it is dropped) — so a failed spawn never orphans an exited=false entry
+                    // that teardown would busy-wait to the grace deadline (ADR-W018 §5).
+                    let rr_exit_guard = crate::live_sources::ExitGuard::new(&rr_exited);
                     let rr_thread_stop = Arc::clone(&rr_stop);
                     let rr_builder =
                         std::thread::Builder::new().name(format!("multiview-yt-reresolve-{id}"));
                     match rr_builder.spawn(move || {
+                        let _exit = rr_exit_guard;
                         youtube_reresolve_thread(&watch_url, &slot, &rr_thread_stop);
                     }) {
                         Ok(handle) => producers.push((rr_stop, handle)),
@@ -4840,16 +5440,11 @@ impl IngestSupervisor {
                     }
                 }
             }
-            let thread_stop = Arc::clone(&stop);
-            let builder = std::thread::Builder::new().name(format!("multiview-ingest-{id}"));
-            match builder.spawn(move || ingest_loop(&plan, &thread_stop)) {
-                Ok(handle) => producers.push((stop, handle)),
-                Err(e) => {
-                    // A thread that cannot spawn is logged and skipped: its tile
-                    // simply rides NO_SIGNAL (slate) rather than failing the run
-                    // (invariant #1 — the output clock is independent of inputs).
-                    tracing::error!(error = %e, source = %id, "could not spawn ingest thread");
-                }
+            // The decode thread itself — the SAME supervised producer the live
+            // hub spawns (ADR-W018 level 2): `spawn_ingest_producer` registers
+            // the per-source stop flag and runs `ingest_loop`.
+            if let Some((stop, handle)) = spawn_ingest_producer(plan, registry) {
+                producers.push((stop, handle));
             }
         }
         for (plan, store) in audio_plans {
@@ -4859,12 +5454,17 @@ impl IngestSupervisor {
             // remove/edit of the source raises every `{id}`-rooted flag, so its
             // audio decode thread stops too — never left mixing a stale source's
             // audio onto the program bus under the replacement.
-            crate::live_sources::register_stop(registry, &format!("{id}/audio"), &stop);
+            let exited =
+                crate::live_sources::register_stop(registry, &format!("{id}/audio"), &stop);
+            // ExitGuard built BEFORE spawn: its Drop flips `exited` even if Builder::spawn
+            // fails (the closure owning it is dropped) — no orphaned latch (ADR-W018 §5).
+            let exit_guard = crate::live_sources::ExitGuard::new(&exited);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-audio-{id}"));
-            match builder
-                .spawn(move || crate::audio::audio_ingest_loop(&plan, &store, &thread_stop))
-            {
+            match builder.spawn(move || {
+                let _exit = exit_guard;
+                crate::audio::audio_ingest_loop(&plan, &store, &thread_stop);
+            }) {
                 Ok(handle) => producers.push((stop, handle)),
                 Err(e) => {
                     // An audio thread that cannot spawn is logged and skipped: its
@@ -4882,12 +5482,15 @@ impl IngestSupervisor {
             // remove/edit of the source raises every `{id}`-rooted flag, so its
             // line-up tone thread stops too — never left feeding the program bus
             // a stale `bars` source's tone under the replacement.
-            crate::live_sources::register_stop(registry, &format!("{id}/tone"), &stop);
+            let exited = crate::live_sources::register_stop(registry, &format!("{id}/tone"), &stop);
+            // ExitGuard built BEFORE spawn (flips `exited` even if spawn fails) (ADR-W018 §5).
+            let exit_guard = crate::live_sources::ExitGuard::new(&exited);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-tone-{id}"));
-            match builder
-                .spawn(move || crate::audio::tone_publish_loop(&plan, &store, &thread_stop))
-            {
+            match builder.spawn(move || {
+                let _exit = exit_guard;
+                crate::audio::tone_publish_loop(&plan, &store, &thread_stop);
+            }) {
                 Ok(handle) => producers.push((stop, handle)),
                 Err(e) => {
                     // A tone thread that cannot spawn is logged and skipped: the
@@ -4905,10 +5508,16 @@ impl IngestSupervisor {
             // live remove/edit of the source raises every `{id}`-rooted flag,
             // so its caption reader stops too — never left decoding a stale
             // URL's cues over the replacement picture.
-            crate::live_sources::register_stop(registry, &format!("{id}/captions"), &stop);
+            let exited =
+                crate::live_sources::register_stop(registry, &format!("{id}/captions"), &stop);
+            // ExitGuard built BEFORE spawn (flips `exited` even if spawn fails) (ADR-W018 §5).
+            let exit_guard = crate::live_sources::ExitGuard::new(&exited);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-captions-{id}"));
-            match builder.spawn(move || crate::captions::caption_loop(&plan, &thread_stop)) {
+            match builder.spawn(move || {
+                let _exit = exit_guard;
+                crate::captions::caption_loop(&plan, &thread_stop);
+            }) {
                 Ok(handle) => producers.push((stop, handle)),
                 Err(e) => {
                     // A caption reader that cannot spawn is logged and skipped:
@@ -4970,6 +5579,154 @@ impl Drop for IngestSupervisor {
         // thread blocks the caller. After `shutdown` the handle vec is already
         // drained, so this is a no-op on that path.
         self.join_all();
+    }
+}
+
+/// Spawn ONE supervised ingest producer thread for `plan`: create its
+/// per-source stop flag, register it under the source id in the run's shared
+/// stop registry (ADR-W018 — a live remove/edit raises exactly this flag), and
+/// run [`ingest_loop`] on a named thread.
+///
+/// This is **the** per-source producer construction — the startup
+/// [`IngestSupervisor::start`] and the live-source hub's
+/// [`LiveIngestSpawner`] both call it, so a runtime-added source runs exactly
+/// the supervised ingest the startup path builds (same reconnect bracket,
+/// jitter, PTS normalization, rw-timeout) — never a second-quality copy.
+///
+/// A thread that cannot spawn is logged and yields `None`: its tile simply
+/// rides `NO_SIGNAL` (slate) rather than failing the run (invariant #1 — the
+/// output clock is independent of inputs).
+fn spawn_ingest_producer(
+    plan: IngestPlan,
+    registry: &crate::live_sources::StopRegistry,
+) -> Option<(Arc<AtomicBool>, JoinHandle<()>)> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let id = plan.id.clone();
+    let exited = crate::live_sources::register_stop(registry, &id, &stop);
+    // ExitGuard built BEFORE spawn: its Drop flips `exited` on thread exit OR if
+    // Builder::spawn fails (the dropped closure drops the guard) — so a failed spawn
+    // never orphans an exited=false entry the hub would busy-wait on (ADR-W018 §5 /
+    // ADR-T002 — the hub cannot join a startup thread, so it waits on this latch).
+    let exit_guard = crate::live_sources::ExitGuard::new(&exited);
+    let thread_stop = Arc::clone(&stop);
+    let builder = std::thread::Builder::new().name(format!("multiview-ingest-{id}"));
+    match builder.spawn(move || {
+        let _exit = exit_guard;
+        ingest_loop(&plan, &thread_stop);
+    }) {
+        Ok(handle) => Some((stop, handle)),
+        Err(e) => {
+            tracing::error!(error = %e, source = %id, "could not spawn ingest thread");
+            None
+        }
+    }
+}
+
+/// The run's decoded-ingest spawner (ADR-W018 level 2), handed to the
+/// live-source hub by the binary: it turns a runtime
+/// [`SourceSpawn`](crate::live_sources::SourceSpawn) into a running producer
+/// through **exactly** the startup construction — [`ingest_plan_for`] builds
+/// the plan, [`select_live_decode_placement`] consults the same admission scorer
+/// (pinned to the running island's device), and [`spawn_ingest_producer`]
+/// spawns the same supervised [`ingest_loop`]. Runs on the hub worker thread
+/// only — heavy/blocking work never touches the output clock (inv #1).
+struct LiveIngestSpawner {
+    /// The solved startup layout: tile geometry for a bound cell, the canvas
+    /// fallback for an unbound one — the same sizing rule the startup build
+    /// applies (a freshly added source is typically unbound until the
+    /// follow-up route, so it decodes at canvas size, exactly like an unbound
+    /// startup source).
+    layout: Arc<Layout>,
+    /// The canvas colour the source's frames are tagged in.
+    canvas_color: CanvasColor,
+    /// The output cadence (generator pacing / plan metadata).
+    cadence: Rational,
+    /// The pinned island slot `drive_streaming` publishes (ADR-W018 §7).
+    #[cfg(feature = "gpu")]
+    island: LiveIslandSlot,
+    /// The GPU load source the placement consult re-polls at decision time
+    /// (NVML in production; injectable for the placement-consult tests).
+    #[cfg(feature = "gpu")]
+    load_source: Box<dyn multiview_hal::LoadSource + Send + Sync>,
+}
+
+impl crate::live_sources::IngestSpawner for LiveIngestSpawner {
+    fn spawn(
+        &self,
+        spawn: crate::live_sources::SourceSpawn,
+        registry: &crate::live_sources::StopRegistry,
+    ) -> Option<crate::live_sources::SpawnedProducer> {
+        let crate::live_sources::SourceSpawn { source, store } = spawn;
+        let (tile_w, tile_h) = cell_pixel_size(&self.layout, &source.id)
+            .unwrap_or((self.layout.canvas.width, self.layout.canvas.height));
+        #[cfg_attr(not(feature = "gpu"), allow(unused_mut))]
+        // reason: without `gpu` there is no placement consult, so the plan is
+        // never re-stamped after construction; the binding must still be `mut`
+        // for the gpu arm below.
+        let mut plan = match ingest_plan_for(
+            &source,
+            tile_w,
+            tile_h,
+            store,
+            self.canvas_color,
+            self.cadence,
+        ) {
+            Ok(plan) => plan,
+            Err(e) => {
+                tracing::warn!(
+                    source = %source.id,
+                    error = %e,
+                    "live ingest spawn refused: the source cannot be planned; \
+                     the tile rides the slate"
+                );
+                return None;
+            }
+        };
+        // Hardware re-assessment on every change (ADR-W018 §7), under `gpu`.
+        #[cfg(feature = "gpu")]
+        {
+            plan.decode_placement = self.decode_placement_for(&plan.id);
+        }
+        spawn_ingest_producer(plan, registry)
+            .map(|(stop, handle)| crate::live_sources::SpawnedProducer { stop, handle })
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl LiveIngestSpawner {
+    /// Decide a runtime-added source's [`DecodePlacement`] (ADR-W018 §7), under
+    /// `gpu` where an admission decision exists. An admit pins the island
+    /// ordinal; a reject (or an un-pinnable admit) forces `SoftwareOnly` so the
+    /// decode never lands on the over-headroom island.
+    ///
+    /// EMPTY ISLAND FAILS CLOSED: `gpu` admission ran at startup
+    /// (`drive_streaming`) and published a `LiveIsland` only when it named a
+    /// device; an EMPTY slot means admission was *attempted and named none*
+    /// (scorer rejection / no NVML / no admissible GPU). Defaulting to
+    /// `DecodePlacement::Default` there would open NVDEC on libav's default
+    /// device — exactly the over-subscribed/wrong GPU the admission declined —
+    /// so a runtime-added decode forces `SoftwareOnly` instead (fail closed).
+    /// The GPU-free build carries no `island` field at all and keeps the
+    /// constructor `Default` (no NVDEC compiled to mis-place).
+    fn decode_placement_for(&self, source_id: &str) -> DecodePlacement {
+        if let Some(island) = self.island.load_full() {
+            select_live_decode_placement(
+                self.load_source.as_ref(),
+                &island,
+                self.layout.canvas.width,
+                self.layout.canvas.height,
+                self.cadence,
+            )
+        } else {
+            tracing::warn!(
+                source = %source_id,
+                "live decode placement: GPU admission named no island device \
+                 (rejected / no NVML); FORCING software decode for this \
+                 runtime-added source (the default device would over-subscribe \
+                 or mis-place the decode — ADR-W018 §7)"
+            );
+            DecodePlacement::SoftwareOnly
+        }
     }
 }
 
@@ -6548,11 +7305,12 @@ fn ingest_plan_for(
         embedded_cc: None,
         canvas_color,
         cadence,
-        // No GPU pinned yet: the load-aware admission pick (decide-once, in
-        // `drive_streaming`) stamps the chosen device's CUDA ordinal onto every
-        // plan before the ingest threads spawn. `None` is the default-device /
-        // GPU-free path, in lockstep with the compositor's `None`.
-        cuda_ordinal: None,
+        // No placement decision yet: the load-aware admission pick (decide-
+        // once, in `drive_streaming`) stamps `Pinned(ordinal)` onto every plan
+        // before the startup threads spawn; the live consult stamps a runtime
+        // add's outcome. `Default` is the default-device / GPU-free path, in
+        // lockstep with the compositor's default adapter.
+        decode_placement: DecodePlacement::Default,
         // The WHIP publisher rendezvous + audio store are stamped after build
         // (the registry/store are owned by the run wiring), like `cuda_ordinal`.
         #[cfg(feature = "webrtc-native")]
@@ -8135,17 +8893,17 @@ fn open_and_stream(
     // the tile keeps running (invariants #1/#2). Decoded CUDA surfaces are
     // downloaded to host NV12 inside the decoder (the budgeted CPU↔GPU copy), so
     // the rest of the pipeline is unchanged (invariant #5).
-    let want_hw = multiview_ffmpeg::want_hw_decode(
-        std::env::var(multiview_ffmpeg::NVDEC_DISABLE_ENV)
-            .ok()
-            .as_deref(),
-    );
-    // Pin NVDEC to the load-aware admission pick's CUDA ordinal so decode opens on
-    // the SAME physical GPU the compositor was pinned to — the whole pipeline
-    // follows one chosen device (affinity; ADR-0035 Tier-1 / the GPU-placement
-    // principle). `None` (no admission pick / GPU-free) selects libav's default
-    // CUDA device, in lockstep with the compositor's `None`.
-    let cuda_ordinal = plan.cuda_ordinal.as_deref();
+    // The placement-aware decode-open gate (ADR-W018 §7): a `Pinned` plan
+    // opens NVDEC on the admission-chosen island device (affinity; ADR-0035
+    // Tier-1); a `Default` plan keeps the env-gated hardware preference on
+    // libav's default device (the GPU-free / no-admission path); a
+    // `SoftwareOnly` plan (a live placement REJECT) never attempts hardware —
+    // NVDEC on the default device would overcommit a single-GPU island or
+    // fragment onto a different GPU (ADR-0018 never-fragment). On a GPU-free box
+    // or any hardware-open failure the open degrades to software gracefully —
+    // the tile keeps running (invariants #1/#2).
+    let nvdec_env = std::env::var(multiview_ffmpeg::NVDEC_DISABLE_ENV).ok();
+    let (want_hw, cuda_ordinal) = decoder_open_args(&plan.decode_placement, nvdec_env.as_deref());
     let (decoder, used_hw) =
         StreamVideoDecoder::new_preferring_hw(params, time_base, want_hw, cuda_ordinal)
             .map_err(|e| e.to_string())?;
@@ -10310,7 +11068,7 @@ segment_ms = 1000
         // A live remove raises exactly this flag (the hub does this); the
         // ingest loop observes it between (re)connect attempts and exits, so
         // the supervisor's shutdown join returns without the wedge-detach path.
-        flag.store(true, Ordering::Release);
+        flag.stop.store(true, Ordering::Release);
         supervisor.shutdown();
     }
 
@@ -10334,7 +11092,7 @@ segment_ms = 1000
             .get("net1/captions")
             .cloned()
             .expect("the caption reader registers under {id}/captions");
-        flag.store(true, Ordering::Release);
+        flag.stop.store(true, Ordering::Release);
         supervisor.shutdown();
     }
 }

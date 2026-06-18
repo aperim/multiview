@@ -498,10 +498,16 @@ impl SoftwareEngine {
             let canvas = self.canvas_color;
             let cadence = self.cadence;
             let id = store.id().to_owned();
-            crate::live_sources::register_stop(&self.stop_registry, &id, &stop);
+            let exited = crate::live_sources::register_stop(&self.stop_registry, &id, &stop);
+            // ExitGuard built BEFORE spawn: its Drop flips `exited` on thread exit OR if
+            // Builder::spawn fails (the dropped closure drops the guard) — so a failed
+            // spawn never orphans an exited=false entry teardown would busy-wait on
+            // (ADR-W018 §5).
+            let exit_guard = crate::live_sources::ExitGuard::new(&exited);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-synth-{id}"));
             match builder.spawn(move || {
+                let _exit = exit_guard;
                 generator_loop(kind, &store, width, height, canvas, cadence, &thread_stop);
             }) {
                 Ok(handle) => producers.push((stop, handle)),
