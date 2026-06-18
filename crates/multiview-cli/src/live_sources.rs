@@ -483,15 +483,16 @@ fn spawn_synth(
     }
     let stop = Arc::new(AtomicBool::new(false));
     let exited = register_stop(registry, &id, &stop);
+    // ExitGuard built BEFORE spawn: its Drop flips `exited` on thread exit OR if
+    // Builder::spawn fails (the dropped closure drops the guard) — so a failed spawn
+    // never orphans an exited=false entry teardown would busy-wait on (ADR-W018 §5).
+    let exit_guard = ExitGuard::new(&exited);
     preview_insert(preview, &id, &store);
     let thread_stop = Arc::clone(&stop);
     let thread_store = Arc::clone(&store);
     let builder = std::thread::Builder::new().name(format!("multiview-synth-live-{id}"));
     match builder.spawn(move || {
-        // Flip the `exited` latch on exit (return or panic) so a live EDIT's
-        // teardown waits for this generator to stop before the replacement
-        // publishes into the reused store (ADR-W018 §5).
-        let _exit = ExitGuard::new(&exited);
+        let _exit = exit_guard;
         crate::synth::generator_loop(
             kind,
             &thread_store,

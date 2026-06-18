@@ -5416,13 +5416,16 @@ impl IngestSupervisor {
                         &format!("{id}/youtube-reresolve"),
                         &rr_stop,
                     );
+                    // Build the ExitGuard BEFORE spawn: its Drop flips `exited` whether the
+                    // thread runs (drops on exit) OR Builder::spawn fails (the closure owning
+                    // it is dropped) — so a failed spawn never orphans an exited=false entry
+                    // that teardown would busy-wait to the grace deadline (ADR-W018 §5).
+                    let rr_exit_guard = crate::live_sources::ExitGuard::new(&rr_exited);
                     let rr_thread_stop = Arc::clone(&rr_stop);
                     let rr_builder =
                         std::thread::Builder::new().name(format!("multiview-yt-reresolve-{id}"));
                     match rr_builder.spawn(move || {
-                        // Flip the exited latch on exit so teardown bounded-waits for this
-                        // companion to stop before a live edit republishes (ADR-W018 §5).
-                        let _exit = crate::live_sources::ExitGuard::new(&rr_exited);
+                        let _exit = rr_exit_guard;
                         youtube_reresolve_thread(&watch_url, &slot, &rr_thread_stop);
                     }) {
                         Ok(handle) => producers.push((rr_stop, handle)),
@@ -5453,12 +5456,13 @@ impl IngestSupervisor {
             // audio onto the program bus under the replacement.
             let exited =
                 crate::live_sources::register_stop(registry, &format!("{id}/audio"), &stop);
+            // ExitGuard built BEFORE spawn: its Drop flips `exited` even if Builder::spawn
+            // fails (the closure owning it is dropped) — no orphaned latch (ADR-W018 §5).
+            let exit_guard = crate::live_sources::ExitGuard::new(&exited);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-audio-{id}"));
             match builder.spawn(move || {
-                // Flip the exited latch on exit so teardown bounded-waits for this audio
-                // thread to stop before a live edit republishes (ADR-W018 §5).
-                let _exit = crate::live_sources::ExitGuard::new(&exited);
+                let _exit = exit_guard;
                 crate::audio::audio_ingest_loop(&plan, &store, &thread_stop);
             }) {
                 Ok(handle) => producers.push((stop, handle)),
@@ -5479,12 +5483,12 @@ impl IngestSupervisor {
             // line-up tone thread stops too — never left feeding the program bus
             // a stale `bars` source's tone under the replacement.
             let exited = crate::live_sources::register_stop(registry, &format!("{id}/tone"), &stop);
+            // ExitGuard built BEFORE spawn (flips `exited` even if spawn fails) (ADR-W018 §5).
+            let exit_guard = crate::live_sources::ExitGuard::new(&exited);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-tone-{id}"));
             match builder.spawn(move || {
-                // Flip the exited latch on exit so teardown bounded-waits for this tone
-                // thread to stop before a live edit republishes (ADR-W018 §5).
-                let _exit = crate::live_sources::ExitGuard::new(&exited);
+                let _exit = exit_guard;
                 crate::audio::tone_publish_loop(&plan, &store, &thread_stop);
             }) {
                 Ok(handle) => producers.push((stop, handle)),
@@ -5506,12 +5510,12 @@ impl IngestSupervisor {
             // URL's cues over the replacement picture.
             let exited =
                 crate::live_sources::register_stop(registry, &format!("{id}/captions"), &stop);
+            // ExitGuard built BEFORE spawn (flips `exited` even if spawn fails) (ADR-W018 §5).
+            let exit_guard = crate::live_sources::ExitGuard::new(&exited);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-captions-{id}"));
             match builder.spawn(move || {
-                // Flip the exited latch on exit so teardown bounded-waits for this caption
-                // reader to stop before a live edit republishes (ADR-W018 §5).
-                let _exit = crate::live_sources::ExitGuard::new(&exited);
+                let _exit = exit_guard;
                 crate::captions::caption_loop(&plan, &thread_stop);
             }) {
                 Ok(handle) => producers.push((stop, handle)),
@@ -5599,15 +5603,15 @@ fn spawn_ingest_producer(
     let stop = Arc::new(AtomicBool::new(false));
     let id = plan.id.clone();
     let exited = crate::live_sources::register_stop(registry, &id, &stop);
+    // ExitGuard built BEFORE spawn: its Drop flips `exited` on thread exit OR if
+    // Builder::spawn fails (the dropped closure drops the guard) — so a failed spawn
+    // never orphans an exited=false entry the hub would busy-wait on (ADR-W018 §5 /
+    // ADR-T002 — the hub cannot join a startup thread, so it waits on this latch).
+    let exit_guard = crate::live_sources::ExitGuard::new(&exited);
     let thread_stop = Arc::clone(&stop);
     let builder = std::thread::Builder::new().name(format!("multiview-ingest-{id}"));
     match builder.spawn(move || {
-        // Flip `exited` on exit (return or panic) so a live EDIT of a
-        // startup-origin source waits for THIS decode thread to leave before
-        // the replacement publishes into the reused single-writer store
-        // (ADR-W018 §5 / ADR-T002 — the hub can't join a startup thread, so it
-        // waits on this latch instead).
-        let _exit = crate::live_sources::ExitGuard::new(&exited);
+        let _exit = exit_guard;
         ingest_loop(&plan, &thread_stop);
     }) {
         Ok(handle) => Some((stop, handle)),
