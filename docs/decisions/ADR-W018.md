@@ -155,8 +155,10 @@ operator re-routes that cell — held, never a panic, never a falter.
   …)`), re-polling NVML at decision time. The outcome is the explicit tri-state
   `DecodePlacement::{Default, Pinned(ordinal), SoftwareOnly}` on the new `IngestPlan` (NOT
   `Option<ordinal>`): an admit stamps `Pinned(island ordinal)` (NVDEC co-located, ADR-0035
-  Tier-1 affinity), or `Default` when the island resolved no ordinal (lockstep with startup); a
-  reject (budget/headroom) **or** the island-vanished case stamps `SoftwareOnly`, and the
+  Tier-1 affinity); an admit where the island resolved **no** ordinal — like a reject
+  (budget/headroom) **or** the island-vanished case — stamps `SoftwareOnly` on the LIVE path (the
+  compositor island is already pinned, so an un-pinnable/rejected/vanished decode forces software,
+  never `Default`, which only the startup path uses where nothing is pinned yet), and the
   `decoder_open_args` gate FORCES that one source's decoder open to software — `(want_hw=false,
   None)` — with a loud warning. This is the load-bearing distinction: encoding a reject as "no
   ordinal" would let `new_preferring_hw(.., want_hw=true, None)` open NVDEC on libav's **default**
@@ -195,7 +197,9 @@ through **one uniform ingest path**: `Pipeline::live_ingest_spawner()` hands the
 → the explicit `DecodePlacement` tri-state, §7 below), and runs the **same** supervised
 `ingest_loop` the startup path runs — never a second-quality copy. The run-path capability `LiveSourceCapability` (derived from
 `ingest.is_some()`) flips the header to `live` for network kinds exactly when a real spawner backs
-it; `rist` is included (it lowers to a `rist://` AVIO URL and rides the identical ingest path). The
+it; `rist` is live-applicable **only** when the `rist` feature is compiled (`with_rist(cfg!(feature =
+"rist"))`) — it then lowers to a `rist://` AVIO URL and rides the identical ingest path; an
+`ffmpeg`-without-`rist` build keeps `rist` as `restart`, never over-claiming `live`. The
 software engine (no decoder) and the `ndi`/`youtube`/`aes67` kinds (runtime machinery the live path
 does not provide) stay `restart`, truthfully. Caption-reader teardown on remove/edit is shipped:
 readers register under `{id}/captions` and the hub raises every `{id}`-rooted flag.
