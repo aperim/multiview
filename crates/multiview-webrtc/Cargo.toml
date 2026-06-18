@@ -23,16 +23,16 @@ tokio = { workspace = true }
 # already in the workspace graph transitively. Pure-Rust, in the DEFAULT build —
 # session-id minting and the TURN client codec are pure and CI-tested without
 # any native dependency.
-rand = "0.8"
+rand = "0.10"
 # HMAC-SHA1 for STUN/TURN MESSAGE-INTEGRITY (RFC 5389 §15.4) and HMAC-SHA256 for
 # coturn-style ephemeral REST credentials (the `turn_rest` username:credential
 # derivation). RustCrypto, pinned; `MIT OR Apache-2.0` (already allowlisted in
 # deny.toml via multiview-preview). Pure-Rust, in the DEFAULT build (the TURN
 # client message codec + auth are pure and offline-tested).
-hmac = "0.12.1"
-sha1 = "0.10.6"
-sha2 = "0.10.9"
-md-5 = "0.10.6"
+hmac = "0.13.0"
+sha1 = "0.11.0"
+sha2 = "0.11.0"
+md-5 = "0.11.0"
 base64 = "0.22.1"
 # Native WebRTC (ICE/DTLS/SRTP) stack — OPTIONAL, pulled in ONLY by `native`.
 # str0m is sans-IO (`MIT OR Apache-2.0`), pinned EXACTLY to =0.16.2 (ADR-0048 §3,

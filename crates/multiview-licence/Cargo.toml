@@ -83,7 +83,7 @@ coset = { version = "0.4", optional = true }
 # SHA-256 of the request body for the PoP pre-image (`sha256(body)`). `sha2` (and
 # its `digest` trait) is `MIT OR Apache-2.0`, deny-clean, and ALREADY in this
 # crate's graph (the `p256` ECDSA closure pulls it), so it adds no new crate.
-sha2 = { version = "0.10", default-features = false, optional = true }
+sha2 = { version = "0.11", default-features = false, optional = true }
 # Serialise the heartbeat request body to the EXACT bytes the PoP `sha256(body)`
 # covers and the transport sends verbatim (ADR-I007 — no re-serialisation drift).
 # `MIT OR Apache-2.0`, deny-clean, ALREADY in the workspace graph (and this crate's
