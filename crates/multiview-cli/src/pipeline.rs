@@ -701,14 +701,17 @@ fn select_admission_pick(
 ///   would double-count it against the session ceiling).
 ///
 /// An **admit** returns [`DecodePlacement::Pinned`] with the island's CUDA
-/// ordinal (NVDEC co-located with the compositor — ADR-0035 affinity), or
-/// [`DecodePlacement::Default`] when the island resolved no ordinal (lockstep
-/// with the startup plans). A **reject** (budget / headroom / the island gone
-/// from the snapshot) returns [`DecodePlacement::SoftwareOnly`] — the decoder
-/// open for that one source is FORCED to software (the [`decoder_open_args`]
-/// gate; never NVDEC on the default device, which would overcommit a
-/// single-GPU island or fragment onto a different GPU), with a loud warning.
-/// The island is never overcommitted and the output never falters (inv #1).
+/// ordinal (NVDEC co-located with the compositor — ADR-0035 affinity). A
+/// **reject** (budget / headroom / the island gone from the snapshot) — AND an
+/// admit where the island resolved **no** CUDA ordinal — returns
+/// [`DecodePlacement::SoftwareOnly`]: the decoder open for that one source is
+/// FORCED to software (the [`decoder_open_args`] gate). This NEVER returns
+/// `Default` on the live path: `Default` opens NVDEC on libav's default device,
+/// which here is fragmentation/overcommit — the compositor island is *already*
+/// pinned at runtime, so an un-pinnable (no-ordinal) admit cannot co-locate
+/// NVDEC with it and must fall to software, not the default GPU. (`Default` is
+/// correct only at startup, where nothing is pinned yet.) The island is never
+/// overcommitted or fragmented and the output never falters (inv #1).
 ///
 /// Runs on the hub worker thread only (it polls NVML) — never on the clock.
 #[cfg(feature = "gpu")]
@@ -796,17 +799,30 @@ fn select_live_decode_placement(
         PlacementPolicy::default(),
     ) {
         Ok(selection) => {
-            tracing::info!(
-                island = island.device.stable_id(),
-                cuda_ordinal = ?island.cuda_ordinal,
-                score = selection.score,
-                "live decode placement: admitted onto the running island device \
-                 (NVDEC co-located, ADR-W018 §7)"
-            );
-            island
-                .cuda_ordinal
-                .clone()
-                .map_or(DecodePlacement::Default, DecodePlacement::Pinned)
+            if let Some(ordinal) = island.cuda_ordinal.clone() {
+                tracing::info!(
+                    island = island.device.stable_id(),
+                    cuda_ordinal = %ordinal,
+                    score = selection.score,
+                    "live decode placement: admitted onto the running island device \
+                     (NVDEC co-located, ADR-W018 §7)"
+                );
+                DecodePlacement::Pinned(ordinal)
+            } else {
+                // Admitted by budget/headroom, but the island device resolved
+                // no CUDA ordinal — on the LIVE path the compositor island is
+                // already pinned, so an un-pinnable decode cannot co-locate and
+                // `Default` (libav's default device) would fragment/overcommit.
+                // Fail closed to software for this one source (ADR-W018 §7).
+                tracing::warn!(
+                    island = island.device.stable_id(),
+                    score = selection.score,
+                    "live decode placement: admitted but the island resolved no \
+                     CUDA ordinal; FORCING software decode for this source (the \
+                     default device would fragment/overcommit the pinned island)"
+                );
+                DecodePlacement::SoftwareOnly
+            }
         }
         Err(reason) => {
             tracing::warn!(
@@ -1001,6 +1017,44 @@ mod admission_target_tests {
         }
     }
 
+    /// An island whose device admits by headroom but resolved NO CUDA ordinal
+    /// — the admit-with-no-pin case (finding #2): on the live path this must
+    /// fall to software, never the default device.
+    fn island_no_ordinal(uuid: &str, index: u32) -> LiveIsland {
+        LiveIsland {
+            device: DeviceId::new(Vendor::Nvidia, uuid, index),
+            cuda_ordinal: None,
+            tile_count: 4,
+        }
+    }
+
+    #[test]
+    fn live_decode_placement_admits_but_forces_software_when_the_island_has_no_ordinal() {
+        // The idle P2000 PASSES the headroom/budget gate, but its LiveIsland
+        // resolved no CUDA ordinal. On the live path the compositor island is
+        // already pinned, so an un-pinnable admit must NOT fall to
+        // `Default` (= libav default-device NVDEC, fragment/overcommit) — it
+        // must FORCE software (finding #2). The decode-open gate confirms
+        // (want_hw=false, no ordinal).
+        let placement = super::select_live_decode_placement(
+            &FakeTwoGpu,
+            &island_no_ordinal(FakeTwoGpu::GPU1_UUID, 1),
+            1920,
+            1080,
+            Rational::new(25, 1),
+        );
+        assert_eq!(
+            placement,
+            super::DecodePlacement::SoftwareOnly,
+            "an admitted-but-un-pinnable live decode must force software, never Default"
+        );
+        assert_eq!(
+            super::decoder_open_args(&placement, None),
+            (false, None),
+            "the un-pinnable admit's decoder open must not WANT hardware at all"
+        );
+    }
+
     #[test]
     fn live_decode_placement_admits_onto_the_idle_island_pinned_to_its_ordinal() {
         // The island is the idle P2000: the consult (island tile set + the new
@@ -1078,6 +1132,78 @@ mod admission_target_tests {
         );
         assert_eq!(placement, super::DecodePlacement::SoftwareOnly);
         assert_eq!(super::decoder_open_args(&placement, None), (false, None));
+    }
+
+    #[test]
+    fn live_spawner_forces_software_when_no_island_was_admitted() {
+        // FINDING #1 — empty island must FAIL CLOSED. Under `gpu`, startup
+        // admission published NO island (scorer rejection / no NVML / no
+        // admissible GPU), so the slot is empty. A runtime-added decode must
+        // NOT keep the constructor `Default` (= libav default-device NVDEC, the
+        // very GPU admission declined) — it must force `SoftwareOnly`. We also
+        // confirm the consult is SKIPPED (no load poll) on the empty path.
+        use multiview_compositor::pipeline::CanvasColor;
+
+        let doc = r##"schema_version = 1
+[canvas]
+width = 320
+height = 240
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "in_a"
+kind = "bars"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[outputs]]
+kind = "hls"
+path = "/tmp/live-spawner-empty-island.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##;
+        let config =
+            multiview_config::MultiviewConfig::load_from_toml(doc).expect("test config parses");
+        let layout = config.solve_layout().expect("test layout solves");
+
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spawner = LiveIngestSpawner {
+            layout: std::sync::Arc::new(layout),
+            canvas_color: CanvasColor::default(),
+            cadence: Rational::new(25, 1),
+            // EMPTY island slot — admission named no device.
+            island: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
+            load_source: Box::new(CountingLoadSource {
+                polls: std::sync::Arc::clone(&polls),
+            }),
+        };
+
+        let placement = spawner.decode_placement_for("live1");
+        assert_eq!(
+            placement,
+            super::DecodePlacement::SoftwareOnly,
+            "an empty island (admission named none) must FORCE software, never Default"
+        );
+        assert_eq!(
+            super::decoder_open_args(&placement, None),
+            (false, None),
+            "the empty-island decode open must not WANT hardware at all"
+        );
+        assert_eq!(
+            polls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the empty-island path must SKIP the admission consult (no load poll)"
+        );
     }
 
     /// A spy [`LoadSource`]: counts polls (proof the spawn path re-polls the
@@ -5285,7 +5411,7 @@ impl IngestSupervisor {
                     let id = plan.id.clone();
                     let watch_url = watch_url.clone();
                     let rr_stop = Arc::new(AtomicBool::new(false));
-                    crate::live_sources::register_stop(
+                    let rr_exited = crate::live_sources::register_stop(
                         registry,
                         &format!("{id}/youtube-reresolve"),
                         &rr_stop,
@@ -5294,6 +5420,9 @@ impl IngestSupervisor {
                     let rr_builder =
                         std::thread::Builder::new().name(format!("multiview-yt-reresolve-{id}"));
                     match rr_builder.spawn(move || {
+                        // Flip the exited latch on exit so teardown bounded-waits for this
+                        // companion to stop before a live edit republishes (ADR-W018 §5).
+                        let _exit = crate::live_sources::ExitGuard::new(&rr_exited);
                         youtube_reresolve_thread(&watch_url, &slot, &rr_thread_stop);
                     }) {
                         Ok(handle) => producers.push((rr_stop, handle)),
@@ -5322,12 +5451,16 @@ impl IngestSupervisor {
             // remove/edit of the source raises every `{id}`-rooted flag, so its
             // audio decode thread stops too — never left mixing a stale source's
             // audio onto the program bus under the replacement.
-            crate::live_sources::register_stop(registry, &format!("{id}/audio"), &stop);
+            let exited =
+                crate::live_sources::register_stop(registry, &format!("{id}/audio"), &stop);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-audio-{id}"));
-            match builder
-                .spawn(move || crate::audio::audio_ingest_loop(&plan, &store, &thread_stop))
-            {
+            match builder.spawn(move || {
+                // Flip the exited latch on exit so teardown bounded-waits for this audio
+                // thread to stop before a live edit republishes (ADR-W018 §5).
+                let _exit = crate::live_sources::ExitGuard::new(&exited);
+                crate::audio::audio_ingest_loop(&plan, &store, &thread_stop);
+            }) {
                 Ok(handle) => producers.push((stop, handle)),
                 Err(e) => {
                     // An audio thread that cannot spawn is logged and skipped: its
@@ -5345,12 +5478,15 @@ impl IngestSupervisor {
             // remove/edit of the source raises every `{id}`-rooted flag, so its
             // line-up tone thread stops too — never left feeding the program bus
             // a stale `bars` source's tone under the replacement.
-            crate::live_sources::register_stop(registry, &format!("{id}/tone"), &stop);
+            let exited = crate::live_sources::register_stop(registry, &format!("{id}/tone"), &stop);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-tone-{id}"));
-            match builder
-                .spawn(move || crate::audio::tone_publish_loop(&plan, &store, &thread_stop))
-            {
+            match builder.spawn(move || {
+                // Flip the exited latch on exit so teardown bounded-waits for this tone
+                // thread to stop before a live edit republishes (ADR-W018 §5).
+                let _exit = crate::live_sources::ExitGuard::new(&exited);
+                crate::audio::tone_publish_loop(&plan, &store, &thread_stop);
+            }) {
                 Ok(handle) => producers.push((stop, handle)),
                 Err(e) => {
                     // A tone thread that cannot spawn is logged and skipped: the
@@ -5368,10 +5504,16 @@ impl IngestSupervisor {
             // live remove/edit of the source raises every `{id}`-rooted flag,
             // so its caption reader stops too — never left decoding a stale
             // URL's cues over the replacement picture.
-            crate::live_sources::register_stop(registry, &format!("{id}/captions"), &stop);
+            let exited =
+                crate::live_sources::register_stop(registry, &format!("{id}/captions"), &stop);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-captions-{id}"));
-            match builder.spawn(move || crate::captions::caption_loop(&plan, &thread_stop)) {
+            match builder.spawn(move || {
+                // Flip the exited latch on exit so teardown bounded-waits for this caption
+                // reader to stop before a live edit republishes (ADR-W018 §5).
+                let _exit = crate::live_sources::ExitGuard::new(&exited);
+                crate::captions::caption_loop(&plan, &thread_stop);
+            }) {
                 Ok(handle) => producers.push((stop, handle)),
                 Err(e) => {
                     // A caption reader that cannot spawn is logged and skipped:
@@ -5456,10 +5598,18 @@ fn spawn_ingest_producer(
 ) -> Option<(Arc<AtomicBool>, JoinHandle<()>)> {
     let stop = Arc::new(AtomicBool::new(false));
     let id = plan.id.clone();
-    crate::live_sources::register_stop(registry, &id, &stop);
+    let exited = crate::live_sources::register_stop(registry, &id, &stop);
     let thread_stop = Arc::clone(&stop);
     let builder = std::thread::Builder::new().name(format!("multiview-ingest-{id}"));
-    match builder.spawn(move || ingest_loop(&plan, &thread_stop)) {
+    match builder.spawn(move || {
+        // Flip `exited` on exit (return or panic) so a live EDIT of a
+        // startup-origin source waits for THIS decode thread to leave before
+        // the replacement publishes into the reused single-writer store
+        // (ADR-W018 §5 / ADR-T002 — the hub can't join a startup thread, so it
+        // waits on this latch instead).
+        let _exit = crate::live_sources::ExitGuard::new(&exited);
+        ingest_loop(&plan, &thread_stop);
+    }) {
         Ok(handle) => Some((stop, handle)),
         Err(e) => {
             tracing::error!(error = %e, source = %id, "could not spawn ingest thread");
@@ -5528,25 +5678,51 @@ impl crate::live_sources::IngestSpawner for LiveIngestSpawner {
                 return None;
             }
         };
-        // Hardware re-assessment on every change (ADR-W018 §7): consult the
-        // same admission path startup decode placement uses, pinned to the
-        // running island's device. No pinned island (GPU-free / no NVML / a
-        // startup scorer rejection) ⇒ no consult — the plan keeps
-        // `DecodePlacement::Default` (libav's default device), in lockstep with
-        // the startup plans. An admit pins the island ordinal; a reject forces
-        // `SoftwareOnly` so the decode never lands on the over-headroom island.
+        // Hardware re-assessment on every change (ADR-W018 §7), under `gpu`.
         #[cfg(feature = "gpu")]
+        {
+            plan.decode_placement = self.decode_placement_for(&plan.id);
+        }
+        spawn_ingest_producer(plan, registry)
+            .map(|(stop, handle)| crate::live_sources::SpawnedProducer { stop, handle })
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl LiveIngestSpawner {
+    /// Decide a runtime-added source's [`DecodePlacement`] (ADR-W018 §7), under
+    /// `gpu` where an admission decision exists. An admit pins the island
+    /// ordinal; a reject (or an un-pinnable admit) forces `SoftwareOnly` so the
+    /// decode never lands on the over-headroom island.
+    ///
+    /// EMPTY ISLAND FAILS CLOSED: `gpu` admission ran at startup
+    /// (`drive_streaming`) and published a `LiveIsland` only when it named a
+    /// device; an EMPTY slot means admission was *attempted and named none*
+    /// (scorer rejection / no NVML / no admissible GPU). Defaulting to
+    /// `DecodePlacement::Default` there would open NVDEC on libav's default
+    /// device — exactly the over-subscribed/wrong GPU the admission declined —
+    /// so a runtime-added decode forces `SoftwareOnly` instead (fail closed).
+    /// The GPU-free build carries no `island` field at all and keeps the
+    /// constructor `Default` (no NVDEC compiled to mis-place).
+    fn decode_placement_for(&self, source_id: &str) -> DecodePlacement {
         if let Some(island) = self.island.load_full() {
-            plan.decode_placement = select_live_decode_placement(
+            select_live_decode_placement(
                 self.load_source.as_ref(),
                 &island,
                 self.layout.canvas.width,
                 self.layout.canvas.height,
                 self.cadence,
+            )
+        } else {
+            tracing::warn!(
+                source = %source_id,
+                "live decode placement: GPU admission named no island device \
+                 (rejected / no NVML); FORCING software decode for this \
+                 runtime-added source (the default device would over-subscribe \
+                 or mis-place the decode — ADR-W018 §7)"
             );
+            DecodePlacement::SoftwareOnly
         }
-        spawn_ingest_producer(plan, registry)
-            .map(|(stop, handle)| crate::live_sources::SpawnedProducer { stop, handle })
     }
 }
 
@@ -10888,7 +11064,7 @@ segment_ms = 1000
         // A live remove raises exactly this flag (the hub does this); the
         // ingest loop observes it between (re)connect attempts and exits, so
         // the supervisor's shutdown join returns without the wedge-detach path.
-        flag.store(true, Ordering::Release);
+        flag.stop.store(true, Ordering::Release);
         supervisor.shutdown();
     }
 
@@ -10912,7 +11088,7 @@ segment_ms = 1000
             .get("net1/captions")
             .cloned()
             .expect("the caption reader registers under {id}/captions");
-        flag.store(true, Ordering::Release);
+        flag.stop.store(true, Ordering::Release);
         supervisor.shutdown();
     }
 }

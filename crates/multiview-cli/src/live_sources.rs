@@ -30,12 +30,29 @@ use multiview_framestore::TileStore;
 
 use crate::synth::SyntheticKind;
 
-/// The per-source stop flags of every running producer, keyed by source id.
+/// One registered producer's teardown handles: the cooperative **stop** flag
+/// the teardown raises, and the **exited** latch the producer thread flips when
+/// it actually leaves (via [`ExitGuard`], so a normal return AND a panic both
+/// set it). Teardown raises `stop` then bounded-waits on `exited` so a
+/// replacement producer never publishes into a reused single-writer store while
+/// the old thread is still writing it (ADR-T002 single-writer; the two-writer
+/// race ADR-W018 §5 closes).
+#[derive(Clone)]
+pub struct ProducerStop {
+    /// Raise to request the producer stop. `pub(crate)` so cross-module callers
+    /// (the ingest-supervisor registration tests in pipeline.rs) can raise the flag
+    /// they looked up from the registry; teardown in this module raises it directly.
+    pub(crate) stop: Arc<AtomicBool>,
+    /// Set by the producer thread on exit (return or panic) via [`ExitGuard`].
+    exited: Arc<AtomicBool>,
+}
+
+/// The per-source producer teardown handles, keyed by source id.
 ///
 /// Registered at spawn (startup supervisors and the hub alike) and consumed by
 /// the hub on teardown. Touched only **off** the output-clock thread: at spawn
 /// time (before/around the run), on the hub worker, and at run teardown.
-pub type StopRegistry = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+pub type StopRegistry = Arc<Mutex<HashMap<String, ProducerStop>>>;
 
 /// Create an empty [`StopRegistry`].
 #[must_use]
@@ -43,15 +60,50 @@ pub fn stop_registry() -> StopRegistry {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-/// Register `id`'s producer stop flag (replacing any stale entry).
+/// An RAII latch a producer thread holds for its whole lifetime: its [`Drop`]
+/// flips the registered `exited` flag, so teardown's bounded-wait observes the
+/// thread leaving on **either** a normal return or a panic-unwind. Carry it
+/// into the thread closure (e.g. `let _exit = ExitGuard::new(&exited);`).
+pub struct ExitGuard {
+    exited: Arc<AtomicBool>,
+}
+
+impl ExitGuard {
+    /// Track exit through `exited` (the latch [`register_stop`] returned).
+    #[must_use]
+    pub fn new(exited: &Arc<AtomicBool>) -> Self {
+        Self {
+            exited: Arc::clone(exited),
+        }
+    }
+}
+
+impl Drop for ExitGuard {
+    fn drop(&mut self) {
+        self.exited.store(true, Ordering::Release);
+    }
+}
+
+/// Register `id`'s producer stop flag (replacing any stale entry) and return
+/// the **exited** latch the producer thread must flip on exit — carry it into
+/// the thread as an [`ExitGuard`]. Teardown bounded-waits on this latch so a
+/// replacement never races the old writer on a reused store.
 ///
 /// A poisoned registry (a panicked writer — never expected) is surfaced as a
 /// warning rather than a panic: the producer still runs, it just cannot be
-/// torn down individually.
-pub fn register_stop(registry: &StopRegistry, id: &str, flag: &Arc<AtomicBool>) {
+/// torn down individually (the returned latch is then unobserved — harmless).
+#[must_use = "carry the returned latch into the producer thread as an ExitGuard so teardown can wait for its exit"]
+pub fn register_stop(registry: &StopRegistry, id: &str, flag: &Arc<AtomicBool>) -> Arc<AtomicBool> {
+    let exited = Arc::new(AtomicBool::new(false));
     match registry.lock() {
         Ok(mut map) => {
-            map.insert(id.to_owned(), Arc::clone(flag));
+            map.insert(
+                id.to_owned(),
+                ProducerStop {
+                    stop: Arc::clone(flag),
+                    exited: Arc::clone(&exited),
+                },
+            );
         }
         Err(poisoned) => {
             tracing::warn!(
@@ -61,6 +113,7 @@ pub fn register_stop(registry: &StopRegistry, id: &str, flag: &Arc<AtomicBool>) 
             drop(poisoned);
         }
     }
+    exited
 }
 
 /// The shared, live-updatable preview store map (`id → TileStore`) the
@@ -429,12 +482,16 @@ fn spawn_synth(
         return;
     }
     let stop = Arc::new(AtomicBool::new(false));
-    register_stop(registry, &id, &stop);
+    let exited = register_stop(registry, &id, &stop);
     preview_insert(preview, &id, &store);
     let thread_stop = Arc::clone(&stop);
     let thread_store = Arc::clone(&store);
     let builder = std::thread::Builder::new().name(format!("multiview-synth-live-{id}"));
     match builder.spawn(move || {
+        // Flip the `exited` latch on exit (return or panic) so a live EDIT's
+        // teardown waits for this generator to stop before the replacement
+        // publishes into the reused store (ADR-W018 §5).
+        let _exit = ExitGuard::new(&exited);
         crate::synth::generator_loop(
             kind,
             &thread_store,
@@ -465,7 +522,7 @@ fn spawn_synth(
 /// "src1") is never touched — the companion separator is `/`.
 fn teardown(id: &str, owned: &mut HashMap<String, Producer>, registry: &StopRegistry) {
     let prefix = format!("{id}/");
-    let registered: Vec<Arc<AtomicBool>> = match registry.lock() {
+    let registered: Vec<ProducerStop> = match registry.lock() {
         Ok(mut map) => {
             let keys: Vec<String> = map
                 .keys()
@@ -480,12 +537,43 @@ fn teardown(id: &str, owned: &mut HashMap<String, Producer>, registry: &StopRegi
             Vec::new()
         }
     };
-    for flag in registered {
-        flag.store(true, Ordering::Release);
+    // Raise every matched stop flag first (the id + every `{id}/` companion).
+    for producer in &registered {
+        producer.stop.store(true, Ordering::Release);
     }
+    // Definitively join the hub-owned producer when we own its handle.
     if let Some(producer) = owned.remove(id) {
         producer.stop.store(true, Ordering::Release);
         join_bounded(id, producer.handle);
+    }
+    // Bounded-WAIT until every torn-down producer has actually EXITED — not
+    // just been asked to stop. A STARTUP-origin producer's `JoinHandle` lives
+    // in `IngestSupervisor`/`GeneratorSupervisor`, not in `owned`, so we cannot
+    // join it; but its thread flips the registered `exited` latch (via
+    // `ExitGuard`) on the way out, and we block on that. This is the fix for
+    // the two-writer race on a REUSED single-writer `TileStore` (ADR-W018 §5 /
+    // ADR-T002): the hub's caller spawns the replacement producer into the same
+    // store only after this returns, so the old writer is gone first. Bounded
+    // by `TEARDOWN_JOIN_GRACE`; a producer that overruns is detached (warned) —
+    // the engine never blocks on the clock thread (the hub worker is off it).
+    await_exits(id, &registered);
+}
+
+/// Bounded-wait until every producer's `exited` latch is set (it left), so a
+/// replacement never races a still-writing predecessor on a reused store.
+fn await_exits(id: &str, producers: &[ProducerStop]) {
+    let deadline = Instant::now() + TEARDOWN_JOIN_GRACE;
+    for producer in producers {
+        while !producer.exited.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if !producer.exited.load(Ordering::Acquire) {
+            tracing::warn!(
+                source = %id,
+                "a torn-down producer did not exit within the grace window; \
+                 detaching (a replacement may briefly interleave on the reused store)"
+            );
+        }
     }
 }
 
@@ -601,9 +689,14 @@ mod tests {
         let video = Arc::new(AtomicBool::new(false));
         let captions = Arc::new(AtomicBool::new(false));
         let unrelated = Arc::new(AtomicBool::new(false));
-        register_stop(&registry, "src1", &video);
-        register_stop(&registry, "src1/captions", &captions);
-        register_stop(&registry, "src10", &unrelated);
+        // These registrations stand in for startup producers (no real thread):
+        // pre-flip their `exited` latches so teardown's bounded exit-wait
+        // proceeds at once (a real producer's `ExitGuard` flips it on exit).
+        let video_exited = register_stop(&registry, "src1", &video);
+        let captions_exited = register_stop(&registry, "src1/captions", &captions);
+        let _unrelated_exited = register_stop(&registry, "src10", &unrelated);
+        video_exited.store(true, Ordering::Release);
+        captions_exited.store(true, Ordering::Release);
         let hub = LiveSourceHub::start(Arc::clone(&registry), preview);
 
         assert!(matches!(

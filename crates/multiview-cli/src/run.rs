@@ -498,10 +498,14 @@ impl SoftwareEngine {
             let canvas = self.canvas_color;
             let cadence = self.cadence;
             let id = store.id().to_owned();
-            crate::live_sources::register_stop(&self.stop_registry, &id, &stop);
+            let exited = crate::live_sources::register_stop(&self.stop_registry, &id, &stop);
             let thread_stop = Arc::clone(&stop);
             let builder = std::thread::Builder::new().name(format!("multiview-synth-{id}"));
             match builder.spawn(move || {
+                // Flip the `exited` latch on exit (return or panic) so a live edit's
+                // teardown bounded-waits for this generator to stop before the
+                // replacement publishes into the reused store (ADR-W018 §5).
+                let _exit = crate::live_sources::ExitGuard::new(&exited);
                 generator_loop(kind, &store, width, height, canvas, cadence, &thread_stop);
             }) {
                 Ok(handle) => producers.push((stop, handle)),
