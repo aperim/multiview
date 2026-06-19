@@ -196,6 +196,9 @@ rand_core = { version = "0.6", default-features = false, features = [
     "getrandom",
 ] }
 ciborium = "0.2.2"
+# Temp config dirs for the ADR-W024 Boot/Loaded/Running tests (boot file +
+# `.multiview/{loaded,active}.toml` state dir). Test-only; MIT/Apache-2.0.
+tempfile = "3"
 
 [features]
 "default" = ["openapi"]
