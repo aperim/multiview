@@ -1180,17 +1180,22 @@ impl ConspectHttpServer {
     /// the bytes the device-PoP `sha256(body)` covered (ADR-I007 — no drift).
     ///
     /// **`Malformed` is a received-2xx contact (the load-bearing retry contract).**
-    /// The status is classified FIRST: a non-2xx is mapped by `heartbeat_status_error`
-    /// (a `4xx` → definitive [`ServerRejected`], a `5xx` → ambiguous [`Transport`]) and
-    /// returns before the body is touched. The body is decoded **only on the success
-    /// path**, so the [`Malformed`] this returns can ONLY follow a RECEIVED `2xx` whose
-    /// body would not parse — never a no-response or `5xx` failure. A `2xx` means the
-    /// server processed the request and **burned the single-use PoP nonce**, so the
-    /// leaf treats this `Malformed` as DEFINITIVE (like a `4xx`): it drops the pinned
-    /// attempt + the burned nonce and recovers with a fresh `/challenge` next cycle —
-    /// it is never replayed. Keeping this ordering is what makes that inference sound;
-    /// do not decode the body before the status check.
+    /// This fulfils the [`LicenceServer::heartbeat`] error-mapping contract that
+    /// `run_once` relies on. The status is classified FIRST: a no-response send failure
+    /// maps to [`Transport`] (the ambiguous, replay-only arm) before the status is even
+    /// read; then a non-2xx is mapped by `heartbeat_status_error` (a `4xx` → definitive
+    /// [`ServerRejected`], a `5xx` → ambiguous [`Transport`]) and returns before the
+    /// body is touched. The body is decoded **only on the success path**, so the
+    /// [`Malformed`] this returns can ONLY follow a RECEIVED `2xx` whose body would not
+    /// parse — never a no-response or `5xx` failure. A `2xx` means the server processed
+    /// the request and **burned the single-use PoP nonce**, so the leaf treats this
+    /// `Malformed` as DEFINITIVE (like a `4xx`): it drops the pinned attempt + the
+    /// burned nonce and recovers with a fresh `/challenge` next cycle — it is never
+    /// replayed. Keeping this ordering is what makes that inference sound; do not decode
+    /// the body before the status check, and never return `Malformed` for a pre-send or
+    /// no-response error.
     ///
+    /// [`LicenceServer::heartbeat`]: multiview_licence::heartbeat::LicenceServer::heartbeat
     /// [`ServerRejected`]: multiview_licence::heartbeat::HeartbeatError::ServerRejected
     /// [`Transport`]: multiview_licence::heartbeat::HeartbeatError::Transport
     /// [`Malformed`]: multiview_licence::heartbeat::HeartbeatError::Malformed

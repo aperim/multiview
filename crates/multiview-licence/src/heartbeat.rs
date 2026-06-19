@@ -1096,6 +1096,37 @@ pub trait LicenceServer: Send + Sync {
     /// these bytes **verbatim** (content-type `application/json`), so the device and
     /// the server hash byte-for-byte the same body (no re-serialisation drift). The
     /// body carries the matching single-use `nonce`.
+    ///
+    /// # Error-mapping contract (implementors MUST uphold — the burned-nonce boundary)
+    ///
+    /// [`run_once`](HeartbeatClient::run_once) keys its retry decision entirely off
+    /// **which** [`HeartbeatError`] variant this returns, because the single-use PoP
+    /// nonce in `body` is burned the instant the server SEES the request. So the
+    /// variant MUST encode whether the request reached the server:
+    ///
+    /// * [`HeartbeatError::Transport`] — an **AMBIGUOUS** failure: **no response was
+    ///   received** (connection/TLS/timeout/DNS, or a `5xx`). This is the **only**
+    ///   variant `run_once` REPLAYS verbatim, so it MUST be reserved for genuine
+    ///   no-contact / lost-response failures (the server may or may not have
+    ///   committed). A pre-send or purely-local error that never reached the server
+    ///   (e.g. failing to build the request) MUST map here, never to
+    ///   [`Malformed`](HeartbeatError::Malformed) — mislabelling it `Malformed` would
+    ///   make `run_once` drop a nonce the server never saw.
+    /// * [`HeartbeatError::ServerRejected`] — a **DEFINITIVE** received non-2xx the
+    ///   device cannot fix by resending the same bytes (`401 pop-invalid`/
+    ///   `pop-required`, `409` idempotency/body-mismatch).
+    /// * [`HeartbeatError::Malformed`] — a **DEFINITIVE** failure that MUST be emitted
+    ///   **only after a RECEIVED `2xx`** whose body would not parse. A `2xx` means the
+    ///   server processed the request and burned the nonce, so `run_once` treats this
+    ///   exactly like `ServerRejected` (drop the pinned attempt + nonce, fresh
+    ///   `/challenge` next cycle). **Do NOT** return `Malformed` for any pre-send,
+    ///   no-response, or otherwise un-contacted error.
+    ///
+    /// The shipped `ConspectHttpServer` transport (in `multiview-cli`, at the cli/app
+    /// boundary) and the in-process test fake uphold this: the body is decoded only
+    /// after `status.is_success()`. This is a trait-level invariant the type cannot
+    /// enforce — a second transport MUST honour it (see the
+    /// [`Malformed`](HeartbeatError::Malformed) docs for the rationale).
     fn heartbeat(
         &self,
         org: &str,
@@ -2105,15 +2136,25 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             Ok(resp) => resp,
             Err(err @ (HeartbeatError::ServerRejected(_) | HeartbeatError::Malformed(_))) => {
                 // INVARIANT: a single-use PoP nonce the server has SEEN is burned — never
-                // replay it. A definitive 4xx (ServerRejected) OR a 2xx whose body will not
-                // parse (Malformed — post_raw_json emits it ONLY after a 2xx, so the server
-                // received the request and processed/burned the nonce) is a RECEIVED contact.
+                // replay it. Both arms here are a RECEIVED contact: a definitive 4xx
+                // (ServerRejected) OR a 2xx whose body would not parse (Malformed).
+                //
+                // This rests on the LicenceServer::heartbeat error-mapping CONTRACT (see the
+                // trait doc): a transport MUST emit Malformed ONLY after a received 2xx (so a
+                // Malformed here ALWAYS means the server processed the request + burned the
+                // nonce), and MUST route any pre-send / no-response / local error to Transport
+                // (the ambiguous, replay-only arm below) — never to Malformed. If a future
+                // transport mislabelled an un-contacted error as Malformed, this arm would
+                // wrongly drop a nonce the server never saw. The shipped ConspectHttpServer +
+                // the test fake decode the body only after status.is_success(), upholding it.
+                //
                 // Drop the pinned attempt + burned nonce so the next cycle recovers with a
                 // fresh challenge (a fresh idempotency-keyed unit; the lease re-renews safely).
                 self.reset_on_rejection();
                 return Err(err);
             }
-            // Ambiguous (no response / 5xx): leave the attempt pinned to replay verbatim.
+            // Ambiguous (no response / 5xx → Transport, per the trait contract): the server
+            // may or may not have committed it, so leave the attempt pinned to replay verbatim.
             Err(err) => return Err(err),
         };
         let (lease, state, next_due, next_nonce) = (
