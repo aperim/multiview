@@ -735,9 +735,12 @@ pub(crate) async fn revert_to_start(
         // snapshot is left UNCHANGED.
     } else {
         clear_revert_incomplete_if_latched(&state, &model);
-        // MAJOR-B round 4: the revert fully landed — the engine now runs Loaded,
-        // so adopt Loaded's sources/overlays into the snapshot.
-        model.adopt_document(model.loaded());
+        // MAJOR-B round 5: the revert fully landed. The adopted snapshot was
+        // already advanced PER-SECTION inside `apply_document_diff` for exactly
+        // the sections it applied LIVE (sources via UpsertSource, layout via
+        // ApplyLayout) — overlays are restart-only on this path, so the engine
+        // keeps the pre-revert overlays and the snapshot's overlays are
+        // correctly left unchanged. No wholesale adoption here.
     }
     state.audit(
         &principal.key_id,

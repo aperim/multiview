@@ -2255,32 +2255,32 @@ async fn a_restart_only_file_watch_change_is_not_persisted_as_adopted() {
     // Edit the BOOT file to ADD a NETWORK (rtsp) source — restart-only on this
     // synthetic-only run: the watcher reseeds the store + warns restart, but the
     // engine never ingests it live.
+    // Insert the new source ONCE, after the existing `in_b` (bars) source —
+    // `str::replace` would otherwise hit BOTH `[[cells]]` anchors and define
+    // net1 twice (an invalid duplicate id the watcher would reject).
     let edited = BOOT_DOC.replace(
-        "[[cells]]",
-        "[[sources]]\nid = \"net1\"\nkind = \"rtsp\"\nurl = \"rtsp://[::1]:8554/x\"\n\n[[cells]]",
+        "id = \"in_b\"\nkind = \"bars\"\n",
+        "id = \"in_b\"\nkind = \"bars\"\n[[sources]]\nid = \"net1\"\nkind = \"rtsp\"\nurl = \"rtsp://[::1]:8554/x\"\n",
     );
+    assert!(edited.contains("net1"), "the edit must insert net1 once");
     std::fs::write(&r.boot_path, &edited).expect("edit boot file: add a network source");
 
-    // Wait for the watcher to apply (it reseeds the store + raises the
-    // restart-pending warning).
+    // Wait for the watcher to APPLY the edit — it reseeds the (restart-only)
+    // network source into the sources store. Proven by the store carrying net1.
     assert!(
-        wait_until(SETTLE, || has_active_warning(
-            &r.warnings,
-            "config-file-requires-restart"
-        ))
-        .await,
-        "the restart-only source change raises the requires-restart warning"
+        wait_until(SETTLE, || r.state.sources.get("net1").is_ok()).await,
+        "the watcher must reseed the restart-only source into the store"
     );
 
     // Several persist windows: active.toml must NOT carry the unadopted network
-    // source (the engine never ingests it live on a synthetic-only run).
+    // source (the engine never ingests it live on a synthetic-only run, so it is
+    // not in the adopted snapshot).
     tokio::time::sleep(TEST_POLL * 8).await;
-    if let Ok(text) = std::fs::read_to_string(&active_path) {
-        assert!(
-            !text.contains("net1"),
-            "active.toml must not persist the restart-only/unadopted file-watch source as adopted"
-        );
-    }
+    let text = std::fs::read_to_string(&active_path).expect("active.toml exists");
+    assert!(
+        !text.contains("net1"),
+        "active.toml must not persist the restart-only/unadopted file-watch source as adopted, got:\n{text}"
+    );
     watch.stop();
     persist.abort();
 }

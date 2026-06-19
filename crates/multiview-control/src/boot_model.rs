@@ -239,17 +239,23 @@ impl BootModel {
         self.lock_adopted().overlays.retain(|o| o.id != id);
     }
 
-    /// Adopt a whole document's sources + overlays into the snapshot (MAJOR-B
-    /// round 4): the file-watcher's apply, when it SETTLES with no shed, has
-    /// applied `config`'s full per-section diff to the engine, so the adopted
-    /// running set now equals `config`'s sources/overlays. (The watcher only
-    /// calls this on a fully-landed apply; a shed leaves the snapshot until the
-    /// idempotent retry lands.) Call ONLY while holding the config-mutation
-    /// lock.
-    pub fn adopt_document(&self, config: &MultiviewConfig) {
+    /// Apply an ADOPTED layout to the snapshot (MAJOR-B round 5): the engine
+    /// landed an `ApplyLayout`, so the running canvas/layout/cells are now this
+    /// layout's. `ApplyLayout` is a LIVE sheddable command, so the working-
+    /// layout store can hold a requested-but-unadopted layout (a landed
+    /// `PUT /layouts/{id}` + a shed apply); this is called ONLY when the
+    /// `ApplyLayout` lands, so the snapshot's canvas/layout/cells stay at the
+    /// adopted layout. Call ONLY while holding the config-mutation lock.
+    pub fn adopt_layout(
+        &self,
+        canvas: multiview_config::Canvas,
+        layout: multiview_config::Layout,
+        cells: Vec<multiview_config::Cell>,
+    ) {
         let mut snap = self.lock_adopted();
-        snap.sources.clone_from(&config.sources);
-        snap.overlays.clone_from(&config.overlays);
+        snap.canvas = canvas;
+        snap.layout = layout;
+        snap.cells = cells;
     }
 
     /// The ADOPTED sources — exactly the sources the engine is running (MAJOR-B
@@ -268,6 +274,23 @@ impl BootModel {
     #[must_use]
     pub fn adopted_overlays(&self) -> Vec<multiview_config::Overlay> {
         self.lock_adopted().overlays.clone()
+    }
+
+    /// The ADOPTED canvas/layout/cells — exactly the layout the engine is
+    /// running (MAJOR-B round 5). `persist_running_now` overrides the
+    /// store-composed config's canvas/layout/cells with these so a
+    /// shed/unadopted `apply-layout` (the working-layout store changed but the
+    /// `ApplyLayout` never landed) does not leak into `active.toml`.
+    #[must_use]
+    pub fn adopted_layout(
+        &self,
+    ) -> (
+        multiview_config::Canvas,
+        multiview_config::Layout,
+        Vec<multiview_config::Cell>,
+    ) {
+        let snap = self.lock_adopted();
+        (snap.canvas.clone(), snap.layout.clone(), snap.cells.clone())
     }
 
     /// Take the next monotonically increasing write ticket (call at compose
@@ -600,6 +623,12 @@ pub async fn persist_running_now(state: &AppState) -> ControlResult<()> {
         })?;
     config.sources = model.adopted_sources();
     config.overlays = model.adopted_overlays();
+    // Layout/cells are also live-sheddable (via `ApplyLayout`), so override
+    // canvas/layout/cells from the adopted snapshot too (MAJOR-B round 5).
+    let (canvas, layout, cells) = model.adopted_layout();
+    config.canvas = canvas;
+    config.layout = layout;
+    config.cells = cells;
     config.validate().map_err(|e| {
         ControlError::Validation(format!("the adopted running config does not validate: {e}"))
     })?;

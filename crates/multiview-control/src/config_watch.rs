@@ -449,19 +449,17 @@ async fn watch_loop(
             }
             if incomplete_active {
                 // A partial (shed) apply was pending and the ORIGINAL content
-                // returned: nothing is pending for the engine any more, but
-                // the stores may have followed the abandoned content. Under the
-                // config-mutation lock (so the persister + REST mutations are
-                // ordered against this), re-converge the stores to the running
-                // baseline and re-adopt it into the snapshot (MAJOR-B round 4 /
-                // B-1: WITHOUT re-adopting, the prior shed would freeze
-                // persistence once the file returns to the adopted content).
+                // returned: nothing is pending for the engine any more, but the
+                // stores may have followed the abandoned content. Under the
+                // config-mutation lock (ordered against the persister + REST
+                // mutations), re-converge the stores to the running baseline and
+                // clear the warning. The adopted SNAPSHOT needs no update here:
+                // per-section adoption (MAJOR-B round 5) only ever recorded the
+                // sections the engine actually applied LIVE, so a shed left it at
+                // the adopted state — there is no global gate to unstick.
                 let _mutation = state.lock_config_mutation().await;
                 resync_all_stores(&state, ACTOR, &baseline);
                 clear_apply_incomplete(&state, &path, &mut incomplete_active);
-                if let Some(model) = state.boot_model.as_ref() {
-                    model.adopt_document(&baseline);
-                }
                 state.running_changed.notify_one();
             }
             continue;
@@ -529,17 +527,15 @@ async fn watch_loop(
                 );
             }
             if incomplete_active {
-                // MAJOR-B round 4 / B-1: a prior shed was pending and the
-                // content reverted to the last-observed (adopted) state — under
-                // the config-mutation lock, re-converge the stores and re-adopt
-                // the baseline so the prior shed can never freeze persistence
-                // forever.
+                // MAJOR-B round 5: a prior shed was pending and the content
+                // reverted to the last-observed (adopted) state — under the
+                // config-mutation lock, re-converge the stores and clear the
+                // warning. The adopted snapshot needs no update (per-section
+                // adoption already kept it at the adopted state through the
+                // shed).
                 let _mutation = state.lock_config_mutation().await;
                 resync_all_stores(&state, ACTOR, &baseline);
                 clear_apply_incomplete(&state, &path, &mut incomplete_active);
-                if let Some(model) = state.boot_model.as_ref() {
-                    model.adopt_document(&baseline);
-                }
                 state.running_changed.notify_one();
             }
             continue;
@@ -669,12 +665,11 @@ fn apply_change(
             "a subsequent valid write applied",
             invalid_active,
         );
-        // MAJOR-B round 4: the file reverted to the running baseline — the
-        // engine runs `baseline` (just set to `next`); adopt it and re-fire so
-        // the persister captures the adopted snapshot.
-        if let Some(model) = state.boot_model.as_ref() {
-            model.adopt_document(baseline);
-        }
+        // MAJOR-B round 5: an identical (empty-diff) rewrite changes nothing the
+        // engine runs, so the adopted snapshot is already correct — no wholesale
+        // adoption (that was the round-4 over-adoption). Re-fire so a pending
+        // persist (e.g. after the incomplete re-converge above) captures the
+        // already-correct snapshot.
         state.running_changed.notify_one();
         tracing::debug!(path = %path.display(), "config file rewritten with identical content");
         return ApplyResult::Settled;
@@ -712,12 +707,14 @@ fn apply_change(
     }
     *baseline = next;
     clear_apply_incomplete(state, path, incomplete_active);
-    // MAJOR-B round 4: the apply landed completely — the engine now runs
-    // `baseline` (just set to `next`); adopt its sources/overlays into the
-    // snapshot and re-fire so the debounced persister captures this snapshot.
-    if let Some(model) = state.boot_model.as_ref() {
-        model.adopt_document(baseline);
-    }
+    // MAJOR-B round 5: the apply landed completely. The adopted snapshot was
+    // ALREADY advanced PER-SECTION inside `apply_document_diff` for exactly the
+    // sections the engine applied LIVE (synthetic sources via UpsertSource,
+    // layout via ApplyLayout) — restart-only sections (a non-synthetic source,
+    // a Class-2 canvas/layout, outputs/probes/devices/sync_groups/audio) applied
+    // NOTHING to the snapshot, so they never leak into `active.toml`. No
+    // wholesale adoption here (that was the round-4 over-adoption). Re-fire so
+    // the debounced persister captures the per-section-updated snapshot.
     state.running_changed.notify_one();
     state
         .config_watch
@@ -862,6 +859,24 @@ pub fn apply_document_diff(
     }
 }
 
+/// Adopt a LANDED source into the boot-model snapshot, if a boot model is wired
+/// (ADR-W024 round 5). Called from the file-watch apply ONLY when an
+/// `UpsertSource` actually lands on the bus — never wholesale.
+fn adopt_source_if_modeled(state: &AppState, source: multiview_config::Source) {
+    if let Some(model) = state.boot_model.as_ref() {
+        model.adopt_source(source);
+    }
+}
+
+/// Drop a LANDED-removed source from the boot-model snapshot, if a boot model is
+/// wired (ADR-W024 round 5). Called from the file-watch apply ONLY when a
+/// `RemoveSource` actually lands.
+fn unadopt_source_if_modeled(state: &AppState, id: &str) {
+    if let Some(model) = state.boot_model.as_ref() {
+        model.unadopt_source(id);
+    }
+}
+
 /// Apply the source diff exactly as the sources routes do (ADR-W018):
 /// synthetic add/edit ⇒ live `UpsertSource`; a synthetic→decoded kind change
 /// ⇒ live `RemoveSource` (stop the stale generator) + restart for the new
@@ -879,13 +894,17 @@ fn apply_source_changes(
             SourceChange::Added(source) => {
                 described.push(format!("{} added", source.id));
                 if source.kind.is_synthetic() {
-                    if !submit(
+                    if submit(
                         state,
                         Command::UpsertSource {
                             op: OperationId::new(),
                             source: source.clone(),
                         },
                     ) {
+                        // ADR-W024 round 5: a LANDED synthetic add is adopted —
+                        // record it in the snapshot per-section (never wholesale).
+                        adopt_source_if_modeled(state, (**source).clone());
+                    } else {
                         *shed = shed.saturating_add(1);
                     }
                 } else {
@@ -900,13 +919,15 @@ fn apply_source_changes(
             SourceChange::Changed { previous, next } => {
                 described.push(format!("{} changed", next.id));
                 if next.kind.is_synthetic() {
-                    if !submit(
+                    if submit(
                         state,
                         Command::UpsertSource {
                             op: OperationId::new(),
                             source: next.clone(),
                         },
                     ) {
+                        adopt_source_if_modeled(state, (**next).clone());
+                    } else {
                         *shed = shed.saturating_add(1);
                     }
                 } else {
@@ -914,13 +935,18 @@ fn apply_source_changes(
                         // Mirror the sources route: stop the stale generator
                         // now; a frozen synthetic pretending to be the new
                         // URL would be dishonest.
-                        if !submit(
+                        if submit(
                             state,
                             Command::RemoveSource {
                                 op: OperationId::new(),
                                 id: next.id.clone(),
                             },
                         ) {
+                            // The LANDED stop drops the old synthetic from the
+                            // snapshot; the new decoded source is restart-only
+                            // (NOT adopted live), so it does not enter here.
+                            unadopt_source_if_modeled(state, &next.id);
+                        } else {
                             *shed = shed.saturating_add(1);
                         }
                     }
@@ -933,13 +959,15 @@ fn apply_source_changes(
             }
             SourceChange::Removed(id) => {
                 described.push(format!("{id} removed"));
-                if !submit(
+                if submit(
                     state,
                     Command::RemoveSource {
                         op: OperationId::new(),
                         id: id.clone(),
                     },
                 ) {
+                    unadopt_source_if_modeled(state, id);
+                } else {
                     *shed = shed.saturating_add(1);
                 }
             }
@@ -993,6 +1021,17 @@ fn apply_layout_change(
                     document: Some(Box::new(resolved)),
                 },
             ) {
+                // ADR-W024 round 5: the ApplyLayout LANDED — the engine now runs
+                // `next`'s canvas/layout/cells, so adopt them into the snapshot
+                // (per-section; never wholesale). A shed leaves the snapshot at
+                // the prior adopted layout (the retry adopts when it lands).
+                if let Some(model) = state.boot_model.as_ref() {
+                    model.adopt_layout(
+                        next.canvas.clone(),
+                        next.layout.clone(),
+                        next.cells.clone(),
+                    );
+                }
                 "layout applied live".to_owned()
             } else {
                 *shed = shed.saturating_add(1);

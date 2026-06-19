@@ -513,6 +513,15 @@ pub(crate) async fn cmd_apply_layout(
     crate::auth::authorize_object(&principal, &req.layout)?;
 
     let layout = req.layout.clone();
+    // ADR-W024 MAJOR-B round 5: hold the config-mutation lock across
+    // resolve→submit→adopt so the persister (same lock) can never compose
+    // mid-apply, and the layout snapshot advances atomically with the engine
+    // submit. The adopted canvas/layout/cells come from the working-layout body
+    // captured here; they are adopted into the snapshot ONLY when the
+    // `ApplyLayout` lands (a shed leaves the snapshot at the prior adopted
+    // layout, so a shed apply-layout never leaks into `active.toml`).
+    let _mutation = state.lock_config_mutation().await;
+    let adopted_body: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
     // Resolution runs INSIDE the fresh-reservation arm (pinned semantics,
     // ADR-W019): a replayed Idempotency-Key answers from the reservation
     // without re-resolving, and a refused resolve releases the key.
@@ -538,12 +547,30 @@ pub(crate) async fn cmd_apply_layout(
             &versioned.layout.body,
             state.running_canvas.as_ref(),
         )?;
+        // Capture the authored body so a LANDED apply can adopt its
+        // canvas/layout/cells into the snapshot (the resolved form is the
+        // engine's solved layout, not the authored config sections).
+        if let Ok(mut slot) = adopted_body.lock() {
+            *slot = Some(versioned.layout.body.clone());
+        }
         Ok(Command::ApplyLayout {
             op,
             layout: req.layout,
             document: Some(Box::new(resolved)),
         })
     })?;
+    // A FRESH landed apply (not a replay) → adopt the layout into the snapshot
+    // (MAJOR-B round 5). A shed never reaches here (`submit_accepted_body`
+    // returns `Err(EngineBusy)`), so a shed apply-layout leaves the snapshot at
+    // the prior adopted layout.
+    if body.kind != "replay" {
+        if let Some(model) = state.boot_model.as_ref() {
+            let captured = adopted_body.lock().ok().and_then(|mut s| s.take());
+            if let Some(layout_body) = captured {
+                adopt_layout_from_body(model, &layout_body);
+            }
+        }
+    }
     // State honestly which per-cell property classes land on screen at the
     // frame boundary vs are carried-but-not-yet-rendered (ADR-W019). A replay
     // body stays undecorated: it answers "did the original land?", it does not
@@ -567,6 +594,28 @@ pub(crate) async fn cmd_apply_layout(
         Some(serde_json::json!({ "command": "apply_layout" })),
     );
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
+}
+
+/// Adopt a landed `ApplyLayout`'s canvas/layout/cells into the boot-model
+/// snapshot (ADR-W024 MAJOR-B round 5): the working-layout `body` is the
+/// authored `{canvas, layout, cells}` shape. Each section is deserialized into
+/// its typed form; a section that fails to deserialize (in practice impossible —
+/// the body already validated on the store write) is skipped, leaving the
+/// snapshot's prior adopted value rather than persisting an invalid layout.
+/// Call ONLY while holding the config-mutation lock.
+fn adopt_layout_from_body(model: &crate::boot_model::BootModel, body: &serde_json::Value) {
+    let canvas = body
+        .get("canvas")
+        .and_then(|v| serde_json::from_value::<multiview_config::Canvas>(v.clone()).ok());
+    let layout = body
+        .get("layout")
+        .and_then(|v| serde_json::from_value::<multiview_config::Layout>(v.clone()).ok());
+    let cells = body
+        .get("cells")
+        .and_then(|v| serde_json::from_value::<Vec<multiview_config::Cell>>(v.clone()).ok());
+    if let (Some(canvas), Some(layout), Some(cells)) = (canvas, layout, cells) {
+        model.adopt_layout(canvas, layout, cells);
+    }
 }
 
 impl axum::extract::FromRequestParts<AppState> for Principal {
