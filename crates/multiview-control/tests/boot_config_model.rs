@@ -1621,3 +1621,113 @@ async fn a_failed_compose_releases_the_idempotency_reservation() {
         }
     }
 }
+
+/// ADR-W024 MAJOR-C2 (concurrency): two concurrent promotes must not lose a
+/// suppression token. Each promote banks an expect token before writing; under
+/// the shared promote/revert mutation serial they cannot interleave, so the
+/// watcher never mistakes one promote's own write for an external edit (which
+/// would re-apply the file). With the watcher running, `applied_count` must
+/// stay 0 across two back-to-back promotes — neither write is applied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_promotes_do_not_lose_a_suppression_token() {
+    let mut r = rig(BOOT_DOC);
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        WatchOptions::default().with_poll_interval(TEST_POLL),
+    );
+
+    // A live edit moves Running away from the boot file. Drain its own
+    // UpsertSource off the bus now, so the post-promote drain below sees ONLY
+    // commands the watcher would have wrongly enqueued (none, if suppression
+    // holds).
+    recolor_in_a(&r, "#c1c1c1").await;
+    let _ = r.commands.try_drain();
+    let router_a = r.router.clone();
+    let router_b = r.router.clone();
+    let (resp_a, resp_b) = tokio::join!(
+        send(
+            &router_a,
+            post_idem("/api/v1/config/promote", OPERATOR_TOKEN, Some("promote-a")),
+        ),
+        send(
+            &router_b,
+            post_idem("/api/v1/config/promote", OPERATOR_TOKEN, Some("promote-b")),
+        ),
+    );
+    assert_eq!(resp_a.status(), StatusCode::OK, "promote A succeeds");
+    assert_eq!(resp_b.status(), StatusCode::OK, "promote B succeeds");
+
+    // Several poll cycles: the watcher must ADOPT both promote writes (never
+    // apply either as an external edit). A lost token would let the watcher
+    // re-apply the promoted file, bumping applied_count.
+    tokio::time::sleep(TEST_POLL * 12).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        0,
+        "neither concurrent promote's own write may be applied as an external edit"
+    );
+    assert!(
+        r.commands.try_drain().is_empty(),
+        "a promote's own write must enqueue no watcher commands"
+    );
+    watch.stop();
+}
+
+/// ADR-W024 MAJOR-C3 (concurrency): a promote concurrent with a revert must not
+/// produce a torn/stale commit. Under the shared mutation serial the two cannot
+/// interleave, so the document promote WRITES to the boot file is exactly the
+/// document it COMMITS as the `boot` revision, and the boot file is always a
+/// valid config (never a half-applied mix). Run promote+revert concurrently and
+/// assert the boot file parses+validates and equals the committed revision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn promote_concurrent_with_revert_commits_a_consistent_snapshot() {
+    let mut r = rig(BOOT_DOC);
+    // Running diverges from Loaded so revert has work to do.
+    recolor_in_a(&r, "#d2d2d2").await;
+
+    let router_p = r.router.clone();
+    let router_v = r.router.clone();
+    let (promote_resp, revert_resp) = tokio::join!(
+        send(
+            &router_p,
+            post_idem("/api/v1/config/promote", OPERATOR_TOKEN, Some("promote-x")),
+        ),
+        send(
+            &router_v,
+            post_idem("/api/v1/config/revert-to-start", OPERATOR_TOKEN, Some("revert-x")),
+        ),
+    );
+    assert_eq!(promote_resp.status(), StatusCode::OK, "promote succeeds");
+    assert_eq!(revert_resp.status(), StatusCode::ACCEPTED, "revert is accepted");
+    let promote_body = body_json(promote_resp).await;
+    let committed_rev = promote_body["revision"]
+        .as_u64()
+        .expect("promote returns the committed boot revision");
+
+    // The boot file promote wrote must be a VALID config (never a torn mix).
+    let boot_text = std::fs::read_to_string(&r.boot_path).expect("read boot file");
+    let boot_config =
+        MultiviewConfig::load_from_toml(&boot_text).expect("the promoted boot file parses");
+    boot_config.validate().expect("the promoted boot file validates");
+
+    // The committed `boot` revision must equal the document promote wrote to the
+    // boot file (compose → write → commit was one atomic critical section; a
+    // concurrent revert could not split it).
+    let revision = r
+        .state
+        .config_versions
+        .get("boot", multiview_control::versioning::RevisionId::new(committed_rev))
+        .expect("the committed boot revision is retrievable");
+    let committed_config: MultiviewConfig =
+        serde_json::from_value(revision.document.clone()).expect("the committed doc is a config");
+    let committed_toml = committed_config.to_toml().expect("render committed");
+    let boot_canonical = boot_config.to_toml().expect("render boot file");
+    assert_eq!(
+        committed_toml, boot_canonical,
+        "the committed boot revision must equal the document written to the boot file \
+         (no stale/torn commit from a concurrent revert)"
+    );
+    let _ = r.commands.try_drain();
+}

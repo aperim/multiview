@@ -313,6 +313,19 @@ where
     // unauthenticated like `/docs` (media devices cannot send Bearer tokens).
     // Isolation-safe (inv #10): the handlers only read files the segmenter
     // already published to disk — never an engine channel or lock.
+    // ADR-W024 MAJOR-C1 (startup TOCTOU): for a config-file run (a boot model
+    // is wired) the config-file watcher's suppression handle MUST be installed
+    // into the shared state BEFORE the router serves a single request — else a
+    // `POST /config/promote` in the window between serving and the watcher
+    // spawning would find no handle, skip suppression, write the boot file, and
+    // the watcher would later re-apply the promoted file as an external edit.
+    // The handle is created and installed here; the caller reads it back via
+    // `state.watch_handle()` and drives the SAME handle from the spawned watcher
+    // (`WatchOptions::with_handle`). Store-only runs (no boot model) install no
+    // handle — promote there correctly skips suppression (nothing to suppress).
+    if state.boot_model.is_some() {
+        state.install_watch_handle(multiview_control::config_watch::ConfigWatchHandle::new());
+    }
     let mut app = multiview_control::router(state.clone());
     for mount in hls_mounts(config) {
         app = app.nest(
@@ -2709,6 +2722,59 @@ input_id = "in_b"
         joined
             .expect("serve task panicked")
             .expect("serve returned an I/O error");
+    }
+
+    /// ADR-W024 MAJOR-C1 (startup TOCTOU): for a config-file run (a boot model
+    /// is wired) `bind_and_serve` must install the config-file watch handle into
+    /// the served `AppState` BEFORE it starts serving — so a
+    /// `POST /config/promote` arriving with the very first request already finds
+    /// the suppression seam, and the promoted file is never later re-applied as
+    /// an external edit. The returned state (the one the router serves) must
+    /// therefore already carry a watch handle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bind_and_serve_installs_the_watch_handle_before_serving() {
+        let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
+        let (commands, _rx) = multiview_control::command_bus(8);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let config = test_config();
+        let boot_model = Arc::new(multiview_control::boot_model::BootModel::new(
+            std::path::PathBuf::from("/nonexistent/multiview.toml"),
+            config.clone(),
+            multiview_config::StartMode::Boot,
+            false,
+            None,
+        ));
+
+        let (_addr, handle, state) = bind_and_serve(
+            "[::1]:0",
+            &config,
+            publisher,
+            commands,
+            multiview_control::no_preview(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            multiview_control::LiveApplyCaps::default(),
+            multiview_control::LiveSourceCapability::synthetic_only(),
+            // A config-file run: the watch handle MUST be installed before serving.
+            Some(boot_model),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        )
+        .await
+        .expect("bind + serve should start");
+
+        assert!(
+            state.watch_handle().is_some(),
+            "a config-file run must have the watch handle installed before the \
+             router serves a single request (no startup TOCTOU for promote)"
+        );
+
+        shutdown_tx.send(()).unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
     }
 
     /// Build a config carrying one HLS output per `(id, path)` pair (the rest of

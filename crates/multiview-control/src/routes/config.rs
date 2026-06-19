@@ -673,6 +673,11 @@ pub(crate) async fn revert_to_start(
         }
         Reservation::Fresh(op) => op,
     };
+    // ADR-W024 MAJOR-C3: hold the same promote/revert mutation serial promote
+    // takes, so a revert cannot interleave with a promote's compose→commit (a
+    // promote must never commit a document a concurrent revert has already
+    // replaced). Compose AFTER acquiring it.
+    let _mutation = state.lock_config_mutation().await;
     let (_document, running) = match compose_running_config(&state) {
         Ok(composed) => composed,
         Err(refusal) => {
@@ -862,6 +867,13 @@ pub(crate) async fn promote_to_boot(
         state.idempotency.release(idem.0.as_deref(), &op);
         refusal
     };
+    // ADR-W024 MAJOR-C2/C3: hold the promote/revert mutation serial across the
+    // WHOLE compose → bank-token → write → commit critical section. It is
+    // composed AFTER acquiring the lock, so a concurrent revert cannot mutate
+    // Running between this compose and the commit (C3, a stale commit); and the
+    // bank-token + write + confirm happen without a concurrent promote
+    // interleaving the watcher's suppression token (C2).
+    let _mutation = state.lock_config_mutation().await;
     let (document, running) = compose_running_config(&state).map_err(&release_and)?;
     let toml = running
         .to_toml()

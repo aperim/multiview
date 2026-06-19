@@ -56,6 +56,46 @@ impl RunningPersist {
     }
 }
 
+/// Await the operator's stop signal: `Ctrl-C` (SIGINT) **or** `SIGTERM`
+/// (MINOR-D, ADR-W024 §3). A self-hosted daemon is stopped with `SIGTERM`
+/// (`docker stop`, `systemctl stop`, a supervisor), so graceful teardown — the
+/// final `active.toml` persist, the server drain — must run on both, not just
+/// an interactive Ctrl-C. Returns the human name of whichever arrived (for the
+/// log line). On non-Unix (not a deploy platform) only Ctrl-C is awaited.
+async fn await_shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            Ok(term) => term,
+            Err(error) => {
+                // Registering the SIGTERM handler failed (rare); fall back to
+                // Ctrl-C alone rather than never stopping.
+                tracing::warn!(error = %error, "could not install the SIGTERM handler; SIGTERM will not trigger graceful teardown");
+                let _ = tokio::signal::ctrl_c().await;
+                return "Ctrl-C";
+            }
+        };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if result.is_err() {
+                    // The Ctrl-C future erroring would busy-loop the select; wait
+                    // on SIGTERM only from here.
+                    term.recv().await;
+                    return "SIGTERM";
+                }
+                "Ctrl-C"
+            }
+            _ = term.recv() => "SIGTERM",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl-C"
+    }
+}
+
 /// The boxed per-tick command drain the engine applies at the frame boundary
 /// (the control-plane command bus → live reconfiguration), shared by the
 /// software-engine and full-pipeline run paths.
@@ -466,15 +506,22 @@ async fn serve_control_plane(
     // boot-load TEXT seeds the last-observed content (ADR-W024 §4: the
     // unchanged boot file must never clobber a resumed baseline; an edit in the
     // boot window differs from this text and still applies).
-    // `spawn` installs the watcher's handle into the shared state, so the
-    // `promote` route can announce its server-side boot-file write through the
-    // ADR-W020 suppression seam (ADR-W024 §6).
+    // The watcher drives the SAME handle `bind_and_serve` already installed
+    // into the state BEFORE serving (ADR-W024 MAJOR-C1), so the `promote` route
+    // found the suppression seam from the very first served request — no
+    // startup window where a promote skips suppression. `bind_and_serve`
+    // installs it for every config-file run (a boot model is wired), so it is
+    // present here.
+    let mut watch_options = multiview_cli::config_watch::WatchOptions::default()
+        .with_initial_observed(start.boot_text.clone());
+    if let Some(installed) = state.watch_handle() {
+        watch_options = watch_options.with_handle(installed);
+    }
     let watch = multiview_cli::config_watch::spawn(
         config_path.to_path_buf(),
         config.clone(),
         state.clone(),
-        multiview_cli::config_watch::WatchOptions::default()
-            .with_initial_observed(start.boot_text.clone()),
+        watch_options,
     );
     Ok((handle, command_rx, hub, watch, persist))
 }
@@ -632,10 +679,9 @@ async fn run_pipeline_until_ctrl_c(
 
     let stop_for_signal = stop.clone();
     let signal = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("Ctrl-C received; stopping after the current frame");
-            stop_for_signal.stop();
-        }
+        let which = await_shutdown_signal().await;
+        tracing::info!(signal = which, "stop signal received; stopping after the current frame");
+        stop_for_signal.stop();
     });
 
     // Sample CPU/host-memory/per-GPU load at ~1.3 Hz and PUSH `Event::SystemMetrics`
@@ -989,10 +1035,9 @@ async fn run_software_until_ctrl_c(
 
     let stop_for_signal = stop.clone();
     let signal = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::info!("Ctrl-C received; stopping after the current frame");
-            stop_for_signal.stop();
-        }
+        let which = await_shutdown_signal().await;
+        tracing::info!(signal = which, "stop signal received; stopping after the current frame");
+        stop_for_signal.stop();
     });
 
     // The off-hot-path system-metrics poller: samples whole-system CPU + host

@@ -60,6 +60,7 @@ const MISSING_POLLS_BEFORE_REPORT: u32 = 5;
 pub struct WatchOptions {
     poll_interval: Duration,
     initial_observed: Option<String>,
+    handle: Option<ConfigWatchHandle>,
 }
 
 impl Default for WatchOptions {
@@ -67,6 +68,7 @@ impl Default for WatchOptions {
         Self {
             poll_interval: Duration::from_secs(1),
             initial_observed: None,
+            handle: None,
         }
     }
 }
@@ -92,6 +94,17 @@ impl WatchOptions {
     #[must_use]
     pub fn with_initial_observed(mut self, content: String) -> Self {
         self.initial_observed = Some(content);
+        self
+    }
+
+    /// Use a pre-created watch handle (ADR-W024 MAJOR-C1): the binary creates
+    /// the handle and installs it into `AppState` BEFORE the router serves, so
+    /// a promote in the startup window already finds the suppression seam, then
+    /// hands the SAME handle here so [`spawn`] drives it. Absent ⇒ [`spawn`]
+    /// creates and installs a fresh one (tests that spawn directly).
+    #[must_use]
+    pub fn with_handle(mut self, handle: ConfigWatchHandle) -> Self {
+        self.handle = Some(handle);
         self
     }
 }
@@ -126,7 +139,26 @@ pub struct ConfigWatchHandle {
     stop: Arc<AtomicBool>,
 }
 
+impl Default for ConfigWatchHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConfigWatchHandle {
+    /// Create a fresh, un-spawned watch handle (ADR-W024 MAJOR-C1): the binary
+    /// installs this into `AppState` BEFORE the router serves a request, then
+    /// hands it to [`spawn`], so a `POST /config/promote` in the startup window
+    /// always finds the suppression seam (never skips it and lets the watcher
+    /// later re-apply the promoted file as an external edit).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            expected: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// Mark one **expected** write of exactly `content`: when a debounced file
     /// change carries this content it is adopted as the new baseline WITHOUT
     /// applying anything (the server-side writer — e.g. a promote-to-boot
@@ -265,14 +297,17 @@ pub fn spawn(
     state: AppState,
     options: WatchOptions,
 ) -> ConfigWatchHandle {
-    let handle = ConfigWatchHandle {
-        expected: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
-        stop: Arc::new(AtomicBool::new(false)),
-    };
+    // The binary installs the handle into `AppState` BEFORE serving (MAJOR-C1)
+    // and passes it via `with_handle`; when absent (tests that spawn directly)
+    // a fresh handle is created and installed here.
+    let handle = options
+        .handle
+        .clone()
+        .unwrap_or_else(ConfigWatchHandle::new);
     // Install the handle into the shared state so the `promote` route (ADR-W024
     // §6) can announce its boot-file write through this watcher's suppression
-    // seam. Done here (not by the caller) so every watcher — including the ones
-    // tests spawn directly — wires its own handle by construction.
+    // seam. Idempotent: re-installing the same handle the binary already
+    // installed before serving is a no-op-equivalent (last-writer-wins).
     state.install_watch_handle(handle.clone());
     state.config_watch.mark_active(&path.display().to_string());
     tracing::info!(

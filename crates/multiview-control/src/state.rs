@@ -756,6 +756,15 @@ pub struct AppState {
     /// store-only deployments (no watcher) — promote then skips suppression
     /// (nothing to suppress). Control-plane-only (invariant #10).
     watch_handle: Arc<std::sync::RwLock<Option<crate::config_watch::ConfigWatchHandle>>>,
+    /// Serializes the whole-Running mutation critical sections of
+    /// `POST /config/promote` and `POST /config/revert-to-start` (ADR-W024
+    /// MAJOR-C2/C3): each holds it across compose → write/apply → commit so a
+    /// concurrent promote/revert can neither interleave the watcher
+    /// suppression token (C2) nor mutate Running between a promote's compose and
+    /// its commit (C3, a stale commit). Control-plane-only, async, never held
+    /// across the engine bus — it serializes two rare admin operations and can
+    /// never back-pressure the engine (invariant #10).
+    config_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     /// The coalescing **Running-changed** signal (ADR-W024 §3): a one-permit
     /// [`tokio::sync::Notify`] fired by [`AppState::audit`] — the ONE choke
     /// point every successful mutation passes through — that the debounced
@@ -895,6 +904,8 @@ impl AppState {
             // self-write suppression (nothing to suppress). The binary installs
             // the spawned watcher's handle via `install_watch_handle`.
             watch_handle: Arc::new(std::sync::RwLock::new(None)),
+            // The promote/revert mutation serial (ADR-W024 MAJOR-C2/C3).
+            config_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             // Honest default: nothing applies live until the binary declares
             // what the running engine can take (ADR-W022).
             live_apply: crate::live_apply::LiveApplyCaps::default(),
@@ -986,6 +997,15 @@ impl AppState {
             Err(poisoned) => poisoned.into_inner(),
         };
         slot.clone()
+    }
+
+    /// Acquire the promote/revert mutation serial (ADR-W024 MAJOR-C2/C3): the
+    /// `promote` and `revert-to-start` handlers hold this across their whole
+    /// compose → write/apply → commit critical section so the two cannot
+    /// interleave. Held only by those two rare admin handlers; never across the
+    /// engine bus (invariant #10).
+    pub async fn lock_config_mutation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.config_mutation_lock).lock_owned().await
     }
 
     /// Declare what the **running** engine can take live (ADR-W022). The
