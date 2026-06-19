@@ -629,6 +629,95 @@ fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
 }
 
+/// Defense-in-depth: harden a secret-storage **directory** against a
+/// group/world-**writable** pre-existing dir before any secret (the device key,
+/// the durable nonce) is stored under it.
+///
+/// The secret FILES are independently 0600-verified
+/// ([`DeviceKeyStore::load_existing`]) and atomically installed (`O_EXCL` + a
+/// unique temp + `hard_link`), so a merely group/world-**readable** dir (the
+/// normal umask-022 `0755`) is NOT a leak — others can list names, not read a
+/// 0600 file. So this targets the **writable** bits only:
+///
+/// * not group/world-writable (`mode & 0o022 == 0`, e.g. `0700`/`0755`) → accept
+///   unchanged (the common case; rejecting `0755` would break normal installs);
+/// * group/world-writable **and we own it** (the dir's `uid` is our effective
+///   uid) → **tighten** it (strip the group/other write bits) and continue, with
+///   a one-line warning — a misconfiguration we can repair, not a hard stop;
+/// * group/world-writable and **not ours** (or the tighten/confirm fails) →
+///   **fail closed** with `on_error(message)`: an attacker who can write the dir
+///   could pre-plant the secret paths, so we refuse to store secrets there.
+///
+/// Unix-only (mode is a Unix concept); a no-op on other targets, consistent with
+/// the file-mode handling elsewhere in this module. `on_error` adapts the message
+/// to the caller's error type (the two call sites return different ones).
+#[cfg(all(feature = "heartbeat", unix))]
+fn harden_secret_dir<E>(dir: &std::path::Path, on_error: impl Fn(String) -> E) -> Result<(), E> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let meta = std::fs::metadata(dir).map_err(|e| {
+        on_error(format!(
+            "could not stat the secret-storage dir {} to check its permissions: {e}",
+            dir.display()
+        ))
+    })?;
+    let mode = meta.permissions().mode() & 0o777;
+    // Not group/world-writable (0700, 0755, …): nothing to do. A readable-only
+    // dir is not a leak (the secret files are 0600).
+    if mode & 0o022 == 0 {
+        return Ok(());
+    }
+    // Group/world-writable: only the OWNER (or root) may safely tighten it. If we
+    // are not the owner we cannot trust the dir (an attacker who owns it could
+    // pre-plant the secret paths) → fail closed.
+    let our_uid = rustix::process::geteuid().as_raw();
+    if meta.uid() != our_uid {
+        return Err(on_error(format!(
+            "secret-storage dir {} is group/world-writable (mode {mode:#o}) and not owned by us \
+             (dir uid {}, our uid {our_uid}) — refusing to store secrets in a dir an attacker \
+             could pre-plant paths in",
+            dir.display(),
+            meta.uid()
+        )));
+    }
+    // We own it: tighten by stripping the group/other WRITE bits (keep any read/
+    // execute bits the operator set, e.g. 0755 -> 0755 is untouched above, 0777 ->
+    // 0755, 0775 -> 0755, 0707 -> 0705).
+    let tightened = mode & !0o022;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(tightened)).map_err(|e| {
+        on_error(format!(
+            "secret-storage dir {} is group/world-writable (mode {mode:#o}) and we own it but \
+             could not tighten it to {tightened:#o}: {e} — refusing to store secrets",
+            dir.display()
+        ))
+    })?;
+    // Confirm the tighten actually took (a filesystem that ignores mode, or a
+    // racing re-widen) — never proceed on an unverified tighten.
+    let after = std::fs::metadata(dir)
+        .map_err(|e| {
+            on_error(format!(
+                "could not re-stat the secret-storage dir {} after tightening it: {e}",
+                dir.display()
+            ))
+        })?
+        .permissions()
+        .mode()
+        & 0o777;
+    if after & 0o022 != 0 {
+        return Err(on_error(format!(
+            "secret-storage dir {} is still group/world-writable (mode {after:#o}) after an \
+             attempt to tighten it — refusing to store secrets",
+            dir.display()
+        )));
+    }
+    tracing::warn!(
+        dir = %dir.display(),
+        was = format_args!("{mode:#o}"),
+        now = format_args!("{after:#o}"),
+        "tightened an over-permissive (group/world-writable) secret-storage directory"
+    );
+    Ok(())
+}
+
 /// A durable, file-backed [`NonceStore`](multiview_licence::heartbeat::NonceStore)
 /// for the idempotency mint counter — a tiny decimal file beside the lease state,
 /// so the per-operation nonce survives a restart and a post-restart operation
@@ -690,6 +779,13 @@ impl FileNonceStore {
         std::fs::create_dir_all(dir_path).map_err(|e| {
             NonceError::new(format!("could not create the lease-state dir {dir}: {e}"))
         })?;
+        // Defense-in-depth: tighten an owned group/world-writable dir (fail closed
+        // on one we don't own) before the lock/data files are created — an attacker
+        // with write access could otherwise pre-plant those paths. A readable-only
+        // (0755) dir is accepted unchanged (not a leak; the data file is created by
+        // the crash-durable writer). Unix-only.
+        #[cfg(unix)]
+        harden_secret_dir(dir_path, NonceError::new)?;
         let lock_path = dir_path.join("idempotency-nonce.lock");
         let lock = std::fs::OpenOptions::new()
             .create(true)
@@ -873,6 +969,13 @@ impl DeviceKeyStore {
         std::fs::create_dir_all(dir_path).map_err(|e| {
             HeartbeatError::Transport(format!("could not create the lease-state dir {dir}: {e}"))
         })?;
+        // Defense-in-depth: tighten an owned group/world-writable dir (fail closed
+        // on one we don't own) BEFORE storing the device-key secret — an attacker
+        // with write access could otherwise pre-plant the key path. The key FILE is
+        // separately 0600-verified at load + O_EXCL-installed, so a readable-only
+        // (0755) dir is accepted unchanged (not a leak). Unix-only.
+        #[cfg(unix)]
+        harden_secret_dir(dir_path, HeartbeatError::Transport)?;
         let path = dir_path.join(Self::FILE);
         // Fast path: an existing key. Verified for perms + shape, fail-closed.
         if let Some(key) = Self::load_existing(&path)? {
@@ -1881,6 +1984,136 @@ mod tests {
             res.is_err(),
             "a symlink at the device-key path must be refused (no symlink-following; \
              the perm-check must bind to the opened inode, not a swappable path)"
+        );
+    }
+
+    // --- Defense-in-depth: the secret-storage DIRECTORY perms (task #109). --------
+    //
+    // The device-key FILE is already 0600-verified at load (an exposed signing
+    // secret fails closed), so a merely group/world-READABLE (0755) dir is NOT a
+    // leak — others can list names, not read a 0600 file. The actual risk is a
+    // group/world-WRITABLE dir: an attacker with write access could pre-plant the
+    // secret paths. So the directory hardening targets the WRITABLE bits only:
+    // tighten an over-permissive dir we own, fail closed on one we don't — and
+    // never reject a normal umask-022 0755 install (that would break installs and
+    // is not a leak). Mirrors PR #199's secret-state-dir hardening.
+
+    #[cfg(all(feature = "heartbeat", unix))]
+    #[test]
+    fn device_key_dir_group_world_writable_is_tightened_then_load_proceeds() {
+        // A group/world-WRITABLE device-key dir we own must be TIGHTENED (the write
+        // bits stripped) BEFORE any secret is stored there, and load must then
+        // proceed (generate the key). A merely-permissive-but-owned dir is a
+        // misconfiguration to repair, not a hard stop.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use multiview_licence::heartbeat::DeviceSigner as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        // 0777: group + world writable (the hostile pre-condition).
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("chmod the dir 0o777");
+        let signer = DeviceKeyStore::load_or_generate(dir.path().to_str().expect("utf8 path"))
+            .expect("load proceeds after tightening an owned over-permissive dir");
+        // The dir's group/other WRITE bits must be cleared after the call.
+        let mode = std::fs::metadata(dir.path())
+            .expect("dir exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode & 0o022,
+            0,
+            "an owned group/world-writable secret dir must be tightened (write bits stripped), \
+             got {mode:#o}"
+        );
+        // And the key really was generated + persisted (0600), proving load did not
+        // merely no-op.
+        let key_path = dir.path().join("device-key.ed25519");
+        assert!(
+            key_path.exists(),
+            "the device key is generated after tightening"
+        );
+        let key_mode = std::fs::metadata(&key_path)
+            .expect("key file exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(key_mode, 0o600, "the persisted seed is still 0600");
+        // Sanity: the returned signer is usable.
+        let _ = signer.public_key_raw();
+    }
+
+    #[cfg(all(feature = "heartbeat", unix))]
+    #[test]
+    fn device_key_dir_world_readable_0755_is_accepted_unchanged() {
+        // A standard umask-022 install leaves the dir 0755 (world-READABLE, NOT
+        // writable). That is NOT a leak (the key file is 0600) and MUST be accepted
+        // unchanged — tightening or rejecting it would break normal installs.
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod the dir 0o755");
+        let _ = DeviceKeyStore::load_or_generate(dir.path().to_str().expect("utf8 path"))
+            .expect("a 0755 (readable, non-writable) dir is accepted");
+        let mode = std::fs::metadata(dir.path())
+            .expect("dir exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "a 0755 (readable, non-writable) secret dir must be left UNCHANGED — \
+             not a leak, must not break umask-022 installs"
+        );
+    }
+
+    #[cfg(all(feature = "heartbeat", unix))]
+    #[test]
+    fn nonce_dir_group_world_writable_is_tightened_then_store_opens() {
+        // The SAME writable-bits-only hardening applies to the durable nonce dir
+        // (FileNonceStore::in_dir) — a group/world-writable lease-state dir we own
+        // is tightened before the lock/data files are created, then the store opens.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use multiview_licence::heartbeat::NonceStore as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("chmod the dir 0o777");
+        let store = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("the nonce store opens after tightening an owned over-permissive dir");
+        let mode = std::fs::metadata(dir.path())
+            .expect("dir exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode & 0o022,
+            0,
+            "an owned group/world-writable nonce dir must be tightened (write bits stripped), \
+             got {mode:#o}"
+        );
+        // The store is functional (a fresh dir loads a trusted 0).
+        assert_eq!(store.load().expect("load the fresh nonce"), 0);
+    }
+
+    #[cfg(all(feature = "heartbeat", unix))]
+    #[test]
+    fn nonce_dir_world_readable_0755_is_accepted_unchanged() {
+        // The nonce dir, like the key dir, must not reject a normal 0755 install.
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod the dir 0o755");
+        let _ = FileNonceStore::in_dir(dir.path().to_str().expect("utf8 path"))
+            .expect("a 0755 (readable, non-writable) nonce dir is accepted");
+        let mode = std::fs::metadata(dir.path())
+            .expect("dir exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "a 0755 (readable, non-writable) nonce dir must be left UNCHANGED"
         );
     }
 }

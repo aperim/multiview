@@ -104,10 +104,12 @@ tempfile = { version = "3", optional = true }
 # (`rustix::fs::flock`, a SAFE wrapper — no `unsafe` in this crate) on the durable
 # idempotency-nonce lock file, so a SECOND `multiview` process pointed at the same
 # lease-state dir cannot concurrently mint colliding Idempotency-Keys (it fails
-# closed: that process's heartbeat declines to start). Already in the workspace
-# graph (the engine's `ptp` feature); MIT/Apache-2.0/BSD, `cargo deny`-clean.
-# Optional + gated so the default build never pulls the `fs` surface.
-rustix = { workspace = true, features = ["fs"], optional = true }
+# closed: that process's heartbeat declines to start). The `process` feature adds
+# `geteuid()` for the secret-storage-dir ownership check (tighten an over-permissive
+# dir we own, fail closed on one we don't). Already in the workspace graph (the
+# engine's `ptp` feature); MIT/Apache-2.0/BSD, `cargo deny`-clean. Optional + gated
+# so the default build never pulls the `fs`/`process` surface.
+rustix = { workspace = true, features = ["fs", "process"], optional = true }
 
 # Used ONLY by the `heartbeat` feature for the device-PoP keypair (CONSPECT-3,
 # ADR-I007): GENERATE (the only RNG in the product, at the cli boundary — the leaf
