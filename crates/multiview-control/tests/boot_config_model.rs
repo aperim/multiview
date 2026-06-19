@@ -1049,6 +1049,76 @@ async fn the_running_persister_is_fail_soft_when_composition_fails() {
     task.abort();
 }
 
+/// MAJOR-B (panel, correctness): a SHED file-watch apply must NOT yield an
+/// `active.toml` that resumes as adopted state. The watcher's `apply_change`
+/// optimistically resyncs the stores (which audits → fires `running_changed`),
+/// but when an engine command is shed it returns `Retry` WITHOUT advancing the
+/// baseline — the engine never adopted the change. The debounced persister must
+/// not snapshot that mutated-but-unadopted store state: a crash before the
+/// retry completes would otherwise `start="resume"` into a configuration the
+/// engine never ran. `active.toml` must reflect only adopted state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shed_file_watch_apply_is_not_persisted_as_adopted() {
+    let r = rig_with(BOOT_DOC, 1);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+
+    // Spawn the file-watcher (baseline = the boot config) at a fast poll, and
+    // the debounced persister, sharing the one AppState.
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        WatchOptions::default().with_poll_interval(TEST_POLL),
+    );
+    let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
+
+    // Occupy the capacity-1 command bus so the watcher's UpsertSource is SHED.
+    // (A bare submit the engine never drains keeps the slot full for the test.)
+    assert!(
+        r.state
+            .commands
+            .try_submit(Command::UpsertSource {
+                op: multiview_control::OperationId::new(),
+                source: Box::new(r.config.sources[0].clone()),
+            })
+            .is_ok(),
+        "the first submit fills the capacity-1 bus"
+    );
+
+    // Edit the BOOT file: change in_a to a SYNTHETIC source colour the watcher
+    // applies via UpsertSource — which sheds on the full bus (apply_change ->
+    // Retry), leaving the sources store optimistically mutated to #5e5e5e.
+    let edited = BOOT_DOC.replace("#101418", "#5e5e5e");
+    std::fs::write(&r.boot_path, &edited).expect("edit boot file");
+
+    // The shed apply raises the incomplete warning (proves the shed happened).
+    assert!(
+        wait_until(SETTLE, || has_active_warning(
+            &r.warnings,
+            "config-file-apply-incomplete"
+        ))
+        .await,
+        "the shed file-watch apply must raise the incomplete warning"
+    );
+
+    // Give the persister several debounce windows to (wrongly) write the
+    // unadopted state.
+    tokio::time::sleep(TEST_POLL * 12).await;
+
+    // active.toml must NOT carry the shed (unadopted) #5e5e5e — the engine
+    // never adopted it.
+    if let Ok(text) = std::fs::read_to_string(&active_path) {
+        assert!(
+            !text.contains("#5e5e5e"),
+            "active.toml must not persist the shed/unadopted file-watch change as adopted state"
+        );
+    }
+
+    watch.stop();
+    persist.abort();
+}
+
 /// `write_atomic` replaces the destination in one rename and leaves no
 /// temp-file residue.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
