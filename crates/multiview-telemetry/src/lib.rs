@@ -78,9 +78,9 @@ pub mod metrics;
 pub mod placement;
 pub mod retention;
 pub mod rist;
-pub mod soak;
 #[cfg(feature = "snmp")]
 pub mod snmp;
+pub mod soak;
 pub mod syslog;
 pub mod tracing_init;
 
