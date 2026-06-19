@@ -709,12 +709,32 @@ mod tests {
     /// (drain as a bare statement, unbiased `select!`, no `yield_now`) serviced
     /// only when the tick arm happened to win, so `driver_services` lagged far
     /// behind `recv_budgets_exhausted`; the bounded-handoff fix services once per
-    /// exhausted budget, so it keeps pace. A real OS-thread flooder keeps the
-    /// socket permanently readable; a `tokio::time::timeout` bounds the run so a
-    /// regression that wedges fails deterministically rather than hanging.
+    /// exhausted budget, so it keeps pace.
+    ///
+    /// The flood precondition is driven to a **fixed count**, not a wall-clock
+    /// window: a real OS-thread flooder keeps the socket permanently readable, so
+    /// the driver will exhaust budgets given enough scheduler time — but *how
+    /// many* it exhausts in a fixed 400ms window depends on how much CPU the
+    /// flooder and driver tasks actually got, which on a contended/starved CI
+    /// runner can be ~none (the flooder thread never runs -> zero budgets
+    /// exhausted -> the precondition spuriously fails even though nothing
+    /// regressed). So instead of sleeping a fixed window and *hoping* the flood
+    /// saturated, the test polls [`RunProbe::recv_budgets_exhausted`] and stops
+    /// the driver only once it has genuinely exhausted `TARGET_EXHAUSTIONS`
+    /// budgets — guaranteed regardless of CPU, so the saturation precondition is
+    /// deterministic. A generous [`tokio::time::timeout`] still bounds the whole
+    /// run, so a regression that wedges the loop (and so can never reach the
+    /// target) fails deterministically rather than hanging.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn servicing_keeps_pace_with_the_receive_budget_under_flood() {
         use std::sync::atomic::AtomicBool;
+
+        // How many receive budgets the flood must drive to exhaustion before we
+        // stop the driver. Above 1 so the test exercises a *sustained* saturating
+        // flood (many consecutive budget->handoff cycles), not a single lucky
+        // trip; still tiny, so even a heavily CPU-starved runner reaches it
+        // quickly once the flooder gets any time slice at all.
+        const TARGET_EXHAUSTIONS: u64 = 8;
 
         let cfg = crate::config::EndpointConfig {
             udp_port: 0,
@@ -753,15 +773,28 @@ mod tests {
             })
         };
 
-        // Run the driver under the flood for a bounded window.
+        // Run the driver under the flood.
         let driver = {
             let probe = Arc::clone(&probe);
             let stop = Arc::clone(&stop);
             tokio::spawn(async move { endpoint.run_inner(stop, &probe).await })
         };
 
-        // Let the driver service many receive budgets while flooded.
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Drive the flood to a DETERMINISTIC number of exhausted budgets rather
+        // than for a fixed wall-clock window: poll the counter until the flood has
+        // genuinely saturated `TARGET_EXHAUSTIONS` budgets, so the precondition
+        // holds regardless of how little CPU a contended runner gave the flooder.
+        // The outer timeout only bounds a wedged regression that can never reach
+        // the target (it would otherwise spin here forever).
+        let saturated = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if probe.recv_budgets_exhausted.load(Ordering::Relaxed) >= TARGET_EXHAUSTIONS {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await;
 
         stop.store(true, Ordering::Release);
         flood_stop.store(true, Ordering::Relaxed);
@@ -771,12 +804,21 @@ mod tests {
         let exhausted = probe.recv_budgets_exhausted.load(Ordering::Relaxed);
         let services = probe.driver_services.load(Ordering::Relaxed);
 
-        // The flood must actually have exhausted budgets (else the test proves
-        // nothing); a saturating loopback flood trips many in 400ms.
+        // The flood must actually have saturated the receive budget (else the test
+        // proves nothing). Driving to a fixed exhaustion count makes this
+        // deterministic — a timeout here means the driver could not reach
+        // `TARGET_EXHAUSTIONS` even in 30s, i.e. it wedged or the flood never
+        // landed (a real regression), not merely a slow runner.
         assert!(
-            exhausted > 0,
-            "the flood must exhaust at least one receive budget (got {exhausted}); \
-             the flood was not saturating"
+            saturated.is_ok(),
+            "the flood must exhaust at least {TARGET_EXHAUSTIONS} receive budgets \
+             within the bound (got {exhausted}); the flood never saturated — the \
+             driver wedged or inbound never landed"
+        );
+        assert!(
+            exhausted >= TARGET_EXHAUSTIONS,
+            "the flood must exhaust at least {TARGET_EXHAUSTIONS} receive budgets \
+             (got {exhausted}); the flood was not saturating"
         );
         // The discriminating invariant: servicing keeps pace with the receive
         // budget. Each exhausted budget hands off to exactly one servicing pass
