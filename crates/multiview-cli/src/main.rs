@@ -552,83 +552,83 @@ async fn run_pipeline_until_ctrl_c(
         Option<_>,
         Option<RunningPersist>,
     ) = if let Some(cfg) = config.control.as_ref() {
-            // What THIS build + run path can take live (ADR-W022): with the
-            // `overlay` feature the bake consumer renders the overlay working
-            // set, so overlay documents the renderer draws (analog-face
-            // clocks — `live_overlays::renders_live`, the same predicate the
-            // drain warns by) apply live; without it nothing overlay-side
-            // renders and the honest default (everything `restart`) stands.
-            #[cfg(feature = "overlay")]
-            let live_apply = multiview_control::LiveApplyCaps::default().with_overlays(
-                multiview_control::OverlayLiveCapability::new(
-                    multiview_cli::live_overlays::renders_live,
-                ),
-            );
-            #[cfg(not(feature = "overlay"))]
-            let live_apply = multiview_control::LiveApplyCaps::default();
-            let (handle, command_rx, hub, watch, persist) = serve_control_plane(
-                &cfg.listen,
-                start,
-                config_path,
-                &publisher,
-                ControlPlaneWiring {
-                    program_slot: Arc::clone(&preview_slot),
-                    stores: pipeline.preview_stores(),
-                    registry: pipeline.stop_registry(),
-                    // The real decoded-ingest spawner (ADR-W018 level 2):
-                    // network/file sources live-apply through the SAME
-                    // supervised ingest_loop the startup path builds.
-                    ingest: Some(pipeline.live_ingest_spawner()),
-                    live_apply,
-                    licence: Some(multiview_control::LicenceState::new(
-                        Arc::clone(&plane.store),
-                        plane.pinned.clone(),
-                    )),
-                    mesh: Some(Arc::clone(&plane.mesh)),
-                    #[cfg(feature = "webrtc-native")]
-                    webrtc_registry: pipeline.webrtc_registry(),
-                    #[cfg(feature = "webrtc-native")]
-                    egress_registry: pipeline.egress_registry(),
-                    #[cfg(feature = "webrtc-native")]
-                    program_audio: program_audio.clone(),
-                },
-                shutdown_rx,
-            )
-            .await?;
-            // Thread the run's live subtitle re-point seam (RT-10b) into the drain so a
-            // `RouteSubtitle` (RT-11) reaches the running pipeline's layer. The slot is
-            // shared (lock-free `ArcSwapOption`); the run publishes its handle into it at
-            // drive start, and the drain reads it wait-free (inv #1/#10). Only under
-            // `overlay` (without it the run renders no subtitles, so there is no layer).
-            // The live overlay seam (ADR-W022) rides the same variant; the
-            // live-source seam (ADR-W018) rides both.
-            #[cfg(feature = "overlay")]
-            let drain: ControlDrain = Box::new(control::command_drain_with_seams(
-                command_rx,
-                config.clone(),
-                Arc::clone(&publisher),
-                pipeline.subtitle_route_slot(),
-                pipeline.overlay_apply_slot(),
-                hub.handle(),
-            ));
-            #[cfg(not(feature = "overlay"))]
-            let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
-                command_rx,
-                config.clone(),
-                Arc::clone(&publisher),
-                hub.handle(),
-            ));
-            (Some(handle), drain, Some(hub), Some(watch), Some(persist))
-        } else {
-            drop(shutdown_rx);
-            (
-                None,
-                Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
-                None,
-                None,
-                None,
-            )
-        };
+        // What THIS build + run path can take live (ADR-W022): with the
+        // `overlay` feature the bake consumer renders the overlay working
+        // set, so overlay documents the renderer draws (analog-face
+        // clocks — `live_overlays::renders_live`, the same predicate the
+        // drain warns by) apply live; without it nothing overlay-side
+        // renders and the honest default (everything `restart`) stands.
+        #[cfg(feature = "overlay")]
+        let live_apply = multiview_control::LiveApplyCaps::default().with_overlays(
+            multiview_control::OverlayLiveCapability::new(
+                multiview_cli::live_overlays::renders_live,
+            ),
+        );
+        #[cfg(not(feature = "overlay"))]
+        let live_apply = multiview_control::LiveApplyCaps::default();
+        let (handle, command_rx, hub, watch, persist) = serve_control_plane(
+            &cfg.listen,
+            start,
+            config_path,
+            &publisher,
+            ControlPlaneWiring {
+                program_slot: Arc::clone(&preview_slot),
+                stores: pipeline.preview_stores(),
+                registry: pipeline.stop_registry(),
+                // The real decoded-ingest spawner (ADR-W018 level 2):
+                // network/file sources live-apply through the SAME
+                // supervised ingest_loop the startup path builds.
+                ingest: Some(pipeline.live_ingest_spawner()),
+                live_apply,
+                licence: Some(multiview_control::LicenceState::new(
+                    Arc::clone(&plane.store),
+                    plane.pinned.clone(),
+                )),
+                mesh: Some(Arc::clone(&plane.mesh)),
+                #[cfg(feature = "webrtc-native")]
+                webrtc_registry: pipeline.webrtc_registry(),
+                #[cfg(feature = "webrtc-native")]
+                egress_registry: pipeline.egress_registry(),
+                #[cfg(feature = "webrtc-native")]
+                program_audio: program_audio.clone(),
+            },
+            shutdown_rx,
+        )
+        .await?;
+        // Thread the run's live subtitle re-point seam (RT-10b) into the drain so a
+        // `RouteSubtitle` (RT-11) reaches the running pipeline's layer. The slot is
+        // shared (lock-free `ArcSwapOption`); the run publishes its handle into it at
+        // drive start, and the drain reads it wait-free (inv #1/#10). Only under
+        // `overlay` (without it the run renders no subtitles, so there is no layer).
+        // The live overlay seam (ADR-W022) rides the same variant; the
+        // live-source seam (ADR-W018) rides both.
+        #[cfg(feature = "overlay")]
+        let drain: ControlDrain = Box::new(control::command_drain_with_seams(
+            command_rx,
+            config.clone(),
+            Arc::clone(&publisher),
+            pipeline.subtitle_route_slot(),
+            pipeline.overlay_apply_slot(),
+            hub.handle(),
+        ));
+        #[cfg(not(feature = "overlay"))]
+        let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
+            command_rx,
+            config.clone(),
+            Arc::clone(&publisher),
+            hub.handle(),
+        ));
+        (Some(handle), drain, Some(hub), Some(watch), Some(persist))
+    } else {
+        drop(shutdown_rx);
+        (
+            None,
+            Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+            None,
+            None,
+            None,
+        )
+    };
 
     let stop_for_signal = stop.clone();
     let signal = tokio::spawn(async move {
@@ -919,66 +919,66 @@ async fn run_software_until_ctrl_c(
         Option<RunningPersist>,
     ) = if let Some(cfg) = config.control.as_ref() {
         let (handle, command_rx, hub, watch, persist) = serve_control_plane(
-                &cfg.listen,
-                start,
-                config_path,
-                &publisher,
-                ControlPlaneWiring {
-                    program_slot: engine.program_preview(),
-                    stores: engine.preview_stores(),
-                    registry: engine.stop_registry(),
-                    // The software engine has no decoder: no ingest spawner, so
-                    // the capability (and the apply header) honestly stays
-                    // synthetic-only (ADR-W018 level 2).
-                    ingest: None,
-                    // The software engine has no bake stage: no overlay
-                    // document renders on this path, so the honest default
-                    // (everything `restart`) is the truth (ADR-W022).
-                    live_apply: multiview_control::LiveApplyCaps::default(),
-                    licence: Some(multiview_control::LicenceState::new(
-                        Arc::clone(&plane.store),
-                        plane.pinned.clone(),
-                    )),
-                    mesh: Some(Arc::clone(&plane.mesh)),
-                    // The software run path has no ingest pipeline, so no webrtc
-                    // source drive loop reads this registry — an empty one keeps
-                    // the WhipProvider present (publishes ride NO_SIGNAL on a
-                    // run with no webrtc tile). `webrtc-native` ⊃ `ffmpeg`, so in
-                    // practice the pipeline path is taken; this keeps the struct
-                    // total under the rare software+webrtc-native combination.
-                    #[cfg(feature = "webrtc-native")]
-                    webrtc_registry: multiview_cli::webrtc_ingest::WhipRegistry::new(),
-                    // No pipeline on this path ⇒ no encode-once fan-out to feed, so
-                    // an empty egress registry: the WHEP provider stays NoWhepOutput
-                    // and no whip_push clients spawn (honest — there is nothing to
-                    // publish without a running program).
-                    #[cfg(feature = "webrtc-native")]
-                    egress_registry: multiview_cli::webrtc_outputs::EgressRegistry::new(),
-                    // The software run path has no bake stage, so no program-audio
-                    // PCM is produced — a WHEP peer on this path is video-only.
-                    #[cfg(feature = "webrtc-native")]
-                    program_audio: None,
-                },
-                shutdown_rx,
-            )
-            .await?;
-            let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
-                command_rx,
-                config.clone(),
-                Arc::clone(&publisher),
-                hub.handle(),
-            ));
-            (Some(handle), drain, Some(hub), Some(watch), Some(persist))
-        } else {
-            drop(shutdown_rx);
-            (
-                None,
-                Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
-                None,
-                None,
-                None,
-            )
-        };
+            &cfg.listen,
+            start,
+            config_path,
+            &publisher,
+            ControlPlaneWiring {
+                program_slot: engine.program_preview(),
+                stores: engine.preview_stores(),
+                registry: engine.stop_registry(),
+                // The software engine has no decoder: no ingest spawner, so
+                // the capability (and the apply header) honestly stays
+                // synthetic-only (ADR-W018 level 2).
+                ingest: None,
+                // The software engine has no bake stage: no overlay
+                // document renders on this path, so the honest default
+                // (everything `restart`) is the truth (ADR-W022).
+                live_apply: multiview_control::LiveApplyCaps::default(),
+                licence: Some(multiview_control::LicenceState::new(
+                    Arc::clone(&plane.store),
+                    plane.pinned.clone(),
+                )),
+                mesh: Some(Arc::clone(&plane.mesh)),
+                // The software run path has no ingest pipeline, so no webrtc
+                // source drive loop reads this registry — an empty one keeps
+                // the WhipProvider present (publishes ride NO_SIGNAL on a
+                // run with no webrtc tile). `webrtc-native` ⊃ `ffmpeg`, so in
+                // practice the pipeline path is taken; this keeps the struct
+                // total under the rare software+webrtc-native combination.
+                #[cfg(feature = "webrtc-native")]
+                webrtc_registry: multiview_cli::webrtc_ingest::WhipRegistry::new(),
+                // No pipeline on this path ⇒ no encode-once fan-out to feed, so
+                // an empty egress registry: the WHEP provider stays NoWhepOutput
+                // and no whip_push clients spawn (honest — there is nothing to
+                // publish without a running program).
+                #[cfg(feature = "webrtc-native")]
+                egress_registry: multiview_cli::webrtc_outputs::EgressRegistry::new(),
+                // The software run path has no bake stage, so no program-audio
+                // PCM is produced — a WHEP peer on this path is video-only.
+                #[cfg(feature = "webrtc-native")]
+                program_audio: None,
+            },
+            shutdown_rx,
+        )
+        .await?;
+        let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
+            command_rx,
+            config.clone(),
+            Arc::clone(&publisher),
+            hub.handle(),
+        ));
+        (Some(handle), drain, Some(hub), Some(watch), Some(persist))
+    } else {
+        drop(shutdown_rx);
+        (
+            None,
+            Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+            None,
+            None,
+            None,
+        )
+    };
 
     let stop_for_signal = stop.clone();
     let signal = tokio::spawn(async move {

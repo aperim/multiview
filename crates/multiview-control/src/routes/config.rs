@@ -238,8 +238,8 @@ pub(crate) fn compose_running_config(
     state: &AppState,
 ) -> ControlResult<(serde_json::Value, multiview_config::MultiviewConfig)> {
     let document = compose_document_unredacted(state)?;
-    let config: multiview_config::MultiviewConfig =
-        serde_path_to_error::deserialize(&document).map_err(|err| {
+    let config: multiview_config::MultiviewConfig = serde_path_to_error::deserialize(&document)
+        .map_err(|err| {
             let path = err.path().to_string();
             crate::error::ControlError::Validation(format!(
                 "stored resources do not compose into a valid configuration at `{path}`: {}",

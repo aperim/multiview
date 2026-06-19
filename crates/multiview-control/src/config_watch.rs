@@ -1299,7 +1299,12 @@ pub(crate) fn resync_all_stores(state: &AppState, actor: &str, config: &Multivie
     for device in &config.devices {
         state.device_status.ensure(&device.id);
     }
-    resync_store(state, actor, &state.sync_groups, &desired_sync_groups(config));
+    resync_store(
+        state,
+        actor,
+        &state.sync_groups,
+        &desired_sync_groups(config),
+    );
     if config.audio.is_some() {
         resync_audio(state, actor, config);
     }
