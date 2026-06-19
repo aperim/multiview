@@ -332,15 +332,50 @@ implementation:
   existing one is group/world-writable or owned by another uid (`rustix::process::geteuid`,
   a safe wrapper) — refusing to persist there, which never takes output off air (the output
   clock is untouched).
-* **Persistence reflects only ADOPTED state — one unified gate (MAJOR-B).** The boot model
-  tracks a single adopted-vs-requested generation pair: a store mutation REQUESTED on ANY
-  live-apply path (the file-watcher AND every REST mutation — sources/overlays) advances
-  `requested`; the engine ADOPTING it (the command landed, or the change reverts to a
-  known-adopted store) advances `adopted`. `persist_running_now` writes `active.toml` ONLY
-  when `adopted == requested`, so a shed on **any** path freezes persistence at the last
-  adopted state, and every settle-to-adopted path advances `adopted` so the gate can never
-  stick (closing both the file-watch stuck-inhibit and the REST-shed leak). A crash while a
-  shed is pending resumes from the last adopted snapshot, never unadopted store state.
+* **Persistence reflects only ADOPTED state — a lock-ordered adopted snapshot (MAJOR-B).**
+  The consistency invariant is **`active.toml` == the running configuration the engine has
+  ADOPTED**. It is guaranteed structurally, not by a counter (the round-3 generation gate had
+  two defects: over-adoption — an unrelated landed mutation could advance a global `adopted`
+  past a prior shed's generation; and a missing happens-before — the gate atomics were not
+  ordered with the store mutation behind a different lock, so a racing persister could compose
+  mid-mutation).
+
+  The live resource stores deliberately hold **requested** state, not adopted state: ADR-W018
+  pins that a shed/non-live REST mutation still **commits the store** and answers `2xx` +
+  `X-Multiview-Apply: restart` (the stored doc is the durable config-as-code truth; it applies
+  on restart). So `active.toml` cannot be composed from the live store — it is composed from a
+  separate **adopted snapshot** (`BootModel.last_adopted`, a `MultiviewConfig`):
+
+  - **One lock for mutate+adopt+persist.** The approved `config_mutation_lock` is extended to
+    cover EVERY live mutation — the file-watch apply AND every REST mutation
+    (sources/overlays/layout) — each holding it across its whole validate → store-write →
+    submit → (snapshot-update | mark-diverged) sequence. `persist_running_now` acquires the
+    **same** lock before reading the snapshot. `try_submit` is the bounded, non-blocking
+    drop-oldest push (ADR-W008), so the hold is brief (the same shape as `promote` holding the
+    lock across its `spawn_blocking` write) and never touches the output clock (inv #1/#10).
+  - **The snapshot advances by ADOPTED deltas, never by recomposing the live store.** It
+    starts as the startup running config. Each mutation that **adopts live** (its command
+    landed) applies exactly **its own** delta to the snapshot under the lock — an adopted
+    source upsert/remove sets/removes that source on the snapshot; an adopted overlay
+    upsert/remove sets/removes that overlay; an adopted layout sets the snapshot's
+    canvas/layout/cells. A shed or restart-only/non-live mutation applies **nothing** to the
+    snapshot (the engine is not running that change). Because only the specific landed delta is
+    applied, an unrelated landed mutation can never "adopt" a prior shed's change (the round-3
+    over-adoption), and the snapshot always equals exactly what the engine runs — no lag.
+  - `persist_running_now` writes the snapshot, never the live store.
+
+  **Adversarial self-check (the two round-3 sequences):**
+  - *Over-adoption (shed `DELETE /sources/in_a` → bus drains → unrelated source/overlay upsert
+    lands).* The shed DELETE applies nothing to the snapshot (the remove was not adopted; the
+    engine still runs `in_a`), so the snapshot keeps `in_a`. The later upsert lands and applies
+    only **its own** add to the snapshot — it does not touch `in_a`. `active.toml` (= the
+    snapshot) keeps `in_a` and gains the new resource: exactly the engine's running set. ✓ No
+    over-adoption (the delete is never adopted by an unrelated landed mutation), no lag.
+  - *Mid-mutation race (persister wakes during an in-flight unadopted mutation).* The mutation
+    holds `config_mutation_lock` across store-write → submit → snapshot-update/mark-diverged.
+    The persister acquires the **same** lock, so it blocks until the mutation fully resolves
+    and then reads a settled snapshot — never a half-applied store or a stale-counter view.
+    Acquire/Release across separate atomics could not give this; the shared lock does. ✓
 * **Promote/watch concurrency is closed (MAJOR-C).** (C1) `bind_and_serve` installs the
   config-file watch handle into `AppState` BEFORE the router serves any request, so a
   promote in the startup window always finds the suppression seam. (C2/C3) `promote` and
