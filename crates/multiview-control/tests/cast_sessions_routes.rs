@@ -442,6 +442,10 @@ async fn stop_clears_the_tombstone_so_session_ids_stay_bounded() {
     let wiring = PollerWiring {
         broadcaster: DeviceBroadcaster::new(engine, Arc::new(DeviceStatusRegistry::new())),
         drivers: Arc::new(DeviceDriverRegistry::new()),
+        cast_sessions: std::sync::Arc::new(
+            multiview_control::devices::cast::store::CastSessionStore::new(),
+        ),
+        clock: std::sync::Arc::new(|| multiview_core::time::MediaTime::from_nanos(0)),
     };
     assert!(
         registry_probe.start(&dev, &wiring),

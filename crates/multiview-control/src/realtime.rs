@@ -820,6 +820,10 @@ pub fn event_scope_id(event: &Event) -> Option<String> {
         Event::DeviceMode(mode) => Some(mode.device_id.clone()),
         Event::DeviceError(error) => Some(error.device_id.clone()),
         Event::DeviceSync(sync) => Some(sync.device_id.clone()),
+        // Cast-session membership events scope by the session id (the same id
+        // the conflated `device.status` lane keys the session's state under).
+        Event::CastSessionStarted(started) => Some(started.session_id.clone()),
+        Event::CastSessionRemoved(removed) => Some(removed.session_id.clone()),
         // `timing.status` scopes by the program/output stream the epoch maps.
         Event::TimingStatus(timing) => Some(timing.stream_id.clone()),
         // A media-player lifecycle event scopes by the player id (ADR-RT008), so
@@ -887,6 +891,8 @@ pub fn topic_for_event(event: &Event) -> Topic {
         | Event::DeviceError(_)
         | Event::DeviceSync(_)
         | Event::DeviceDiscovered(_)
+        | Event::CastSessionStarted(_)
+        | Event::CastSessionRemoved(_)
         | Event::TimingStatus(_) => Topic::Devices,
         // The broadcast-switcher lifecycle lane (ADR-RT008): a media player's
         // discrete transport-state transition rides the lossless `switcher`
