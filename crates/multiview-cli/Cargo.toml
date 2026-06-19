@@ -142,6 +142,16 @@ tokio = { workspace = true, features = [
     "io-util",
 ] }
 tempfile = "3"
+# Test-only crypto for the device-ACTIVATE never-off-air chaos gate (ADR-I008): an
+# ECDSA-P256 root signs a fabricated attested keyset (so the chaos server's
+# `fetch_keys` passes `TrustedKeys::verify` and `activate_once` actually REACHES the
+# stalled/partitioned `server.activate(...)`), and an Ed25519 device key signs the PoP.
+# All already in the workspace graph behind `heartbeat` (deny-clean, no new crate);
+# dev-only — the cli's non-test code has no signer/RNG.
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+serde_json = { workspace = true }
 
 # The pipeline-ingest integration test needs the `ffmpeg` feature (a libav*
 # build + the `ffmpeg`/`ffprobe` CLIs at runtime).
