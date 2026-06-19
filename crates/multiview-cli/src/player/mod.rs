@@ -26,8 +26,10 @@
 //! (`publish_at(k) = anchor_pts + k × frame_period`, media-playout §7.2), never
 //! source-relative.
 
+mod mailbox;
 mod transport;
 
+pub use mailbox::{TransportMailbox, TransportVerb};
 pub use transport::{
     EofPolicy, MediaPlayer, MediaPlayerState, PlayerAction, PlayoutGeometry, PlayoutGeometryError,
 };

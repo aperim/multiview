@@ -25,6 +25,7 @@
 
 use multiview_cli::player::{
     EofPolicy, MediaPlayer, MediaPlayerState, PlayerAction, PlayoutGeometry, PlayoutGeometryError,
+    TransportMailbox, TransportVerb,
 };
 use multiview_core::time::{MediaTime, Rational};
 
@@ -95,6 +96,64 @@ fn geometry_rejects_non_positive_cadence() {
         PlayoutGeometry::new(0, 100, 10, 90, Rational::new(-25, 1)).unwrap_err(),
         PlayoutGeometryError::Cadence { .. }
     ));
+}
+
+// ---------------------------------------------------------------------------
+// 1b. Transport mailbox — conflated latest-wins, drain in order
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mailbox_conflates_state_verbs_to_the_latest() {
+    let mb = TransportMailbox::new();
+    // A burst of state-collapsing verbs: only the LAST survives.
+    mb.submit(TransportVerb::Play);
+    mb.submit(TransportVerb::Pause);
+    mb.submit(TransportVerb::ArmExit);
+    mb.submit(TransportVerb::Vamp);
+    let drained = mb.drain();
+    assert_eq!(
+        drained,
+        vec![TransportVerb::Vamp],
+        "only the latest state-collapsing verb survives conflation"
+    );
+    // Drained empty afterwards.
+    assert!(mb.drain().is_empty());
+}
+
+#[test]
+fn mailbox_preserves_targeted_verbs_in_order() {
+    let mb = TransportMailbox::new();
+    // Targeted verbs (load/cue/seek) carry distinct targets — all preserved, in order.
+    mb.submit(TransportVerb::Load {
+        asset: "a".to_owned(),
+    });
+    mb.submit(TransportVerb::Cue { frame: Some(10) });
+    mb.submit(TransportVerb::Seek { frame: 42 });
+    let drained = mb.drain();
+    assert_eq!(
+        drained,
+        vec![
+            TransportVerb::Load {
+                asset: "a".to_owned()
+            },
+            TransportVerb::Cue { frame: Some(10) },
+            TransportVerb::Seek { frame: 42 },
+        ]
+    );
+}
+
+#[test]
+fn mailbox_collapses_only_the_state_verbs_keeping_targets() {
+    let mb = TransportMailbox::new();
+    mb.submit(TransportVerb::Play);
+    mb.submit(TransportVerb::Seek { frame: 5 });
+    mb.submit(TransportVerb::Pause); // collapses the earlier Play, keeps Seek
+    let drained = mb.drain();
+    assert_eq!(
+        drained,
+        vec![TransportVerb::Seek { frame: 5 }, TransportVerb::Pause],
+        "state verbs conflate but a targeted Seek between them is preserved"
+    );
 }
 
 // ---------------------------------------------------------------------------
