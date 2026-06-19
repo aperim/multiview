@@ -314,3 +314,32 @@ porting:
 * Sections without control stores (`control`, `placement`, `salvos`, `tally_profiles`,
   `walls`, `routing`) cannot hot-revert; revert reports them `restart_only` and the
   indicator keeps naming them until restart.
+
+## Cross-vendor panel hardening
+
+The 3-lens review surfaced five defects on this design; the fixes are part of the
+implementation:
+
+* **Secrets are 0600 on FIRST write (MAJOR-A).** `loaded.toml`/`active.toml` carry the
+  composed Running config with secrets intact (resume needs the real credentials), so
+  `write_atomic` sets the temp file's mode at `open(2)` time to an owner-only `0600` floor
+  (tightened further if the destination already carries a stricter mode), and the
+  `.multiview` state dir is created `0700` — the plaintext credentials never sit at the
+  umask default, not even transiently.
+* **Persistence reflects only ADOPTED state (MAJOR-B).** A file-watch apply optimistically
+  resyncs the stores, but when an engine command is shed it returns `Retry` without
+  advancing the baseline. While a retry is pending the boot model's `persist_inhibited`
+  flag is set, so `persist_running_now` skips the `active.toml` write; the watcher clears
+  it and re-fires `running_changed` when the retry settles, so `active.toml` never captures
+  store state the engine did not adopt (a crash mid-retry resumes from the last adopted
+  snapshot).
+* **Promote/watch concurrency is closed (MAJOR-C).** (C1) `bind_and_serve` installs the
+  config-file watch handle into `AppState` BEFORE the router serves any request, so a
+  promote in the startup window always finds the suppression seam. (C2/C3) `promote` and
+  `revert-to-start` hold one shared `config_mutation_lock` across their whole
+  compose → write/apply → commit critical section (composing AFTER acquiring it), so two
+  promotes cannot interleave the suppression token and a revert cannot mutate Running
+  between a promote's compose and its commit.
+* **The ADR's claims are made true (MINOR-D).** Graceful teardown runs on `SIGTERM` as well
+  as Ctrl-C (`docker stop` / systemd), and the boot path is canonicalized at startup so a
+  symlinked config is promoted at its real target file.
