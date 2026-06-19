@@ -34,7 +34,9 @@
 
 **Date:** 2026-06-15 (original) · **Currency pass:** 2026-06-19.
 **Owning crate:** **`crates/multiview-licence`** — British spelling, **`licence`**, lib target
-`multiview_licence` (pure-Rust leaf; **no FFI, no GPU, no I/O, no RNG in non-test code**;
+`multiview_licence` (pure-Rust leaf; **no FFI, no GPU, no network/socket I/O, no RNG in non-test
+code** — the live HTTP transport is the cli's, and the only filesystem I/O in the crate is the
+control-plane lease-directory watcher, §4;
 [ADR-0050 §1](../decisions/ADR-0050.md), [crate CLAUDE.md](../../crates/multiview-licence/CLAUDE.md)).
 **Touched crates:** `multiview-core` + `multiview-events` (the only deps of the leaf crate),
 `multiview-cli` (wires the client: keypair generation + persistence, the `reqwest`/rustls HTTP
@@ -84,9 +86,9 @@ and they are not negotiable. **All four are upheld by the IMPLEMENTED code** (AD
    cheap atomics the engine reads on the hot path** — a config-lock signal and a watermark signal —
    and nothing richer ever touches the loop. The licensing client is **physically incapable of
    back-pressuring the engine**: it holds no engine handle, owns no channel the engine blocks on, and
-   the engine never sends to it. The CONSPECT-2 chaos gate proves that killing, stalling, or
-   partitioning the service (and SIGKILLing the heartbeat task) leaves program output bit-for-bit
-   unaffected (§8.3–§8.4).
+   the engine never sends to it. The CONSPECT-2 chaos gate demonstrates that killing, stalling, or
+   partitioning the service (and SIGKILLing the heartbeat task) leaves the output clock emitting
+   exactly one frame per tick with no falter and the last-good lease state unchanged (§8.3–§8.4).
 
    > **Drift corrected.** The original brief specified a single `watch::Sender<LicencePosture>` seam
    > with the engine reading `*rx.borrow()` at frame boundaries. **That abstraction never shipped and
@@ -342,9 +344,14 @@ This gates only the free auto-issue onboarding default, not the renew core.
 
 ## 4. The `multiview-licence` crate — shape and dependency direction (IMPLEMENTED)
 
-`multiview-licence` is a **pure-Rust leaf** (no FFI, no GPU, **no I/O, no RNG in non-test code**) so it
-builds in the GPU-free CI baseline and adds nothing to the default link surface. Default build is a
-**pure shell**; the network client is behind the off-by-default **`heartbeat`** feature.
+`multiview-licence` is a **pure-Rust leaf** (no FFI, no GPU, **no network/socket I/O, no RNG in
+non-test code**) so it builds in the GPU-free CI baseline and adds nothing to the default link
+surface. Default build is a **pure shell**; the network client is behind the off-by-default
+**`heartbeat`** feature. The crate's verification/state core is I/O-free; the **only** filesystem I/O
+it performs is the **control-plane lease-directory watcher** (`watcher.rs` — a poll loop that
+`read_dir`/`metadata`/`read`s the lease dir and feeds `LeaseStore::install_binding`; it holds no
+engine handle and cannot back-pressure the engine). All network I/O — the live HTTP transport and the
+device keypair generation/persistence — lives at the `multiview-cli` boundary.
 
 ```
 multiview-core ─┐
@@ -521,12 +528,20 @@ publishes via `arc_swap`; the engine *samples* it. If it stalls (network hang), 
 which it doesn't, every path is `Result`), or is SIGKILLed: the engine keeps reading the last value and
 emits frames unaffected; on cold start the initial value is default-allow.
 
-### 8.4 The CONSPECT-2 chaos gate (HARD requirement, IMPLEMENTED)
+### 8.4 The never-off-air chaos gate (HARD requirement, IMPLEMENTED)
 
-`crates/multiview-cli/tests/heartbeat_never_off_air.rs` **kills, stalls, and partitions the service and
-SIGKILLs the heartbeat task** under load and asserts program output is **bit-for-bit unaffected** on
-every rung — the same harness the engine uses for the output-clock invariant. "Licensing cannot
-back-pressure the engine" is a **gate**.
+`crates/multiview-cli/tests/heartbeat_never_off_air.rs` (the CONSPECT-3 gate, extending the engine's
+CONSPECT-2 isolation gate to the heartbeat task) runs the real software output clock while a heartbeat
+task against a misbehaving in-process server is **SIGKILLed (aborted), stalled in-flight, and
+partitioned**, and asserts the output clock **emits exactly one frame per tick** (`frames == ticks ==
+N`) and **never falters** (`!report.faltered`), and that the **last-good lease state is unchanged**.
+What it proves precisely: it is an **engine-clock isolation property** test — frame/tick-count +
+no-falter + store-unchanged against an **empty** store (last-good == no lease) at a single
+`EnforcementLevel::Active`. **It does not byte-compare output and does not iterate the enforcement
+rungs** — it is the structural "licensing cannot back-pressure or perturb the clock" gate, not a
+per-rung output-equality proof. (The seeded-lease "withhold keeps last-good Active" path is covered by
+the crate-level `heartbeat_client` suite against a real fake that mints verified leases.) "Licensing
+cannot back-pressure the engine" is therefore a **gate**, not a hope.
 
 ---
 
@@ -726,7 +741,10 @@ Every service call is off the data plane.
 - **Fingerprint** — property test: single-component drift keeps score ≥ 70; re-platform drops below;
   pure/hardware-free via injected readings.
 - **Isolation chaos gate (HARD CI gate)** — `heartbeat_never_off_air.rs`: kill/stall/partition the
-  service **and** SIGKILL the heartbeat task under soak; assert program output is bit-for-bit unaffected.
+  service **and** SIGKILL the heartbeat task while the output clock runs; assert one frame per tick
+  (`frames == ticks`), no falter, and the last-good lease store unchanged — against an empty store at
+  `EnforcementLevel::Active`. (Engine-clock isolation property; not a byte-equality or per-rung proof —
+  §8.4.)
 - **Fail-open** — service unreachable from cold start ⇒ default-allow and all features start; a
   wrong/backwards clock never *tightens* (signed-expiry guard).
 - **Privacy assertion** — inspect every outbound body; **fail** if any field matches a raw-identifier
