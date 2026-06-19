@@ -2167,8 +2167,16 @@ async fn shed_apply_layout_does_not_persist_unadopted_layout() {
             { "id": "cell_b", "area": "b", "source": { "input_id": "in_a" } }
         ]
     });
-    let resp = send(&r.router, get(&format!("/api/v1/layouts/{working}"), OPERATOR_TOKEN)).await;
-    assert_eq!(resp.status(), StatusCode::OK, "the working layout is readable");
+    let resp = send(
+        &r.router,
+        get(&format!("/api/v1/layouts/{working}"), OPERATOR_TOKEN),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the working layout is readable"
+    );
     let etag = support::etag(&resp).expect("layout carries an ETag");
     let resp = send(
         &r.router,
@@ -2180,7 +2188,11 @@ async fn shed_apply_layout_does_not_persist_unadopted_layout() {
         ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK, "the layout PUT lands (store)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the layout PUT lands (store)"
+    );
 
     // POST apply-layout — the ApplyLayout SHEDS on the full bus → EngineBusy.
     let resp = send(
@@ -2208,13 +2220,11 @@ async fn shed_apply_layout_does_not_persist_unadopted_layout() {
         .iter()
         .find(|c| c.id == "cell_a")
         .expect("cell_a present");
-    let cell_a_src = serde_json::to_value(cell_a)
-        .ok()
-        .and_then(|v| {
-            v.get("source")
-                .and_then(|s| s.get("input_id"))
-                .and_then(|i| i.as_str().map(str::to_owned))
-        });
+    let cell_a_src = serde_json::to_value(cell_a).ok().and_then(|v| {
+        v.get("source")
+            .and_then(|s| s.get("input_id"))
+            .and_then(|i| i.as_str().map(str::to_owned))
+    });
     assert_eq!(
         cell_a_src.as_deref(),
         Some("in_a"),
