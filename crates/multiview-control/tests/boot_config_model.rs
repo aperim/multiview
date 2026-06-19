@@ -2116,3 +2116,171 @@ async fn the_persister_blocks_on_the_mutation_lock() {
         "active.toml is written once the in-flight mutation releases the lock"
     );
 }
+
+/// MAJOR-B round 5 — codex sequence 3 (layout leak): `Command::ApplyLayout` is a
+/// LIVE sheddable command. A landed `PUT /layouts/working` (the working-layout
+/// store mutates) followed by a SHED `POST /commands/apply-layout` must NOT
+/// persist the requested-but-unadopted canvas/layout/cells into `active.toml` —
+/// it keeps the previously ADOPTED layout (same B-2 class as sources, for the
+/// layout sections). The round-4 snapshot did not back layout/cells.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shed_apply_layout_does_not_persist_unadopted_layout() {
+    let mut r = rig_with(BOOT_DOC, 1);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+    let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
+    let working = r
+        .state
+        .working_layout_id
+        .clone()
+        .expect("the rig seeds a working layout id");
+
+    // Let the initial adopted layout persist: cell_a→in_a, cell_b→in_b.
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("cell_a")))
+        .await,
+        "the initial adopted layout must persist"
+    );
+
+    // Occupy the capacity-1 bus so the apply-layout SHEDS.
+    assert!(
+        r.state
+            .commands
+            .try_submit(Command::UpsertSource {
+                op: multiview_control::OperationId::new(),
+                source: Box::new(r.config.sources[0].clone()),
+            })
+            .is_ok(),
+        "fill the bus"
+    );
+
+    // PUT a CHANGED working layout — same pinned 64x64 canvas + grid, but the
+    // cells SWAP their sources (cell_a→in_b, cell_b→in_a). The store mutates.
+    let changed = serde_json::json!({
+        "canvas": { "width": 64, "height": 64, "fps": "25/1", "pixel_format": "nv12",
+                    "background": "#101014", "color": { "profile": "sdr-bt709-limited" } },
+        "layout": { "kind": "grid", "columns": ["1fr", "1fr"], "rows": ["1fr"], "areas": ["a b"] },
+        "cells": [
+            { "id": "cell_a", "area": "a", "source": { "input_id": "in_b" } },
+            { "id": "cell_b", "area": "b", "source": { "input_id": "in_a" } }
+        ]
+    });
+    let resp = send(&r.router, get(&format!("/api/v1/layouts/{working}"), OPERATOR_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK, "the working layout is readable");
+    let etag = support::etag(&resp).expect("layout carries an ETag");
+    let resp = send(
+        &r.router,
+        put_json(
+            &format!("/api/v1/layouts/{working}"),
+            OPERATOR_TOKEN,
+            Some(&etag),
+            &serde_json::json!({ "name": working, "body": changed }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "the layout PUT lands (store)");
+
+    // POST apply-layout — the ApplyLayout SHEDS on the full bus → EngineBusy.
+    let resp = send(
+        &r.router,
+        support::post_json(
+            "/api/v1/commands/apply-layout",
+            OPERATOR_TOKEN,
+            &serde_json::json!({ "layout": working }),
+        ),
+    )
+    .await;
+    assert!(
+        resp.status().is_server_error() || resp.status() == StatusCode::SERVICE_UNAVAILABLE,
+        "the shed apply-layout must fail (engine busy), got {}",
+        resp.status()
+    );
+
+    // Several persist windows: active.toml must keep the ADOPTED layout
+    // (cell_a→in_a) and NEVER the unadopted swap (cell_a→in_b).
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let text = std::fs::read_to_string(&active_path).expect("read active");
+    let config = MultiviewConfig::load_from_toml(&text).expect("active parses");
+    let cell_a = config
+        .cells
+        .iter()
+        .find(|c| c.id == "cell_a")
+        .expect("cell_a present");
+    let cell_a_src = serde_json::to_value(cell_a)
+        .ok()
+        .and_then(|v| {
+            v.get("source")
+                .and_then(|s| s.get("input_id"))
+                .and_then(|i| i.as_str().map(str::to_owned))
+        });
+    assert_eq!(
+        cell_a_src.as_deref(),
+        Some("in_a"),
+        "active.toml must keep the ADOPTED layout (cell_a→in_a); the shed apply-layout's \
+         swap (cell_a→in_b) must NOT be persisted as adopted"
+    );
+    let _ = r.commands.try_drain();
+    persist.abort();
+}
+
+/// MAJOR-B round 5 — codex sequence 4 (watcher over-adopt): a file-watch apply
+/// that adds a RESTART-ONLY change (here a NETWORK source, which is restart-only
+/// on a synthetic-only run) must NOT enter `active.toml` — the engine never
+/// adopted it LIVE. The round-4 watcher copied the whole requested document into
+/// the snapshot (adopt_document), leaking restart-only file edits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_only_file_watch_change_is_not_persisted_as_adopted() {
+    let r = rig(BOOT_DOC);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        WatchOptions::default().with_poll_interval(TEST_POLL),
+    );
+    let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
+
+    // The initial adopted state persists.
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("in_a")))
+        .await,
+        "the initial adopted state persists"
+    );
+
+    // Edit the BOOT file to ADD a NETWORK (rtsp) source — restart-only on this
+    // synthetic-only run: the watcher reseeds the store + warns restart, but the
+    // engine never ingests it live.
+    let edited = BOOT_DOC.replace(
+        "[[cells]]",
+        "[[sources]]\nid = \"net1\"\nkind = \"rtsp\"\nurl = \"rtsp://[::1]:8554/x\"\n\n[[cells]]",
+    );
+    std::fs::write(&r.boot_path, &edited).expect("edit boot file: add a network source");
+
+    // Wait for the watcher to apply (it reseeds the store + raises the
+    // restart-pending warning).
+    assert!(
+        wait_until(SETTLE, || has_active_warning(
+            &r.warnings,
+            "config-file-requires-restart"
+        ))
+        .await,
+        "the restart-only source change raises the requires-restart warning"
+    );
+
+    // Several persist windows: active.toml must NOT carry the unadopted network
+    // source (the engine never ingests it live on a synthetic-only run).
+    tokio::time::sleep(TEST_POLL * 8).await;
+    if let Ok(text) = std::fs::read_to_string(&active_path) {
+        assert!(
+            !text.contains("net1"),
+            "active.toml must not persist the restart-only/unadopted file-watch source as adopted"
+        );
+    }
+    watch.stop();
+    persist.abort();
+}
