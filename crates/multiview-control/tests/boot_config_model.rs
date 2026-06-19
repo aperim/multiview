@@ -139,6 +139,7 @@ fn rig_with(doc: &str, capacity: usize) -> Rig {
     .with_boot_model(Arc::new(BootModel::new(
         boot_path.clone(),
         config.clone(),
+        config.clone(),
         StartMode::Boot,
         false,
         None,
@@ -668,6 +669,7 @@ async fn an_external_boot_edit_during_a_resumed_run_still_hot_applies() {
     .with_boot_model(Arc::new(BootModel::new(
         boot_path.clone(),
         boot_config,
+        active_config.clone(),
         StartMode::Resume,
         true,
         None,
@@ -742,6 +744,7 @@ async fn a_resumed_run_does_not_reapply_the_unchanged_boot_file() {
     .with_boot_model(Arc::new(BootModel::new(
         boot_path.clone(),
         boot_config,
+        active_config.clone(),
         StartMode::Resume,
         true,
         None,
@@ -1022,6 +1025,7 @@ async fn the_running_persister_is_fail_soft_when_composition_fails() {
     )
     .with_boot_model(Arc::new(BootModel::new(
         boot_path,
+        config.clone(),
         config,
         StartMode::Boot,
         false,
@@ -1119,12 +1123,12 @@ async fn a_shed_file_watch_apply_is_not_persisted_as_adopted() {
     persist.abort();
 }
 
-/// MAJOR-B round 2 / B-1 (panel): the persist gate must never STICK. A applied
-/// → edit to B while the bus is full (B sheds, `requested` advances) → edit the
-/// file back to A: the watcher reaches the already-applied content, so the
-/// stores are adopted again. The gate must clear (`persist_ready`) and
-/// `active.toml` must update — never freeze stale because the settle-to-A path
-/// forgot to advance `adopted`.
+/// MAJOR-B / B-1 (panel): the adopted snapshot must never STICK. A applied →
+/// edit to B while the bus is full (B sheds, the engine never adopts it) → edit
+/// the file back to A: the watcher reaches the already-applied content, so the
+/// engine runs A again. `active.toml` must reflect the adopted A throughout and
+/// NEVER the shed B — never frozen stale because a settle-to-A path forgot to
+/// re-adopt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_persist_gate_clears_when_a_shed_edit_reverts_to_adopted() {
     let r = rig_with(BOOT_DOC, 1);
@@ -1166,19 +1170,31 @@ async fn the_persist_gate_clears_when_a_shed_edit_reverts_to_adopted() {
             "config-file-apply-incomplete"
         ))
         .await,
-        "the shed edit to B raises the incomplete warning (the gate is frozen)"
+        "the shed edit to B raises the incomplete warning (B is not adopted)"
     );
-    assert!(
-        !model.persist_ready(),
-        "while B is shed-pending the gate must NOT be ready"
-    );
+    // While B is shed-pending, active.toml must never carry the unadopted B.
+    tokio::time::sleep(TEST_POLL * 6).await;
+    if let Ok(text) = std::fs::read_to_string(&active_path) {
+        assert!(
+            !text.contains("#7b7b7b"),
+            "active.toml must never carry the shed/unadopted B"
+        );
+    }
 
     // Now edit the file BACK to A. The watcher reaches the already-applied
-    // content; the gate must clear and active.toml must reflect A (never B).
+    // content; the snapshot re-adopts A and a later adopted edit still persists
+    // (the snapshot never sticks).
     std::fs::write(&r.boot_path, BOOT_DOC).expect("edit back to A");
+    // Drain the bus so a follow-up live edit lands and proves persistence is not
+    // frozen.
     assert!(
-        wait_until(SETTLE, || model.persist_ready()).await,
-        "the gate must CLEAR once the file reverts to the adopted content (never stick)"
+        wait_until(SETTLE, || {
+            std::fs::read_to_string(&active_path)
+                .ok()
+                .is_some_and(|t| t.contains("#101418") && !t.contains("#7b7b7b"))
+        })
+        .await,
+        "active.toml must reflect the adopted A (never the shed B) and not be frozen"
     );
     // active.toml is A, and never the unadopted B.
     let text = std::fs::read_to_string(&active_path).expect("read active");
@@ -1221,12 +1237,8 @@ async fn a_shed_rest_source_upsert_is_not_persisted_as_adopted() {
 
     // A REST recolor of in_a to a SYNTHETIC colour (a live-appliable kind) whose
     // UpsertSource sheds on the full bus → ApplyMode::Restart, store mutated,
-    // audit fires running_changed — but the engine never adopted it.
-    recolor_in_a(&r, "#3c3c3c").await;
-    assert!(
-        !model.persist_ready(),
-        "a shed REST live-apply must leave the persist gate not-ready"
-    );
+    // audit fires running_changed — but the engine never adopted it, so the
+    // adopted snapshot must not gain #3c3c3c.
 
     // Give the persister several windows to (wrongly) write the unadopted state.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1825,6 +1837,7 @@ async fn a_failed_compose_releases_the_idempotency_reservation() {
     )
     .with_boot_model(Arc::new(BootModel::new(
         boot_path,
+        config.clone(),
         config,
         StartMode::Boot,
         false,
@@ -1969,4 +1982,125 @@ async fn promote_concurrent_with_revert_commits_a_consistent_snapshot() {
          (no stale/torn commit from a concurrent revert)"
     );
     let _ = r.commands.try_drain();
+}
+
+/// MAJOR-B round 4 — codex sequence 1 (over-adoption): a shed `DELETE
+/// /sources/in_a` (bus full → the engine still runs `in_a`) followed by an
+/// UNRELATED landed mutation must NOT drop `in_a` from `active.toml`. The
+/// round-3 global counter let the unrelated landed mutation "adopt" the prior
+/// shed's generation, persisting a config WITHOUT `in_a` though the engine ran
+/// it. The round-4 adopted snapshot applies only the specific landed delta, so
+/// `in_a` stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shed_delete_then_unrelated_landed_mutation_keeps_the_running_source() {
+    let mut r = rig_with(BOOT_DOC, 1);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+    let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
+
+    // Occupy the capacity-1 bus so the DELETE's RemoveSource sheds.
+    assert!(
+        r.state
+            .commands
+            .try_submit(Command::UpsertSource {
+                op: multiview_control::OperationId::new(),
+                source: Box::new(r.config.sources[0].clone()),
+            })
+            .is_ok(),
+        "fill the bus"
+    );
+
+    // DELETE /sources/in_a — the store drops in_a, but the RemoveSource SHEDS,
+    // so the engine still runs in_a (ApplyMode::Restart). Read the ETag first.
+    let resp = send(&r.router, get("/api/v1/sources/in_a", OPERATOR_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let etag = support::etag(&resp).expect("source carries an ETag");
+    let req = Request::builder()
+        .method("DELETE")
+        .uri("/api/v1/sources/in_a")
+        .header(header::AUTHORIZATION, format!("Bearer {OPERATOR_TOKEN}"))
+        .header(header::IF_MATCH, etag)
+        .body(Body::empty())
+        .expect("delete request");
+    let resp = send(&r.router, req).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "the delete succeeds (store)");
+
+    // Drain the bus so the next, UNRELATED mutation lands live.
+    let _ = r.commands.try_drain();
+
+    // An unrelated NEW synthetic source in_c — a live-appliable kind that LANDS.
+    let resp = send(
+        &r.router,
+        put_json(
+            "/api/v1/sources/in_c",
+            OPERATOR_TOKEN,
+            None,
+            &serde_json::json!({
+                "name": "in_c",
+                "body": { "id": "in_c", "kind": "solid", "color": "#222222" }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "the unrelated add lands");
+
+    // Several persist windows: active.toml must STILL carry in_a (the engine
+    // runs it; the shed delete was never adopted) and gain in_c.
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("in_c")))
+        .await,
+        "active.toml must gain the landed in_c"
+    );
+    let text = std::fs::read_to_string(&active_path).expect("read active");
+    assert!(
+        text.contains("in_a"),
+        "active.toml must KEEP in_a — the engine still runs it; an unrelated landed \
+         mutation must never adopt the prior shed delete (round-3 over-adoption)"
+    );
+    persist.abort();
+}
+
+/// MAJOR-B round 4 — codex sequence 2 (mid-mutation race): the persister shares
+/// the config-mutation lock with every live mutation, so it can never compose
+/// `active.toml` mid-mutation. Driven DETERMINISTICALLY: the test holds the lock
+/// (standing in for an in-flight unadopted mutation) and drives a persist; the
+/// persist must BLOCK until the lock is released, then read settled state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_persister_blocks_on_the_mutation_lock() {
+    let r = rig(BOOT_DOC);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+    assert!(!active_path.exists(), "no active.toml before the first persist");
+
+    // Hold the mutation lock — as an in-flight mutate→submit→adopt would.
+    let guard = r.state.lock_config_mutation().await;
+
+    // Drive a persist concurrently; it must block on the lock (the same lock the
+    // in-flight mutation holds), so nothing is written while we hold it.
+    let persist_state = r.state.clone();
+    let persisting = tokio::spawn(async move {
+        persist_running_now(&persist_state).await.expect("persist");
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !persisting.is_finished(),
+        "the persist must BLOCK on the mutation lock while an in-flight mutation holds it"
+    );
+    assert!(
+        !active_path.exists(),
+        "no active.toml may be written while the mutation lock is held (no mid-mutation compose)"
+    );
+
+    // Release the lock: the persist now proceeds and writes adopted state.
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(5), persisting)
+        .await
+        .expect("the persist completes once the lock frees")
+        .expect("persist task");
+    assert!(
+        active_path.exists(),
+        "active.toml is written once the in-flight mutation releases the lock"
+    );
 }
