@@ -7,8 +7,8 @@
 //! Serde round-trip + topic-routing contract tests for the **switcher** realtime
 //! surface (ADR-RT008 / ADR-0097): the `Topic::Switcher` subscription lane and the
 //! lossless `media.player_state` lifecycle event carrying a media player's discrete
-//! transport state (cued / playing / paused / stopped / vamping{exit_armed} / eof /
-//! loading) + its `position_frames` playhead.
+//! transport state (the lifecycle a clip / VT-roll / opener player rides) plus its
+//! `position_frames` playhead.
 //!
 //! These prove the new `Event` variant is internally-tagged (`t`/`data`, never
 //! untagged), survives a JSON round-trip, carries the player via the envelope `id`,
@@ -16,6 +16,9 @@
 //! the replay ring per ADR-RT003), and that the `Vamping { exit_armed }` struct
 //! variant — the VT vamp/exit delta (task #42) — round-trips on the wire. The state
 //! enum mirrors how `SalvoPhase` is shaped/serialised (a small tagged enum).
+//!
+//! States covered: cued / playing / paused / stopped / `vamping{exit_armed}` / eof
+//! / loading.
 
 use multiview_core::time::MediaTime;
 use multiview_events::event::{MediaPlayerEvent, MediaPlayerState};
@@ -95,7 +98,10 @@ fn media_player_state_envelope_carries_player_via_id() {
     assert_eq!(state.get("kind").unwrap(), &json!("cued"));
 
     let back: EventEnvelope = serde_json::from_value(v).unwrap();
-    assert_eq!(back, env, "media.player_state must survive a JSON round-trip");
+    assert_eq!(
+        back, env,
+        "media.player_state must survive a JSON round-trip"
+    );
 }
 
 #[test]
@@ -111,8 +117,7 @@ fn all_simple_media_player_states_roundtrip_with_snake_case_kind() {
         (MediaPlayerState::Loading, "loading"),
     ];
     for (state, wire) in cases {
-        let event =
-            Event::MediaPlayerState(MediaPlayerEvent::new("player:vt1", state, 12));
+        let event = Event::MediaPlayerState(MediaPlayerEvent::new("player:vt1", state, 12));
         let v = serde_json::to_value(&event).unwrap();
         let kind = v.pointer("/data/state/kind").unwrap();
         assert_eq!(kind, &json!(wire), "state kind mismatch for {wire}");
@@ -161,16 +166,16 @@ fn media_player_event_asset_is_optional_and_roundtrips() {
         .with_asset("asset:opener_v3");
     let event = Event::MediaPlayerState(with_asset);
     let v = serde_json::to_value(&event).unwrap();
-    assert_eq!(
-        v.pointer("/data/asset").unwrap(),
-        &json!("asset:opener_v3")
-    );
+    assert_eq!(v.pointer("/data/asset").unwrap(), &json!("asset:opener_v3"));
     let back: Event = serde_json::from_value(v).unwrap();
     assert_eq!(back, event, "asset-scoped state must round-trip");
 
     // Absent asset is skipped on the wire (no `null`, no leaked Rust field).
-    let no_asset =
-        Event::MediaPlayerState(MediaPlayerEvent::new("player:vt1", MediaPlayerState::Stopped, 9));
+    let no_asset = Event::MediaPlayerState(MediaPlayerEvent::new(
+        "player:vt1",
+        MediaPlayerState::Stopped,
+        9,
+    ));
     let v = serde_json::to_value(&no_asset).unwrap();
     assert!(
         v.pointer("/data/asset").is_none(),
@@ -235,8 +240,7 @@ fn switcher_topic_ordering_error_names_the_wire_topic() {
 #[test]
 fn asyncapi_documents_the_media_player_state_message_and_schema() {
     use multiview_events::asyncapi;
-    let doc: Value =
-        serde_json::from_str(&asyncapi::generate_asyncapi_document()).unwrap();
+    let doc: Value = serde_json::from_str(&asyncapi::generate_asyncapi_document()).unwrap();
 
     // The reusable message must exist and $ref its payload schema.
     let messages = doc
@@ -273,8 +277,7 @@ fn asyncapi_documents_the_media_player_state_message_and_schema() {
 #[test]
 fn asyncapi_envelope_oneof_includes_media_player_event() {
     use multiview_events::asyncapi;
-    let doc: Value =
-        serde_json::from_str(&asyncapi::generate_asyncapi_document()).unwrap();
+    let doc: Value = serde_json::from_str(&asyncapi::generate_asyncapi_document()).unwrap();
     let one_of = doc
         .pointer("/components/messages/Envelope/payload/properties/data/oneOf")
         .and_then(Value::as_array)
@@ -291,8 +294,7 @@ fn asyncapi_envelope_oneof_includes_media_player_event() {
 #[test]
 fn asyncapi_topic_enum_includes_switcher() {
     use multiview_events::asyncapi;
-    let doc: Value =
-        serde_json::from_str(&asyncapi::generate_asyncapi_document()).unwrap();
+    let doc: Value = serde_json::from_str(&asyncapi::generate_asyncapi_document()).unwrap();
     let topic_enum = doc
         .pointer("/components/messages/Envelope/payload/properties/topic/enum")
         .and_then(Value::as_array)

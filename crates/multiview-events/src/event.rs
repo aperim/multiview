@@ -699,6 +699,102 @@ impl SalvoEvent {
     }
 }
 
+/// A media player's discrete transport state (ADR-RT008 / ADR-0097,
+/// media-playout.md): the lifecycle a clip/VT-roll/opener player rides, reported
+/// by the `media.player_state` event. This is the **discrete** state — the
+/// per-frame playhead is carried separately as
+/// [`MediaPlayerEvent::position_frames`], never as a per-frame event.
+///
+/// Serialised **tagged** (`#[serde(tag = "kind", rename_all = "snake_case")]`),
+/// never `untagged` (conventions §5) — the same shape as a tagged
+/// [`TallyTarget`]/[`SyncChange`] union, so the data-carrying [`Vamping`] variant
+/// rides the wire as `{ "kind": "vamping", "exit_armed": true }`. `#[non_exhaustive]`
+/// so a future state does not break the wire enum. ADR-RT008 enumerates
+/// `cued`/`playing`/`paused`/`stopped`/`eof`; [`Loading`] and the
+/// exit-armable [`Vamping`] are the additive vamp/exit states (the VT vamp/exit
+/// delta — the operator's fill-until-a-cue-then-exit-cleanly ask) layered on top.
+///
+/// [`Vamping`]: MediaPlayerState::Vamping
+/// [`Loading`]: MediaPlayerState::Loading
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MediaPlayerState {
+    /// The player is opening/decoding its asset toward the cue point; the cued
+    /// in-point frame is not yet primed. A transient pre-roll state.
+    Loading,
+    /// The asset is loaded and the in-point frame is primed in the tile store,
+    /// holding paused on that frame — ready to take to air (preview-before-trigger).
+    Cued,
+    /// The player is playing forward at the output cadence.
+    Playing,
+    /// The player is paused, holding the current frame.
+    Paused,
+    /// The player is stopped (idle); no asset is rolling.
+    Stopped,
+    /// The player is vamping — looping a fill segment to hold until a cue. When
+    /// `exit_armed` is set, the current lap finishes and the player transitions out
+    /// cleanly at the next loop/frame boundary (the VT vamp/exit feature). Distinct
+    /// from a forever loop precisely because of the armable exit latch.
+    Vamping {
+        /// Whether a clean exit has been armed: the current vamp lap completes,
+        /// then the player leaves the vamp at the boundary.
+        exit_armed: bool,
+    },
+    /// The player reached end-of-file (the asset played to its out-point and no
+    /// loop/vamp is engaged).
+    Eof,
+}
+
+/// A media-player transport-state lifecycle event (topic
+/// [`crate::topic::Topic::Switcher`], ADR-RT008 / ADR-0097).
+///
+/// Identifies the [`player`](MediaPlayerEvent::player) by its stable id (the same
+/// value the envelope `id` is scoped with), the discrete
+/// [`state`](MediaPlayerEvent::state) it transitioned into, the optional
+/// [`asset`](MediaPlayerEvent::asset) currently loaded, and the playhead
+/// [`position_frames`](MediaPlayerEvent::position_frames) at the transition.
+///
+/// **Lossless lifecycle event** (ADR-RT008): rare, operator-meaningful facts kept
+/// in the bounded replay ring — [`Event::is_conflated`] returns `false` for it and
+/// its topic is not high-rate, so a control surface or the SPA can reconstruct an
+/// authoritative player history. It must never be conflated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaPlayerEvent {
+    /// Stable media-player id (matches the envelope `id` scope).
+    pub player: String,
+    /// The asset currently loaded in the player, if any (omitted when none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset: Option<String>,
+    /// The discrete transport state the player transitioned into.
+    pub state: MediaPlayerState,
+    /// The playhead position at the transition, in integer frames at the output
+    /// cadence (exact frames, never a float; ADR-T015). Counts from the asset
+    /// in-point; clients interpolate between events at the output rate.
+    pub position_frames: u64,
+}
+
+impl MediaPlayerEvent {
+    /// Construct a media-player state event for `player` entering `state` at
+    /// `position_frames`, with no asset scope.
+    #[must_use]
+    pub fn new(player: impl Into<String>, state: MediaPlayerState, position_frames: u64) -> Self {
+        Self {
+            player: player.into(),
+            asset: None,
+            state,
+            position_frames,
+        }
+    }
+
+    /// Builder: record the asset currently loaded in the player.
+    #[must_use]
+    pub fn with_asset(mut self, asset: impl Into<String>) -> Self {
+        self.asset = Some(asset.into());
+        self
+    }
+}
+
 // ---- Devices realtime surface (ADR-RT007, managed-devices.md §2.1/§7) ----
 
 /// A managed device's lifecycle state (managed-devices.md §2.2), uppercase on
@@ -1379,6 +1475,16 @@ pub enum Event {
     #[serde(rename = "salvo.cancelled")]
     SalvoCancelled(SalvoEvent),
 
+    // ---- Switcher realtime surface (topic `switcher`, ADR-RT008) ----
+    /// A media player's discrete transport state changed (topic `switcher`,
+    /// envelope `id` = player id). A **lossless** lifecycle event kept in the
+    /// replay ring ([`Event::is_conflated`] is `false`): cued / playing / paused /
+    /// stopped / `vamping{exit_armed}` / eof / loading transitions, plus the playhead
+    /// `position_frames`. Discrete state changes only — never a per-frame position
+    /// stream.
+    #[serde(rename = "media.player_state")]
+    MediaPlayerState(MediaPlayerEvent),
+
     // ---- Devices realtime surface (topic `devices`, ADR-RT007) ----
     /// Conflated latest-wins per-device runtime snapshot (envelope `id` =
     /// device id). Excluded from the lossless replay ring per event type
@@ -1453,6 +1559,7 @@ impl Event {
             Self::SalvoArmed(_) => "salvo.armed",
             Self::SalvoTaken(_) => "salvo.taken",
             Self::SalvoCancelled(_) => "salvo.cancelled",
+            Self::MediaPlayerState(_) => "media.player_state",
             Self::DeviceStatus(_) => "device.status",
             Self::DeviceAdopted(_) => "device.adopted",
             Self::DeviceRemoved(_) => "device.removed",

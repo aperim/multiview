@@ -84,7 +84,7 @@ fn build_info() -> Value {
             "WebSocket and SSE realtime event stream for the Multiview engine. ",
             "Every message uses a single versioned envelope (ADR-RT002). ",
             "Topics: tiles, inputs, outputs, audio.meters, alerts, alarms, tally, ",
-            "layout, config, logs, jobs, preview, system, capabilities, devices. ",
+            "layout, config, logs, jobs, preview, system, capabilities, devices, switcher. ",
             "The WebSocket endpoint (/api/v1/ws) is bidirectional (events + subscription ",
             "control frames); the SSE endpoint (/api/v1/events) is server-to-client only.",
         ),
@@ -241,6 +241,8 @@ fn build_messages() -> Value {
     map.extend(build_messages_envelope());
     // Data event messages.
     map.extend(build_messages_data_events());
+    // Switcher realtime surface messages (ADR-RT008).
+    map.extend(build_messages_switcher_events());
     // Devices realtime surface messages (ADR-RT007).
     map.extend(build_messages_device_events());
     // Control frame messages.
@@ -450,6 +452,29 @@ fn input_streams_message() -> Value {
     })
 }
 
+/// Build the Switcher realtime-surface message definitions (ADR-RT008): the
+/// lossless `media.player_state` lifecycle event on topic `switcher`.
+fn build_messages_switcher_events() -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    map.insert("MediaPlayerEvent".to_owned(), json!({
+        "name": "MediaPlayerEvent",
+        "title": "Media-player transport-state lifecycle",
+        "summary": "A media player transitioned transport state (media.player_state on topic `switcher`).",
+        "description": concat!(
+            "Emitted on topic `switcher` with envelope `id` = player id. A LOSSLESS ",
+            "lifecycle event kept in the bounded replay ring (ADR-RT008): discrete ",
+            "transport-state changes (cued / playing / paused / stopped / ",
+            "vamping{exit_armed} / eof / loading) plus the playhead `position_frames`. ",
+            "It must never be conflated — a control surface reconstructs authoritative ",
+            "player history from it. Per-frame position is NOT streamed; clients ",
+            "interpolate `position_frames` between events at the output cadence.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/MediaPlayerEvent" }
+    }));
+    map
+}
+
 /// Build the Devices realtime-surface message definitions (ADR-RT007): the
 /// conflated `device.status` / `timing.status` telemetry lanes plus the
 /// lossless low-rate device lifecycle events, all on topic `devices`.
@@ -591,7 +616,7 @@ fn envelope_schema() -> Value {
                 "enum": [
                     "$control", "system", "capabilities", "inputs", "tiles", "outputs",
                     "audio.meters", "audio.loudness", "alerts", "alarms", "tally",
-                    "layout", "config", "logs", "jobs", "preview", "devices"
+                    "layout", "config", "logs", "jobs", "preview", "devices", "switcher"
                 ]
             },
             "id": {
@@ -640,6 +665,7 @@ fn event_payload_one_of() -> Value {
         { "$ref": "#/components/schemas/AlarmTransition" },
         { "$ref": "#/components/schemas/TallyEvent" },
         { "$ref": "#/components/schemas/SalvoEvent" },
+        { "$ref": "#/components/schemas/MediaPlayerEvent" },
         { "$ref": "#/components/schemas/DeviceStatus" },
         { "$ref": "#/components/schemas/DeviceAdopted" },
         { "$ref": "#/components/schemas/DeviceRemoved" },
@@ -673,6 +699,7 @@ fn build_schemas() -> Value {
     let mut map = serde_json::Map::new();
     for section in [
         core_event_schemas(),
+        switcher_event_schemas(),
         device_event_schemas(),
         control_frame_schemas(),
     ] {
@@ -1398,6 +1425,109 @@ fn salvo_event_schema() -> Value {
             "head": {
                 "type": "string",
                 "description": "Output head this recall applies to, if scoped."
+            }
+        }
+    })
+}
+
+// --- Switcher realtime-surface schemas (ADR-RT008) ---
+// Mirror the serde wire shapes of the switcher types in `crate::event`; the Rust
+// definitions are the canonical source of truth.
+
+/// The Switcher realtime-surface payload schemas (ADR-RT008): the media-player
+/// transport-state event and its tagged state union.
+fn switcher_event_schemas() -> Value {
+    json!({
+        "MediaPlayerState": media_player_state_schema(),
+        "MediaPlayerEvent": media_player_event_schema()
+    })
+}
+
+fn media_player_state_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "A media player's discrete transport state (tagged by `kind`, never ",
+            "untagged). The `vamping` variant carries `exit_armed`: when set, the ",
+            "current vamp lap finishes then the player exits cleanly at the boundary. ",
+            "`#[non_exhaustive]`: a client must treat an unknown kind as forward-",
+            "compatible, not an error.",
+        ),
+        "required": ["kind"],
+        // AsyncAPI 3.0 Schema Object: `discriminator` is the property NAME.
+        "discriminator": "kind",
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": "string", "const": "loading" } },
+                "description": "Opening/decoding the asset toward the cue point; not yet primed."
+            },
+            {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": "string", "const": "cued" } },
+                "description": "Asset loaded, in-point frame primed, holding paused — ready to take."
+            },
+            {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": "string", "const": "playing" } },
+                "description": "Playing forward at the output cadence."
+            },
+            {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": "string", "const": "paused" } },
+                "description": "Paused, holding the current frame."
+            },
+            {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": "string", "const": "stopped" } },
+                "description": "Stopped/idle; no asset rolling."
+            },
+            {
+                "type": "object",
+                "required": ["kind", "exit_armed"],
+                "properties": {
+                    "kind": { "type": "string", "const": "vamping" },
+                    "exit_armed": {
+                        "type": "boolean",
+                        "description": "Whether a clean exit is armed: finish the current lap, then leave the vamp at the boundary."
+                    }
+                },
+                "description": "Looping a fill segment to hold until a cue (the VT vamp/exit feature)."
+            },
+            {
+                "type": "object",
+                "required": ["kind"],
+                "properties": { "kind": { "type": "string", "const": "eof" } },
+                "description": "Reached end-of-file with no loop/vamp engaged."
+            }
+        ]
+    })
+}
+
+fn media_player_event_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of `media.player_state` (ADR-RT008): a media player's discrete ",
+            "transport-state transition, envelope `id` = player id. LOSSLESS — kept in ",
+            "the replay ring, never conflated. `position_frames` is the playhead in ",
+            "integer frames at the output cadence (never a float; clients interpolate ",
+            "between events).",
+        ),
+        "required": ["player", "state", "position_frames"],
+        "properties": {
+            "player": { "type": "string", "description": "Stable media-player id (matches the envelope `id`)." },
+            "asset": { "type": "string", "description": "The asset currently loaded in the player, if any." },
+            "state": { "$ref": "#/components/schemas/MediaPlayerState" },
+            "position_frames": {
+                "type": "integer",
+                "format": "uint64",
+                "description": "Playhead position at the transition, in integer frames at the output cadence."
             }
         }
     })

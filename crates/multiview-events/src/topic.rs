@@ -68,6 +68,14 @@ pub enum Topic {
     /// device lifecycle events, scoped finer with the `ids` filter.
     #[serde(rename = "devices")]
     Devices,
+    /// Broadcast-switcher lifecycle (ADR-RT008): the lossless, operator-meaningful
+    /// transition events (M/E transition + FTB + keyer state, **media-player
+    /// transport state**, and macro progress), scoped finer with the envelope `id`
+    /// (an M/E, keyer, player, or macro id). Deliberately coarse: every switcher
+    /// element rides this one topic and a client filters by `id`. NOT high-rate —
+    /// its events stay in the lossless replay ring (ADR-RT003).
+    #[serde(rename = "switcher")]
+    Switcher,
 }
 
 impl Topic {
@@ -92,6 +100,7 @@ impl Topic {
             Self::Jobs => "jobs",
             Self::Preview => "preview",
             Self::Devices => "devices",
+            Self::Switcher => "switcher",
         }
     }
 
