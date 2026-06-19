@@ -51,10 +51,18 @@ pub struct StartConfig {
 impl StartConfig {
     /// The control plane's [`BootModel`] for this resolution, rooted at the
     /// boot file `boot_path` (the watch + promote target).
+    ///
+    /// The path is **canonicalized** (MINOR-D, ADR-W024 §6): when the config is
+    /// reached through a symlink, `promote` must rewrite the real target file
+    /// (the atomic temp-file + `rename(2)` would otherwise replace the symlink
+    /// itself, breaking it). Canonicalization resolves `.`/`..`/symlinks once at
+    /// startup; if it fails (e.g. the file is transiently absent) the given path
+    /// is kept verbatim.
     #[must_use]
     pub fn to_boot_model(&self, boot_path: &Path) -> BootModel {
+        let resolved = std::fs::canonicalize(boot_path).unwrap_or_else(|_| boot_path.to_path_buf());
         BootModel::new(
-            boot_path.to_path_buf(),
+            resolved,
             self.loaded.clone(),
             self.start,
             self.resumed,

@@ -232,3 +232,36 @@ fn the_default_boot_policy_ignores_an_existing_active() {
         "Running must be the boot document"
     );
 }
+
+/// MINOR-D (ADR-W024 §6): when the config is reached through a SYMLINK, the
+/// boot model's path must be CANONICALIZED to the real target, so a later
+/// `promote` rewrites the real file (the atomic temp + rename would otherwise
+/// replace the symlink itself). `to_boot_model` resolves the link at startup.
+#[cfg(unix)]
+#[test]
+fn to_boot_model_canonicalizes_a_symlinked_config() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let real = dir.path().join("real-multiview.toml");
+    let link = dir.path().join("multiview.toml");
+    let boot = boot_doc("");
+    std::fs::write(&real, &boot).expect("write real config");
+    std::os::unix::fs::symlink(&real, &link).expect("create symlink");
+
+    let config = MultiviewConfig::load_from_toml(&boot).expect("parse");
+    let start = resolve_start_config(config, boot, &link);
+    let model = start.to_boot_model(&link);
+
+    let canonical_real = std::fs::canonicalize(&real).expect("canonicalize real");
+    assert_eq!(
+        model.boot_path(),
+        canonical_real.as_path(),
+        "the boot model must resolve the symlink to the real file so promote writes through it"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("stat link")
+            .file_type()
+            .is_symlink(),
+        "the symlink itself is untouched"
+    );
+}
