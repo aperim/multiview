@@ -2323,8 +2323,8 @@ async fn a_restart_only_file_watch_change_is_not_persisted_as_adopted() {
 // ===========================================================================
 
 /// A boot document that declares a salvo recall AND a tally profile (both
-/// reference the BOOT_DOC cells), so the runtime-mutable salvo/tally stores are
-/// seeded at start and a later REST edit can be checked for round-trip into
+/// reference the `BOOT_DOC` cells), so the runtime-mutable salvo/tally stores
+/// are seeded at start and a later REST edit can be checked for round-trip into
 /// `active.toml`.
 const BOOT_DOC_WITH_RECALLS: &str = r##"schema_version = 1
 [canvas]
@@ -2436,10 +2436,10 @@ async fn a_runtime_salvo_edit_persists_to_active_toml() {
     persist.abort();
 }
 
-/// ADR-W024 round 6 — F1 (tally_profiles): a tally profile is runtime-mutable
+/// ADR-W024 round 6 — F1 (`tally_profiles`): a tally profile is runtime-mutable
 /// through `PUT /api/v1/tally/profiles/{id}` (a pure control-plane store edit).
 /// A runtime edit MUST round-trip into `active.toml`. The round-5 composition
-/// took tally_profiles VERBATIM from the boot base document.
+/// took `tally_profiles` VERBATIM from the boot base document.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_runtime_tally_profile_edit_persists_to_active_toml() {
     let r = rig(BOOT_DOC_WITH_RECALLS);
@@ -2458,11 +2458,7 @@ async fn a_runtime_tally_profile_edit_persists_to_active_toml() {
 
     // Add a second index→cell binding through the REAL route. The new index `1`
     // is a value the seeded profile did not carry, so it is a recognisable edit.
-    let resp = send(
-        &r.router,
-        get("/api/v1/tally/profiles/tp1", OPERATOR_TOKEN),
-    )
-    .await;
+    let resp = send(&r.router, get("/api/v1/tally/profiles/tp1", OPERATOR_TOKEN)).await;
     assert_eq!(resp.status(), StatusCode::OK, "tally profile is readable");
     let etag = support::etag(&resp).expect("tally profile carries an ETag");
     let resp = send(

@@ -818,13 +818,35 @@ pub fn apply_document_diff(
         ));
     }
 
+    // 3b. Overlays: mirror the REST overlay routes (ADR-W024 round 6 / F2). An
+    //     overlay is LIVE-SHEDDABLE — on an overlay-capable run the REST routes
+    //     submit `UpsertOverlay`/`RemoveOverlay` and adopt per landed delta, so
+    //     the watcher MUST do the same (the round-5 watcher treated overlays as
+    //     restart-only here, diverging from REST and leaking a live file-edit
+    //     out of `active.toml`). Handled explicitly, BEFORE the generic loop, so
+    //     `apply_overlay_changes` can read the pre-resync store to compute the
+    //     per-overlay delta; the loop below skips `"overlays"`.
+    if diff.changed_sections.contains("overlays") {
+        parts.push(apply_overlay_changes(
+            state,
+            actor,
+            next,
+            &mut restart,
+            &mut shed,
+        ));
+    }
+
     // 4. Every other changed section: reseed its store where one exists (the
     //    UI's truth follows the file) + restart accounting (no live path yet).
     for section in &diff.changed_sections {
+        // Overlays are handled live above (3b) — never as a generic restart-only
+        // reseed here (that would double-account and miss the live adopt path).
+        if *section == "overlays" {
+            continue;
+        }
         restart.insert((*section).to_owned());
         match *section {
             "outputs" => resync_store(state, actor, &state.outputs, &desired_outputs(next)),
-            "overlays" => resync_store(state, actor, &state.overlays, &desired_overlays(next)),
             "probes" => resync_store(state, actor, &state.probes, &desired_probes(next)),
             "devices" => {
                 resync_store(state, actor, &state.devices, &desired_devices(next));
@@ -836,6 +858,15 @@ pub fn apply_document_diff(
                 resync_store(state, actor, &state.sync_groups, &desired_sync_groups(next));
             }
             "audio" => resync_audio(state, actor, next),
+            // ADR-W024 round 6 (F1): salvos + tally_profiles are store-backed
+            // running state composed INTO `active.toml` — reseed the definition
+            // store so a boot-file edit follows the file (the same path a
+            // boot-file `outputs` edit rides). A pure store edit (no engine
+            // command), restart-only for the engine's recall (the definition
+            // takes effect on the next arm/take), so the store == adopted and
+            // `active.toml` composes it straight from the store.
+            "salvos" => resync_salvos(state, actor, next),
+            "tally_profiles" => resync_tally_profiles(state, actor, next),
             // No store is boot-seeded for these; the file itself is the
             // durable truth and the restart warning names them.
             _ => {}
@@ -974,6 +1005,137 @@ fn apply_source_changes(
         }
     }
     format!("sources: {}", described.join(", "))
+}
+
+/// Adopt a LANDED overlay upsert into the boot-model snapshot, if a boot model
+/// is wired (ADR-W024 round 6 / F2). Called from the file-watch overlay apply
+/// ONLY when an `UpsertOverlay` actually lands on the bus — never wholesale.
+fn adopt_overlay_if_modeled(state: &AppState, overlay: multiview_config::Overlay) {
+    if let Some(model) = state.boot_model.as_ref() {
+        model.adopt_overlay(overlay);
+    }
+}
+
+/// Drop a LANDED-removed overlay from the boot-model snapshot, if a boot model
+/// is wired (ADR-W024 round 6 / F2). Called ONLY when a `RemoveOverlay` lands.
+fn unadopt_overlay_if_modeled(state: &AppState, id: &str) {
+    if let Some(model) = state.boot_model.as_ref() {
+        model.unadopt_overlay(id);
+    }
+}
+
+/// Apply the overlays diff exactly as the REST overlay routes do (ADR-W024
+/// round 6 / F2). The round-5 watcher treated `overlays` as a restart-only
+/// store reseed, diverging from the REST routes (which submit
+/// `UpsertOverlay`/`RemoveOverlay` and adopt per landed delta on an
+/// overlay-capable run) and so leaking a live file-edit out of `active.toml`.
+///
+/// Parity with `overlays.rs::live_apply_upsert`/`live_apply_remove`:
+/// * With NO live overlay capability (`state.live_apply.overlays` is `None` —
+///   the store-only / software-path posture), every overlay change is
+///   restart-only: reseed the store and leave `overlays` in the restart set.
+///   Nothing is adopted (the engine has no live overlay seam), so `active.toml`
+///   does not capture it — correct, because the engine only takes it on restart.
+/// * With a capability, EVERY changed/added overlay rides `UpsertOverlay` and
+///   each removal rides `RemoveOverlay` on the bounded bus (the working-set
+///   mirror stays coherent; `renders` decides only the REST `X-Multiview-Apply`
+///   header, not adoption). A LANDED command adopts/unadopts the snapshot
+///   per-section; a SHED command counts toward `shed` (the whole apply retries)
+///   and keeps the section restart-pending. The caller's `restart` set already
+///   carries `overlays`; a fully-landed live apply REMOVES it (nothing pending).
+///
+/// The store is reseeded last so the UI overlay list follows the file in every
+/// case (matching `seed_resources` / the other resync paths).
+fn apply_overlay_changes(
+    state: &AppState,
+    actor: &str,
+    next: &MultiviewConfig,
+    restart: &mut BTreeSet<String>,
+    shed: &mut u32,
+) -> String {
+    // The store's CURRENT overlays (parsed back to the config type), so the
+    // delta is per-overlay — exactly the id-keyed add/change/remove the REST
+    // routes apply one mutation at a time.
+    let current: Vec<multiview_config::Overlay> = match state.overlays.list() {
+        Ok(list) => list
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v.resource.body).ok())
+            .collect(),
+        Err(error) => {
+            tracing::warn!(error = %error, "config-file overlay apply: listing overlays failed");
+            Vec::new()
+        }
+    };
+
+    let capability = state.live_apply.overlays.clone();
+    let mut described: Vec<String> = Vec::new();
+    let mut all_landed = capability.is_some();
+
+    if capability.is_some() {
+        // Added/changed overlays in the file → live UpsertOverlay (every kind,
+        // so the engine's working set stays coherent — ADR-W022).
+        for overlay in &next.overlays {
+            let changed = current.iter().find(|o| o.id == overlay.id) != Some(overlay);
+            if !changed {
+                continue;
+            }
+            described.push(format!("{} upserted", overlay.id));
+            if submit(
+                state,
+                Command::UpsertOverlay {
+                    op: OperationId::new(),
+                    overlay: Box::new(overlay.clone()),
+                },
+            ) {
+                adopt_overlay_if_modeled(state, overlay.clone());
+            } else {
+                *shed = shed.saturating_add(1);
+                all_landed = false;
+            }
+        }
+        // Removed overlays (present in the store, absent from the file) → live
+        // RemoveOverlay.
+        for overlay in &current {
+            if next.overlays.iter().any(|o| o.id == overlay.id) {
+                continue;
+            }
+            described.push(format!("{} removed", overlay.id));
+            if submit(
+                state,
+                Command::RemoveOverlay {
+                    op: OperationId::new(),
+                    id: overlay.id.clone(),
+                },
+            ) {
+                unadopt_overlay_if_modeled(state, &overlay.id);
+            } else {
+                *shed = shed.saturating_add(1);
+                all_landed = false;
+            }
+        }
+    }
+
+    // The UI overlay list follows the file in every case (capability or not).
+    resync_store(state, actor, &state.overlays, &desired_overlays(next));
+
+    if all_landed {
+        // Every overlay command landed live (and was adopted): the section is
+        // fully applied, so it is NOT restart-pending.
+        restart.remove("overlays");
+        format!("overlays applied live: {}", described.join(", "))
+    } else if capability.is_some() {
+        // A shed left the apply incomplete; keep it restart-pending (the
+        // watcher retries the whole apply on its next poll, review M1).
+        restart.insert("overlays".to_owned());
+        format!(
+            "overlays partially applied (shed; retried): {}",
+            described.join(", ")
+        )
+    } else {
+        // No live overlay seam on this run path: honest restart-only.
+        restart.insert("overlays".to_owned());
+        "overlays changed (applies on restart)".to_owned()
+    }
 }
 
 /// Apply a layout/cells change through the shared route machinery
@@ -1164,6 +1326,95 @@ fn resync_audio(state: &AppState, actor: &str, next: &MultiviewConfig) {
         }
     }
     tracing::warn!("config-file resync: the audio-routing store kept changing; giving up");
+}
+
+/// Bring the salvo DEFINITION store in line with the file's `[[salvos]]`
+/// (ADR-W024 round 6 / F1): create/update by id, delete the absent — audited as
+/// `actor`, mirroring [`resync_store`] for the typed [`crate::salvo_store::SalvoRepository`].
+/// A salvo definition is a pure control-plane store edit (no engine command),
+/// so the store IS the adopted state; `active.toml` is composed straight from
+/// it. The engine's salvo RECALL applies the new definition on the next
+/// arm/take (restart-class for the running recall), so the section stays in the
+/// restart-pending set, but the durable definition follows the file at once.
+fn resync_salvos(state: &AppState, actor: &str, next: &MultiviewConfig) {
+    use crate::salvo_store::SALVO_KIND;
+    let existing: Vec<String> = match state.salvos.list() {
+        Ok(list) => list.into_iter().map(|v| v.salvo.id).collect(),
+        Err(error) => {
+            tracing::warn!(error = %error, "config-file resync: listing salvos failed");
+            return;
+        }
+    };
+    for salvo in &next.salvos {
+        let id = salvo.id.clone();
+        let result = if existing.iter().any(|e| e == &id) {
+            state.salvos.update(&id, salvo.clone())
+        } else {
+            state.salvos.create(salvo.clone())
+        };
+        match result {
+            Ok(versioned) => state.audit(
+                actor,
+                AuditAction::Update,
+                SALVO_KIND,
+                &id,
+                to_body(&versioned.salvo),
+            ),
+            Err(error) => {
+                tracing::warn!(id = %id, error = %error, "config-file resync: salvo write failed");
+            }
+        }
+    }
+    for id in existing {
+        if !next.salvos.iter().any(|s| s.id == id) {
+            match state.salvos.delete(&id) {
+                Ok(()) => state.audit(actor, AuditAction::Delete, SALVO_KIND, &id, None),
+                Err(error) => {
+                    tracing::warn!(id = %id, error = %error, "config-file resync: salvo delete failed");
+                }
+            }
+        }
+    }
+}
+
+/// Bring the tally-profile store in line with the file's `[[tally_profiles]]`
+/// (ADR-W024 round 6 / F1): create/update by id, delete the absent — audited as
+/// `actor`. Like salvos, a profile is a pure control-plane store edit (no engine
+/// command), so the store IS the adopted state composed into `active.toml`.
+fn resync_tally_profiles(state: &AppState, actor: &str, next: &MultiviewConfig) {
+    use crate::tally_state::TALLY_PROFILE_KIND;
+    let existing: Vec<String> = match state.tally_profiles.list() {
+        Ok(list) => list.into_iter().map(|v| v.profile.id).collect(),
+        Err(error) => {
+            tracing::warn!(error = %error, "config-file resync: listing tally profiles failed");
+            return;
+        }
+    };
+    for profile in &next.tally_profiles {
+        let id = profile.id.clone();
+        match state.tally_profiles.put(profile.clone()) {
+            Ok(versioned) => state.audit(
+                actor,
+                AuditAction::Update,
+                TALLY_PROFILE_KIND,
+                &id,
+                to_body(&versioned.profile),
+            ),
+            Err(error) => {
+                tracing::warn!(id = %id, error = %error, "config-file resync: tally-profile write failed");
+            }
+        }
+    }
+    for id in existing {
+        if !next.tally_profiles.iter().any(|p| p.id == id) {
+            match state.tally_profiles.delete(&id) {
+                Ok(()) => state.audit(actor, AuditAction::Delete, TALLY_PROFILE_KIND, &id, None),
+                Err(error) => {
+                    tracing::warn!(id = %id, error = %error, "config-file resync: tally-profile delete failed");
+                }
+            }
+        }
+    }
 }
 
 /// The sources store's desired contents for `config` (mirrors `seed_resources`).
@@ -1435,6 +1686,12 @@ pub(crate) fn resync_all_stores(state: &AppState, actor: &str, config: &Multivie
     if config.audio.is_some() {
         resync_audio(state, actor, config);
     }
+    // ADR-W024 round 6 (F1): salvos + tally_profiles are store-backed running
+    // state composed into `active.toml`, so revert-to-start MUST roll their
+    // definition stores back to the target document too — otherwise a runtime
+    // salvo/tally edit would survive a revert (the store would keep the drift).
+    resync_salvos(state, actor, config);
+    resync_tally_profiles(state, actor, config);
     let id = state
         .working_layout_id
         .clone()

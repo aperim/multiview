@@ -74,11 +74,22 @@ impl StartConfig {
 
 /// Splice the storeless restart-only sections from the BOOT document into a
 /// resumed Running document (ADR-W024 review M1): `control`, `placement`,
-/// `salvos`, `tally_profiles`, `walls`, `routing`, and `schema_version` have
-/// no control store — the boot file is their durable truth, and a restart is
-/// exactly when they take effect. Without the splice, a boot-file
-/// `[control] listen` edit would be silently lost on the very restart the
-/// operator performed to apply it (the stale `active.toml` copy would win).
+/// `walls`, `routing`, and `schema_version` have no control store — the boot
+/// file is their durable truth, and a restart is exactly when they take effect.
+/// Without the splice, a boot-file `[control] listen` edit would be silently
+/// lost on the very restart the operator performed to apply it (the stale
+/// `active.toml` copy would win).
+///
+/// `salvos` and `tally_profiles` are deliberately NOT spliced (ADR-W024 round
+/// 6): they ARE runtime-mutable through their definition routes (a pure
+/// control-plane store edit), so they are store-backed running state composed
+/// INTO `active.toml` — exactly like `sources`/`overlays`/`outputs`. A resume
+/// must restore the runtime-edited definitions from `active.toml`, not discard
+/// them back to the boot file's copy. A boot-file edit to a salvo/tally during
+/// a resumed run still takes effect: the ADR-W020 watcher diffs the boot file
+/// against the resumed baseline and resyncs the definition store (the same path
+/// a boot-file `sources` edit rides), so the boot file stays authoritative for
+/// external edits without clobbering live drift on every restart.
 fn splice_storeless_sections(
     mut running: MultiviewConfig,
     boot: &MultiviewConfig,
@@ -86,8 +97,6 @@ fn splice_storeless_sections(
     running.schema_version = boot.schema_version;
     running.control.clone_from(&boot.control);
     running.placement.clone_from(&boot.placement);
-    running.salvos.clone_from(&boot.salvos);
-    running.tally_profiles.clone_from(&boot.tally_profiles);
     running.walls.clone_from(&boot.walls);
     running.routing.clone_from(&boot.routing);
     running
@@ -98,13 +107,15 @@ fn splice_storeless_sections(
 ///
 /// Under `start = "resume"` the persisted `active.toml` next to the boot file
 /// becomes Running when it is valid — with the storeless restart-only
-/// sections (`control`, `placement`, `salvos`, `tally_profiles`, `walls`,
-/// `routing`, `schema_version`) spliced from the BOOT document (review M1: a
-/// boot-file edit to a restart-only section must take effect on restart). A
-/// missing/unreadable/invalid file — or a splice that no longer validates —
-/// falls back to the boot document with a `tracing::warn!` and the reason
-/// recorded in [`StartConfig::resume_fallback`]. The default `boot` policy
-/// never reads `active.toml`.
+/// sections (`control`, `placement`, `walls`, `routing`, `schema_version`)
+/// spliced from the BOOT document (review M1: a boot-file edit to a
+/// restart-only section must take effect on restart). `salvos`/`tally_profiles`
+/// are store-backed running state (ADR-W024 round 6) and resume FROM
+/// `active.toml`, never spliced. A missing/unreadable/invalid file — or a
+/// splice that no longer validates — falls back to the boot document with a
+/// `tracing::warn!` and the reason recorded in
+/// [`StartConfig::resume_fallback`]. The default `boot` policy never reads
+/// `active.toml`.
 #[must_use]
 pub fn resolve_start_config(
     boot: MultiviewConfig,

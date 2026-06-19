@@ -164,6 +164,19 @@ pub struct SeededResources {
     /// The audio-routing singleton store, seeded from the config's optional
     /// `[audio]` block (unconfigured when the config carries none).
     pub audio: Arc<AudioRoutingStore>,
+    /// The `salvos` store, one definition per `config.salvos` (ADR-W024 round
+    /// 6). A salvo DEFINITION is runtime-mutable through `PUT/DELETE
+    /// /api/v1/salvos/{id}` — a pure control-plane store edit with NO engine
+    /// command (arm/take/cancel submit recall commands, never the definition),
+    /// so the store IS the adopted state and `active.toml` is composed from it
+    /// (not verbatim from the boot base, which lost runtime edits on resume).
+    pub salvos: Arc<dyn SalvoRepository>,
+    /// The `tally_profiles` store, one profile per `config.tally_profiles`
+    /// (ADR-W024 round 6). A tally PROFILE is runtime-mutable through
+    /// `PUT/DELETE /api/v1/tally/profiles/{id}` — a pure control-plane store
+    /// edit (the override route submits a runtime command, never the profile),
+    /// so the store IS the adopted state and `active.toml` is composed from it.
+    pub tally_profiles: Arc<dyn TallyProfileRepository>,
     /// The layout store carrying the single working layout (canvas + cells).
     pub layouts: Arc<dyn Repository>,
     /// The id the working layout was seeded under (the solved layout's name,
@@ -301,6 +314,20 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         outputs.create(&id, ResourceInput { name: kind, body })?;
     }
 
+    // Salvo definitions + tally profiles (ADR-W024 round 6): seeded one per
+    // config entry so the runtime-mutable definition stores hold the boot
+    // state, and `active.toml` is composed FROM these stores (not verbatim from
+    // the boot base, which lost runtime REST edits on resume). Their CRUD is a
+    // pure store edit — no engine command, so the store IS the adopted state.
+    let salvos = InMemorySalvoStore::new();
+    for salvo in &config.salvos {
+        salvos.create(salvo.clone())?;
+    }
+    let tally_profiles = InMemoryProfileStore::new();
+    for profile in &config.tally_profiles {
+        tally_profiles.put(profile.clone())?;
+    }
+
     let layouts = InMemoryRepository::new();
     let working_layout_id = seed_working_layout(config, &layouts)?;
 
@@ -313,6 +340,8 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         sync_groups: Arc::new(sync_groups),
         device_status: Arc::new(device_status),
         audio: Arc::new(AudioRoutingStore::seeded(config.audio.clone())),
+        salvos: Arc::new(salvos),
+        tally_profiles: Arc::new(tally_profiles),
         layouts: Arc::new(layouts),
         working_layout_id,
         // Snapshot the pinned canvas from the LOADED CONFIG (the geometry +
@@ -1468,6 +1497,8 @@ impl AppState {
         self.sync_groups = seeded.sync_groups;
         self.device_status = seeded.device_status;
         self.audio_routing = seeded.audio;
+        self.salvos = seeded.salvos;
+        self.tally_profiles = seeded.tally_profiles;
         self.repository = seeded.layouts;
         self.working_layout_id = Some(seeded.working_layout_id);
         self.running_canvas = Some(seeded.running_canvas);

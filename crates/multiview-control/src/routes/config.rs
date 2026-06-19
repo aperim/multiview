@@ -309,9 +309,10 @@ pub(crate) fn compose_document_unredacted(state: &AppState) -> ControlResult<ser
     };
 
     // Start from the loaded configuration document (so authored sections the
-    // stores do not carry — control, placement, audio, salvos, tally
-    // profiles, walls, routing — survive the round-trip verbatim), then
-    // overlay everything the live stores own.
+    // stores do not carry — control, placement, walls, routing,
+    // schema_version — survive the round-trip verbatim), then overlay
+    // everything the live stores own (including salvos + tally_profiles, which
+    // are runtime-mutable through their definition routes — ADR-W024 round 6).
     let mut document = state
         .base_document
         .as_deref()
@@ -376,12 +377,40 @@ pub(crate) fn compose_document_unredacted(state: &AppState) -> ControlResult<ser
         "sync_groups".to_owned(),
         serde_json::Value::Array(collect(&state.sync_groups)?),
     );
-    // The audio-routing singleton overlays the `audio` key when an operator
-    // (or the seeded config) configured it; otherwise the base document's
-    // authored block — if any — is left untouched. The whole-document
-    // validation below this composition is where routes are cross-checked
-    // against the declared sources (the check `PUT /api/v1/audio-routing`
+    // The store-backed singletons/collections that overlay the base document —
+    // `audio`, `salvos`, `tally_profiles` — are composed FROM their stores
+    // ([`insert_store_backed_sections`]; extracted to keep this function under
+    // the line limit). The whole-document validation below cross-checks routes
+    // against the declared sources (the `PUT /api/v1/audio-routing` check
     // intentionally defers).
+    insert_store_backed_sections(doc, state)?;
+    // The composition is returned with secrets INTACT. The redaction for the
+    // outward-facing export happens in `compose_export_document`; the Running
+    // snapshot (`compose_running_config`) keeps the real credentials so a
+    // resume reload works (the atomic writer tightens the file's mode).
+    Ok(document)
+}
+
+/// Overlay the runtime-mutable store-backed sections — `audio`, `salvos`,
+/// `tally_profiles` — onto the composed document FROM their stores.
+///
+/// * **`audio`** overlays the `audio` key when an operator (or the seeded
+///   config) configured it; otherwise the base document's authored block (if
+///   any) is left untouched.
+/// * **`salvos` + `tally_profiles`** (ADR-W024 round 6 / F1) are runtime-mutable
+///   through their definition routes (`PUT/DELETE /salvos/{id}`, `PUT/DELETE
+///   /tally/profiles/{id}`) — a pure control-plane store edit with NO engine
+///   command, so the store IS the adopted state. Composing them from the store
+///   (not verbatim from the boot base) means a runtime salvo/tally edit
+///   round-trips into `active.toml` and survives a `resume` (the stores are
+///   seeded from the boot document, so a boot-authored recall is carried too).
+///
+/// `to_value` on these derived config types has no failing path in practice;
+/// the fault is surfaced, never panicked (guardrails forbid `unwrap`).
+fn insert_store_backed_sections(
+    doc: &mut serde_json::Map<String, serde_json::Value>,
+    state: &AppState,
+) -> ControlResult<()> {
     let (audio, _) = state.audio_routing.snapshot();
     if let Some(routing) = audio {
         doc.insert(
@@ -393,11 +422,35 @@ pub(crate) fn compose_document_unredacted(state: &AppState) -> ControlResult<ser
             })?,
         );
     }
-    // The composition is returned with secrets INTACT. The redaction for the
-    // outward-facing export happens in `compose_export_document`; the Running
-    // snapshot (`compose_running_config`) keeps the real credentials so a
-    // resume reload works (the atomic writer tightens the file's mode).
-    Ok(document)
+    doc.insert(
+        "salvos".to_owned(),
+        serde_json::to_value(
+            state
+                .salvos
+                .list()?
+                .into_iter()
+                .map(|v| v.salvo)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| {
+            crate::error::ControlError::Repository(format!("serializing the salvos: {e}"))
+        })?,
+    );
+    doc.insert(
+        "tally_profiles".to_owned(),
+        serde_json::to_value(
+            state
+                .tally_profiles
+                .list()?
+                .into_iter()
+                .map(|v| v.profile)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| {
+            crate::error::ControlError::Repository(format!("serializing the tally profiles: {e}"))
+        })?,
+    );
+    Ok(())
 }
 
 /// `GET /api/v1/config/watch-status` — the config-file watch status

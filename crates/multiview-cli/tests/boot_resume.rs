@@ -141,11 +141,13 @@ fn resume_falls_back_to_boot_when_active_is_missing() {
 }
 
 /// Review M1 — resume staleness: the storeless restart-only sections
-/// (`control`, `placement`, `salvos`, `tally_profiles`, `walls`, `routing`,
-/// `schema_version`) must be spliced from the BOOT file into the resumed
-/// Running document — a boot-file `[control] listen` edit must take effect on
-/// the restart the operator performed, while the live sections still resume
-/// from `active.toml`.
+/// (`control`, `placement`, `walls`, `routing`, `schema_version`) must be
+/// spliced from the BOOT file into the resumed Running document — a boot-file
+/// `[control] listen` edit must take effect on the restart the operator
+/// performed, while the live sections still resume from `active.toml`.
+/// (ADR-W024 round 6: `salvos`/`tally_profiles` are store-backed running state
+/// resumed from `active.toml`, no longer spliced — covered by the control-plane
+/// `boot_config_model` suite.)
 #[test]
 fn resume_splices_storeless_sections_from_the_boot_file() {
     // The previous run persisted active.toml under the OLD listen; the
@@ -178,20 +180,101 @@ fn resume_splices_storeless_sections_from_the_boot_file() {
 }
 
 /// Review M1 fallback branch: when the splice produces a document that no
-/// longer validates (here: boot's salvo recalls a source the persisted
-/// Running state no longer carries), the run falls back to the boot document
-/// with the reason surfaced — never starts from an invalid combination.
+/// longer validates, the run falls back to the boot document with the reason
+/// surfaced — never starts from an invalid combination.
+///
+/// ADR-W024 round 6: `salvos`/`tally_profiles` are NO LONGER spliced (they are
+/// store-backed running state that resumes from `active.toml`), so the invalid
+/// combination is now driven by a STILL-spliced section — the `[routing]` block.
+/// Boot is a two-cell grid (cell_a ← in_a, cell_b ← in_b) with a routing video
+/// crosspoint `cell_b ← in_b`; the persisted Running state (`active.toml`)
+/// dropped cell_b + in_b live (a valid single-cell document with no routing).
+/// Layout/cells resume from `active.toml` (live-sheddable, not spliced) so the
+/// resumed document has only cell_a/in_a, but `routing` SPLICES from boot and
+/// now references the dropped cell_b/in_b → the splice no longer validates →
+/// fallback to boot.
 #[test]
 fn resume_falls_back_when_the_splice_does_not_validate() {
-    let boot = format!(
-        "{}[[sources]]\nid = \"in_b\"\nkind = \"bars\"\n[[salvos]]\nid = \"s1\"\n\
-         [[salvos.sources]]\ncell = \"cell_a\"\ninput_id = \"in_b\"\n",
-        boot_doc("start = \"resume\"")
-    );
-    // The previous run removed in_b live; its persisted Running state has
-    // neither in_b nor any salvos (machine-written, valid on its own).
-    let active = boot_doc("start = \"resume\"").replace("#101418", "#f0f0f0");
-    let (_dir, boot_path, boot_config) = stage(&boot, Some(&active));
+    let boot = r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr"]
+areas = ["a b"]
+[control]
+listen = "[::1]:0"
+start = "resume"
+[[sources]]
+id = "in_a"
+kind = "solid"
+color = "#101418"
+[[sources]]
+id = "in_b"
+kind = "bars"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[cells]]
+id = "cell_b"
+area = "b"
+[cells.source]
+input_id = "in_b"
+[[routing.video]]
+cell = "cell_b"
+source = { input_id = "in_b", kind = { kind = "video" } }
+[[outputs]]
+kind = "hls"
+path = "/tmp/boot-resume.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##
+    .to_owned();
+    // The previous run removed cell_b + in_b live; its persisted Running state
+    // is a valid single-cell document with neither and no routing. The spliced
+    // boot `[routing]` then references the missing cell_b/in_b.
+    let active = r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[control]
+listen = "[::1]:0"
+start = "resume"
+[[sources]]
+id = "in_a"
+kind = "solid"
+color = "#f0f0f0"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[outputs]]
+kind = "hls"
+path = "/tmp/boot-resume.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##;
+    let (_dir, boot_path, boot_config) = stage(&boot, Some(active));
 
     let start = resolve_start_config(boot_config, boot.clone(), &boot_path);
     assert!(
@@ -210,6 +293,53 @@ fn resume_falls_back_when_the_splice_does_not_validate() {
         Some("#101418"),
         "Running must fall back to the boot document"
     );
+}
+
+/// ADR-W024 round 6 (F1): `salvos` and `tally_profiles` are store-backed running
+/// state and MUST resume FROM `active.toml`, never be spliced back to the boot
+/// file's copy — a runtime salvo/tally edit (persisted to `active.toml`) must
+/// survive a `resume` restart. Boot declares salvo `s1` + tally profile `tp1`;
+/// the operator edited both live (a renamed salvo, a profile that drops a
+/// binding), so `active.toml` carries the EDITED definitions. After resume the
+/// Running document must reflect `active.toml`'s definitions, not boot's.
+#[test]
+fn resume_keeps_runtime_salvo_and_tally_edits_from_active() {
+    // Boot: salvo "s1" (display "Boot name") + tally profile "tp1" with two
+    // index bindings. `[control] start = "resume"`.
+    let boot = format!(
+        "{}[[salvos]]\nid = \"s1\"\ndisplay_name = \"Boot name\"\n\
+         [[salvos.tally]]\ncell = \"cell_a\"\ncolor = \"Red\"\n\
+         [[tally_profiles]]\nid = \"tp1\"\n\
+         [[tally_profiles.index_cells]]\nindex = 0\ncell = \"cell_a\"\n",
+        boot_doc("start = \"resume\"")
+    );
+    // active.toml = the persisted Running state after live edits: the salvo was
+    // renamed, and the tally profile kept only index 0 (a real machine-written
+    // valid document on its own).
+    let active = format!(
+        "{}[[salvos]]\nid = \"s1\"\ndisplay_name = \"Edited live\"\n\
+         [[salvos.tally]]\ncell = \"cell_a\"\ncolor = \"Green\"\n\
+         [[tally_profiles]]\nid = \"tp1\"\n\
+         [[tally_profiles.index_cells]]\nindex = 0\ncell = \"cell_a\"\n",
+        boot_doc("start = \"resume\"").replace("#101418", "#f0f0f0")
+    );
+    let (_dir, boot_path, boot_config) = stage(&boot, Some(&active));
+
+    let start = resolve_start_config(boot_config, boot.clone(), &boot_path);
+    assert!(start.resumed, "the valid active.toml must resume");
+    let salvo = start
+        .running
+        .salvos
+        .iter()
+        .find(|s| s.id == "s1")
+        .expect("the resumed Running state carries the salvo");
+    assert_eq!(
+        salvo.display_name.as_deref(),
+        Some("Edited live"),
+        "the runtime salvo edit must resume from active.toml, NOT be spliced back to the boot copy"
+    );
+    // The live sections still resume from active.toml (the recolor too).
+    assert_eq!(in_a_color(&start.running).as_deref(), Some("#f0f0f0"));
 }
 
 /// The default policy is `boot`: an existing `active.toml` is IGNORED unless

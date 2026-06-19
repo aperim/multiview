@@ -370,26 +370,39 @@ implementation:
     snapshot-backed section (sources, overlays, **canvas/layout/cells**) from the snapshot,
     validates the result, and writes it. It never writes the live store directly.
 
-  **Complete-coverage proof.** Every section `compose_document_unredacted` writes, classified —
-  *live-sheddable* (MUST be snapshot-backed per landed delta), *restart-only* (the store == the
-  adopted state because its change never applies live, so it is composed straight from the store),
-  or *runtime* (not composed into `active.toml` at all):
+  **Complete-coverage proof — DERIVED from the routes + the file-watch, not hand-enumerated
+  (round 6).** Every section `compose_document_unredacted` writes is classified by *how it
+  mutates at runtime*, which must agree across THREE places: the compose source, the resume
+  splice (`multiview-cli/src/boot.rs::splice_storeless_sections`), and the file-watch
+  changed-section handling. The classes:
+  *live-sheddable* (a REST/file mutation submits an engine command that can `EngineBusy` — MUST be
+  snapshot-backed per landed delta, composed from the snapshot); *always-commit store-backed* (a
+  pure control-plane store edit with **no** engine command — the store IS the adopted state by
+  construction, composed straight from the store, resumed from `active.toml`, never spliced);
+  *restart-only store-backed* (store-backed but the engine only adopts on the next start, which IS
+  the resume — store == adopted, composed from the store); *static* (no store, no REST write —
+  carried verbatim from the immutable `base_document` and spliced from boot on resume); or
+  *runtime* (engine-runtime state, not composed into `active.toml` at all).
 
-  | Section(s) composed | Live engine command? | Class | Snapshot-backed? |
-  |---|---|---|---|
-  | `sources` | `UpsertSource`/`RemoveSource` (synthetic + network on a full run) — **sheddable** | live-sheddable | **yes** (`adopt_source`/`unadopt_source`) |
-  | `overlays` | `UpsertOverlay`/`RemoveOverlay` (rendering kinds) — **sheddable** | live-sheddable | **yes** (`adopt_overlay`/`unadopt_overlay`) |
-  | `canvas` + `layout` + `cells` | `ApplyLayout` — **sheddable** | live-sheddable | **yes** (`adopt_layout`) |
-  | `outputs` | none (output reconfig is restart) | restart-only | no — store == adopted |
-  | `probes`, `devices`, `sync_groups` | none | restart-only | no — store == adopted |
-  | `audio` (audio-routing) | none (PUT defers to restart) | restart-only | no — store == adopted |
-  | `schema_version`, `control`, `placement`, `salvos`, `tally_profiles`, `walls`, `routing` | none — carried verbatim from the immutable `base_document` | restart-only/static | no — never runtime-mutated |
-  | tally state, salvo arm/take, routing crosspoints | engine-runtime only | runtime | n/a — not composed into `active.toml` |
+  | Section(s) composed | Runtime mutation (route → engine command?) | Class | active.toml compose source | Resume | File-watch |
+  |---|---|---|---|---|---|
+  | `sources` | `POST/PUT/DELETE /sources/{id}` → `UpsertSource`/`RemoveSource` (synthetic) — **sheddable** | live-sheddable | adopted snapshot (`adopt_source`/`unadopt_source`) | from active.toml | `apply_source_changes` (submit + adopt on land) |
+  | `overlays` | `POST/PUT/DELETE /overlays/{id}` → `UpsertOverlay`/`RemoveOverlay` — **sheddable** | live-sheddable | adopted snapshot (`adopt_overlay`/`unadopt_overlay`) | from active.toml | `apply_overlay_changes` (submit + adopt on land — round 6 / F2, mirrors REST) |
+  | `canvas` + `layout` + `cells` | `PUT /layouts/{id}` → `ApplyLayout` — **sheddable** | live-sheddable | adopted snapshot (`adopt_layout`) | from active.toml | `apply_layout_change` (submit + adopt on land) |
+  | `salvos` | `PUT/DELETE /salvos/{id}` → **no engine command** (arm/take/cancel submit recall cmds, never the definition) | always-commit store-backed | **the store** (round 6 / F1) | from active.toml (NOT spliced) | `resync_salvos` (store reseed; restart-pending recall) |
+  | `tally_profiles` | `PUT/DELETE /tally/profiles/{id}` → **no engine command** (override submits a runtime cmd, never the profile) | always-commit store-backed | **the store** (round 6 / F1) | from active.toml (NOT spliced) | `resync_tally_profiles` (store reseed) |
+  | `outputs` | `POST/PUT/DELETE /outputs/{id}` → none (output reconfig is restart) | restart-only store-backed | the store | from active.toml | `resync_store` (restart-pending) |
+  | `probes`, `devices`, `sync_groups` | their CRUD routes → none | restart-only store-backed | the store | from active.toml | `resync_store` (restart-pending) |
+  | `audio` (audio-routing) | `PUT /audio-routing` → none (defers to restart) | restart-only store-backed | the store | from active.toml | `resync_audio` (restart-pending) |
+  | `schema_version`, `control`, `placement`, `walls`, `routing` (the `[routing]` config block) | no store, no REST write (`/routing/{kind}/take` submits only runtime `Route*` crosspoints) | static | verbatim from `base_document` | **spliced from boot** | restart-pending only |
+  | tally lamp state, salvo arm/take, routing crosspoints | engine-runtime only | runtime | n/a — not composed | n/a | n/a |
 
-  No live-sheddable section is unbacked, and no restart-only section is wrongly backed: a
-  restart-only change keeps the store (ADR-W018) and `active.toml` composes it from the store
-  (the engine adopts restart-only changes only on the next start, which IS the resume — so the
-  store and the running state agree at resume time).
+  No live-sheddable section is unbacked; every always-commit/restart-only section is composed from
+  its store (store == adopted by construction); and the compose source, the resume splice, and the
+  file-watch handling agree per section. A runtime-mutable section that was store-backed in one
+  place but static in another (round 6: `salvos`/`tally_profiles` were composed verbatim, spliced
+  from boot, and not file-watch-resynced — so a runtime edit was LOST on resume) re-introduces the
+  unadopted/lost-state leak; the derived table is the compiler-adjacent check against that.
 
   **Adversarial self-check (all four sequences):**
   - *seq-1 over-adoption (shed `DELETE /sources/in_a` → drain → unrelated source/overlay upsert
@@ -415,3 +428,39 @@ implementation:
 * **The ADR's claims are made true (MINOR-D).** Graceful teardown runs on `SIGTERM` as well
   as Ctrl-C (`docker stop` / systemd), and the boot path is canonicalized at startup so a
   symlinked config is promoted at its real target file.
+
+### Round-6 under-adoption fixes (the re-panel after round 5)
+
+Round 4 missed `layout`; round 5 closed `layout` but the re-panel found three more
+runtime-mutable sections whose ADOPTED state `active.toml` still failed to capture. The lesson:
+**do not hand-enumerate the composed sections — DERIVE the classification from the routes and the
+file-watch**, because a misclassification hides wherever the compose source, the resume splice,
+and the file-watch handling silently disagree. The round-6 coverage table above is that derivation
+(every `state.<store>` with a runtime mutation path, classified, with all three call sites checked
+to agree). The three fixes:
+
+* **F1 — `salvos` + `tally_profiles` were lost on resume (correctness).** Their definition routes
+  (`PUT/DELETE /api/v1/salvos/{id}`, `PUT/DELETE /api/v1/tally/profiles/{id}`) are pure
+  control-plane store edits with **no** engine command (the salvo arm/take/cancel and the tally
+  override submit *runtime recall/lamp* commands, never the definition), so the store IS the
+  adopted state. But round 5 took both VERBATIM from `base_document`, spliced them from boot on
+  resume, and never file-watch-resynced them — three places all treating them as *static*. They
+  are now *always-commit store-backed*, exactly like `outputs`: seeded from the config in
+  `seed_resources`, composed FROM the store in `compose_document_unredacted`, audited on every
+  definition mutation (so the one persist choke point fires), reseeded by the file-watch
+  (`resync_salvos`/`resync_tally_profiles`), and resumed from `active.toml` (removed from
+  `splice_storeless_sections`). No snapshot backing is needed — a pure store edit cannot shed, so
+  store == adopted by construction.
+* **F2 — the file-watch `overlays` branch diverged from the REST overlay routes (concurrency).**
+  The REST routes submit `UpsertOverlay`/`RemoveOverlay` and adopt per landed delta on an
+  overlay-capable run, but round 5's watcher handled the `overlays` changed-section as a
+  restart-only store reseed — so a live overlay edit arriving through the watched boot file never
+  entered `active.toml`. The watcher now applies overlays through `apply_overlay_changes`, which
+  mirrors the REST path exactly: with a live overlay capability it submits per-overlay
+  `UpsertOverlay`/`RemoveOverlay` and adopts/unadopts each LANDED delta (a shed counts toward the
+  M1 retry and keeps the section restart-pending); with no capability it stays honest restart-only.
+  Watcher, REST, and the snapshot now agree.
+* **F3 — the shed-REST-source test was a tautology (rule 19).** It only filled the bus and
+  asserted a value that was never submitted was absent. It now ACTUALLY performs the recolor over
+  the full bus (committing the store and shedding the engine command) and asserts the store
+  committed, so it genuinely exercises the shed-REST path the adopted-snapshot gate guards.
