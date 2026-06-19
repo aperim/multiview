@@ -65,8 +65,9 @@ impl RunningPersist {
 async fn await_shutdown_signal() -> &'static str {
     #[cfg(unix)]
     {
-        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        {
+        let mut term = match tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ) {
             Ok(term) => term,
             Err(error) => {
                 // Registering the SIGTERM handler failed (rare); fall back to
@@ -680,7 +681,10 @@ async fn run_pipeline_until_ctrl_c(
     let stop_for_signal = stop.clone();
     let signal = tokio::spawn(async move {
         let which = await_shutdown_signal().await;
-        tracing::info!(signal = which, "stop signal received; stopping after the current frame");
+        tracing::info!(
+            signal = which,
+            "stop signal received; stopping after the current frame"
+        );
         stop_for_signal.stop();
     });
 
@@ -1036,7 +1040,10 @@ async fn run_software_until_ctrl_c(
     let stop_for_signal = stop.clone();
     let signal = tokio::spawn(async move {
         let which = await_shutdown_signal().await;
-        tracing::info!(signal = which, "stop signal received; stopping after the current frame");
+        tracing::info!(
+            signal = which,
+            "stop signal received; stopping after the current frame"
+        );
         stop_for_signal.stop();
     });
 

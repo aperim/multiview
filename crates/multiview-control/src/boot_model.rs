@@ -399,8 +399,7 @@ pub fn persist_loaded(model: &BootModel) -> Result<(), String> {
         .to_toml()
         .map_err(|e| format!("rendering the Loaded snapshot: {e}"))?;
     let dir = model.state_dir();
-    create_state_dir(&dir)
-        .map_err(|e| format!("creating the state dir {}: {e}", dir.display()))?;
+    create_state_dir(&dir).map_err(|e| format!("creating the state dir {}: {e}", dir.display()))?;
     write_atomic(&model.loaded_path(), &toml)
         .map_err(|e| format!("writing {}: {e}", model.loaded_path().display()))
 }

@@ -1232,7 +1232,9 @@ async fn first_persist_writes_state_files_0600_in_a_0700_dir() {
     // A fresh deployment: no .multiview dir yet.
     let model = r.state.boot_model.clone().expect("rig wires a boot model");
     persist_loaded(&model).expect("persist loaded");
-    persist_running_now(&r.state).await.expect("persist running");
+    persist_running_now(&r.state)
+        .await
+        .expect("persist running");
 
     let state_dir = model.state_dir();
     let loaded = model.loaded_path();
@@ -1696,11 +1698,19 @@ async fn promote_concurrent_with_revert_commits_a_consistent_snapshot() {
         ),
         send(
             &router_v,
-            post_idem("/api/v1/config/revert-to-start", OPERATOR_TOKEN, Some("revert-x")),
+            post_idem(
+                "/api/v1/config/revert-to-start",
+                OPERATOR_TOKEN,
+                Some("revert-x")
+            ),
         ),
     );
     assert_eq!(promote_resp.status(), StatusCode::OK, "promote succeeds");
-    assert_eq!(revert_resp.status(), StatusCode::ACCEPTED, "revert is accepted");
+    assert_eq!(
+        revert_resp.status(),
+        StatusCode::ACCEPTED,
+        "revert is accepted"
+    );
     let promote_body = body_json(promote_resp).await;
     let committed_rev = promote_body["revision"]
         .as_u64()
@@ -1710,7 +1720,9 @@ async fn promote_concurrent_with_revert_commits_a_consistent_snapshot() {
     let boot_text = std::fs::read_to_string(&r.boot_path).expect("read boot file");
     let boot_config =
         MultiviewConfig::load_from_toml(&boot_text).expect("the promoted boot file parses");
-    boot_config.validate().expect("the promoted boot file validates");
+    boot_config
+        .validate()
+        .expect("the promoted boot file validates");
 
     // The committed `boot` revision must equal the document promote wrote to the
     // boot file (compose → write → commit was one atomic critical section; a
@@ -1718,7 +1730,10 @@ async fn promote_concurrent_with_revert_commits_a_consistent_snapshot() {
     let revision = r
         .state
         .config_versions
-        .get("boot", multiview_control::versioning::RevisionId::new(committed_rev))
+        .get(
+            "boot",
+            multiview_control::versioning::RevisionId::new(committed_rev),
+        )
         .expect("the committed boot revision is retrievable");
     let committed_config: MultiviewConfig =
         serde_json::from_value(revision.document.clone()).expect("the committed doc is a config");
