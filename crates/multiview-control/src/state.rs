@@ -33,8 +33,9 @@ use crate::nmos::NmosRegistry;
 use crate::pending_actions::{InMemoryPendingActions, PendingActionRepository};
 use crate::repository::{InMemoryRepository, LayoutInput, Repository};
 use crate::resource_store::{
-    InMemoryDeviceStore, InMemoryOutputStore, InMemoryOverlayStore, InMemoryProbeStore,
-    InMemorySourceStore, InMemorySyncGroupStore, ResourceInput, ResourceRepository,
+    InMemoryDeviceStore, InMemoryMediaPlayerStore, InMemoryOutputStore, InMemoryOverlayStore,
+    InMemoryProbeStore, InMemorySourceStore, InMemorySyncGroupStore, ResourceInput,
+    ResourceRepository,
 };
 use crate::router::RouteTable;
 use crate::salvo_store::{InMemorySalvoStore, SalvoRepository};
@@ -156,6 +157,10 @@ pub struct SeededResources {
     /// The `sync-groups` store, one resource per `config.sync_groups`
     /// (presentation-sync groups, ADR-M008/M010).
     pub sync_groups: Arc<dyn ResourceRepository>,
+    /// The `media-players` registry, one resource per `config.media_players`
+    /// (pre-declared player channels, ADR-0057 / ADR-0097). Read-mostly: the
+    /// transport + vamp-exit routes look players up here for existence + BOLA.
+    pub media_players: Arc<dyn ResourceRepository>,
     /// The device **status** registry, seeded with one `ADOPTING` runtime row
     /// per `config.devices` so a freshly-booted control plane answers
     /// `GET /devices/{id}/status` before any driver probe. Runtime state only —
@@ -299,6 +304,8 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         )?;
     }
 
+    let media_players = seed_media_players(config)?;
+
     let outputs = InMemoryOutputStore::new();
     for (index, output) in config.outputs.iter().enumerate() {
         // Outputs carry no intrinsic id in the config schema; assign a stable,
@@ -338,6 +345,7 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         probes: Arc::new(probes),
         devices: Arc::new(devices),
         sync_groups: Arc::new(sync_groups),
+        media_players: Arc::new(media_players),
         device_status: Arc::new(device_status),
         audio: Arc::new(AudioRoutingStore::seeded(config.audio.clone())),
         salvos: Arc::new(salvos),
@@ -353,6 +361,32 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
             config.canvas.fps,
         ),
     })
+}
+
+/// Seed the `media-players` registry, one resource per `config.media_players`
+/// (pre-declared player channels, ADR-0057 / ADR-0097). The body is the typed
+/// [`MediaPlayer`](multiview_config::MediaPlayer) serialized to canonical JSON
+/// (round-trips back to `MediaPlayer`). Config validation (run before this)
+/// already enforced unique player ids and the MVP cap, so the `create` calls
+/// cannot collide; a serialization fault surfaces as
+/// [`ControlError::Repository`] rather than a panic.
+///
+/// # Errors
+///
+/// [`ControlError::Repository`] if a player fails to serialize, and any
+/// [`ControlError`] a backing `create` surfaces.
+fn seed_media_players(config: &MultiviewConfig) -> ControlResult<InMemoryMediaPlayerStore> {
+    let media_players = InMemoryMediaPlayerStore::new();
+    for player in &config.media_players {
+        media_players.create(
+            &player.id,
+            ResourceInput {
+                name: player.id.clone(),
+                body: to_body(player)?,
+            },
+        )?;
+    }
+    Ok(media_players)
 }
 
 /// Seed the single working layout (canvas + grid/layout strategy + cells) into
@@ -523,6 +557,12 @@ pub struct AppState {
     /// presentation-sync groups, ADR-M008/M010). The body is a
     /// `multiview_config::SyncGroup`.
     pub sync_groups: Arc<dyn ResourceRepository>,
+    /// The media-players registry (read-mostly, seeded from
+    /// `config.media_players`; ADR-0057 / ADR-0097). The transport + vamp-exit
+    /// routes look a player up here for the existence check (`404` on an unknown
+    /// id) and per-object authorization (BOLA) before submitting to the engine.
+    /// The body is a `multiview_config::MediaPlayer`.
+    pub media_players: Arc<dyn ResourceRepository>,
     /// The latest-wins device **status** registry (runtime state, never
     /// persisted/exported): the conflated `device.status` lane's backing store
     /// and `GET /devices/{id}/status`'s cold-snapshot source. Bounded, control-
@@ -855,6 +895,7 @@ impl AppState {
             probes: Arc::new(InMemoryProbeStore::new()),
             devices: Arc::new(InMemoryDeviceStore::new()),
             sync_groups: Arc::new(InMemorySyncGroupStore::new()),
+            media_players: Arc::new(InMemoryMediaPlayerStore::new()),
             device_status: Arc::new(DeviceStatusRegistry::new()),
             discovery: Arc::new(DiscoveryInventory::default()),
             discovery_browser: Arc::new(NullBrowser),
@@ -1376,6 +1417,14 @@ impl AppState {
         self
     }
 
+    /// Replace the media-players registry (e.g. to share one store with a test,
+    /// or to install the one seeded from `config.media_players`).
+    #[must_use]
+    pub fn with_media_player_store(mut self, media_players: Arc<dyn ResourceRepository>) -> Self {
+        self.media_players = media_players;
+        self
+    }
+
     /// Replace the device status registry (e.g. to share one with a driver
     /// poller / broadcaster).
     #[must_use]
@@ -1495,6 +1544,7 @@ impl AppState {
         self.probes = seeded.probes;
         self.devices = seeded.devices;
         self.sync_groups = seeded.sync_groups;
+        self.media_players = seeded.media_players;
         self.device_status = seeded.device_status;
         self.audio_routing = seeded.audio;
         self.salvos = seeded.salvos;

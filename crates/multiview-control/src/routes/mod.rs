@@ -34,6 +34,7 @@ pub mod health;
 pub mod inputs;
 pub mod licence;
 pub mod logs;
+pub mod media_players;
 pub mod mesh;
 pub mod outputs;
 pub mod overlays;
@@ -902,6 +903,23 @@ pub fn api_router() -> Router<AppState> {
         .route("/salvos/{id}/cancel", post(salvos::cancel_salvo))
         // Salvo parity (Conspect §11): fire a named salvo through the bus → 202.
         .route("/salvos/{id}/fire", post(account::fire_salvo))
+        // Media-player transport surface (ADR-0057/ADR-0097): read + the
+        // load/cue/play/pause/stop/seek verbs + the vamp-exit arm/take/cancel
+        // triad, each 202 + op id onto the bounded command bus.
+        .route("/media/players", get(media_players::list_players))
+        .route("/media/players/{id}", get(media_players::get_player))
+        .route("/media/players/{id}/load", post(media_players::load_player))
+        .route("/media/players/{id}/cue", post(media_players::cue_player))
+        .route("/media/players/{id}/play", post(media_players::play_player))
+        .route("/media/players/{id}/pause", post(media_players::pause_player))
+        .route("/media/players/{id}/stop", post(media_players::stop_player))
+        .route("/media/players/{id}/seek", post(media_players::seek_player))
+        .route("/media/players/{id}/exit/arm", post(media_players::arm_exit))
+        .route("/media/players/{id}/exit/take", post(media_players::take_exit))
+        .route(
+            "/media/players/{id}/exit/cancel",
+            post(media_players::cancel_exit),
+        )
         // Per-stream crosspoint routing (RT-11): classify (plan) + apply (take).
         .route("/routing/plan", post(routing::plan_route))
         .route("/routing/{kind}/take", post(routing::take_route))

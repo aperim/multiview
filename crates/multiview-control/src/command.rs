@@ -159,6 +159,65 @@ pub fn resolve_layout_document(
     Ok(ResolvedLayout::new(solved, document))
 }
 
+/// The transport verb a [`Command::MediaTransport`] applies to a media player
+/// (ADR-0057 Decision 4, ADR-0097): the play-deck controls that swap *what* a
+/// pre-declared player channel plays without spawning or tearing an engine-path
+/// thread. Each verb is Class-1 Hot (no encoder reset; invariant #11).
+///
+/// An adjacently/internally-tagged union (`#[serde(tag = "verb")]`, never
+/// `untagged`; house style) so the wire form is unambiguous — e.g.
+/// `{"verb":"load","asset":"opener"}`, `{"verb":"seek","frame":240}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "verb", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MediaTransportVerb {
+    /// Load an asset into the player (does not start playout). Carries the
+    /// asset id to resolve against the media library.
+    Load {
+        /// The media-library asset id to load.
+        asset: String,
+    },
+    /// Cue the player to its in-point (or an explicit frame) and hold there,
+    /// primed for take to air (preview-before-trigger). [`None`] cues the
+    /// asset's declared in-point.
+    Cue {
+        /// The frame to cue to (asset-relative, integer frames at the output
+        /// cadence; ADR-T015), or [`None`] for the declared in-point.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame: Option<u64>,
+    },
+    /// Play forward at the output cadence.
+    Play,
+    /// Pause, holding the current frame.
+    Pause,
+    /// Stop (idle) — re-cue to the in-point; no asset rolls.
+    Stop,
+    /// Seek to a frame and continue in the current transport state. [`None`]
+    /// seeks to the declared in-point.
+    Seek {
+        /// The target frame (asset-relative, integer frames; ADR-T015), or
+        /// [`None`] for the declared in-point.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame: Option<u64>,
+    },
+}
+
+impl MediaTransportVerb {
+    /// A stable machine-readable label for the transport verb (the
+    /// [`Command::kind`] surfaced in a `media_*` 202 body / audit record).
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Load { .. } => "media_load",
+            Self::Cue { .. } => "media_cue",
+            Self::Play => "media_play",
+            Self::Pause => "media_pause",
+            Self::Stop => "media_stop",
+            Self::Seek { .. } => "media_seek",
+        }
+    }
+}
+
 /// A control-plane command destined for the engine.
 ///
 /// These are the management mutations that must be applied on the data plane
@@ -343,6 +402,52 @@ pub enum Command {
         /// The colour to force, or `None` to clear the override.
         color: Option<multiview_core::tally::TallyColor>,
     },
+    /// Drive a pre-declared media player's transport (ADR-0057 Decision 4,
+    /// ADR-0097): load/cue/play/pause/stop/seek. All Class-1 Hot — the engine
+    /// drain writes the player's latest-wins transport slot at a frame
+    /// boundary; the player thread reads it between frames and never paces the
+    /// engine (inv #1/#10). The player channel exists from boot, so a transport
+    /// verb never spawns or tears an engine-path thread (sidesteps ADR-W018).
+    MediaTransport {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The target media-player id.
+        player: String,
+        /// The transport verb to apply (carries its own params).
+        verb: MediaTransportVerb,
+    },
+    /// Arm (stage) a media player's clean vamp exit (ADR-0097 §3): set
+    /// `Vamping.exit_armed = true` so the current vamp lap finishes and the
+    /// player transitions out at the next vamp boundary. Mirrors
+    /// [`Command::ArmSalvo`] — staging an intent, committed at a boundary,
+    /// withdrawable via [`Command::CancelMediaExit`]. Idempotent.
+    ArmMediaExit {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The target media-player id.
+        player: String,
+    },
+    /// Take a media player's vamp exit (ADR-0097 §3): arm **and** request the
+    /// soonest boundary in one verb. Still fires at the next *vamp boundary*,
+    /// never a mid-lap cut (the clean-seam guarantee). Functionally
+    /// [`Command::ArmMediaExit`] on a not-yet-armed vamp. Mirrors
+    /// [`Command::TakeSalvo`].
+    TakeMediaExit {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The target media-player id.
+        player: String,
+    },
+    /// Cancel a media player's previously-armed vamp exit (ADR-0097 §3): set
+    /// `Vamping.exit_armed = false`; the vamp keeps looping. A cancel that
+    /// races a just-fired boundary is a no-op (the boundary won). Mirrors
+    /// [`Command::CancelSalvo`].
+    CancelMediaExit {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The target media-player id.
+        player: String,
+    },
 }
 
 impl Command {
@@ -364,7 +469,11 @@ impl Command {
             | Self::RemoveSource { op, .. }
             | Self::UpsertOverlay { op, .. }
             | Self::RemoveOverlay { op, .. }
-            | Self::SetTallyOverride { op, .. } => op,
+            | Self::SetTallyOverride { op, .. }
+            | Self::MediaTransport { op, .. }
+            | Self::ArmMediaExit { op, .. }
+            | Self::TakeMediaExit { op, .. }
+            | Self::CancelMediaExit { op, .. } => op,
         }
     }
 
@@ -387,6 +496,12 @@ impl Command {
             Self::UpsertOverlay { .. } => "upsert_overlay",
             Self::RemoveOverlay { .. } => "remove_overlay",
             Self::SetTallyOverride { .. } => "set_tally_override",
+            // Media transport: the kind reflects the verb so the 202 body / audit
+            // record names what the player was asked to do.
+            Self::MediaTransport { verb, .. } => verb.kind(),
+            Self::ArmMediaExit { .. } => "arm_media_exit",
+            Self::TakeMediaExit { .. } => "take_media_exit",
+            Self::CancelMediaExit { .. } => "cancel_media_exit",
         }
     }
 

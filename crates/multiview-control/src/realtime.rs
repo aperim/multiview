@@ -34,12 +34,12 @@ use axum::response::{IntoResponse, Response};
 use multiview_core::time::MediaTime;
 use multiview_engine::{EventSubscription, RecvError, TryRecvError};
 use multiview_events::{
-    DeviceStatus, Envelope, Event, FrameKind, Hello, OutputRunState, SalvoPhase, SchemaVersion,
-    Seq, TileSnapshotEntry, TilesSnapshot, Topic,
+    DeviceStatus, Envelope, Event, FrameKind, Hello, MediaPlayerState, OutputRunState, SalvoPhase,
+    SchemaVersion, Seq, TileSnapshotEntry, TilesSnapshot, Topic,
 };
 
 use crate::auth::{Action, Principal};
-use crate::command::{Command, OperationId};
+use crate::command::{Command, MediaTransportVerb, OperationId};
 use crate::devices::DeviceStatusRegistry;
 use crate::state::{AppState, EngineStateSnapshot};
 
@@ -81,6 +81,19 @@ pub enum CorrKey {
         salvo: String,
         /// The lifecycle phase the salvo transitions into.
         phase: SalvoPhase,
+    },
+    /// A media player transitioning into a discrete transport state (the
+    /// outcome of a `MediaTransport`/`ArmMediaExit`/`TakeMediaExit`/
+    /// `CancelMediaExit` whose target state is unambiguous; ADR-0097 §6,
+    /// ADR-RT008). Mirrors [`CorrKey::Salvo`]: the key is derived identically
+    /// from the command (at 202 time) and the matching `media.player_state`
+    /// outcome event, so the op id never enters the `Event` enum.
+    /// `MediaPlayerState` is `Eq + Hash`, so the `CorrKey` derive holds.
+    MediaPlayer {
+        /// The media-player id (must match the outcome `MediaPlayerEvent::player`).
+        player: String,
+        /// The transport state the player transitions into.
+        state: MediaPlayerState,
     },
     /// The running discovery scan's `device.discovered` rows (ADR-RT007):
     /// a **windowed**, multi-event correlation — every row one scan publishes
@@ -132,6 +145,44 @@ impl CorrKey {
                 salvo: salvo.clone(),
                 phase: SalvoPhase::Cancelled,
             }),
+            // Media vamp-exit triad (ADR-0097 §3/§6), mirroring the salvo triad:
+            // arm/take stage the transition to `Vamping { exit_armed: true }`
+            // (take is functionally arm-then-soonest-boundary), cancel unsets it.
+            // Both project to the same `media.player_state` outcome.
+            Command::ArmMediaExit { player, .. } | Command::TakeMediaExit { player, .. } => {
+                Some(Self::MediaPlayer {
+                    player: player.clone(),
+                    state: MediaPlayerState::Vamping { exit_armed: true },
+                })
+            }
+            Command::CancelMediaExit { player, .. } => Some(Self::MediaPlayer {
+                player: player.clone(),
+                state: MediaPlayerState::Vamping { exit_armed: false },
+            }),
+            // Media transport: only verbs with a single unambiguous outcome state
+            // are keyed. play→Playing, pause→Paused, stop→Stopped, cue→Cued.
+            // `load` may resolve to Loading then Cued (ambiguous) and `seek`
+            // leaves the player in its current state — both fall through to None
+            // rather than mis-correlate (ADR-0097 §6 "single unambiguous outcome").
+            Command::MediaTransport { player, verb, .. } => match verb {
+                MediaTransportVerb::Play => Some(Self::MediaPlayer {
+                    player: player.clone(),
+                    state: MediaPlayerState::Playing,
+                }),
+                MediaTransportVerb::Pause => Some(Self::MediaPlayer {
+                    player: player.clone(),
+                    state: MediaPlayerState::Paused,
+                }),
+                MediaTransportVerb::Stop => Some(Self::MediaPlayer {
+                    player: player.clone(),
+                    state: MediaPlayerState::Stopped,
+                }),
+                MediaTransportVerb::Cue { .. } => Some(Self::MediaPlayer {
+                    player: player.clone(),
+                    state: MediaPlayerState::Cued,
+                }),
+                MediaTransportVerb::Load { .. } | MediaTransportVerb::Seek { .. } => None,
+            },
             // Take/cancel of the *armed* salvo: the name is resolved engine-side
             // and unknown here, so it is left uncorrelated rather than guessed.
             Command::TakeSalvo { salvo: None, .. }
@@ -187,6 +238,13 @@ impl CorrKey {
             // The running scan's rows correlate via the windowed Discovery key
             // (recorded at scan start, seq-fenced).
             Event::DeviceDiscovered(_) => Some(Self::Discovery),
+            // A media-player lifecycle transition projects to the same key its
+            // originating command produced (ADR-0097 §6, ADR-RT008): the player
+            // id + the discrete transport state it entered.
+            Event::MediaPlayerState(e) => Some(Self::MediaPlayer {
+                player: e.player.clone(),
+                state: e.state,
+            }),
             _ => None,
         }
     }
@@ -764,6 +822,9 @@ pub fn event_scope_id(event: &Event) -> Option<String> {
         Event::DeviceSync(sync) => Some(sync.device_id.clone()),
         // `timing.status` scopes by the program/output stream the epoch maps.
         Event::TimingStatus(timing) => Some(timing.stream_id.clone()),
+        // A media-player lifecycle event scopes by the player id (ADR-RT008), so
+        // the `ids` filter narrows the coarse `switcher` topic to one player.
+        Event::MediaPlayerState(e) => Some(e.player.clone()),
         // A discovery row has no registry id yet (untrusted inventory): it is
         // correlated to its scan operation via `corr`, never a fabricated id.
         _ => None,
@@ -827,6 +888,10 @@ pub fn topic_for_event(event: &Event) -> Topic {
         | Event::DeviceSync(_)
         | Event::DeviceDiscovered(_)
         | Event::TimingStatus(_) => Topic::Devices,
+        // The broadcast-switcher lifecycle lane (ADR-RT008): a media player's
+        // discrete transport-state transition rides the lossless `switcher`
+        // topic (scoped finer by the player `id`), NOT the `$control` catch-all.
+        Event::MediaPlayerState(_) => Topic::Switcher,
         _ => Topic::Control,
     }
 }
@@ -1411,7 +1476,10 @@ mod media_player_correlation_tests {
             (MediaTransportVerb::Play, MediaPlayerState::Playing),
             (MediaTransportVerb::Pause, MediaPlayerState::Paused),
             (MediaTransportVerb::Stop, MediaPlayerState::Stopped),
-            (MediaTransportVerb::Cue { frame: None }, MediaPlayerState::Cued),
+            (
+                MediaTransportVerb::Cue { frame: None },
+                MediaPlayerState::Cued,
+            ),
             (
                 MediaTransportVerb::Cue { frame: Some(120) },
                 MediaPlayerState::Cued,
@@ -1466,12 +1534,8 @@ mod media_player_correlation_tests {
             player: "vt-1".to_owned(),
         };
         let event = Event::MediaPlayerState(
-            MediaPlayerEvent::new(
-                "vt-1",
-                MediaPlayerState::Vamping { exit_armed: true },
-                240,
-            )
-            .with_asset("opener"),
+            MediaPlayerEvent::new("vt-1", MediaPlayerState::Vamping { exit_armed: true }, 240)
+                .with_asset("opener"),
         );
         assert_eq!(
             CorrKey::for_command(&armed),
@@ -1484,11 +1548,8 @@ mod media_player_correlation_tests {
     fn media_player_state_routes_to_the_switcher_topic_lossless() {
         // ADR-RT008: media.player_state is a lossless lifecycle event on the
         // `switcher` topic — NOT the `$control` catch-all, and NOT high-rate.
-        let event = Event::MediaPlayerState(MediaPlayerEvent::new(
-            "vt-1",
-            MediaPlayerState::Playing,
-            12,
-        ));
+        let event =
+            Event::MediaPlayerState(MediaPlayerEvent::new("vt-1", MediaPlayerState::Playing, 12));
         assert_eq!(topic_for_event(&event), Topic::Switcher);
         assert!(
             !Topic::Switcher.is_high_rate(),
@@ -1504,11 +1565,8 @@ mod media_player_correlation_tests {
     fn media_player_state_scopes_its_envelope_id_by_player() {
         // The envelope `id` scope is the player id (ADR-RT008), so the `ids`
         // filter narrows the coarse `switcher` topic to one player.
-        let event = Event::MediaPlayerState(MediaPlayerEvent::new(
-            "vt-2",
-            MediaPlayerState::Cued,
-            0,
-        ));
+        let event =
+            Event::MediaPlayerState(MediaPlayerEvent::new("vt-2", MediaPlayerState::Cued, 0));
         assert_eq!(event_scope_id(&event).as_deref(), Some("vt-2"));
     }
 }

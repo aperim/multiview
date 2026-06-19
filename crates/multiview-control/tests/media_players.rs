@@ -228,11 +228,7 @@ async fn exit_arm_unknown_player_is_404_and_enqueues_nothing() {
     let (mut h, _store) = harness_with_players(&[]);
     let resp = send(
         &h.router,
-        post_if_match(
-            "/api/v1/media/players/ghost/exit/arm",
-            OPERATOR_TOKEN,
-            None,
-        ),
+        post_if_match("/api/v1/media/players/ghost/exit/arm", OPERATOR_TOKEN, None),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
