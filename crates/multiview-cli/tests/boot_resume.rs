@@ -186,13 +186,13 @@ fn resume_splices_storeless_sections_from_the_boot_file() {
 /// ADR-W024 round 6: `salvos`/`tally_profiles` are NO LONGER spliced (they are
 /// store-backed running state that resumes from `active.toml`), so the invalid
 /// combination is now driven by a STILL-spliced section — the `[routing]` block.
-/// Boot is a two-cell grid (cell_a ← in_a, cell_b ← in_b) with a routing video
-/// crosspoint `cell_b ← in_b`; the persisted Running state (`active.toml`)
-/// dropped cell_b + in_b live (a valid single-cell document with no routing).
-/// Layout/cells resume from `active.toml` (live-sheddable, not spliced) so the
-/// resumed document has only cell_a/in_a, but `routing` SPLICES from boot and
-/// now references the dropped cell_b/in_b → the splice no longer validates →
-/// fallback to boot.
+/// Boot is a two-cell grid (`cell_a` ← `in_a`, `cell_b` ← `in_b`) with a routing
+/// video crosspoint `cell_b` ← `in_b`; the persisted Running state
+/// (`active.toml`) dropped `cell_b` + `in_b` live (a valid single-cell document
+/// with no routing). Layout/cells resume from `active.toml` (live-sheddable, not
+/// spliced) so the resumed document has only `cell_a`/`in_a`, but `routing`
+/// SPLICES from boot and now references the dropped `cell_b`/`in_b` → the splice
+/// no longer validates → fallback to boot.
 #[test]
 fn resume_falls_back_when_the_splice_does_not_validate() {
     let boot = r##"schema_version = 1
