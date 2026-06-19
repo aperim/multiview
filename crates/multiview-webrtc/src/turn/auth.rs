@@ -15,7 +15,7 @@
 //!   (config field named so the redactor strips it — see [`crate::config`]).
 
 use base64::Engine;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 
 /// A resolved TURN long-term credential: the `username`/`password` pair plus the

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 
 use crate::error::WebRtcError;
 
@@ -29,7 +29,7 @@ impl SessionId {
     #[must_use]
     pub fn random() -> Self {
         let mut bytes = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         Self(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
     }
 

@@ -17,7 +17,7 @@
 //! out of scope here; API-key + RBAC + per-object authz is the tested surface.
 use std::collections::HashMap;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -237,7 +237,7 @@ impl ApiKeyStore {
         // documented infallible for `Hmac<_>` (it pads/hashes the key as
         // needed), so the `let-else` fallback below is defensive and never
         // taken — but it keeps this method total without `unwrap`/`expect`.
-        let Ok(mut mac) = <HmacSha256 as Mac>::new_from_slice(&self.pepper) else {
+        let Ok(mut mac) = <HmacSha256 as KeyInit>::new_from_slice(&self.pepper) else {
             return Vec::new();
         };
         mac.update(secret.as_bytes());
