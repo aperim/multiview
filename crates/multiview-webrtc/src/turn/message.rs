@@ -17,9 +17,9 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use md5::{Digest, Md5};
-use rand::RngCore;
+use rand::Rng;
 use sha1::Sha1;
 
 use crate::error::TurnError;
@@ -191,7 +191,7 @@ impl TransactionId {
     #[must_use]
     pub fn random() -> Self {
         let mut bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         Self(bytes)
     }
 
