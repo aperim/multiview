@@ -82,11 +82,27 @@ chrony on a non-PTP GbE switch typically holds well within the 1 ms bound.
 
 ## Running the acceptance soak
 
-The harness (`scripts/soak-acceptance.sh`) drives a 2-node sync group, scrapes
-each node's telemetry, injects the invariant-#1 chaos (kills PTP/WS mid-soak and
-checks the output cadence never stalls — the nodes free-run on the held epoch),
-and renders the PASS/FAIL verdict with the tested `cargo xtask soak-report`
-analyzer.
+The harness (`scripts/soak-acceptance.sh`) drives a sync group of **≥2 nodes** and
+gates a run on four things:
+
+1. **each node's** per-source `|offset|` p99 ≤ the per-source bound (the
+   `multiview-telemetry::soak` analyzer) — every `--node-metrics` URL is scraped,
+   not just the first;
+2. the **cross-node clock skew** p99 — the max pairwise `|offset_i − offset_j|`
+   per source, per sample — ≤ the same per-source bound (the analyzer). This is
+   the whole point of a *multi-node* soak: two nodes can each track the reference
+   yet be skewed relative to each other, which this leg catches;
+3. **every node's** output-tick counter advanced ≥ the cadence floor each sample
+   across the PTP/WS kill window (the analyzer, invariant #1 — the nodes free-run
+   on the held epoch). The floor defaults to `--sample × --expected-fps` (never 1),
+   so a near-stalled tick counter FAILS;
+4. if `--frame-ocr-hook` is supplied, the burnt-in **cross-node frame-counter
+   skew** it prints (in ns) stays within one frame period at `--expected-fps`
+   (checked in the harness — it is a presentation skew, not a clock offset).
+
+The clock pass/fail maths lives only in the tested `cargo xtask soak-report`
+analyzer; the harness scrapes, derives the cross-node skew, applies the cadence
+floor, and runs the OCR hook around it.
 
 **Verify the wiring (no hardware, CI-safe):**
 
@@ -95,7 +111,10 @@ scripts/soak-acceptance.sh --dry-run
 ```
 
 This feeds bundled fixtures through `soak-report` and asserts a clean capture
-passes while an offset breach and a cadence stall each fail.
+passes while a **single-node offset breach**, a **cross-node skew breach**, and a
+**cadence stall** each fail. The CI `soak harness self-test` job runs `shellcheck`
+plus this `--dry-run`, so the harness→analyzer wiring is exercised on every
+relevant push.
 
 **Real 24 h run (needs ≥2 nodes):**
 
@@ -105,20 +124,35 @@ scripts/soak-acceptance.sh \
   --group sg-livingroom \
   --node-metrics 'http://[node-a]:9090/metrics' \
   --node-metrics 'http://[node-b]:9090/metrics' \
+  --expected-fps 50 \
   --chaos-hook 'ssh node-a systemctl stop ptp4l' \
   --frame-ocr-hook './capture-and-ocr.sh' \
   --duration 86400 --out soak-capture.json
 ```
 
-`cargo xtask soak-report soak-capture.json` re-renders the verdict from a capture
-at any time (exit 0 = PASS, 1 = FAIL).
+`--expected-fps` sets the output cadence (the cadence-floor base **and** the
+frame-skew bound); override the derived floor directly with `--cadence-floor N` if
+needed. `cargo xtask soak-report soak-capture.json` re-renders the clock verdict
+from a capture at any time (exit 0 = PASS, 1 = FAIL).
+
+### The `--frame-ocr-hook` contract
+
+The hook is the operator's physical capture+compare: a command that, each time it
+is called, **prints to stdout one integer** — the current cross-node burnt-in
+frame-counter skew in **nanoseconds** (e.g. from two cameras pointed at the node
+heads + OCR of the DEV-C3 test-pattern counter). The harness **captures** that
+output (it is not discarded) and fails the run if the worst skew exceeds one frame
+period at `--expected-fps`. Omit the hook to run the telemetry legs only; the
+physical visual leg is then simply **absent** (reported as "not run"), never
+silently passed.
 
 ### Hardware-gated
 
-The **physical 24 h execution** — two real nodes on a non-PTP GbE switch, cameras
-capturing the burnt-in frame counter, and OCR comparing cross-node skew — is the
-hardware-validation step (it needs ≥ 2 physical nodes). The harness, the chaos
-extension, and the verdict analyzer ship and are exercised in CI via `--dry-run`;
-the camera capture + OCR is wired through `--frame-ocr-hook`. The burnt-in counter
-itself comes from the sync-group **test-pattern** (DEV-C3), which the harness
-starts over the API.
+The **physical 24 h execution** — two real nodes on a non-PTP GbE switch, the live
+`ptp4l`/`chronyd` discipline under load, and the cameras + OCR feeding
+`--frame-ocr-hook` — is the operator's hardware-validation step (it needs ≥2
+physical nodes). The harness, the cross-node-skew derivation, the chaos extension,
+the cadence floor, and the verdict analyzer ship and are exercised in CI via
+`--dry-run` (the `soak harness self-test` job). The burnt-in counter itself comes
+from the sync-group **test-pattern** (DEV-C3), which the harness starts over the
+API.

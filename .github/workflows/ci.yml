@@ -492,6 +492,29 @@ jobs:
         # or ADR) without pulling a Node/Ruby link-checker toolchain.
         run: ./scripts/check-markdown-links.sh
 
+  soak-harness:
+    name: soak harness self-test (DEV-C4)
+    runs-on: ubuntu-latest
+    # shellcheck (seconds) + a `cargo run -p xtask` build for the --dry-run leg.
+    # The toolchain + xtask build dominate; 20min covers a cold cache.
+    timeout-minutes: 20
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: shellcheck the acceptance-soak harness
+        # The Ubuntu runner ships shellcheck; lint the harness so a quoting/word-
+        # split bug in the real-run scrape/skew path is caught (ADR-R012).
+        run: shellcheck scripts/soak-acceptance.sh
+      - name: soak harness --dry-run (analyzer wiring, no hardware)
+        # Feeds bundled fixtures through `cargo xtask soak-report` and asserts a
+        # clean capture PASSes while a single-node offset breach, a CROSS-NODE
+        # SKEW breach, and a cadence stall each FAIL — the CI-exercised proof that
+        # the harness→analyzer wiring gates a de-synced/stalled deployment.
+        run: ./scripts/soak-acceptance.sh --dry-run
+
   # ── web SPA gates (eslint + tsc + vitest + build) ────────────────────────────
   # Gates the EXISTING web/ scripts (web/package.json): `lint` (eslint
   # --max-warnings=0), an explicit `tsc --noEmit` typecheck, `test` (vitest run),
