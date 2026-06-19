@@ -370,4 +370,73 @@ proptest! {
         // every lap strictly before the arm lap (so at least `arm_lap` wraps).
         prop_assert!(wraps >= arm_lap, "must have looped up to the arm lap");
     }
+
+    /// INVARIANT #1 (the player is SAMPLED, never pacing): under ANY adversarial
+    /// interleaving of transport verbs and decoded/heartbeat ticks, every core
+    /// call returns a well-defined action and **every published/held stamp is
+    /// strictly greater than the previous one** — the core can never emit a
+    /// frozen or backwards timeline that would wedge or time-warp a tile. (The
+    /// core is synchronous by construction — no await, no lock, no internal
+    /// loop — so "never blocks" is structural; this pins the *output* property
+    /// the Conductor's panel must verify: a wedged/looping/paused player still
+    /// yields a monotone, bounded result every tick.)
+    #[test]
+    fn core_never_wedges_and_stamps_never_regress_under_any_command_sequence(
+        ops in proptest::collection::vec(0u8..9, 1..200),
+    ) {
+        let anchor = MediaTime::from_tick(7, cad_25());
+        let mut p = MediaPlayer::new(geom(0, 6, 1, 4), EofPolicy::Loop, anchor);
+        p.play(anchor);
+
+        let mut source_frame = 0u64;
+        let mut last_stamp: Option<i64> = None;
+
+        for op in ops {
+            // Apply an adversarial op. 0..=4 are verbs; 5..=8 advance time.
+            let action = match op {
+                0 => { p.play(anchor); continue; }
+                1 => { p.vamp(anchor); continue; }
+                2 => { p.pause(); continue; }
+                3 => { p.arm_exit(); continue; }
+                4 => { p.cancel_exit(); continue; }
+                5 => { p.stop(); continue; }
+                6 => {
+                    // Decode the next source frame (wrapping the cursor in [0,6)).
+                    let f = source_frame % 6;
+                    source_frame = source_frame.wrapping_add(1);
+                    p.on_decoded(f)
+                }
+                7 => p.on_heartbeat(),
+                _ => {
+                    // Decode the boundary frame deliberately (force a wrap/term).
+                    p.on_decoded(6)
+                }
+            };
+
+            // Every action that carries a stamp must strictly advance it.
+            let stamp = match action {
+                PlayerAction::Publish { at } | PlayerAction::Hold { at } => Some(at.as_nanos()),
+                PlayerAction::SeekFlushTo { frame } => {
+                    // A wrap target is always a real in-point of our geometry.
+                    prop_assert!(frame == 1 || frame == 0, "wrap target must be an in-point");
+                    None
+                }
+                PlayerAction::Ended => None,
+                _ => {
+                    prop_assert!(false, "unexpected action variant");
+                    None
+                }
+            };
+            if let Some(s) = stamp {
+                if let Some(prev) = last_stamp {
+                    prop_assert!(
+                        s > prev,
+                        "stamps must strictly increase (got {} after {})",
+                        s, prev
+                    );
+                }
+                last_stamp = Some(s);
+            }
+        }
+    }
 }
