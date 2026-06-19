@@ -334,6 +334,12 @@ async fn probe(path: &Path) -> Option<Fingerprint> {
 /// The poll loop: debounce (a new fingerprint must be observed on two
 /// consecutive polls), suppress expected writes, and hand a settled change to
 /// [`apply_change`].
+// reason: one cohesive poll/debounce state machine — the fingerprints, the
+// last-observed content, the expected-write suppression, and the two warning
+// latches are read-modify-written across a single linear sequence per tick;
+// splitting it scatters that state across helpers and obscures the ordering
+// that makes it correct (the resume/suppression interplay especially).
+#[allow(clippy::too_many_lines)]
 async fn watch_loop(
     path: PathBuf,
     mut baseline: MultiviewConfig,
@@ -748,7 +754,7 @@ pub fn apply_document_diff(
                 }
             }
             "sync_groups" => {
-                resync_store(state, actor, &state.sync_groups, &desired_sync_groups(next))
+                resync_store(state, actor, &state.sync_groups, &desired_sync_groups(next));
             }
             "audio" => resync_audio(state, actor, next),
             // No store is boot-seeded for these; the file itself is the

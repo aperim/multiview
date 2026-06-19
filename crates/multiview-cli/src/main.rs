@@ -880,6 +880,13 @@ async fn run_pipeline(
 /// A best-effort signal watcher raises the engine's stop flag on Ctrl-C; the
 /// engine checks it once per tick and finishes the current frame cleanly. The
 /// watcher cannot back-pressure the engine (invariant #10).
+// reason: one straight-line run lifecycle — bring up the publisher, the
+// optional control plane + Running persister + watcher, the off-hot-loop
+// pollers, drive the engine, then tear them all down in order. The cohesive
+// sub-units are already extracted (`serve_control_plane`,
+// `shutdown_run_tenants`, `spawn_metrics_retention`); what remains reads best
+// top-to-bottom in one place (matching `run_pipeline_until_ctrl_c`).
+#[allow(clippy::too_many_lines)]
 async fn run_software_until_ctrl_c(
     engine: &mut SoftwareEngine,
     start: &multiview_cli::boot::StartConfig,
