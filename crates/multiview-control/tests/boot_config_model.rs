@@ -1235,10 +1235,21 @@ async fn a_shed_rest_source_upsert_is_not_persisted_as_adopted() {
         "fill the bus"
     );
 
-    // A REST recolor of in_a to a SYNTHETIC colour (a live-appliable kind) whose
-    // UpsertSource sheds on the full bus → ApplyMode::Restart, store mutated,
-    // audit fires running_changed — but the engine never adopted it, so the
-    // adopted snapshot must not gain #3c3c3c.
+    // ACTUALLY perform a REST recolor of in_a to a SYNTHETIC colour (a
+    // live-appliable kind) over the full bus. The route commits the store +
+    // audits (firing running_changed) BUT its UpsertSource sheds →
+    // ApplyMode::Restart, so the engine never adopts #3c3c3c. (F3, rule 19:
+    // the prior version only filled the bus and asserted a value that was never
+    // submitted was absent — a tautology that passed without exercising the
+    // shed-REST path at all. This drives the real mutation so the assertion
+    // genuinely guards the gate.)
+    recolor_in_a(&r, "#3c3c3c").await;
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#3c3c3c"),
+        "the shed REST edit still COMMITS the store (ADR-W018) — only the engine \
+         did not adopt it, so this is a real requested-but-unadopted state"
+    );
 
     // Give the persister several windows to (wrongly) write the unadopted state.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -2291,6 +2302,312 @@ async fn a_restart_only_file_watch_change_is_not_persisted_as_adopted() {
     assert!(
         !text.contains("net1"),
         "active.toml must not persist the restart-only/unadopted file-watch source as adopted, got:\n{text}"
+    );
+    watch.stop();
+    persist.abort();
+}
+
+// ===========================================================================
+// ADR-W024 round 6 — under-adoption fixes. The round-5 re-panel found three
+// runtime-mutable sections whose adopted state `active.toml` failed to capture:
+//   F1. salvos + tally_profiles are runtime-mutable through their definition
+//       PUT/DELETE routes (pure CONTROL-PLANE store edits — no engine command,
+//       so the store IS the adopted state), yet `compose_document_unredacted`
+//       took them VERBATIM from the boot base document, so a runtime salvo /
+//       tally-profile edit was LOST on resume.
+//   F2. the file-watch `overlays` branch was restart-only (resync + restart
+//       accounting) while the REST overlay routes submit `UpsertOverlay`/
+//       `RemoveOverlay` + adopt per-section — so a live overlay edit arriving
+//       via the watched boot file never entered `active.toml`.
+// (F3 strengthens the previously-tautological shed-REST-source test in place.)
+// ===========================================================================
+
+/// A boot document that declares a salvo recall AND a tally profile (both
+/// reference the BOOT_DOC cells), so the runtime-mutable salvo/tally stores are
+/// seeded at start and a later REST edit can be checked for round-trip into
+/// `active.toml`.
+const BOOT_DOC_WITH_RECALLS: &str = r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr"]
+areas = ["a b"]
+[control]
+listen = "[::1]:0"
+[[sources]]
+id = "in_a"
+kind = "solid"
+color = "#101418"
+[[sources]]
+id = "in_b"
+kind = "bars"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[cells]]
+id = "cell_b"
+area = "b"
+[cells.source]
+input_id = "in_b"
+[[outputs]]
+kind = "hls"
+path = "/tmp/boot-config-model.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+[[salvos]]
+id = "recall_a"
+display_name = "Recall A"
+[[salvos.tally]]
+cell = "cell_a"
+color = "Red"
+[[tally_profiles]]
+id = "tp1"
+[[tally_profiles.bit_colors]]
+bit = 0
+color = "Red"
+[[tally_profiles.index_cells]]
+index = 0
+cell = "cell_a"
+"##;
+
+/// ADR-W024 round 6 — F1 (salvos): a salvo definition is runtime-mutable
+/// through `PUT /api/v1/salvos/{id}` (a pure control-plane store edit — no
+/// engine command, so the store IS the adopted state). A runtime edit MUST
+/// round-trip into `active.toml` so a `resume` does not lose it. The round-5
+/// composition took salvos VERBATIM from the boot base document, dropping the
+/// edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_runtime_salvo_edit_persists_to_active_toml() {
+    let r = rig(BOOT_DOC_WITH_RECALLS);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+    let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
+
+    // The seeded salvo persists at startup (it must be composed from the store,
+    // which is seeded from the boot document).
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("recall_a")))
+        .await,
+        "the boot-seeded salvo must be composed into active.toml"
+    );
+
+    // Edit the salvo's display name through the REAL route (GET → ETag → PUT).
+    let resp = send(&r.router, get("/api/v1/salvos/recall_a", OPERATOR_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK, "salvo is readable");
+    let etag = support::etag(&resp).expect("salvo carries an ETag");
+    let resp = send(
+        &r.router,
+        put_json(
+            "/api/v1/salvos/recall_a",
+            OPERATOR_TOKEN,
+            Some(&etag),
+            &serde_json::json!({
+                "id": "recall_a",
+                "display_name": "Recall A v2",
+                "tally": [{ "cell": "cell_a", "color": "Green" }],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "the salvo edit must land");
+
+    // The runtime edit must round-trip into active.toml (a pure store edit is
+    // adopted by construction — no engine command to shed).
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("Recall A v2")))
+        .await,
+        "the runtime salvo edit must persist into active.toml (it is lost on \
+         resume otherwise)"
+    );
+    persist.abort();
+}
+
+/// ADR-W024 round 6 — F1 (tally_profiles): a tally profile is runtime-mutable
+/// through `PUT /api/v1/tally/profiles/{id}` (a pure control-plane store edit).
+/// A runtime edit MUST round-trip into `active.toml`. The round-5 composition
+/// took tally_profiles VERBATIM from the boot base document.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_runtime_tally_profile_edit_persists_to_active_toml() {
+    let r = rig(BOOT_DOC_WITH_RECALLS);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+    let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
+
+    // The seeded tally profile persists at startup (composed from the store).
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("tp1")))
+        .await,
+        "the boot-seeded tally profile must be composed into active.toml"
+    );
+
+    // Add a second index→cell binding through the REAL route. The new index `1`
+    // is a value the seeded profile did not carry, so it is a recognisable edit.
+    let resp = send(
+        &r.router,
+        get("/api/v1/tally/profiles/tp1", OPERATOR_TOKEN),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "tally profile is readable");
+    let etag = support::etag(&resp).expect("tally profile carries an ETag");
+    let resp = send(
+        &r.router,
+        put_json(
+            "/api/v1/tally/profiles/tp1",
+            OPERATOR_TOKEN,
+            Some(&etag),
+            &serde_json::json!({
+                "id": "tp1",
+                "bit_colors": [{ "bit": 0, "color": "Red" }, { "bit": 1, "color": "Green" }],
+                "index_cells": [{ "index": 0, "cell": "cell_a" }, { "index": 1, "cell": "cell_b" }],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "the tally edit must land");
+
+    // The runtime edit must round-trip into active.toml. Assert the new index→
+    // cell_b binding is present (the round-5 verbatim-from-base composition kept
+    // only the boot profile, missing cell_b).
+    assert!(
+        wait_until(SETTLE, || {
+            let Ok(text) = std::fs::read_to_string(&active_path) else {
+                return false;
+            };
+            let Ok(config) = MultiviewConfig::load_from_toml(&text) else {
+                return false;
+            };
+            config
+                .tally_profiles
+                .iter()
+                .find(|p| p.id == "tp1")
+                .is_some_and(|p| p.index_cells.iter().any(|c| c.cell == "cell_b"))
+        })
+        .await,
+        "the runtime tally-profile edit must persist into active.toml"
+    );
+    persist.abort();
+}
+
+/// [`rig`] but with a binary-injected overlay live-apply capability (every
+/// overlay renders), so the file-watch overlay branch CAN apply live — the
+/// posture a full-pipeline run has. The default rig carries no capability
+/// (honest restart-only), which is correct for a store-only run but cannot
+/// exercise the watcher's live overlay path.
+fn rig_with_overlay_live(doc: &str) -> Rig {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let boot_path = dir.path().join("multiview.toml");
+    std::fs::write(&boot_path, doc).expect("write boot config");
+    let config = MultiviewConfig::load_from_toml(doc).expect("parse boot config");
+    config.validate().expect("boot config validates");
+
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
+    let (sender, commands) = command_bus(64);
+    let warnings: Arc<dyn WarningRepository> = Arc::new(InMemoryWarningStore::new());
+    tokio::spawn(run_warning_ingest(
+        publisher.subscribe(),
+        Arc::clone(&warnings),
+    ));
+    let seeded = multiview_control::seed_resources(&config).expect("seed stores");
+    let state = AppState::new(
+        publisher,
+        sender,
+        Arc::new(InMemoryRepository::new()),
+        Arc::new(support::seeded_keys()),
+    )
+    .with_seeded_resources(seeded)
+    .with_base_document(serde_json::to_value(&config).expect("boot doc to JSON"))
+    .with_live_apply(
+        multiview_control::LiveApplyCaps::default()
+            .with_overlays(multiview_control::OverlayLiveCapability::new(|_| true)),
+    )
+    .with_boot_model(Arc::new(BootModel::new(
+        boot_path.clone(),
+        config.clone(),
+        config.clone(),
+        StartMode::Boot,
+        false,
+        None,
+    )));
+    let router = multiview_control::router(state.clone());
+    Rig {
+        _dir: dir,
+        boot_path,
+        config,
+        state,
+        router,
+        commands,
+        warnings,
+    }
+}
+
+/// ADR-W024 round 6 — F2 (watcher overlay parity): on an overlay-capable run a
+/// file-watch edit that ADDS an overlay must be applied LIVE and adopted, so
+/// `active.toml` carries it — exactly as the REST overlay route adopts a landed
+/// `UpsertOverlay`. The round-5 watcher overlay branch was restart-only
+/// (resync + restart accounting only), so a live overlay file-edit never
+/// entered `active.toml`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_watch_overlay_add_is_adopted_on_an_overlay_capable_run() {
+    let r = rig_with_overlay_live(BOOT_DOC);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        WatchOptions::default().with_poll_interval(TEST_POLL),
+    );
+    let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
+
+    // The initial adopted state persists.
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("in_a")))
+        .await,
+        "the initial adopted state persists"
+    );
+
+    // Edit the BOOT file to ADD a clock overlay (a rendering kind on a capable
+    // run). The watcher must submit UpsertOverlay + adopt it (like the REST
+    // route), so it reaches active.toml.
+    let edited = format!(
+        "{BOOT_DOC}[[overlays]]\nid = \"ov_clock\"\nkind = \"clock\"\ntarget = \"canvas\"\n"
+    );
+    assert!(edited.contains("ov_clock"), "the edit must add the overlay");
+    std::fs::write(&r.boot_path, &edited).expect("edit boot file: add an overlay");
+
+    // The watcher reseeds the overlay store (proof the apply ran).
+    assert!(
+        wait_until(SETTLE, || r.state.overlays.get("ov_clock").is_ok()).await,
+        "the watcher must reseed the overlay into the store"
+    );
+
+    // The live overlay edit must be ADOPTED and persisted to active.toml — the
+    // engine drew it (UpsertOverlay landed), so it is part of the running state.
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("ov_clock")))
+        .await,
+        "a live file-watch overlay add must be adopted into active.toml (the \
+         watcher must mirror the REST overlay adopt path)"
     );
     watch.stop();
     persist.abort();
