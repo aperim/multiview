@@ -2506,6 +2506,13 @@ async fn a_runtime_tally_profile_edit_persists_to_active_toml() {
 /// (honest restart-only), which is correct for a store-only run but cannot
 /// exercise the watcher's live overlay path.
 fn rig_with_overlay_live(doc: &str) -> Rig {
+    rig_with_overlay_live_capacity(doc, 64)
+}
+
+/// [`rig_with_overlay_live`] with a chosen command-bus `capacity` — the
+/// overlay-shed-retry test runs at 1 so the first `UpsertOverlay`/`RemoveOverlay`
+/// sheds while the bus is occupied.
+fn rig_with_overlay_live_capacity(doc: &str, capacity: usize) -> Rig {
     let dir = tempfile::tempdir().expect("temp dir");
     let boot_path = dir.path().join("multiview.toml");
     std::fs::write(&boot_path, doc).expect("write boot config");
@@ -2513,7 +2520,7 @@ fn rig_with_overlay_live(doc: &str) -> Rig {
     config.validate().expect("boot config validates");
 
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
-    let (sender, commands) = command_bus(64);
+    let (sender, commands) = command_bus(capacity);
     let warnings: Arc<dyn WarningRepository> = Arc::new(InMemoryWarningStore::new());
     tokio::spawn(run_warning_ingest(
         publisher.subscribe(),
@@ -2605,6 +2612,173 @@ async fn a_file_watch_overlay_add_is_adopted_on_an_overlay_capable_run() {
         "a live file-watch overlay add must be adopted into active.toml (the \
          watcher must mirror the REST overlay adopt path)"
     );
+    watch.stop();
+    persist.abort();
+}
+
+/// ADR-W024 round 7 — F2 retry lost-update (concurrency BLOCKER). A file-watch
+/// overlay ADD whose `UpsertOverlay` SHEDS on the first attempt (bus full) MUST,
+/// on retry, STILL submit the command and end ADOPTED in `active.toml`.
+///
+/// The round-6 `apply_overlay_changes` computed the delta from the MUTATED
+/// overlay store and reseeded the store to `next` BEFORE the retry resolved. On
+/// a shed the file baseline does not advance, but the next retry saw the store
+/// already == `next`, submitted NO `UpsertOverlay`, falsely reported
+/// `all_landed`, cleared restart/incomplete, advanced the baseline — so the shed
+/// overlay edit was silently dropped (never delivered, never adopted). The fix
+/// derives the retry delta from the FILE BASELINE (the `ConfigDiff`, stable
+/// across retries), exactly like the source path, so the retry re-submits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shed_file_watch_overlay_add_is_redelivered_and_adopted_on_retry() {
+    // Capacity-1 bus so the overlay UpsertOverlay sheds while the bus is full.
+    let mut r = rig_with_overlay_live_capacity(BOOT_DOC, 1);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        WatchOptions::default().with_poll_interval(TEST_POLL),
+    );
+    let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
+
+    // Initial adopted state persists (no overlay yet).
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("in_a")))
+        .await,
+        "the initial adopted state persists"
+    );
+
+    // Occupy the capacity-1 bus so the watcher's first UpsertOverlay sheds.
+    assert!(
+        r.state
+            .commands
+            .try_submit(Command::UpsertSource {
+                op: multiview_control::OperationId::new(),
+                source: Box::new(r.config.sources[0].clone()),
+            })
+            .is_ok(),
+        "fill the bus"
+    );
+
+    // Edit the BOOT file to ADD a clock overlay. The watcher applies it, but the
+    // UpsertOverlay SHEDS on the full bus → Retry (baseline NOT advanced).
+    let edited = format!(
+        "{BOOT_DOC}[[overlays]]\nid = \"ov_clock\"\nkind = \"clock\"\ntarget = \"canvas\"\n"
+    );
+    std::fs::write(&r.boot_path, &edited).expect("edit boot file: add an overlay");
+
+    // The watcher reseeds the overlay store even on a shed (the UI mirror follows
+    // the file) — proof the apply attempt ran at least once against the full bus.
+    assert!(
+        wait_until(SETTLE, || r.state.overlays.get("ov_clock").is_ok()).await,
+        "the watcher reseeds the overlay store on the (shed) first attempt"
+    );
+
+    // While the UpsertOverlay is shed-pending, active.toml must NOT yet carry the
+    // overlay — the engine has not adopted it (a shed is not a false success).
+    tokio::time::sleep(TEST_POLL * 3).await;
+    if let Ok(text) = std::fs::read_to_string(&active_path) {
+        assert!(
+            !text.contains("ov_clock"),
+            "active.toml must NOT carry the overlay while its UpsertOverlay is shed-pending"
+        );
+    }
+
+    // Drain the bus: the next retry must RE-DERIVE the delta from the file
+    // baseline (stable), re-submit UpsertOverlay (now it lands), adopt it, and
+    // persist it. The round-6 bug saw the store already == next and dropped it.
+    let _ = r.commands.try_drain();
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("ov_clock")))
+        .await,
+        "after the bus drains, the retry MUST re-deliver the overlay and adopt it \
+         into active.toml — a shed must never silently become a false success"
+    );
+
+    watch.stop();
+    persist.abort();
+}
+
+/// ADR-W024 round 7 — F2 retry lost-update, REMOVAL direction. A file-watch
+/// overlay REMOVE whose `RemoveOverlay` SHEDS on the first attempt MUST, on
+/// retry, still submit the removal and end unadopted (dropped from
+/// `active.toml`). Same root cause as the add case: a removal delta derived from
+/// the already-reseeded store vanishes on retry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shed_file_watch_overlay_remove_is_redelivered_and_adopted_on_retry() {
+    // Boot WITH an overlay so a file edit can REMOVE it.
+    let boot_with_overlay = format!(
+        "{BOOT_DOC}[[overlays]]\nid = \"ov_clock\"\nkind = \"clock\"\ntarget = \"canvas\"\n"
+    );
+    let mut r = rig_with_overlay_live_capacity(&boot_with_overlay, 1);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        WatchOptions::default().with_poll_interval(TEST_POLL),
+    );
+    let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
+
+    // The boot overlay is adopted at start (seeded into the store, composed).
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("ov_clock")))
+        .await,
+        "the boot overlay is adopted at start"
+    );
+
+    // Occupy the capacity-1 bus so the watcher's first RemoveOverlay sheds.
+    assert!(
+        r.state
+            .commands
+            .try_submit(Command::UpsertSource {
+                op: multiview_control::OperationId::new(),
+                source: Box::new(r.config.sources[0].clone()),
+            })
+            .is_ok(),
+        "fill the bus"
+    );
+
+    // Edit the BOOT file to REMOVE the overlay (drop the [[overlays]] block).
+    std::fs::write(&r.boot_path, BOOT_DOC).expect("edit boot file: remove the overlay");
+
+    // The watcher reseeds the store (removes ov_clock) even on a shed.
+    assert!(
+        wait_until(SETTLE, || r.state.overlays.get("ov_clock").is_err()).await,
+        "the watcher reseeds the overlay store (removes it) on the (shed) first attempt"
+    );
+
+    // While the RemoveOverlay is shed-pending, active.toml must STILL carry the
+    // overlay — the engine still renders it (the removal was not adopted).
+    tokio::time::sleep(TEST_POLL * 3).await;
+    if let Ok(text) = std::fs::read_to_string(&active_path) {
+        assert!(
+            text.contains("ov_clock"),
+            "active.toml must KEEP the overlay while its RemoveOverlay is shed-pending"
+        );
+    }
+
+    // Drain the bus: the retry must re-derive the removal from the file baseline,
+    // re-submit RemoveOverlay (now it lands), unadopt it, and drop it from
+    // active.toml.
+    let _ = r.commands.try_drain();
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| !t.contains("ov_clock")))
+        .await,
+        "after the bus drains, the retry MUST re-deliver the removal and drop the \
+         overlay from active.toml — a shed removal must never silently become a false success"
+    );
+
     watch.stop();
     persist.abort();
 }
