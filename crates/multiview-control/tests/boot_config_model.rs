@@ -30,8 +30,8 @@ use axum::http::{header, Request, StatusCode};
 use axum::Router;
 use multiview_config::{MultiviewConfig, StartMode};
 use multiview_control::boot_model::{
-    finish_running_persist, load_resume_config, persist_running_now, spawn_running_persist,
-    write_active_serialized, write_atomic, BootModel,
+    finish_running_persist, load_resume_config, persist_loaded, persist_running_now,
+    spawn_running_persist, write_active_serialized, write_atomic, BootModel,
 };
 use multiview_control::config_watch::{spawn as spawn_watch, WatchOptions};
 use multiview_control::{
@@ -1127,6 +1127,62 @@ async fn promote_preserves_the_boot_file_mode() {
         mode_of(&r.boot_path),
         0o600,
         "promote must preserve the boot file's mode (chmod-600 stays 600)"
+    );
+}
+
+/// MAJOR-A (panel, security): `write_atomic` must create a NEW file at mode
+/// 0600 — not the umask default (typically 0644). `loaded.toml`/`active.toml`
+/// carry the composed Running config WITH secrets intact (WebRTC ICE password,
+/// `static_auth_secret`, WHIP bearer tokens), so a first write at 0644 leaves
+/// those credentials group/world-readable. The existing mode test only covers
+/// PRESERVING an already-0600 destination; this covers the first create.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_atomic_creates_a_new_file_at_mode_600() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("secret-state.toml");
+    write_atomic(&path, "token = \"super-secret\"\n").expect("first write");
+    assert_eq!(
+        mode_of(&path),
+        0o600,
+        "a first-create atomic write must be 0600, not the umask default — \
+         the state files carry plaintext credentials"
+    );
+}
+
+/// MAJOR-A at the persistence layer: a FIRST persist of the Running snapshot
+/// (`active.toml`) and the Loaded snapshot (`loaded.toml`) on a fresh deployment
+/// must produce 0600 files inside a 0700 `.multiview` state dir. Without a
+/// pre-existing destination there is nothing to preserve, so the writer itself
+/// must tighten the mode before any secret bytes land.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_persist_writes_state_files_0600_in_a_0700_dir() {
+    let r = rig(BOOT_DOC);
+    // A fresh deployment: no .multiview dir yet.
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    persist_loaded(&model).expect("persist loaded");
+    persist_running_now(&r.state).await.expect("persist running");
+
+    let state_dir = model.state_dir();
+    let loaded = model.loaded_path();
+    let active = model.active_path();
+    assert!(loaded.exists(), "loaded.toml is written");
+    assert!(active.exists(), "active.toml is written");
+    assert_eq!(
+        mode_of(&loaded),
+        0o600,
+        "loaded.toml (plaintext secrets) must be 0600 on first write"
+    );
+    assert_eq!(
+        mode_of(&active),
+        0o600,
+        "active.toml (plaintext secrets) must be 0600 on first write"
+    );
+    assert_eq!(
+        mode_of(&state_dir),
+        0o700,
+        "the .multiview state dir must be 0700 (its contents carry credentials)"
     );
 }
 
