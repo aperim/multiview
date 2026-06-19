@@ -450,20 +450,20 @@ async fn watch_loop(
             if incomplete_active {
                 // A partial (shed) apply was pending and the ORIGINAL content
                 // returned: nothing is pending for the engine any more, but
-                // the stores may have followed the abandoned content —
-                // re-converge them to the running baseline.
+                // the stores may have followed the abandoned content. Under the
+                // config-mutation lock (so the persister + REST mutations are
+                // ordered against this), re-converge the stores to the running
+                // baseline and re-adopt it into the snapshot (MAJOR-B round 4 /
+                // B-1: WITHOUT re-adopting, the prior shed would freeze
+                // persistence once the file returns to the adopted content).
+                let _mutation = state.lock_config_mutation().await;
                 resync_all_stores(&state, ACTOR, &baseline);
                 clear_apply_incomplete(&state, &path, &mut incomplete_active);
+                if let Some(model) = state.boot_model.as_ref() {
+                    model.adopt_document(&baseline);
+                }
+                state.running_changed.notify_one();
             }
-            // MAJOR-B (unified gate / B-1): the file is at the already-applied
-            // content, so the stores match adopted state — mark adopted and
-            // re-fire so the persister captures it. WITHOUT this, a prior shed's
-            // `requested` advance would leave persistence frozen FOREVER once
-            // the file returns to A (this branch never advanced `adopted`).
-            if let Some(model) = state.boot_model.as_ref() {
-                model.mark_adopted();
-            }
-            state.running_changed.notify_one();
             continue;
         }
         if rejected.as_ref() == Some(&now) {
@@ -529,26 +529,41 @@ async fn watch_loop(
                 );
             }
             if incomplete_active {
+                // MAJOR-B round 4 / B-1: a prior shed was pending and the
+                // content reverted to the last-observed (adopted) state — under
+                // the config-mutation lock, re-converge the stores and re-adopt
+                // the baseline so the prior shed can never freeze persistence
+                // forever.
+                let _mutation = state.lock_config_mutation().await;
                 resync_all_stores(&state, ACTOR, &baseline);
                 clear_apply_incomplete(&state, &path, &mut incomplete_active);
+                if let Some(model) = state.boot_model.as_ref() {
+                    model.adopt_document(&baseline);
+                }
+                state.running_changed.notify_one();
             }
-            // MAJOR-B (unified gate / B-1): the content matches the last-observed
-            // (adopted) state — mark adopted and re-fire so a prior shed's
-            // `requested` advance can never freeze persistence forever.
-            if let Some(model) = state.boot_model.as_ref() {
-                model.mark_adopted();
-            }
-            state.running_changed.notify_one();
             continue;
         }
-        match apply_change(
-            &path,
-            &text,
-            &mut baseline,
-            &state,
-            &mut invalid_active,
-            &mut incomplete_active,
-        ) {
+        // MAJOR-B round 4: the whole mutate → submit → adopt-snapshot of a
+        // file-watch apply runs UNDER the config-mutation lock, so the persister
+        // (which takes the same lock) can never compose mid-apply and the
+        // adopted snapshot advances atomically with the engine submit — the same
+        // discipline the REST mutation handlers and the revert route follow.
+        // `apply_change` itself never re-acquires the lock (only the watcher and
+        // the revert route, which already holds it, are callers), so there is no
+        // re-entrancy.
+        let apply_result = {
+            let _mutation = state.lock_config_mutation().await;
+            apply_change(
+                &path,
+                &text,
+                &mut baseline,
+                &state,
+                &mut invalid_active,
+                &mut incomplete_active,
+            )
+        };
+        match apply_result {
             ApplyResult::Settled => {
                 applied = Some(now);
                 rejected = None;
@@ -654,11 +669,11 @@ fn apply_change(
             "a subsequent valid write applied",
             invalid_active,
         );
-        // MAJOR-B (unified gate): the file reverted to the running baseline
-        // (the stores are re-converged to adopted state) — mark adopted and
-        // re-fire so the persister captures the adopted snapshot.
+        // MAJOR-B round 4: the file reverted to the running baseline — the
+        // engine runs `baseline` (just set to `next`); adopt it and re-fire so
+        // the persister captures the adopted snapshot.
         if let Some(model) = state.boot_model.as_ref() {
-            model.mark_adopted();
+            model.adopt_document(baseline);
         }
         state.running_changed.notify_one();
         tracing::debug!(path = %path.display(), "config file rewritten with identical content");
@@ -688,25 +703,20 @@ fn apply_change(
             ),
         );
         publish_apply_incomplete(state, path, outcome.shed, incomplete_active);
-        // MAJOR-B (unified gate): the stores were optimistically mutated but the
-        // engine did NOT adopt the change (a command was shed) — advance
-        // `requested` without `adopted`, so the persister skips `active.toml`
-        // until the retry lands. A crash in this window can never resume from
-        // store state the engine never ran.
-        if let Some(model) = state.boot_model.as_ref() {
-            model.note_requested();
-        }
+        // MAJOR-B round 4: a command was SHED — the engine did NOT adopt this
+        // document, so the adopted snapshot is left UNCHANGED (it still reflects
+        // the last fully-adopted document). The idempotent retry on a later poll
+        // adopts it when it lands. active.toml therefore never captures the
+        // mid-retry store state.
         return ApplyResult::Retry;
     }
     *baseline = next;
     clear_apply_incomplete(state, path, incomplete_active);
-    // MAJOR-B (unified gate): the apply landed completely — the stores now
-    // reflect adopted state. Mark every requested mutation adopted and re-fire
-    // the choke-point signal so the debounced persister captures this adopted
-    // snapshot (the optimistic store mutation's own `running_changed` may have
-    // been consumed by a skipped persist pass).
+    // MAJOR-B round 4: the apply landed completely — the engine now runs
+    // `baseline` (just set to `next`); adopt its sources/overlays into the
+    // snapshot and re-fire so the debounced persister captures this snapshot.
     if let Some(model) = state.boot_model.as_ref() {
-        model.mark_adopted();
+        model.adopt_document(baseline);
     }
     state.running_changed.notify_one();
     state

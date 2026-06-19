@@ -40,7 +40,7 @@ use multiview_control::{
 };
 use multiview_engine::EnginePublisher;
 use multiview_events::Event;
-use support::{body_json, get, put_json, send, OPERATOR_TOKEN, VIEWER_TOKEN};
+use support::{body_json, get, put_json, send, ADMIN_TOKEN, OPERATOR_TOKEN, VIEWER_TOKEN};
 
 /// The fast poll the watcher-interplay tests run at (real default is 1 s).
 const TEST_POLL: Duration = Duration::from_millis(80);
@@ -2012,13 +2012,14 @@ async fn shed_delete_then_unrelated_landed_mutation_keeps_the_running_source() {
 
     // DELETE /sources/in_a — the store drops in_a, but the RemoveSource SHEDS,
     // so the engine still runs in_a (ApplyMode::Restart). Read the ETag first.
-    let resp = send(&r.router, get("/api/v1/sources/in_a", OPERATOR_TOKEN)).await;
+    // DELETE requires the administer role (ADMIN_TOKEN).
+    let resp = send(&r.router, get("/api/v1/sources/in_a", ADMIN_TOKEN)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let etag = support::etag(&resp).expect("source carries an ETag");
     let req = Request::builder()
         .method("DELETE")
         .uri("/api/v1/sources/in_a")
-        .header(header::AUTHORIZATION, format!("Bearer {OPERATOR_TOKEN}"))
+        .header(header::AUTHORIZATION, format!("Bearer {ADMIN_TOKEN}"))
         .header(header::IF_MATCH, etag)
         .body(Body::empty())
         .expect("delete request");
@@ -2028,13 +2029,13 @@ async fn shed_delete_then_unrelated_landed_mutation_keeps_the_running_source() {
     // Drain the bus so the next, UNRELATED mutation lands live.
     let _ = r.commands.try_drain();
 
-    // An unrelated NEW synthetic source in_c — a live-appliable kind that LANDS.
+    // An unrelated NEW synthetic source in_c — a live-appliable kind that LANDS
+    // (POST creates a new resource).
     let resp = send(
         &r.router,
-        put_json(
+        support::post_json(
             "/api/v1/sources/in_c",
             OPERATOR_TOKEN,
-            None,
             &serde_json::json!({
                 "name": "in_c",
                 "body": { "id": "in_c", "kind": "solid", "color": "#222222" }

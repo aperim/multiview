@@ -73,30 +73,32 @@ pub struct BootModel {
     /// The monotonically increasing write-ticket source (taken at compose
     /// time, compared in [`write_active_serialized`]).
     write_tickets: AtomicU64,
-    /// The unified adopted-vs-requested persistence gate (MAJOR-B / panel round
-    /// 2): the count of store mutations REQUESTED across EVERY live-apply path
-    /// (the file-watcher AND all REST mutations). A mutation that sheds an
-    /// engine command advances `requested` but NOT `adopted`.
-    requested_generation: AtomicU64,
-    /// The count of mutations the engine actually ADOPTED (the command landed,
-    /// or the change needs no command). [`persist_running_now`] writes
-    /// `active.toml` ONLY when `adopted == requested` — so a shed (file-watch or
-    /// REST) freezes persistence at the last adopted state until the change is
-    /// adopted (its retry lands, or a later mutation reaches a known-adopted
-    /// store), and it can never stick (any settle-to-adopted path advances
-    /// `adopted`). Closes the file-watch B-1 (stuck inhibit) AND the REST B-2
-    /// (the original defect via REST) with one gate every path feeds.
-    adopted_generation: AtomicU64,
+    /// The **adopted running configuration** (MAJOR-B / panel round 4): the
+    /// config the engine has actually ADOPTED, which `active.toml` is rendered
+    /// from. The live resource stores deliberately hold REQUESTED state (a
+    /// shed/non-live REST mutation still commits the store and answers `2xx` +
+    /// `restart`, ADR-W018), so `active.toml` cannot be composed from them —
+    /// it is this snapshot, advanced by applying each ADOPTED delta (never by
+    /// recomposing the store), so an unrelated landed mutation can never adopt a
+    /// prior shed's change and the snapshot always equals exactly what the
+    /// engine runs. Mutated and read ONLY while the caller holds
+    /// [`crate::AppState::lock_config_mutation`], so the inner mutex is plain
+    /// interior mutability (the async lock provides the ordering, not this).
+    last_adopted: std::sync::Mutex<MultiviewConfig>,
 }
 
 impl BootModel {
     /// Build the model for a run started from `boot_path` whose Loaded
     /// snapshot is `loaded`, under cold-start policy `start`. `resumed` /
     /// `resume_fallback` record what the resume resolution actually did.
+    /// `running` is the resolved starting Running config — the engine adopts it
+    /// at startup, so it seeds the adopted snapshot `active.toml` is rendered
+    /// from (MAJOR-B round 4).
     #[must_use]
     pub fn new(
         boot_path: PathBuf,
         loaded: MultiviewConfig,
+        running: MultiviewConfig,
         start: StartMode,
         resumed: bool,
         resume_fallback: Option<String>,
@@ -111,8 +113,7 @@ impl BootModel {
             revert_incomplete: AtomicBool::new(false),
             write_serial: std::sync::Mutex::new(0),
             write_tickets: AtomicU64::new(0),
-            requested_generation: AtomicU64::new(0),
-            adopted_generation: AtomicU64::new(0),
+            last_adopted: std::sync::Mutex::new(running),
         }
     }
 
@@ -192,39 +193,81 @@ impl BootModel {
         self.revert_incomplete.swap(false, Ordering::AcqRel)
     }
 
-    /// Record that a store mutation was REQUESTED (MAJOR-B): advances the
-    /// `requested` generation. Call from EVERY live-apply path that mutates the
-    /// stores — the file-watcher and every REST mutation — when the change may
-    /// not have been adopted by the engine (i.e. a command was submitted).
-    /// Returns the new `requested` value.
-    pub fn note_requested(&self) -> u64 {
-        self.requested_generation.fetch_add(1, Ordering::AcqRel) + 1
+    /// Lock the adopted-snapshot, recovering from poisoning (a panicked holder
+    /// must never wedge persistence). Callers already hold
+    /// [`crate::AppState::lock_config_mutation`], so this never contends.
+    fn lock_adopted(&self) -> std::sync::MutexGuard<'_, MultiviewConfig> {
+        match self.last_adopted.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
-    /// Mark the stores as fully ADOPTED (MAJOR-B): advance `adopted` to the
-    /// current `requested`, so [`persist_ready`](Self::persist_ready) becomes
-    /// true and `active.toml` captures the adopted state. Call whenever a
-    /// live-apply path reaches a known-adopted store: a non-shed mutation, a
-    /// shed's retry that lands, the file reverting to the running baseline, or
-    /// any settle-to-adopted path. It can never under-advance (it only ever
-    /// moves `adopted` forward), so the gate can never stick.
-    pub fn mark_adopted(&self) {
-        let requested = self.requested_generation.load(Ordering::Acquire);
-        // Monotonic: never move `adopted` backwards (a concurrent shed may have
-        // advanced `requested` past what this caller observed; the next
-        // adoption catches up).
-        self.adopted_generation
-            .fetch_max(requested, Ordering::AcqRel);
+    /// Apply an ADOPTED source upsert to the adopted snapshot (MAJOR-B round 4):
+    /// the engine landed an `UpsertSource`, so the running config now carries
+    /// this source. Replaces an existing source of the same id, else appends.
+    /// Call ONLY while holding the config-mutation lock.
+    pub fn adopt_source(&self, source: multiview_config::Source) {
+        let mut snap = self.lock_adopted();
+        match snap.sources.iter_mut().find(|s| s.id == source.id) {
+            Some(existing) => *existing = source,
+            None => snap.sources.push(source),
+        }
     }
 
-    /// Whether `active.toml` may be persisted now (MAJOR-B): true only when the
-    /// engine has ADOPTED every requested mutation (`adopted >= requested`). A
-    /// shed (file-watch or REST) leaves `adopted` behind, freezing persistence
-    /// at the last adopted state until the change is adopted.
+    /// Apply an ADOPTED source removal to the adopted snapshot (MAJOR-B round
+    /// 4): the engine landed a `RemoveSource`. Call ONLY while holding the
+    /// config-mutation lock.
+    pub fn unadopt_source(&self, id: &str) {
+        self.lock_adopted().sources.retain(|s| s.id != id);
+    }
+
+    /// Apply an ADOPTED overlay upsert to the adopted snapshot (MAJOR-B round
+    /// 4). Replaces an existing overlay of the same id, else appends. Call ONLY
+    /// while holding the config-mutation lock.
+    pub fn adopt_overlay(&self, overlay: multiview_config::Overlay) {
+        let mut snap = self.lock_adopted();
+        match snap.overlays.iter_mut().find(|o| o.id == overlay.id) {
+            Some(existing) => *existing = overlay,
+            None => snap.overlays.push(overlay),
+        }
+    }
+
+    /// Apply an ADOPTED overlay removal to the adopted snapshot (MAJOR-B round
+    /// 4). Call ONLY while holding the config-mutation lock.
+    pub fn unadopt_overlay(&self, id: &str) {
+        self.lock_adopted().overlays.retain(|o| o.id != id);
+    }
+
+    /// Adopt a whole document's sources + overlays into the snapshot (MAJOR-B
+    /// round 4): the file-watcher's apply, when it SETTLES with no shed, has
+    /// applied `config`'s full per-section diff to the engine, so the adopted
+    /// running set now equals `config`'s sources/overlays. (The watcher only
+    /// calls this on a fully-landed apply; a shed leaves the snapshot until the
+    /// idempotent retry lands.) Call ONLY while holding the config-mutation
+    /// lock.
+    pub fn adopt_document(&self, config: &MultiviewConfig) {
+        let mut snap = self.lock_adopted();
+        snap.sources.clone_from(&config.sources);
+        snap.overlays.clone_from(&config.overlays);
+    }
+
+    /// The ADOPTED sources — exactly the sources the engine is running (MAJOR-B
+    /// round 4). `persist_running_now` overrides the store-composed config's
+    /// `sources` with these so `active.toml` reflects adopted, not requested,
+    /// source state (a shed/restart-pending REST source change keeps the store
+    /// but is not adopted, so it does not leak into `active.toml`). Call ONLY
+    /// while holding the config-mutation lock.
     #[must_use]
-    pub fn persist_ready(&self) -> bool {
-        self.adopted_generation.load(Ordering::Acquire)
-            >= self.requested_generation.load(Ordering::Acquire)
+    pub fn adopted_sources(&self) -> Vec<multiview_config::Source> {
+        self.lock_adopted().sources.clone()
+    }
+
+    /// The ADOPTED overlays — exactly the overlays the engine is running
+    /// (MAJOR-B round 4). See [`adopted_sources`](Self::adopted_sources).
+    #[must_use]
+    pub fn adopted_overlays(&self) -> Vec<multiview_config::Overlay> {
+        self.lock_adopted().overlays.clone()
     }
 
     /// Take the next monotonically increasing write ticket (call at compose
@@ -531,18 +574,35 @@ pub async fn persist_running_now(state: &AppState) -> ControlResult<()> {
     let Some(model) = state.boot_model.as_ref() else {
         return Ok(());
     };
-    // MAJOR-B (unified gate): persist ONLY when the engine has adopted every
-    // requested mutation. A shed on ANY live-apply path (the file-watcher OR a
-    // REST mutation) leaves `adopted` behind `requested`, so the stores hold
-    // state the engine did not adopt — skip the write. The change's adoption
-    // (its retry lands, the file reverts, or a later mutation reaches a
-    // known-adopted store) advances `adopted` and re-fires `running_changed`,
-    // and `active.toml` then captures only adopted state. A crash in this
-    // window resumes from the last adopted snapshot, never unadopted state.
-    if !model.persist_ready() {
-        return Ok(());
-    }
-    let (_document, config) = crate::routes::config::compose_running_config(state)?;
+    // MAJOR-B (round 4): acquire the SAME mutation lock every live-apply path
+    // holds, so this can never compose mid-mutation (the happens-before the
+    // round-3 separate atomics lacked) — the persister blocks until any
+    // in-flight mutate→submit→adopt sequence fully resolves, then reads a
+    // settled adopted snapshot.
+    let _mutation = state.lock_config_mutation().await;
+    // Compose the running document from the stores WITHOUT validating (the live
+    // store can transiently fail whole-document validation — e.g. a cell
+    // referencing a source a shed-but-still-running DELETE removed from the
+    // store), then OVERRIDE the divergence-prone collections (sources, overlays)
+    // with the ADOPTED snapshot: the stores hold REQUESTED state (a shed/non-
+    // live REST mutation keeps the store, ADR-W018), so `active.toml` must
+    // reflect what the engine actually runs, not what was requested. Only AFTER
+    // the override do we validate — the adopted document (what the engine
+    // runs) must always be valid.
+    let document = crate::routes::config::compose_document_unredacted(state)?;
+    let mut config: MultiviewConfig =
+        serde_path_to_error::deserialize(&document).map_err(|err| {
+            let path = err.path().to_string();
+            ControlError::Validation(format!(
+                "the running document does not compose at `{path}`: {}",
+                err.into_inner()
+            ))
+        })?;
+    config.sources = model.adopted_sources();
+    config.overlays = model.adopted_overlays();
+    config.validate().map_err(|e| {
+        ControlError::Validation(format!("the adopted running config does not validate: {e}"))
+    })?;
     let toml = config
         .to_toml()
         .map_err(|e| ControlError::Repository(format!("TOML render failed: {e}")))?;

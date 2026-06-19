@@ -64,6 +64,7 @@ impl StartConfig {
         BootModel::new(
             resolved,
             self.loaded.clone(),
+            self.running.clone(),
             self.start,
             self.resumed,
             self.resume_fallback.clone(),

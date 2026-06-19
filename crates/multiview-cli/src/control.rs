@@ -2740,6 +2740,7 @@ input_id = "in_b"
         let boot_model = Arc::new(multiview_control::boot_model::BootModel::new(
             std::path::PathBuf::from("/nonexistent/multiview.toml"),
             config.clone(),
+            config.clone(),
             multiview_config::StartMode::Boot,
             false,
             None,

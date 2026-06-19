@@ -1165,23 +1165,6 @@ impl AppState {
         self.running_changed.notify_one();
     }
 
-    /// Feed the ADR-W024 unified persist gate (MAJOR-B) for one REST live-apply
-    /// that submitted an engine command for a Running-config store mutation: a
-    /// `landed` command is adopted; a shed advances `requested` only, so
-    /// `active.toml` is not written with requested-but-unadopted state until the
-    /// change is adopted (the next adopted mutation, or a restart). Call from
-    /// EVERY mutating live-apply path (sources/overlays/layout/…) right after
-    /// the `try_submit`, BEFORE the audit that fires `running_changed`. A no-op
-    /// when this run has no boot model.
-    pub fn note_engine_apply(&self, landed: bool) {
-        if let Some(model) = self.boot_model.as_ref() {
-            model.note_requested();
-            if landed {
-                model.mark_adopted();
-            }
-        }
-    }
-
     /// Replace the account-side append-only audit store (e.g. to share one with a
     /// test, or to use a persistent backend).
     #[must_use]

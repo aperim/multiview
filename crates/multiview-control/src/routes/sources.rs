@@ -64,21 +64,21 @@ fn live_apply_upsert(
             .commands
             .try_submit(Command::UpsertSource {
                 op: OperationId::new(),
-                source: Box::new(source),
+                source: Box::new(source.clone()),
             })
             .is_ok();
-        // MAJOR-B (unified gate / B-2): this REST mutation already wrote the
-        // store + will audit (firing `running_changed`). Feed the one
-        // adopted-vs-requested gate so a SHED live-apply does not persist
-        // requested-but-unadopted state to `active.toml`: a landed command is
-        // adopted; a shed advances `requested` only (the next adopted mutation,
-        // or a restart, catches `adopted` up).
-        state.note_engine_apply(submitted);
-        return if submitted {
-            ApplyMode::Live
-        } else {
-            ApplyMode::Restart
-        };
+        // MAJOR-B round 4: only a LANDED command is adopted, so only then does
+        // the adopted snapshot (what `active.toml` is rendered from) gain this
+        // source. A shed keeps the store (ADR-W018 restart) but is NOT adopted,
+        // so it stays out of `active.toml` until a restart. The caller holds
+        // the config-mutation lock, so this is ordered against the persister.
+        if submitted {
+            if let Some(model) = state.boot_model.as_ref() {
+                model.adopt_source(source);
+            }
+            return ApplyMode::Live;
+        }
+        return ApplyMode::Restart;
     }
     if previous.is_some_and(|prev| state.live_sources.is_live(&prev.kind)) {
         // Synthetic -> decoded kind change: stop the running generator now;
@@ -97,10 +97,15 @@ fn live_apply_upsert(
                  rendering the old synthetic picture until restart"
             );
         }
-        // MAJOR-B (unified gate / B-2): a shed stop leaves the running engine
-        // still rendering the old synthetic source — gate persistence until it
-        // is adopted (the removal lands, or a restart).
-        state.note_engine_apply(removed.is_ok());
+        // MAJOR-B round 4: when the stop LANDS the engine no longer runs the
+        // old synthetic source, so drop it from the adopted snapshot. The new
+        // decoded source is restart-only — NOT adopted — so it never enters the
+        // snapshot here.
+        if removed.is_ok() {
+            if let Some(model) = state.boot_model.as_ref() {
+                model.unadopt_source(&source.id);
+            }
+        }
     }
     ApplyMode::Restart
 }
@@ -115,11 +120,14 @@ fn live_apply_remove(state: &AppState, id: &str) -> ApplyMode {
             id: id.to_owned(),
         })
         .is_ok();
-    // MAJOR-B (unified gate / B-2): a shed removal leaves the running engine
-    // still carrying the removed source — feed the persist gate so the
-    // post-delete `active.toml` does not record the removal as adopted.
-    state.note_engine_apply(submitted);
+    // MAJOR-B round 4: only when the removal LANDS does the engine stop running
+    // the source, so only then is it dropped from the adopted snapshot. A shed
+    // removal keeps the source running, so the snapshot keeps it (active.toml is
+    // never told the source is gone while the engine still runs it).
     if submitted {
+        if let Some(model) = state.boot_model.as_ref() {
+            model.unadopt_source(id);
+        }
         ApplyMode::Live
     } else {
         ApplyMode::Restart
@@ -220,6 +228,11 @@ pub(crate) async fn create_source(
         name: input.name,
         body: validated_body(TypedCollection::Sources, &id, &input.body)?,
     };
+    // ADR-W024 MAJOR-B round 4: hold the config-mutation lock across the whole
+    // store-write → submit → adopt-snapshot sequence, so the persister (which
+    // takes the same lock) can never compose mid-mutation and the adopted
+    // snapshot advances atomically with the engine submit.
+    let _mutation = state.lock_config_mutation().await;
     let versioned = state.sources.create(&id, input)?;
     state.audit(
         &principal.key_id,
@@ -263,6 +276,9 @@ pub(crate) async fn update_source(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &id)?;
+    // ADR-W024 MAJOR-B round 4: hold the config-mutation lock across the whole
+    // precondition → store-write → submit → adopt-snapshot sequence.
+    let _mutation = state.lock_config_mutation().await;
     // Preconditions are evaluated before request content (RFC 9110 §13.2.2):
     // a stale `If-Match` (or a missing resource) is reported even when the
     // submitted body is itself invalid.
@@ -317,6 +333,9 @@ pub(crate) async fn delete_source(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Administer)?;
     crate::auth::authorize_object(&principal, &id)?;
+    // ADR-W024 MAJOR-B round 4: hold the config-mutation lock across the whole
+    // precondition → store-delete → submit → adopt-snapshot sequence.
+    let _mutation = state.lock_config_mutation().await;
     let current = state.sources.get(&id)?;
     if_match.require(SOURCE_KIND, &id, current.version)?;
     state.sources.delete(&id)?;

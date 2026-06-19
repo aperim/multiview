@@ -266,10 +266,14 @@ fn compose_export_document(state: &AppState) -> ControlResult<serde_json::Value>
 }
 
 /// Compose the running JSON document from `base_document` + the live stores,
-/// **without** redaction. The shared composition behind both the redacted
-/// export ([`compose_export_document`]) and the secrets-intact Running
-/// snapshot ([`compose_running_config`]).
-fn compose_document_unredacted(state: &AppState) -> ControlResult<serde_json::Value> {
+/// **without** redaction and **without** validation. The shared composition
+/// behind the redacted export ([`compose_export_document`]), the secrets-intact
+/// Running snapshot ([`compose_running_config`]), and the adopted-state persist
+/// (`boot_model::persist_running_now`, which overrides sources/overlays with the
+/// adopted snapshot BEFORE validating — the live store can transiently fail
+/// whole-document validation, e.g. a cell referencing a just-deleted but still
+/// running source).
+pub(crate) fn compose_document_unredacted(state: &AppState) -> ControlResult<serde_json::Value> {
     // The working layout carries { canvas, layout, cells }. Prefer the
     // designated working layout (set at seed time); fall back to the id-sorted
     // first layout document that declares a canvas (store-only deployments).
@@ -725,8 +729,15 @@ pub(crate) async fn revert_to_start(
             .publish_event(multiview_events::Event::HealthWarningRaised(
                 revert_incomplete_warning(outcome.shed, state.ack_now().as_nanos(), true),
             ));
+        // MAJOR-B round 4: a shed revert applied NOTHING durable (the stores
+        // rolled back to the pre-revert Running) — the engine still runs the
+        // pre-revert state, which the adopted snapshot already reflects, so the
+        // snapshot is left UNCHANGED.
     } else {
         clear_revert_incomplete_if_latched(&state, &model);
+        // MAJOR-B round 4: the revert fully landed — the engine now runs Loaded,
+        // so adopt Loaded's sources/overlays into the snapshot.
+        model.adopt_document(model.loaded());
     }
     state.audit(
         &principal.key_id,
