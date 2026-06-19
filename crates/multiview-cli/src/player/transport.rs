@@ -14,11 +14,12 @@ use multiview_core::time::{rescale, MediaTime, Rational};
 /// The end-of-asset behaviour for a player channel
 /// ([ADR-0057](../../../../docs/decisions/ADR-0057.md) Decision 4,
 /// [media-playout §7.4](../../../../docs/research/media-playout.md)).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum EofPolicy {
     /// Freeze on the final frame and hold it forever (the as-built
     /// `NoSignalPolicy::HoldForever` behaviour; the default).
+    #[default]
     HoldLastFrame,
     /// Seek back to the in-point in place and keep decoding — loops forever.
     Loop,
@@ -28,12 +29,6 @@ pub enum EofPolicy {
     /// Publish the terminal frame, report `Ended`, and release the decoder; the
     /// switcher state machine applies the bus/keyer consequence.
     AutoOff,
-}
-
-impl Default for EofPolicy {
-    fn default() -> Self {
-        Self::HoldLastFrame
-    }
 }
 
 /// Why a [`PlayoutGeometry`] was rejected at construction.
@@ -202,9 +197,11 @@ pub enum MediaPlayerState {
         /// Whether an exit has been armed (fires at the next vamp boundary).
         exit_armed: bool,
     },
-    /// EOF held: frozen on the final/terminal frame (`hold_last_frame` /
-    /// `black`).
+    /// EOF held: frozen on the final real frame (`hold_last_frame`).
     Holding,
+    /// EOF black: holding the terminal black (opaque) / transparent (alpha)
+    /// frame (`black`), so a keyed fill cleanly vanishes.
+    Black,
     /// EOF ended: the terminal frame was published and the channel reports
     /// `Ended` (`auto_off`); the switcher applies the bus/keyer consequence.
     Ended,
@@ -364,10 +361,42 @@ impl MediaPlayer {
     /// a held state it returns [`PlayerAction::Hold`].
     #[must_use]
     pub fn on_decoded(&mut self, source_frame: u64) -> PlayerAction {
-        // INTENTIONALLY-WRONG placeholder so the RED tests fail on assertions
-        // (not on a panic). Real logic lands in the GREEN commit.
-        let _ = source_frame;
-        PlayerAction::Hold { at: self.last_at }
+        match self.state {
+            MediaPlayerState::Playing => {
+                // Plain playback runs to the clip out-point; under a `loop`
+                // policy it wraps to the in-point, else it ends per the policy.
+                if source_frame < self.geometry.out_point {
+                    self.publish()
+                } else if matches!(self.eof_policy, EofPolicy::Loop) {
+                    Self::wrap_to(self.geometry.in_point)
+                } else {
+                    self.terminate()
+                }
+            }
+            MediaPlayerState::Vamping { exit_armed } => {
+                if source_frame < self.geometry.vamp_out {
+                    self.publish()
+                } else if exit_armed {
+                    // The boundary reached with the exit armed: consume the
+                    // latch exactly once and settle per the EOF policy. The
+                    // exit overrides the loop — a vamp never loops once armed.
+                    self.terminate()
+                } else {
+                    Self::wrap_to(self.geometry.vamp_in)
+                }
+            }
+            // Cued: publish the cued frame so PVW shows it; do not advance laps.
+            MediaPlayerState::Cued => self.publish(),
+            // Held / paused: a late-arriving decoded frame is held, not shown.
+            MediaPlayerState::Paused
+            | MediaPlayerState::Holding
+            | MediaPlayerState::Black
+            | MediaPlayerState::Idle
+            | MediaPlayerState::Loading => PlayerAction::Hold {
+                at: self.advance_stamp(),
+            },
+            MediaPlayerState::Ended => PlayerAction::Ended,
+        }
     }
 
     /// Produce the heartbeat action for a tick on which no new frame was
@@ -375,8 +404,12 @@ impl MediaPlayer {
     /// advancing stamp, or [`PlayerAction::Ended`] once ended.
     #[must_use]
     pub fn on_heartbeat(&mut self) -> PlayerAction {
-        // INTENTIONALLY-WRONG placeholder (see `on_decoded`).
-        PlayerAction::Hold { at: self.last_at }
+        match self.state {
+            MediaPlayerState::Ended => PlayerAction::Ended,
+            _ => PlayerAction::Hold {
+                at: self.advance_stamp(),
+            },
+        }
     }
 
     // ---- internals ------------------------------------------------------
@@ -387,11 +420,68 @@ impl MediaPlayer {
         self.last_at = anchor;
     }
 
-    /// The output-anchored stamp for the next frame to emit:
-    /// `anchor + emitted × frame_period`.
-    #[allow(dead_code)] // used by the GREEN implementation
-    fn next_stamp(&self) -> MediaTime {
-        let offset = (self.emitted as i64).saturating_mul(self.geometry.frame_period_ns);
+    /// The output-anchored stamp for the `emitted`-th frame:
+    /// `anchor + emitted × frame_period` (media-playout §7.2). Exact integer
+    /// arithmetic — never float, never wall-clock.
+    fn stamp_for(&self, emitted: u64) -> MediaTime {
+        // `emitted` is a frame counter; it fits i64 for any realistic run. Clamp
+        // (never panic) rather than `as`-cast (lint policy / safety rule 3).
+        let k = i64::try_from(emitted).unwrap_or(i64::MAX);
+        let offset = k.saturating_mul(self.geometry.frame_period_ns);
         self.anchor.saturating_add(MediaTime::from_nanos(offset))
+    }
+
+    /// Publish the current frame at the next output-anchored stamp and advance
+    /// the emitted-frame cursor.
+    fn publish(&mut self) -> PlayerAction {
+        let at = self.stamp_for(self.emitted);
+        self.emitted = self.emitted.saturating_add(1);
+        self.last_at = at;
+        PlayerAction::Publish { at }
+    }
+
+    /// Wrap a loop: seek the open container back to `frame`, discard the
+    /// boundary frame, and keep the emitted cursor advancing (monotonic stamps
+    /// across the seam). The executor performs `Demuxer::seek` + decoder flush +
+    /// `PtsNormalizer::mark_discontinuity` on this action. The emitted cursor is
+    /// *not* reset — stamps stay monotonic across the lap seam (the executor's
+    /// next decoded frame publishes at the next `k`).
+    const fn wrap_to(frame: u64) -> PlayerAction {
+        PlayerAction::SeekFlushTo { frame }
+    }
+
+    /// Settle a non-looping end-of-segment per the EOF policy: `auto_off` ends
+    /// (the switcher applies the bus/keyer consequence); the others hold the
+    /// terminal frame.
+    fn terminate(&mut self) -> PlayerAction {
+        match self.eof_policy {
+            EofPolicy::AutoOff => {
+                self.state = MediaPlayerState::Ended;
+                PlayerAction::Ended
+            }
+            EofPolicy::Black => {
+                self.state = MediaPlayerState::Black;
+                PlayerAction::Hold {
+                    at: self.advance_stamp(),
+                }
+            }
+            EofPolicy::HoldLastFrame | EofPolicy::Loop => {
+                // (Loop reaches here only on the armed-exit path, where the exit
+                // overrides the loop and we hold the last frame.)
+                self.state = MediaPlayerState::Holding;
+                PlayerAction::Hold {
+                    at: self.advance_stamp(),
+                }
+            }
+        }
+    }
+
+    /// The stamp for a heartbeat republish: advance the emitted cursor so the
+    /// republished frame reads LIVE (strictly-increasing stamps), never aged.
+    fn advance_stamp(&mut self) -> MediaTime {
+        let at = self.stamp_for(self.emitted);
+        self.emitted = self.emitted.saturating_add(1);
+        self.last_at = at;
+        at
     }
 }
