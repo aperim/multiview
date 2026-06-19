@@ -601,4 +601,103 @@ mod tests {
         };
         assert!(start.route_intent().is_none());
     }
+
+    #[test]
+    fn media_transport_verbs_carry_per_verb_kinds() {
+        // The 202 `kind` label reflects the transport verb so an operator/audit
+        // sees what the player was asked to do (load/cue/play/pause/stop/seek),
+        // mirroring how each salvo verb has its own `kind()` string.
+        let cases = [
+            (
+                MediaTransportVerb::Load {
+                    asset: "opener".to_owned(),
+                },
+                "media_load",
+            ),
+            (MediaTransportVerb::Cue { frame: None }, "media_cue"),
+            (MediaTransportVerb::Cue { frame: Some(120) }, "media_cue"),
+            (MediaTransportVerb::Play, "media_play"),
+            (MediaTransportVerb::Pause, "media_pause"),
+            (MediaTransportVerb::Stop, "media_stop"),
+            (MediaTransportVerb::Seek { frame: Some(48) }, "media_seek"),
+        ];
+        for (verb, kind) in cases {
+            let cmd = Command::MediaTransport {
+                op: OperationId::new(),
+                player: "vt-1".to_owned(),
+                verb,
+            };
+            assert_eq!(cmd.kind(), kind);
+            assert!(cmd.route_intent().is_none());
+        }
+    }
+
+    #[test]
+    fn media_exit_verbs_mirror_the_salvo_triad_kinds() {
+        // ADR-0097 §3: the three exit verbs mirror ArmSalvo/TakeSalvo/CancelSalvo
+        // exactly, with `arm_media_exit`/`take_media_exit`/`cancel_media_exit`.
+        let arm = Command::ArmMediaExit {
+            op: OperationId::new(),
+            player: "vt-1".to_owned(),
+        };
+        let take = Command::TakeMediaExit {
+            op: OperationId::new(),
+            player: "vt-1".to_owned(),
+        };
+        let cancel = Command::CancelMediaExit {
+            op: OperationId::new(),
+            player: "vt-1".to_owned(),
+        };
+        assert_eq!(arm.kind(), "arm_media_exit");
+        assert_eq!(take.kind(), "take_media_exit");
+        assert_eq!(cancel.kind(), "cancel_media_exit");
+        assert!(arm.route_intent().is_none());
+        assert!(take.route_intent().is_none());
+        assert!(cancel.route_intent().is_none());
+    }
+
+    #[test]
+    fn media_commands_expose_their_operation_id() {
+        // Every new media variant participates in `operation_id()` so the
+        // command surface can correlate its 202 like any other command.
+        let op = OperationId::new();
+        let transport = Command::MediaTransport {
+            op: op.clone(),
+            player: "vt-1".to_owned(),
+            verb: MediaTransportVerb::Play,
+        };
+        assert_eq!(transport.operation_id(), &op);
+        let arm = Command::ArmMediaExit {
+            op: op.clone(),
+            player: "vt-1".to_owned(),
+        };
+        assert_eq!(arm.operation_id(), &op);
+    }
+
+    #[test]
+    fn media_transport_verb_serde_round_trips_tagged_by_verb() {
+        // The verb union is an adjacently/internally-tagged enum (house style,
+        // never `untagged`): `{"verb":"load","asset":"opener"}` etc.
+        let load = MediaTransportVerb::Load {
+            asset: "opener".to_owned(),
+        };
+        let json = serde_json::to_value(&load).unwrap();
+        assert_eq!(json["verb"], "load");
+        assert_eq!(json["asset"], "opener");
+        let back: MediaTransportVerb = serde_json::from_value(json).unwrap();
+        assert_eq!(back, load);
+
+        let cue = MediaTransportVerb::Cue { frame: Some(90) };
+        let json = serde_json::to_value(&cue).unwrap();
+        assert_eq!(json["verb"], "cue");
+        assert_eq!(json["frame"], 90);
+        let back: MediaTransportVerb = serde_json::from_value(json).unwrap();
+        assert_eq!(back, cue);
+
+        let play = MediaTransportVerb::Play;
+        let json = serde_json::to_value(&play).unwrap();
+        assert_eq!(json["verb"], "play");
+        let back: MediaTransportVerb = serde_json::from_value(json).unwrap();
+        assert_eq!(back, play);
+    }
 }
