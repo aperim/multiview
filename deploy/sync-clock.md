@@ -116,9 +116,12 @@ scripts/soak-acceptance.sh --dry-run
 This feeds bundled fixtures through `soak-report` and asserts a clean capture
 passes while a **single-node offset breach**, a **cross-node skew breach**, and a
 **cadence stall** each fail. It also drives the physical-OCR leg with sample hooks
-and asserts a hook that **exits non-zero** and a hook that **emits no value** each
-FAIL, while an in-bound reading passes — so the fail-closed behaviour is gated, not
-just asserted. The CI `soak harness self-test` job runs `shellcheck` plus this
+and asserts that a hook which **exits non-zero** (with or without output), one that
+**emits no value**, and one that **prints a non-numeric token** each FAIL, that a
+hook printing an in-bound value **but also exiting non-zero** FAILs (its reading is
+not trusted), and that a failing hook is **polled every sample** (the soak does not
+abort) — while a valid in-bound reading passes. The fail-closed behaviour is gated,
+not just asserted. The CI `soak harness self-test` job runs `shellcheck` plus this
 `--dry-run`, so the harness→analyzer wiring is exercised on every relevant push.
 
 **Real 24 h run (needs ≥2 nodes):**
