@@ -16,8 +16,7 @@
 )]
 
 use multiview_config::{
-    frames_for_ms, EofPolicy, MediaAsset, MediaAssetKind, MediaLibrary, MediaPlayer,
-    MultiviewConfig, SourceKind,
+    frames_for_ms, EofPolicy, MediaAsset, MediaAssetKind, MultiviewConfig, SourceKind,
 };
 use multiview_core::time::Rational;
 
@@ -224,7 +223,10 @@ fn source_kind_still_variant_round_trip() {
         serde_json::from_value(serde_json::json!({ "kind": "still", "asset": "logo" })).unwrap();
     assert!(matches!(&kind, SourceKind::Still { asset } if asset == "logo"));
     let json = serde_json::to_value(&kind).unwrap();
-    assert_eq!(json, serde_json::json!({ "kind": "still", "asset": "logo" }));
+    assert_eq!(
+        json,
+        serde_json::json!({ "kind": "still", "asset": "logo" })
+    );
 }
 
 #[test]
@@ -295,7 +297,10 @@ fn validate_rejects_vamp_in_before_in_point() {
     .unwrap();
     let err = doc.validate().expect_err("vamp_in < in_point must fail");
     let msg = err.to_string();
-    assert!(msg.contains("vamp"), "error should name the vamp window: {msg}");
+    assert!(
+        msg.contains("vamp"),
+        "error should name the vamp window: {msg}"
+    );
 }
 
 #[test]
@@ -310,8 +315,7 @@ fn validate_rejects_vamp_out_after_out_point() {
         }
     })))
     .unwrap();
-    doc.validate()
-        .expect_err("vamp_out > out_point must fail");
+    doc.validate().expect_err("vamp_out > out_point must fail");
 }
 
 #[test]
@@ -342,8 +346,7 @@ fn validate_rejects_out_before_in() {
         }
     })))
     .unwrap();
-    doc.validate()
-        .expect_err("out_point < in_point must fail");
+    doc.validate().expect_err("out_point < in_point must fail");
 }
 
 #[test]
@@ -502,13 +505,17 @@ fn validate_accepts_exactly_two_players() {
         ]
     })))
     .unwrap();
-    doc.validate().expect("exactly 2 players is within the MVP bound");
+    doc.validate()
+        .expect("exactly 2 players is within the MVP bound");
 }
 
 // ---------------------------------------------------------------------------
 // Helpers — a minimal valid base document we splice media fields into.
 // ---------------------------------------------------------------------------
 
+/// A complete, otherwise-valid document: a 1-cell grid wired to a `bars`
+/// source and a single output, so a full [`MultiviewConfig::validate`] run
+/// reaches the media checks instead of tripping on an earlier invariant.
 fn base_doc() -> serde_json::Value {
     serde_json::json!({
         "schema_version": 1,
@@ -520,18 +527,31 @@ fn base_doc() -> serde_json::Value {
             "background": "#101014",
             "color": { "profile": "sdr-bt709-limited" }
         },
-        "layout": { "kind": "grid", "columns": ["1fr"], "rows": ["1fr"], "areas": ["a"] }
+        "layout": { "kind": "grid", "columns": ["1fr"], "rows": ["1fr"], "areas": ["a"] },
+        "sources": [{ "id": "in_a", "kind": "bars" }],
+        "cells": [{ "id": "cell_a", "area": "a", "fit": "contain", "source": { "input_id": "in_a" } }],
+        "outputs": [{ "kind": "rtsp_server", "mount": "/multiview", "codec": "h264" }]
     })
 }
 
-/// The base document with `extra` keys merged into the top-level object.
+/// The base document with `extra` keys merged into the top-level object. Arrays
+/// present in both the base and `extra` (e.g. `sources`) are **concatenated**
+/// (base entries first) so a test that adds its own sources keeps the base's
+/// `in_a` cell binding valid; non-array keys are overwritten.
 fn base_doc_with(extra: serde_json::Value) -> serde_json::Value {
     let mut doc = base_doc();
     let (Some(obj), serde_json::Value::Object(extra)) = (doc.as_object_mut(), extra) else {
         panic!("base doc and extra must be JSON objects");
     };
     for (k, v) in extra {
-        obj.insert(k, v);
+        match (obj.get_mut(&k), v) {
+            (Some(serde_json::Value::Array(base_arr)), serde_json::Value::Array(extra_arr)) => {
+                base_arr.extend(extra_arr);
+            }
+            (_, v) => {
+                obj.insert(k, v);
+            }
+        }
     }
     doc
 }

@@ -106,6 +106,12 @@ pub struct ConfigDiff {
 
 impl ConfigDiff {
     /// Compute the structural diff from the `running` document to `next`.
+    // The length is forced by the deliberate, load-bearing exhaustive destructure
+    // of every `MultiviewConfig` field (the review-m1 compile-time guard documented
+    // below): the body grows by two binds per field, and splitting it would only
+    // hide the guard behind a helper. The logic stays a flat, readable per-field
+    // comparison, so the line count is inherent rather than accidental complexity.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn between(running: &MultiviewConfig, next: &MultiviewConfig) -> Self {
         // EXHAUSTIVE destructure (no `..`): adding a field to `MultiviewConfig`
@@ -134,6 +140,8 @@ impl ConfigDiff {
             timing: running_timing,
             webrtc: running_webrtc,
             system: running_system,
+            media_library: running_media_library,
+            media_players: running_media_players,
         } = running;
         let MultiviewConfig {
             schema_version: next_schema_version,
@@ -157,6 +165,8 @@ impl ConfigDiff {
             timing: next_timing,
             webrtc: next_webrtc,
             system: next_system,
+            media_library: next_media_library,
+            media_players: next_media_players,
         } = next;
 
         // Canvas: the pinned signal is geometry + cadence BY VALUE (the
@@ -172,8 +182,14 @@ impl ConfigDiff {
         let canvas_signal_changed = running_signal != next_signal;
         let canvas_cosmetic_changed = !canvas_signal_changed && running_canvas != next_canvas;
 
+        // Media library + player channels (ADR-0057): a restart-class section.
+        // The live load/cue/play/vamp verbs are command-bus actions (ADR-0097),
+        // not a document-diff apply, so a change to the declared set is a
+        // controlled reset, never a silent hot-swap.
+        let media_changed = running_media_library != next_media_library
+            || running_media_players != next_media_players;
         let mut changed_sections = BTreeSet::new();
-        let sectioned: [(&'static str, bool); 17] = [
+        let sectioned: [(&'static str, bool); 18] = [
             (
                 "schema_version",
                 running_schema_version != next_schema_version,
@@ -201,6 +217,7 @@ impl ConfigDiff {
             // safe boundary (ADR-0008 §7.5) is a separate follow-up, so surface it
             // as a changed section (controlled reset) rather than claiming hot-apply.
             ("system", running_system != next_system),
+            ("media", media_changed),
         ];
         for (name, changed) in sectioned {
             if changed {
