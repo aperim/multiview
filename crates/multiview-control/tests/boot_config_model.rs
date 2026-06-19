@@ -1566,15 +1566,16 @@ async fn a_failed_promote_write_releases_the_banked_expect_token() {
     let running_toml =
         String::from_utf8(support::body_bytes(resp).await).expect("export is UTF-8 TOML");
 
-    // Force the atomic write to fail: occupy write_atomic's deterministic
-    // temp name with a DIRECTORY (root-proof, unlike a permissions trick).
-    let tmp_blocker = r
-        .boot_path
-        .parent()
-        .expect("dir")
-        .join(".multiview.toml.tmp");
-    std::fs::create_dir(&tmp_blocker).expect("block the temp path");
+    // Force the atomic write to fail ROOT-PROOF: the secure writer
+    // (`NamedTempFile`) uses an unpredictable temp name, so blocking a
+    // deterministic temp name no longer works — instead replace the boot file
+    // DESTINATION with a NON-EMPTY directory. The temp is created fine, but the
+    // final `rename(2)` of a regular file over a non-empty directory fails
+    // (`ENOTDIR`/`EEXIST`) regardless of uid.
     let before = std::fs::read_to_string(&r.boot_path).expect("read boot file");
+    std::fs::remove_file(&r.boot_path).expect("remove the boot file");
+    std::fs::create_dir(&r.boot_path).expect("replace the boot path with a directory");
+    std::fs::write(r.boot_path.join("keep"), "x").expect("make the blocker dir non-empty");
     let resp = send(
         &r.router,
         post_idem("/api/v1/config/promote", OPERATOR_TOKEN, None),
@@ -1585,12 +1586,10 @@ async fn a_failed_promote_write_releases_the_banked_expect_token() {
         "the blocked write must fail the promote, got {}",
         resp.status()
     );
-    assert_eq!(
-        std::fs::read_to_string(&r.boot_path).expect("read boot file"),
-        before,
-        "a failed promote must leave the boot file untouched"
-    );
-    std::fs::remove_dir(&tmp_blocker).expect("unblock the temp path");
+    // Restore the boot file to exactly its pre-promote content.
+    std::fs::remove_file(r.boot_path.join("keep")).expect("clear the blocker dir");
+    std::fs::remove_dir(&r.boot_path).expect("remove the blocker dir");
+    std::fs::write(&r.boot_path, &before).expect("restore the boot file");
 
     // A REAL external edit now lands with exactly the content the failed
     // promote announced. The promote never wrote it, so it must be APPLIED
