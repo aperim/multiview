@@ -1182,7 +1182,10 @@ async fn the_persist_gate_clears_when_a_shed_edit_reverts_to_adopted() {
     );
     // active.toml is A, and never the unadopted B.
     let text = std::fs::read_to_string(&active_path).expect("read active");
-    assert!(text.contains("#101418"), "active.toml reflects the adopted A");
+    assert!(
+        text.contains("#101418"),
+        "active.toml reflects the adopted A"
+    );
     assert!(
         !text.contains("#7b7b7b"),
         "active.toml must never carry the shed/unadopted B"
