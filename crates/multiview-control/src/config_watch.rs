@@ -300,10 +300,7 @@ pub fn spawn(
     // The binary installs the handle into `AppState` BEFORE serving (MAJOR-C1)
     // and passes it via `with_handle`; when absent (tests that spawn directly)
     // a fresh handle is created and installed here.
-    let handle = options
-        .handle
-        .clone()
-        .unwrap_or_else(ConfigWatchHandle::new);
+    let handle = options.handle.clone().unwrap_or_default();
     // Install the handle into the shared state so the `promote` route (ADR-W024
     // §6) can announce its boot-file write through this watcher's suppression
     // seam. Idempotent: re-installing the same handle the binary already
