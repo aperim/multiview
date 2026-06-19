@@ -36,6 +36,7 @@ import {
 } from '../devices/api';
 import type { OutputTargetView, SourceCandidateView } from '../devices/api';
 import { DeviceStateBadge } from '../devices/DeviceStateBadge';
+import { InputStreamsInspector } from '../devices/InputStreamsInspector';
 import { LastSeenCell } from '../devices/lastSeen';
 import {
   useDeviceStatuses,
@@ -610,6 +611,22 @@ export function DeviceDetailPage(): JSX.Element {
                   ))}
                 </ul>
               )}
+            </section>
+
+            <section aria-labelledby="device-input-streams">
+              <h2 id="device-input-streams" className="mb-2 text-sm font-semibold">
+                <Trans>Input elementary streams</Trans>
+              </h2>
+              <p className="mb-2 max-w-prose text-sm text-muted-foreground">
+                <Trans>
+                  Inspect the cached elementary-stream inventory of a configured
+                  input (read-only). A bindable stream above becomes an input id
+                  once you bind it as a source.
+                </Trans>
+              </p>
+              <InputStreamsInspector
+                suggestions={(candidates.data ?? []).map((candidate) => candidate.id)}
+              />
             </section>
 
             <section aria-labelledby="device-targets">
