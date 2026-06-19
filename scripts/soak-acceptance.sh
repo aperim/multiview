@@ -181,6 +181,48 @@ JSON
     echo "FAIL: an out-of-bound OCR reading unexpectedly passed the physical leg" >&2; exit 1
   fi
 
+  # A hook that prints an IN-BOUND reading but ALSO exits non-zero must FAIL: the
+  # operator's check errored, so the in-bound number is not trustworthy. (This is
+  # the case a naive PIPESTATUS-after-pipeline check misses — the exit status of a
+  # hook inside `cmd | awk` is awk's, always 0, so the failure is invisible.)
+  echo "dry-run: OCR hook that prints a value THEN exits non-zero must FAIL (ocr_hook_failed)"
+  local out
+  out="$(ocr_dry_leg 'printf "1000\n"; exit 7' 3 "$frame_ns")" && {
+    echo "FAIL: a value-then-nonzero-exit OCR hook silently passed" >&2
+    printf '%s\n' "$out" >&2; exit 1
+  }
+  case "$out" in
+    *ocr_hook_failed*) : ;;
+    *) echo "FAIL: value-then-nonzero hook did not report ocr_hook_failed:" >&2
+       printf '%s\n' "$out" >&2; exit 1 ;;
+  esac
+
+  # A hook that exits zero but prints a NON-NUMERIC token must FAIL (no usable
+  # reading), never be passed through as if it were a skew value.
+  echo "dry-run: OCR hook that prints non-numeric output must FAIL (ocr_hook_no_output)"
+  out="$(ocr_dry_leg 'echo abc' 3 "$frame_ns")" && {
+    echo "FAIL: a non-numeric OCR hook silently passed" >&2
+    printf '%s\n' "$out" >&2; exit 1
+  }
+  case "$out" in
+    *ocr_hook_no_output*) : ;;
+    *) echo "FAIL: non-numeric hook did not report ocr_hook_no_output:" >&2
+       printf '%s\n' "$out" >&2; exit 1 ;;
+  esac
+
+  # A supplied hook that fails must not ABORT the soak: every poll is attempted
+  # and the leg fails closed. Prove all polls ran (no set -e early-exit) by
+  # checking the attempt count the verdict prints.
+  echo "dry-run: a failing OCR hook must be polled every sample (no abort) and FAIL"
+  out="$(ocr_dry_leg 'exit 7' 3 "$frame_ns")" && {
+    echo "FAIL: a failing OCR hook silently passed" >&2; exit 1
+  }
+  case "$out" in
+    *"3 hook poll(s)"*) : ;;
+    *) echo "FAIL: the failing-hook leg did not poll all 3 samples (set -e abort?):" >&2
+       printf '%s\n' "$out" >&2; exit 1 ;;
+  esac
+
   echo "dry-run OK: harness→analyzer wiring verified (offset, cross-node skew, cadence, frame-OCR)"
 }
 
