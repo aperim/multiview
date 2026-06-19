@@ -33,6 +33,29 @@ use multiview_engine::{CompositorDrive, EnginePublisher, StopSignal};
 use multiview_events::Event;
 use multiview_telemetry::tracing_init::SubscriberBuilder;
 
+/// The debounce window for the ADR-W024 Running persister: at most one
+/// `active.toml` write per window (~2 s), coalescing a burst of live changes.
+const RUNNING_PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The run's handle on the debounced ADR-W024 Running persister: the spawned
+/// task plus the served [`multiview_control::AppState`] it persists from.
+struct RunningPersist {
+    /// The debounced persist task ([`multiview_control::boot_model::spawn_running_persist`]).
+    task: tokio::task::JoinHandle<()>,
+    /// The served control-plane state (one set of stores with the router).
+    state: multiview_control::AppState,
+}
+
+impl RunningPersist {
+    /// Stop the debounced persister at teardown: abort → **await the task's
+    /// termination** → one final best-effort persist capturing changes
+    /// younger than the debounce (review M2: the ordering restores the
+    /// deterministic `.tmp` single-writer guarantee; fail-soft on error).
+    async fn finish(self) {
+        multiview_control::boot_model::finish_running_persist(self.task, &self.state).await;
+    }
+}
+
 /// The boxed per-tick command drain the engine applies at the frame boundary
 /// (the control-plane command bus → live reconfiguration), shared by the
 /// software-engine and full-pipeline run paths.
@@ -114,26 +137,38 @@ fn run_validate(args: &ValidateArgs) -> anyhow::Result<ExitCode> {
 /// software engine (`--software`), the full libav\* pipeline (default, `ffmpeg`
 /// feature), or — with neither available — report readiness.
 async fn run_run(args: RunArgs) -> anyhow::Result<ExitCode> {
-    let config = load_validated(&args.config)?;
+    let (boot_text, boot) = load_validated(&args.config)?;
+
+    // Resolve the starting Running state (ADR-W024 §4): `start = "boot"` (the
+    // default) runs the boot document; `start = "resume"` runs a valid
+    // persisted `active.toml` (with the boot file's restart-only sections
+    // spliced in), falling back to boot with a surfaced reason. Loaded stays
+    // the boot snapshot in both modes (the revert-to-start target).
+    let start = multiview_cli::boot::resolve_start_config(boot, boot_text, &args.config);
 
     // A configured `[timing].ptp_phc` in a build without the `ptp` feature is
     // a capability this binary cannot provide: fail the run at startup with a
     // clear error (the DEV-B1 display-output fail-fast precedent) — never
     // silently ride the system clock while the config asks for a PHC.
-    multiview_cli::timing_gate::ensure_ptp_phc_supported(config.timing.as_ref())
+    multiview_cli::timing_gate::ensure_ptp_phc_supported(start.running.timing.as_ref())
         .map_err(|reason| anyhow::anyhow!(reason))?;
 
     if args.software {
-        return run_software(&config, &args).await;
+        return run_software(&start, &args).await;
     }
 
-    run_pipeline(&config, &args).await
+    run_pipeline(&start, &args).await
 }
 
 /// The FFmpeg-free software run: the output-clock + CPU compositor driving the
 /// built-in test-pattern sources (the software end-to-end smoke of the
 /// output-clock invariant), serving the API/WebUI just like the full build.
-async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
+async fn run_software(
+    start: &multiview_cli::boot::StartConfig,
+    args: &RunArgs,
+) -> anyhow::Result<ExitCode> {
+    // The engine is built from the starting Running document (ADR-W024).
+    let config = &start.running;
     // Conspect entitlement plane (ADR-0050): assemble the shared lease store +
     // published ladder level from the environment, then gate the NEW engine build
     // (S1). A running engine is NEVER re-gated; this only refuses a *new* start at
@@ -150,7 +185,7 @@ async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
             .context("software bounded run")?
     } else {
         tracing::info!("software run: until Ctrl-C");
-        run_software_until_ctrl_c(&mut engine, config, &plane, &args.config).await?
+        run_software_until_ctrl_c(&mut engine, start, &plane, &args.config).await?
     };
 
     println!("{}", report.render());
@@ -164,9 +199,14 @@ async fn run_software(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
 /// The full libav\* end-to-end pipeline (the `ffmpeg` feature): ingest →
 /// composite → encode-once → fan out to the configured file/HLS outputs.
 #[cfg(feature = "ffmpeg")]
-async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
+async fn run_pipeline(
+    start: &multiview_cli::boot::StartConfig,
+    args: &RunArgs,
+) -> anyhow::Result<ExitCode> {
     use multiview_cli::pipeline::Pipeline;
 
+    // The pipeline is built from the starting Running document (ADR-W024).
+    let config = &start.running;
     // Conspect entitlement plane (ADR-0050): assemble the shared store + ladder
     // level from the environment, then gate the NEW pipeline build (S1) — refuse a
     // new start at the block-new-instance rung. A running pipeline is never
@@ -207,7 +247,7 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
         // MP-1 (ADR-0030 §2.2): the daemon run path builds an engine `ProgramSet`
         // and drives this single program (id "main") through it — move the owned
         // pipeline in (the set spawns it on its own supervised task).
-        run_pipeline_until_ctrl_c(pipeline, config, &plane, &args.config).await?
+        run_pipeline_until_ctrl_c(pipeline, start, &plane, &args.config).await?
     };
 
     println!("{}", report.render());
@@ -290,7 +330,7 @@ struct ControlPlaneWiring {
 #[allow(clippy::similar_names)]
 async fn serve_control_plane(
     listen: &str,
-    config: &MultiviewConfig,
+    start: &multiview_cli::boot::StartConfig,
     config_path: &Path,
     publisher: &Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     wiring: ControlPlaneWiring,
@@ -300,7 +340,11 @@ async fn serve_control_plane(
     multiview_control::CommandReceiver,
     multiview_cli::live_sources::LiveSourceHub,
     multiview_cli::config_watch::ConfigWatchHandle,
+    RunningPersist,
 )> {
+    // The starting Running document drives the engine + seeds the stores; the
+    // boot file stays the watch + promote target (ADR-W024).
+    let config = &start.running;
     let ControlPlaneWiring {
         program_slot,
         stores,
@@ -370,6 +414,10 @@ async fn serve_control_plane(
     let provider: multiview_control::SharedPreview = Arc::new(
         multiview_cli::preview::CliPreviewProvider::new(program_slot, shared_stores),
     );
+    // The Boot/Loaded/Running model (ADR-W024): Loaded is the immutable boot
+    // snapshot; the model backs `GET /api/v1/config/boot-model` and the
+    // revert-to-start/promote actions, and is the persister's target.
+    let boot_model = Arc::new(start.to_boot_model(config_path));
     let (addr, handle, state) = control::bind_and_serve(
         listen,
         config,
@@ -383,6 +431,7 @@ async fn serve_control_plane(
         mesh,
         live_apply,
         live_capability,
+        Some(Arc::clone(&boot_model)),
         async move {
             let _ = shutdown_rx.await;
         },
@@ -390,17 +439,44 @@ async fn serve_control_plane(
     .await
     .with_context(|| format!("binding the control plane on {listen}"))?;
     tracing::info!(listen = %addr, "control plane listening (OpenAPI/Scalar docs at /docs)");
+    // Persist the Loaded snapshot to `loaded.toml` (forensics + the on-disk
+    // revert-target record). Fail-soft: the in-memory snapshot is
+    // authoritative; a write failure is warned, never fatal.
+    if let Err(reason) = multiview_control::boot_model::persist_loaded(&boot_model) {
+        tracing::warn!(
+            reason = %reason,
+            "could not persist the Loaded snapshot (fail-soft; the in-memory snapshot is authoritative)"
+        );
+    }
+    // The debounced Running persister (ADR-W024 §3): waits on the ONE
+    // `running_changed` choke-point signal `AppState::audit` fires, then writes
+    // `active.toml` atomically. Control-plane file I/O only (inv #10).
+    let persist = RunningPersist {
+        task: multiview_control::boot_model::spawn_running_persist(
+            state.clone(),
+            RUNNING_PERSIST_DEBOUNCE,
+        ),
+        state: state.clone(),
+    };
     // Watch the boot config file for external edits (ADR-W020): a valid write
     // hot-reloads the impacted parts through the SAME router state + command
     // bus; an invalid write warns and changes nothing. A control-plane tokio
-    // tenant — it can never pace or stall the engine (inv #1/#10).
+    // tenant — it can never pace or stall the engine (inv #1/#10). The diff
+    // baseline is the RUNNING document (the resumed one under resume), and the
+    // boot-load TEXT seeds the last-observed content (ADR-W024 §4: the
+    // unchanged boot file must never clobber a resumed baseline; an edit in the
+    // boot window differs from this text and still applies).
     let watch = multiview_cli::config_watch::spawn(
         config_path.to_path_buf(),
         config.clone(),
-        state,
-        multiview_cli::config_watch::WatchOptions::default(),
+        state.clone(),
+        multiview_cli::config_watch::WatchOptions::default()
+            .with_initial_observed(start.boot_text.clone()),
     );
-    Ok((handle, command_rx, hub, watch))
+    // Install the watcher's handle so the `promote` route can announce its
+    // server-side boot-file write through the ADR-W020 suppression seam.
+    state.install_watch_handle(watch.clone());
+    Ok((handle, command_rx, hub, watch, persist))
 }
 
 /// Drive the ingest/composite/encode pipeline until Ctrl-C while **also**
@@ -428,10 +504,13 @@ async fn run_pipeline_until_ctrl_c(
     // `unused_mut`-clean on the `ffmpeg`/`rist`-only feature legs.
     #[cfg(feature = "webrtc-native")] mut pipeline: multiview_cli::pipeline::Pipeline,
     #[cfg(not(feature = "webrtc-native"))] pipeline: multiview_cli::pipeline::Pipeline,
-    config: &MultiviewConfig,
+    start: &multiview_cli::boot::StartConfig,
     plane: &multiview_cli::licence::EntitlementPlane,
     config_path: &Path,
 ) -> anyhow::Result<multiview_cli::pipeline::PipelineReport> {
+    // The Running document seeds the stores/drain; the boot file (config_path)
+    // stays the watch + promote target (ADR-W024).
+    let config = &start.running;
     let stop = StopSignal::new();
     let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
     let preview_slot = multiview_cli::preview::program_slot();
@@ -466,8 +545,13 @@ async fn run_pipeline_until_ctrl_c(
     // `heartbeat` feature is built AND the device is configured. It renews the
     // lease via the same `install_binding` convergence; a no-op otherwise.
     plane.spawn_heartbeat();
-    let (server, drain, live_hub, config_watch): (Option<_>, ControlDrain, Option<_>, Option<_>) =
-        if let Some(cfg) = config.control.as_ref() {
+    let (server, drain, live_hub, config_watch, running_persist): (
+        Option<_>,
+        ControlDrain,
+        Option<_>,
+        Option<_>,
+        Option<RunningPersist>,
+    ) = if let Some(cfg) = config.control.as_ref() {
             // What THIS build + run path can take live (ADR-W022): with the
             // `overlay` feature the bake consumer renders the overlay working
             // set, so overlay documents the renderer draws (analog-face
@@ -482,9 +566,9 @@ async fn run_pipeline_until_ctrl_c(
             );
             #[cfg(not(feature = "overlay"))]
             let live_apply = multiview_control::LiveApplyCaps::default();
-            let (handle, command_rx, hub, watch) = serve_control_plane(
+            let (handle, command_rx, hub, watch, persist) = serve_control_plane(
                 &cfg.listen,
-                config,
+                start,
                 config_path,
                 &publisher,
                 ControlPlaneWiring {
@@ -534,12 +618,13 @@ async fn run_pipeline_until_ctrl_c(
                 Arc::clone(&publisher),
                 hub.handle(),
             ));
-            (Some(handle), drain, Some(hub), Some(watch))
+            (Some(handle), drain, Some(hub), Some(watch), Some(persist))
         } else {
             drop(shutdown_rx);
             (
                 None,
                 Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+                None,
                 None,
                 None,
             )
@@ -652,6 +737,7 @@ async fn run_pipeline_until_ctrl_c(
         retention_task,
         retention_store,
         config_watch,
+        running_persist,
         live_hub,
         server,
         shutdown_tx,
@@ -759,7 +845,11 @@ async fn drive_main_program_in_set(
 // reason: this is the no-`ffmpeg` half of an `async fn` pair; the `ffmpeg`
 // counterpart awaits the full pipeline, so the signature must match for the one
 // `run_pipeline(..).await` call site to compile under either feature set.
-async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Result<ExitCode> {
+async fn run_pipeline(
+    start: &multiview_cli::boot::StartConfig,
+    args: &RunArgs,
+) -> anyhow::Result<ExitCode> {
+    let config = &start.running;
     if args.subtitles.is_some() {
         tracing::warn!(
             "--subtitles needs the `ffmpeg`+`overlay` features (full pipeline); ignoring"
@@ -792,10 +882,13 @@ async fn run_pipeline(config: &MultiviewConfig, args: &RunArgs) -> anyhow::Resul
 /// watcher cannot back-pressure the engine (invariant #10).
 async fn run_software_until_ctrl_c(
     engine: &mut SoftwareEngine,
-    config: &MultiviewConfig,
+    start: &multiview_cli::boot::StartConfig,
     plane: &multiview_cli::licence::EntitlementPlane,
     config_path: &Path,
 ) -> anyhow::Result<RunReport> {
+    // The Running document seeds the stores/drain; the boot file (config_path)
+    // stays the watch + promote target (ADR-W024).
+    let config = &start.running;
     let stop = StopSignal::new();
 
     // The engine's outbound publisher, shared read-only with the control plane
@@ -818,11 +911,16 @@ async fn run_software_until_ctrl_c(
     // phone-home (best-effort, never off air — inv #1/#10), when the `heartbeat`
     // feature is built and the device is configured; a no-op otherwise.
     plane.spawn_heartbeat();
-    let (server, drain, live_hub, config_watch): (Option<_>, ControlDrain, Option<_>, Option<_>) =
-        if let Some(cfg) = config.control.as_ref() {
-            let (handle, command_rx, hub, watch) = serve_control_plane(
+    let (server, drain, live_hub, config_watch, running_persist): (
+        Option<_>,
+        ControlDrain,
+        Option<_>,
+        Option<_>,
+        Option<RunningPersist>,
+    ) = if let Some(cfg) = config.control.as_ref() {
+        let (handle, command_rx, hub, watch, persist) = serve_control_plane(
                 &cfg.listen,
-                config,
+                start,
                 config_path,
                 &publisher,
                 ControlPlaneWiring {
@@ -870,12 +968,13 @@ async fn run_software_until_ctrl_c(
                 Arc::clone(&publisher),
                 hub.handle(),
             ));
-            (Some(handle), drain, Some(hub), Some(watch))
+            (Some(handle), drain, Some(hub), Some(watch), Some(persist))
         } else {
             drop(shutdown_rx);
             (
                 None,
                 Box::new(|_d: &mut CompositorDrive<Nv12Image>| {}),
+                None,
                 None,
                 None,
             )
@@ -941,6 +1040,7 @@ async fn run_software_until_ctrl_c(
         retention_task,
         retention_store,
         config_watch,
+        running_persist,
         live_hub,
         server,
         shutdown_tx,
@@ -974,7 +1074,7 @@ fn load_subtitles(path: &Path) -> anyhow::Result<multiview_overlay::subtitle::Cu
 /// Non-fatal advisories (e.g. a clock setting both `timezone` and
 /// `tz_offset_minutes`) are surfaced to the operator via `tracing::warn!`
 /// before the engine starts — they never fail the load.
-fn load_validated(path: &Path) -> anyhow::Result<MultiviewConfig> {
+fn load_validated(path: &Path) -> anyhow::Result<(String, MultiviewConfig)> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
     let config = MultiviewConfig::load_from_toml(&text)
@@ -985,7 +1085,10 @@ fn load_validated(path: &Path) -> anyhow::Result<MultiviewConfig> {
     for warning in multiview_cli::validate::config_warnings(&config) {
         tracing::warn!(advisory = %warning, "config advisory");
     }
-    Ok(config)
+    // The raw boot-file TEXT is returned alongside the parsed config (ADR-W024
+    // §4): it seeds the file watcher's initial last-observed content so a
+    // resumed run does not reapply the unchanged boot file.
+    Ok((text, config))
 }
 
 /// The control-plane + off-hot-loop tenants a run brings up alongside the
@@ -1008,6 +1111,10 @@ struct RunTenants {
     retention_store: Arc<multiview_telemetry::retention::RetentionStore>,
     /// The ADR-W020 config-file watcher, when the control plane is up.
     config_watch: Option<multiview_cli::config_watch::ConfigWatchHandle>,
+    /// The ADR-W024 debounced Running persister, when the control plane is up:
+    /// finished at teardown (abort → await → one final `active.toml` write
+    /// capturing changes younger than the debounce).
+    running_persist: Option<RunningPersist>,
     /// The ADR-W018 live-source hub (stops + joins every runtime producer).
     live_hub: Option<multiview_cli::live_sources::LiveSourceHub>,
     /// The control server task, when the control plane is up.
@@ -1031,6 +1138,7 @@ async fn shutdown_run_tenants(tenants: RunTenants) {
         retention_task,
         retention_store,
         config_watch,
+        running_persist,
         live_hub,
         server,
         shutdown_tx,
@@ -1043,6 +1151,13 @@ async fn shutdown_run_tenants(tenants: RunTenants) {
     timing_task.abort();
     retention_task.abort();
     log_retention_summary(&retention_store);
+    // Finish the Running persister BEFORE stopping the watcher (ADR-W024 §3):
+    // abort → await → one final best-effort `active.toml` write capturing
+    // changes younger than the debounce, so a resume after this shutdown sees
+    // the latest Running state. Fail-soft.
+    if let Some(persist) = running_persist {
+        persist.finish().await;
+    }
     if let Some(watch) = config_watch {
         watch.stop();
     }

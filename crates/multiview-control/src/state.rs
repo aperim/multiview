@@ -739,6 +739,31 @@ pub struct AppState {
     /// `GET /api/v1/config/watch-status` reads it. Defaults to the honest
     /// "not watched" state. Control-plane-only (invariant #10).
     pub config_watch: Arc<crate::watch_status::ConfigWatchStatus>,
+    /// The Boot/Loaded/Running model (ADR-W024): the boot path, the immutable
+    /// Loaded snapshot, the cold-start policy, and the boot-model file-write
+    /// serial. `Some` only when the run serves a control plane from a config
+    /// file; `None` for store-only/`--ticks` deployments (the
+    /// `revert-to-start`/`promote`/`boot-model` routes then report `modeled:
+    /// false` and refuse the actions). Control-plane-only (invariant #10).
+    pub boot_model: Option<Arc<crate::boot_model::BootModel>>,
+    /// The installed config-file watch HANDLE (ADR-W024 §6): the
+    /// `POST /api/v1/config/promote` route announces its server-side boot-file
+    /// write through this handle's `expect_write`/`confirm`/`release`
+    /// suppression seam (ADR-W020 §7) so the watcher adopts the write as its
+    /// new baseline instead of re-applying it. Interior-mutable because the
+    /// watcher is spawned WITH this `AppState` and so can only be installed
+    /// after construction ([`AppState::install_watch_handle`]). `None` for
+    /// store-only deployments (no watcher) — promote then skips suppression
+    /// (nothing to suppress). Control-plane-only (invariant #10).
+    watch_handle: Arc<std::sync::RwLock<Option<crate::config_watch::ConfigWatchHandle>>>,
+    /// The coalescing **Running-changed** signal (ADR-W024 §3): a one-permit
+    /// [`tokio::sync::Notify`] fired by [`AppState::audit`] — the ONE choke
+    /// point every successful mutation passes through — that the debounced
+    /// `active.toml` persister (`boot_model::spawn_running_persist`) waits on.
+    /// One permit, never queues/grows/blocks, so it can never back-pressure the
+    /// engine (invariant #10). Always present (cheap); only the persister task
+    /// observes it, and only when a boot model is wired.
+    pub running_changed: Arc<tokio::sync::Notify>,
     /// What the **running** engine can take live, per stored collection
     /// (ADR-W022): injected by the binary at wiring time so mutation routes
     /// declare `X-Multiview-Apply` honestly per build + run path. The default
@@ -860,6 +885,16 @@ impl AppState {
             retention: Arc::new(RetentionStore::new()),
             // No watcher by default: the endpoint reports "not watched".
             config_watch: Arc::new(crate::watch_status::ConfigWatchStatus::new()),
+            // No boot model by default (store-only / --ticks): the
+            // boot-model routes report `modeled: false` (ADR-W024). The binary
+            // installs one via `with_boot_model` when it runs from a config
+            // file. The coalescing running-changed signal always exists (cheap).
+            boot_model: None,
+            running_changed: Arc::new(tokio::sync::Notify::new()),
+            // No watcher handle by default (store-only): promote skips
+            // self-write suppression (nothing to suppress). The binary installs
+            // the spawned watcher's handle via `install_watch_handle`.
+            watch_handle: Arc::new(std::sync::RwLock::new(None)),
             // Honest default: nothing applies live until the binary declares
             // what the running engine can take (ADR-W022).
             live_apply: crate::live_apply::LiveApplyCaps::default(),
@@ -918,6 +953,39 @@ impl AppState {
     ) -> Self {
         self.config_watch = config_watch;
         self
+    }
+
+    /// Install the Boot/Loaded/Running model (ADR-W024). The binary wires the
+    /// same `Arc<BootModel>` the debounced persister and the
+    /// `revert-to-start`/`promote`/`boot-model` routes share; the default
+    /// (`None`) reports `modeled: false` and refuses those actions.
+    #[must_use]
+    pub fn with_boot_model(mut self, boot_model: Arc<crate::boot_model::BootModel>) -> Self {
+        self.boot_model = Some(boot_model);
+        self
+    }
+
+    /// Install the spawned config-file watcher's handle (ADR-W024 §6) AFTER
+    /// construction: the watcher is spawned with this `AppState`, so the
+    /// handle it returns can only be wired back in via interior mutability.
+    /// The `promote` route then announces its boot-file write through this
+    /// handle's suppression seam. Idempotent last-writer-wins.
+    pub fn install_watch_handle(&self, handle: crate::config_watch::ConfigWatchHandle) {
+        let mut slot = match self.watch_handle.write() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = Some(handle);
+    }
+
+    /// The installed config-file watch handle, if a watcher was spawned.
+    #[must_use]
+    pub fn watch_handle(&self) -> Option<crate::config_watch::ConfigWatchHandle> {
+        let slot = match self.watch_handle.read() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        slot.clone()
     }
 
     /// Declare what the **running** engine can take live (ADR-W022). The
@@ -1069,6 +1137,12 @@ impl AppState {
             self.ack_now(),
             detail,
         );
+        // ADR-W024 §3: this is the ONE choke point every successful control-
+        // plane mutation passes through, so fire the coalescing Running-changed
+        // signal here — the debounced `active.toml` persister waits on it. One
+        // permit, never queues/grows/blocks (invariant #10); a no-op when no
+        // persister is running.
+        self.running_changed.notify_one();
     }
 
     /// Replace the account-side append-only audit store (e.g. to share one with a

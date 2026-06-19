@@ -118,6 +118,10 @@ pub async fn bind_and_serve<F>(
     // actually wired (network kinds iff the hub has an ingest spawner), so
     // the X-Multiview-Apply header never over-claims.
     live_sources: multiview_control::LiveSourceCapability,
+    // The Boot/Loaded/Running model (ADR-W024): `Some` for a config-file run
+    // (backs `GET /config/boot-model` + the revert/promote actions); `None`
+    // for store-only/`--ticks` runs (those routes report `modeled: false`).
+    boot_model: Option<Arc<multiview_control::boot_model::BootModel>>,
     shutdown: F,
 ) -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>, AppState)>
 where
@@ -217,6 +221,12 @@ where
     // zowietek-control service type (the vendor's type is unverified — only a
     // configured string is ever recognised) plus any extra DNS-SD types.
     .with_discovery_config(config.discovery.clone().unwrap_or_default());
+    // The Boot/Loaded/Running model (ADR-W024): installed for a config-file
+    // run so the boot-model/revert/promote routes are live; absent ⇒ those
+    // routes honestly report `modeled: false`.
+    if let Some(boot_model) = boot_model {
+        state = state.with_boot_model(boot_model);
+    }
     // Serve the process log-tail ring the capture layer feeds (ADR-0060): the
     // same `Arc` `init_tracing` installed, so `GET /api/v1/logs` returns live
     // captured, resource-attributed records. If logging was not initialized
@@ -2658,6 +2668,8 @@ input_id = "in_b"
             None,
             multiview_control::LiveApplyCaps::default(),
             multiview_control::LiveSourceCapability::synthetic_only(),
+            // boot_model: none for this store-only bind test (ADR-W024).
+            None,
             async move {
                 let _ = shutdown_rx.await;
             },

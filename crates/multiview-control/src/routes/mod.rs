@@ -888,6 +888,16 @@ pub fn api_router() -> Router<AppState> {
         // "not watched" default. A static segment, so it never collides with
         // the `{target}` capture below (axum prefers static matches).
         .route("/config/watch-status", get(config::watch_status))
+        // The Boot/Loaded/Running config model (ADR-W024). Static segments, so
+        // they never collide with the `{target}` capture below: the divergence
+        // indicator (read), revert-to-start (Running := Loaded, live), and
+        // promote (write Running to the boot file via the ADR-W020 seam).
+        .route("/config/boot-model", get(config::boot_model_status))
+        .route(
+            "/config/revert-to-start",
+            post(config::revert_to_start),
+        )
+        .route("/config/promote", post(config::promote_to_boot))
         // Config versioning: history + commit, single revision, diff, rollback.
         .route(
             "/config/{target}",

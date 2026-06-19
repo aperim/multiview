@@ -504,6 +504,7 @@ async fn pipeline_serves_control_api_and_live_preview_while_ingesting() {
         None, // mesh
         multiview_control::LiveApplyCaps::default(),
         multiview_control::LiveSourceCapability::synthetic_only(),
+        None, // boot_model (ADR-W024)
         async move {
             let _ = shutdown_rx.await;
         },
