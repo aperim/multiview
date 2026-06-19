@@ -35,8 +35,8 @@ use multiview_cli::run::SoftwareEngine;
 use multiview_config::MultiviewConfig;
 use multiview_engine::{CooperativePacer, ManualTimeSource};
 use multiview_licence::heartbeat::{
-    DeviceChallenge, DeviceIdentity, HeartbeatClient, HeartbeatConfig, HeartbeatError,
-    HeartbeatResponse, LicenceServer, LicensingKeys, PinnedRoot,
+    ActivateResponse, DeviceChallenge, DeviceIdentity, HeartbeatClient, HeartbeatConfig,
+    HeartbeatError, HeartbeatResponse, LicenceServer, LicensingKeys, PinnedRoot,
 };
 use multiview_licence::{EnforcementLevel, LeaseStore};
 
@@ -134,6 +134,18 @@ impl LicenceServer for HostileServer {
         _idem: &str,
         _pop_header: &str,
     ) -> Result<HeartbeatResponse, HeartbeatError> {
+        self.maybe_stall().await;
+        Err(HeartbeatError::Transport("partitioned".to_owned()))
+    }
+    async fn activate(
+        &self,
+        _org: &str,
+        _body: Vec<u8>,
+        _idem: &str,
+        _pop_header: &str,
+    ) -> Result<ActivateResponse, HeartbeatError> {
+        // The first-contact ACTIVATE path is just as hostile (stall / partition) —
+        // it must NOT be able to stall the output clock either (ADR-I008, inv #10).
         self.maybe_stall().await;
         Err(HeartbeatError::Transport("partitioned".to_owned()))
     }
@@ -312,5 +324,125 @@ async fn the_output_clock_ticks_while_a_heartbeat_call_is_stalled_in_flight() {
     assert!(
         store.status().is_none(),
         "the stalled heartbeat installed/removed nothing"
+    );
+}
+
+/// A FRESH, un-bound device identity (no binding) — the first-contact ACTIVATE case.
+fn fresh_identity() -> DeviceIdentity {
+    DeviceIdentity {
+        binding_id: None,
+        ..identity()
+    }
+}
+
+/// An ENROLLING client: a fresh device with activate ENABLED, so `run_once` takes
+/// the first-contact ACTIVATE path (fetch challenge → activate) instead of the
+/// renew-only no-op.
+fn enrolling_client(
+    server: Arc<HostileServer>,
+    store: Arc<LeaseStore>,
+) -> HeartbeatClient<HostileServer> {
+    HeartbeatClient::new(
+        server,
+        store,
+        dummy_root(),
+        HeartbeatConfig {
+            org_id: "org_test".to_owned(),
+            min_interval: Duration::from_millis(1),
+            enable_activate: true,
+            ..HeartbeatConfig::default()
+        },
+        fresh_identity(),
+    )
+}
+
+/// THE ACTIVATE-PATH IN-FLIGHT STALL GATE (ADR-I008): a fresh device's first-contact
+/// ACTIVATE call, black-holed in flight, cannot back-pressure the output clock. The
+/// deferred enrolment slice is held to the SAME never-off-air bar (inv #1/#10) as the
+/// renew path — a stalled activate must never stall output.
+#[tokio::test]
+async fn the_output_clock_ticks_while_an_activate_call_is_stalled_in_flight() {
+    let store = Arc::new(LeaseStore::new());
+    let mut engine = SoftwareEngine::build_gated(&small_config(), Some(EnforcementLevel::Active))
+        .expect("build");
+
+    // A fresh device that ENROLS — its first activate-path server call black-holes.
+    let server = Arc::new(HostileServer::stalling());
+    let hb = enrolling_client(Arc::clone(&server), Arc::clone(&store));
+    let handle = tokio::spawn(async move { hb.run_forever().await });
+
+    // Wait until the activate-path call is genuinely parked in flight (not a race).
+    let parked = tokio::time::timeout(Duration::from_secs(5), async {
+        while !server.is_in_flight() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(
+        parked.is_ok(),
+        "the activate-path call must reach an in-flight stall"
+    );
+    assert!(!handle.is_finished(), "the activate is stalled (not returned)");
+
+    // WHILE the activate is stalled in flight, drive the output clock — one frame per
+    // tick, never faltered.
+    let time = Arc::new(ManualTimeSource::new());
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.run_for(time, CooperativePacer, 50),
+    )
+    .await
+    .expect("the engine run must not hang while an activate call is stalled")
+    .expect("the engine drives regardless of an in-flight stalled activate");
+    assert_eq!(
+        report.frames, 50,
+        "one frame per tick while an activate call is stalled in flight"
+    );
+    assert!(
+        !report.faltered,
+        "the output clock never falters during the activate stall"
+    );
+    assert!(
+        !handle.is_finished(),
+        "the activate is STILL stalled while the clock ran the whole way"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    assert!(
+        store.status().is_none(),
+        "the stalled activate installed nothing (a fresh device stays last-good/empty)"
+    );
+}
+
+/// A partitioned ACTIVATE loop (every enrolment call errors) churning alongside the
+/// output clock cannot slow it or install anything — the fresh-device fail-closed
+/// path keeps the engine on air (ADR-I008, inv #1/#10).
+#[tokio::test]
+async fn a_partitioned_activate_loop_runs_alongside_the_clock_without_effect() {
+    let store = Arc::new(LeaseStore::new());
+    let mut engine = SoftwareEngine::build_gated(&small_config(), Some(EnforcementLevel::Active))
+        .expect("build");
+
+    let server = Arc::new(HostileServer::partitioning());
+    let hb = enrolling_client(Arc::clone(&server), Arc::clone(&store));
+    let handle = tokio::spawn(async move { hb.run_forever().await });
+
+    let time = Arc::new(ManualTimeSource::new());
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.run_for(time, CooperativePacer, 50),
+    )
+    .await
+    .expect("the engine run must not hang under activate churn")
+    .expect("the engine drives regardless");
+    assert_eq!(report.frames, 50, "one frame per tick under activate churn");
+    assert!(!report.faltered, "the output clock never falters");
+
+    handle.abort();
+    let _ = handle.await;
+    assert!(
+        store.status().is_none(),
+        "a partitioned activate never installs a lease (fresh device stays empty)"
     );
 }
