@@ -2024,7 +2024,11 @@ async fn shed_delete_then_unrelated_landed_mutation_keeps_the_running_source() {
         .body(Body::empty())
         .expect("delete request");
     let resp = send(&r.router, req).await;
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "the delete succeeds (store)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "the delete succeeds (store)"
+    );
 
     // Drain the bus so the next, UNRELATED mutation lands live.
     let _ = r.commands.try_drain();
@@ -2043,7 +2047,11 @@ async fn shed_delete_then_unrelated_landed_mutation_keeps_the_running_source() {
         ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "the unrelated add lands");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "the unrelated add lands"
+    );
 
     // Several persist windows: active.toml must STILL carry in_a (the engine
     // runs it; the shed delete was never adopted) and gain in_c.
@@ -2073,7 +2081,10 @@ async fn the_persister_blocks_on_the_mutation_lock() {
     let r = rig(BOOT_DOC);
     let model = r.state.boot_model.clone().expect("rig wires a boot model");
     let active_path = model.active_path();
-    assert!(!active_path.exists(), "no active.toml before the first persist");
+    assert!(
+        !active_path.exists(),
+        "no active.toml before the first persist"
+    );
 
     // Hold the mutation lock — as an in-flight mutate→submit→adopt would.
     let guard = r.state.lock_config_mutation().await;
