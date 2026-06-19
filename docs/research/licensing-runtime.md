@@ -471,8 +471,12 @@ This is the heart of the isolation guarantee (Rule 2, invariant #10).
 ([ADR-0050 §4/§5](../decisions/ADR-0050.md), `ladder.rs`) is:
 
 - **Running program output is NEVER interrupted at ANY rung.** Not stalled, not de-paced, not torn
-  down. A program on air **stays exactly as it was** (invariant #1) — including under a revoked/lapsed
-  entitlement (revocation-by-non-reissue, §5.2).
+  down. A program on air **stays on air with its cadence and timing preserved** (invariant #1) —
+  uninterrupted, correctly-paced output, including under a revoked/lapsed entitlement
+  (revocation-by-non-reissue, §5.2). Invariant #1 is a guarantee about **uninterrupted, correctly-timed
+  delivery, not pixel-identical frames**: under the `watermark` rung the running canvas **may gain the
+  documented corner watermark** (S3 below) — the output never stops or de-paces, but its pixels are not
+  frozen.
 - **`active`:** full function, no banner, no watermark.
 - **`warning` (nearing expiry / 14-day grace):** full function, prominent **UI warning banner**, no
   watermark — the operator is told to renew; nothing is degraded.
@@ -785,8 +789,10 @@ Every service call is off the data plane.
 
 - **#1 (output-clock):** licensing **never** stops, stalls, or de-paces a running program. The hardest
   rung only **refuses to start a new instance** (S1), **denies reconfig** (S2), and **stamps a corner
-  watermark** (S3). Running output is sacrosanct, including under revocation. Proven by §8 and the
-  CONSPECT-2 chaos gate.
+  watermark** (S3). Running output is never taken off air or de-paced, including under revocation — the
+  guarantee is uninterrupted, correctly-paced delivery, **not** pixel-identical frames (the `watermark`
+  rung modifies the canvas via S3, §7). Demonstrated by the §8.4 never-off-air chaos gate (one frame per
+  tick, no falter, store unchanged).
 - **#10 (isolation):** the heartbeat task is a control-plane task holding **no engine handle**; it
   publishes `LicenceStatus` via `arc_swap` and the engine reads **two derived atomics** wait-free per
   tick. There is no channel, lock, or `.await` by which licensing can back-pressure the engine.
