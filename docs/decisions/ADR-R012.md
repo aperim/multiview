@@ -71,11 +71,17 @@ subcommand and an operator harness, all in the **default CI-green build, no hard
    so a near-stalled tick FAILS); and — when `--frame-ocr-hook` is supplied — the
    hook's captured cross-node burnt-in frame-counter skew (in ns) checked against one
    frame period at `--expected-fps` (a presentation skew, gated in the harness, not the
-   clock analyzer). Plus the node-OS clock-discipline runbook (`ptp4l`/`chronyd`
-   configs, exported-metric table, the `--frame-ocr-hook` ns contract, thresholds).
-   `--dry-run` feeds bundled fixtures through `soak-report` and asserts a clean capture
-   PASSes while a single-node offset breach, a cross-node-skew breach, and a cadence
-   stall each FAIL.
+   clock analyzer). The OCR leg is **fail-closed**: a supplied hook that exits non-zero
+   or produces no parseable reading is a **FAILURE** (`ocr_hook_failed` /
+   `ocr_hook_no_output`), never coerced to skew 0 and passed — the operator asked for the
+   visual check, so a check that did not happen fails. Omitting the hook is unchanged: the
+   physical leg is reported "not run", which is not a failure. Plus the node-OS
+   clock-discipline runbook (`ptp4l`/`chronyd` configs, exported-metric table, the
+   `--frame-ocr-hook` ns contract, thresholds). `--dry-run` feeds bundled fixtures through
+   `soak-report` and asserts a clean capture PASSes while a single-node offset breach, a
+   cross-node-skew breach, and a cadence stall each FAIL; it also asserts the OCR leg FAILs
+   for a hook that exits non-zero and for a hook that emits no value, and PASSes only for an
+   in-bound reading.
 
 5. **`.github/workflows/ci.yml` — the `soak harness self-test` job** runs `shellcheck`
    on the harness plus the `--dry-run` self-test on every relevant push, so the
@@ -111,6 +117,7 @@ subcommand and an operator harness, all in the **default CI-green build, no hard
 | Scrape only node A in the harness real-run | A 2-node sync soak that never reads node B (or its skew) can PASS a de-synced pair — the exact failure ADR-M010 exists to catch. The harness scrapes **every** node and derives the cross-node skew leg. |
 | Hardcode the cadence floor at 1 tick/sample | A floor of 1 lets a 30 s sample PASS when the tick counter advanced a single tick — defeating the inv-#1 chaos assertion on hardware. The floor derives from `--sample × --expected-fps`. |
 | Gate the frame-OCR skew with the clock-offset ns bound | A 1-frame presentation skew (20 ms at 50 fps) is ~200× the 100 µs PTP clock bound; the OCR leg needs a frame-period bound, checked in the harness, not the clock analyzer. |
+| Let a supplied OCR hook that fails or emits nothing leave skew 0 and PASS (fail-open) | A soak-acceptance harness exists to *catch* desync; coercing a missing/failed reading to 0 silently passes the exact leg the operator added to verify presentation sync. The supplied-but-non-producing hook is fail-**closed** (`ocr_hook_failed` / `ocr_hook_no_output` ⇒ FAIL). Absence of a hook stays "not run", never a failure. |
 | A new ADR family / numeric ADR | This is a telemetry/resilience implementation of an existing management decision (ADR-M010); the Resilience & A/V family (`R*`) is the correct home, next free number R012. |
 
 ## Consequences
@@ -122,13 +129,14 @@ subcommand and an operator harness, all in the **default CI-green build, no hard
   and to the capture-document JSON shape `soak-report` reads.
 - **Hardware-validation seam (rule 26):** this change proves the **analyzer + thresholds +
   verdict logic** and the **harness orchestration** (multi-node scrape, cross-node-skew
-  derivation, cadence floor, OCR-hook capture+gate) — all exercised by the CI `--dry-run`
-  self-test. It does **not** prove the real servo. The operator's on-hardware validation is:
-  a live `ptp4l`/`chrony` p99 offset under production load; a real audio resampler's
-  resample-ppm behaviour; and the physical 24 h soak across ≥2 nodes on a non-PTP GbE switch
-  where the cameras + OCR of the burnt-in frame counter feed `--frame-ocr-hook` (the harness
-  captures and gates that ns skew, but the cameras/OCR themselves are physical) and the chaos
-  is injected via `--chaos-hook`. The software path ships and is CI-exercised; the physical
+  derivation, cadence floor, fail-closed OCR-hook capture+gate) — all exercised by the CI
+  `--dry-run` self-test. It does **not** prove the real servo. The operator's on-hardware
+  validation is: a live `ptp4l`/`chrony` p99 offset under production load; a real audio
+  resampler's resample-ppm behaviour; and the physical 24 h soak across ≥2 nodes on a
+  non-PTP GbE switch where the cameras + OCR of the burnt-in frame counter feed
+  `--frame-ocr-hook` (the harness captures and gates that ns skew, failing closed if the
+  hook errors or returns no reading, but the cameras/OCR themselves are physical) and the
+  chaos is injected via `--chaos-hook`. The software path ships and is CI-exercised; the physical
   run is gated on real nodes.
 - Touches invariant #1 (the `cadence_uninterrupted` chaos assertion *encodes* the
   output-never-falters guarantee as a soak pass condition) and invariant #10 (the servo

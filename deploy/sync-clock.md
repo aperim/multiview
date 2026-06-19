@@ -99,6 +99,9 @@ gates a run on four things:
 4. if `--frame-ocr-hook` is supplied, the burnt-in **cross-node frame-counter
    skew** it prints (in ns) stays within one frame period at `--expected-fps`
    (checked in the harness — it is a presentation skew, not a clock offset).
+   This leg is **fail-closed**: a supplied hook that exits non-zero or prints no
+   parseable value FAILS the run (`ocr_hook_failed` / `ocr_hook_no_output`) — a
+   missing reading is never coerced to skew 0 and passed.
 
 The clock pass/fail maths lives only in the tested `cargo xtask soak-report`
 analyzer; the harness scrapes, derives the cross-node skew, applies the cadence
@@ -112,9 +115,11 @@ scripts/soak-acceptance.sh --dry-run
 
 This feeds bundled fixtures through `soak-report` and asserts a clean capture
 passes while a **single-node offset breach**, a **cross-node skew breach**, and a
-**cadence stall** each fail. The CI `soak harness self-test` job runs `shellcheck`
-plus this `--dry-run`, so the harness→analyzer wiring is exercised on every
-relevant push.
+**cadence stall** each fail. It also drives the physical-OCR leg with sample hooks
+and asserts a hook that **exits non-zero** and a hook that **emits no value** each
+FAIL, while an in-bound reading passes — so the fail-closed behaviour is gated, not
+just asserted. The CI `soak harness self-test` job runs `shellcheck` plus this
+`--dry-run`, so the harness→analyzer wiring is exercised on every relevant push.
 
 **Real 24 h run (needs ≥2 nodes):**
 
@@ -142,9 +147,16 @@ is called, **prints to stdout one integer** — the current cross-node burnt-in
 frame-counter skew in **nanoseconds** (e.g. from two cameras pointed at the node
 heads + OCR of the DEV-C3 test-pattern counter). The harness **captures** that
 output (it is not discarded) and fails the run if the worst skew exceeds one frame
-period at `--expected-fps`. Omit the hook to run the telemetry legs only; the
-physical visual leg is then simply **absent** (reported as "not run"), never
-silently passed.
+period at `--expected-fps`.
+
+The leg is **fail-closed**. Because you supplied the hook to verify presentation
+sync, a hook that **exits non-zero** (`ocr_hook_failed`) or that **prints no
+parseable integer** (`ocr_hook_no_output`) on any poll is a **FAILURE** — the
+verification you asked for did not happen, so the harness never coerces the missing
+reading to skew 0 and passes. Omit the hook entirely to run the telemetry legs
+only; the physical visual leg is then simply **absent** (reported as "not run"),
+which is *not* a failure. The contract is: supply the hook and it must produce a
+reading every poll, or do not supply it at all.
 
 ### Hardware-gated
 
