@@ -466,6 +466,9 @@ async fn serve_control_plane(
     // boot-load TEXT seeds the last-observed content (ADR-W024 §4: the
     // unchanged boot file must never clobber a resumed baseline; an edit in the
     // boot window differs from this text and still applies).
+    // `spawn` installs the watcher's handle into the shared state, so the
+    // `promote` route can announce its server-side boot-file write through the
+    // ADR-W020 suppression seam (ADR-W024 §6).
     let watch = multiview_cli::config_watch::spawn(
         config_path.to_path_buf(),
         config.clone(),
@@ -473,9 +476,6 @@ async fn serve_control_plane(
         multiview_cli::config_watch::WatchOptions::default()
             .with_initial_observed(start.boot_text.clone()),
     );
-    // Install the watcher's handle so the `promote` route can announce its
-    // server-side boot-file write through the ADR-W020 suppression seam.
-    state.install_watch_handle(watch.clone());
     Ok((handle, command_rx, hub, watch, persist))
 }
 

@@ -269,6 +269,11 @@ pub fn spawn(
         expected: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         stop: Arc::new(AtomicBool::new(false)),
     };
+    // Install the handle into the shared state so the `promote` route (ADR-W024
+    // §6) can announce its boot-file write through this watcher's suppression
+    // seam. Done here (not by the caller) so every watcher — including the ones
+    // tests spawn directly — wires its own handle by construction.
+    state.install_watch_handle(handle.clone());
     state.config_watch.mark_active(&path.display().to_string());
     tracing::info!(
         path = %path.display(),
