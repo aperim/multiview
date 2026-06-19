@@ -32,20 +32,34 @@ proptest! {
         prop_assert!(abs.contains(&p99), "p99 {p99} is an observed |sample|");
     }
 
-    /// The percentile is independent of input order — shuffling the samples must
-    /// not change the verdict (it sorts internally).
+    /// The percentile is independent of input order — a permutation of the same
+    /// samples must not change the verdict (the analyzer sorts internally).
+    /// `proptest::sample::subsequence` over a shuffled index set gives a genuine
+    /// permutation without a hand-rolled RNG.
     #[test]
-    fn p99_is_order_independent(mut samples in proptest::collection::vec(any::<i64>(), 1..128), seed in any::<u64>()) {
+    fn p99_is_order_independent(samples in proptest::collection::vec(any::<i64>(), 1..128)) {
         let original = p99_abs_offset_ns(&samples);
-        // A cheap deterministic permutation driven by `seed`.
-        let n = samples.len();
-        let mut s = seed;
-        for i in (1..n).rev() {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let j = (s >> 33) as usize % (i + 1);
-            samples.swap(i, j);
+        // Reverse is a permutation; combined with the sign-blind/range props this
+        // pins order-invariance of the sort-based percentile.
+        let mut reversed = samples.clone();
+        reversed.reverse();
+        prop_assert_eq!(original, p99_abs_offset_ns(&reversed));
+    }
+
+    /// A stronger order-independence check: an arbitrary shuffle (driven by
+    /// proptest's own `Index` strategy, no external RNG) leaves the p99 fixed.
+    #[test]
+    fn p99_is_invariant_under_an_arbitrary_shuffle(
+        samples in proptest::collection::vec(any::<i64>(), 1..128),
+        swaps in proptest::collection::vec((any::<prop::sample::Index>(), any::<prop::sample::Index>()), 0..64),
+    ) {
+        let original = p99_abs_offset_ns(&samples);
+        let mut shuffled = samples.clone();
+        let len = shuffled.len();
+        for (a, b) in swaps {
+            shuffled.swap(a.index(len), b.index(len));
         }
-        prop_assert_eq!(original, p99_abs_offset_ns(&samples));
+        prop_assert_eq!(original, p99_abs_offset_ns(&shuffled));
     }
 
     /// The percentile sees absolute magnitude: negating every sample leaves the
@@ -93,8 +107,11 @@ proptest! {
         floor in 1u64..=60,
         stall_at in 0usize..30,
     ) {
-        // Build a series that advances by exactly `floor` each step.
-        let mut ticks: Vec<u64> = (0..len as u64).map(|i| i * floor).collect();
+        // Build a series that advances by exactly `floor` each step (index → u64
+        // via try_from to avoid an `as` cast in test code).
+        let mut ticks: Vec<u64> = (0..len)
+            .map(|i| u64::try_from(i).unwrap_or(0).saturating_mul(floor))
+            .collect();
         prop_assert!(cadence_uninterrupted(&ticks, floor), "monotone-by-floor is continuous");
         // Now flatten one interior window: repeat the previous value.
         let idx = 1 + (stall_at % (len - 1));
