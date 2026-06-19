@@ -235,7 +235,9 @@ ocr_dry_leg() {
   local ocr_hook_failed=0 ocr_no_output=0 j=0 ocr rc
   while [ "$j" -lt "$polls" ]; do
     ocr_attempts=$(( ocr_attempts + 1 ))
-    ocr="$(ocr_capture_sample "$hook")"; rc=$?
+    # Same guarded capture as real_run: `|| rc=$?` so a failing hook under set -e
+    # records the failure and the loop continues (no abort).
+    rc=0; ocr="$(ocr_capture_sample "$hook")" || rc=$?
     if [ "$rc" -eq 0 ]; then
       ocr_readings=$(( ocr_readings + 1 ))
       [ "$ocr" -gt "$ocr_skew_max_ns" ] && ocr_skew_max_ns="$ocr"
@@ -332,8 +334,11 @@ real_run() {
     # and it did not happen, so it must not silently pass (gated below).
     if [ -n "$FRAME_OCR_HOOK" ]; then
       ocr_attempts=$(( ocr_attempts + 1 ))
-      local ocr rc
-      ocr="$(ocr_capture_sample "$FRAME_OCR_HOOK")"; rc=$?
+      local ocr rc=0
+      # Guard with `|| rc=$?`: under `set -e` a command substitution that returns
+      # non-zero in a bare assignment aborts the script — a failing hook must
+      # record the failure and let the soak CONTINUE, never kill the run.
+      ocr="$(ocr_capture_sample "$FRAME_OCR_HOOK")" || rc=$?
       if [ "$rc" -eq 0 ]; then
         ocr_readings=$(( ocr_readings + 1 ))
         ocr_skew_series="${ocr_skew_series}${ocr},"
@@ -386,18 +391,21 @@ real_run() {
 # Poll the operator's frame-OCR hook once and classify the result:
 #   exit 0 + the absolute integer ns skew on stdout — a usable reading;
 #   exit 2 — the hook itself exited non-zero (ocr_hook_failed);
-#   exit 3 — the hook succeeded but printed no parseable first-field integer
-#            (ocr_hook_no_output).
+#   exit 3 — the hook succeeded but produced no parseable non-negative-integer
+#            first field (ocr_hook_no_output).
 # A failed reading is NEVER coerced to skew 0; the caller counts it as a leg
-# failure (fail-closed). The hook runs in a pipeline, so its exit status is
-# captured explicitly via PIPESTATUS rather than the pipe's (awk's) status.
+# failure (fail-closed). The hook runs in its OWN command substitution so `$?`
+# is the hook's real exit status (running it inside `hook | awk` would mask a
+# non-zero exit, since the pipeline's status is awk's — always 0). The first
+# field is parsed and numerically validated only after the exit is confirmed.
 ocr_capture_sample() {
-  local hook="$1" raw value
-  raw="$(eval "$hook" 2>/dev/null | awk 'NR==1{print $1}')"
-  [ "${PIPESTATUS[0]}" -eq 0 ] || return 2
-  [ -n "$raw" ] || return 3
-  value="$(abs_int "$raw")"
-  [ -n "$value" ] || return 3
+  local hook="$1" raw first value
+  raw="$(eval "$hook" 2>/dev/null)" || return 2
+  first="$(printf '%s\n' "$raw" | awk 'NR==1{print $1}')"
+  value="$(abs_int "$first")"
+  case "$value" in
+    '' | *[!0-9]*) return 3 ;;
+  esac
   printf '%s\n' "$value"
 }
 
