@@ -155,7 +155,51 @@ JSON
     echo "FAIL: cadence-stall fixture unexpectedly passed" >&2; exit 1
   fi
 
-  echo "dry-run OK: harness→analyzer wiring verified (offset, cross-node skew, cadence)"
+  # ── physical-OCR leg: a SUPPLIED hook that does not produce a reading must
+  # FAIL, never silently pass. The operator asked for the visual check; a hook
+  # that exits non-zero or prints nothing means it did not happen. (No hook at
+  # all is the "not run" case, exercised by the real run, not a failure.)
+  local frame_ns=$(( 1000000000 / EXPECTED_FPS ))
+
+  echo "dry-run: supplied OCR hook that EXITS NON-ZERO must FAIL (never silent pass)"
+  if ocr_dry_leg 'exit 7' 3 "$frame_ns"; then
+    echo "FAIL: a failing OCR hook silently passed the physical leg" >&2; exit 1
+  fi
+
+  echo "dry-run: supplied OCR hook that emits NO VALUE must FAIL (never silent pass)"
+  if ocr_dry_leg 'true' 3 "$frame_ns"; then
+    echo "FAIL: a no-output OCR hook silently passed the physical leg" >&2; exit 1
+  fi
+
+  echo "dry-run: supplied OCR hook reading within one frame period must PASS"
+  if ! ocr_dry_leg 'echo 1000' 3 "$frame_ns"; then
+    echo "FAIL: a healthy in-bound OCR hook did not pass the physical leg" >&2; exit 1
+  fi
+
+  echo "dry-run: supplied OCR hook reading beyond one frame period must FAIL"
+  if ocr_dry_leg "echo $(( frame_ns + 1 ))" 3 "$frame_ns"; then
+    echo "FAIL: an out-of-bound OCR reading unexpectedly passed the physical leg" >&2; exit 1
+  fi
+
+  echo "dry-run OK: harness→analyzer wiring verified (offset, cross-node skew, cadence, frame-OCR)"
+}
+
+# Drive the physical-OCR capture+verdict path against a hook command for a fixed
+# number of polls (no metrics, no sleeps) — the same accumulators and verdict the
+# real run uses, so the dry-run self-test gates the SAME fail-closed logic.
+ocr_dry_leg() {
+  local hook="$1" polls="$2" bound_ns="$3"
+  local ocr_skew_max_ns=0 ocr_attempts=0 ocr_failures=0 j=0 ocr
+  while [ "$j" -lt "$polls" ]; do
+    ocr_attempts=$(( ocr_attempts + 1 ))
+    if ocr="$(ocr_capture_sample "$hook")"; then
+      [ "$ocr" -gt "$ocr_skew_max_ns" ] && ocr_skew_max_ns="$ocr"
+    else
+      ocr_failures=$(( ocr_failures + 1 ))
+    fi
+    j=$(( j + 1 ))
+  done
+  ocr_leg_verdict "$ocr_attempts" "$ocr_failures" "$ocr_skew_max_ns" "$bound_ns"
 }
 
 # ── real run helpers (hardware) ─────────────────────────────────────────────
@@ -209,7 +253,7 @@ real_run() {
     ptp_series[n]=""; sys_series[n]=""; tick_series[n]=""
   done
   local ptp_skew_series="" sys_skew_series="" ocr_skew_series=""
-  local ocr_skew_max_ns=0
+  local ocr_skew_max_ns=0 ocr_attempts=0 ocr_failures=0
 
   local i=0
   while [ "$i" -lt "$samples" ]; do
@@ -233,13 +277,18 @@ real_run() {
     sys_skew_series="${sys_skew_series}$(max_pairwise_abs "${sys_now[@]}"),"
 
     # Physical leg: capture (do NOT discard) the operator hook's cross-node
-    # burnt-in frame-counter skew in ns, gate it against one frame period.
+    # burnt-in frame-counter skew in ns, gate it against one frame period. A
+    # supplied hook that fails (non-zero) or emits no parseable value is counted
+    # as an OCR *failure* this sample — the operator asked for the visual check
+    # and it did not happen, so it must not silently pass (gated below).
     if [ -n "$FRAME_OCR_HOOK" ]; then
-      local ocr; ocr="$(eval "$FRAME_OCR_HOOK" 2>/dev/null | awk 'NR==1{print $1}')" || ocr=""
-      if [ -n "$ocr" ]; then
-        ocr="$(abs_int "$ocr")"
+      ocr_attempts=$(( ocr_attempts + 1 ))
+      local ocr
+      if ocr="$(ocr_capture_sample "$FRAME_OCR_HOOK")"; then
         ocr_skew_series="${ocr_skew_series}${ocr},"
         [ "$ocr" -gt "$ocr_skew_max_ns" ] && ocr_skew_max_ns="$ocr"
+      else
+        ocr_failures=$(( ocr_failures + 1 ))
       fi
     fi
 
@@ -265,10 +314,7 @@ real_run() {
   local ocr_ok=1
   if [ -n "$FRAME_OCR_HOOK" ]; then
     local frame_ns=$(( 1000000000 / EXPECTED_FPS ))
-    if [ "$ocr_skew_max_ns" -le "$frame_ns" ]; then
-      echo "  [frame-ocr] cross-node frame skew max ${ocr_skew_max_ns} ns (bound ${frame_ns} ns) — PASS"
-    else
-      echo "  [frame-ocr] cross-node frame skew max ${ocr_skew_max_ns} ns (bound ${frame_ns} ns) — FAIL"
+    if ! ocr_leg_verdict "$ocr_attempts" "$ocr_failures" "$ocr_skew_max_ns" "$frame_ns"; then
       ocr_ok=0
     fi
   else
@@ -281,6 +327,34 @@ real_run() {
     echo "VERDICT: FAIL"
     exit 1
   fi
+}
+
+# Poll the operator's frame-OCR hook once. On success prints the absolute
+# integer ns skew it reported and returns 0; if the hook exits non-zero OR emits
+# no parseable first-field integer, prints nothing and returns 1 (a failed
+# reading the caller must treat as an OCR failure, never as skew 0).
+ocr_capture_sample() {
+  local hook="$1" raw value
+  raw="$(eval "$hook" 2>/dev/null | awk 'NR==1{print $1}')" || raw=""
+  [ -n "$raw" ] || return 1
+  value="$(abs_int "$raw")"
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
+}
+
+# Render the physical-OCR leg verdict from the run's accumulators: the number of
+# hook polls attempted, how many of those failed (non-zero / empty), the worst
+# observed cross-node frame skew in ns, and the one-frame-period bound in ns.
+# Prints a one-line verdict and returns 0 (PASS) / 1 (FAIL).
+ocr_leg_verdict() {
+  local attempts="$1" failures="$2" max_ns="$3" bound_ns="$4"
+  echo "  [frame-ocr] ${attempts} hook poll(s), ${failures} with no reading"
+  if [ "$max_ns" -le "$bound_ns" ]; then
+    echo "  [frame-ocr] cross-node frame skew max ${max_ns} ns (bound ${bound_ns} ns) — PASS"
+    return 0
+  fi
+  echo "  [frame-ocr] cross-node frame skew max ${max_ns} ns (bound ${bound_ns} ns) — FAIL"
+  return 1
 }
 
 # Absolute value of a (possibly signed, possibly float-ish) integer string → int.
