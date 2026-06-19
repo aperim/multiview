@@ -31,12 +31,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use multiview_cli::run::SoftwareEngine;
 use multiview_config::MultiviewConfig;
 use multiview_engine::{CooperativePacer, ManualTimeSource};
 use multiview_licence::heartbeat::{
-    DeviceChallenge, DeviceIdentity, HeartbeatClient, HeartbeatConfig, HeartbeatError,
-    HeartbeatResponse, LicenceServer, LicensingKeys, PinnedRoot,
+    ActivateResponse, DeviceChallenge, DeviceIdentity, HeartbeatClient, HeartbeatConfig,
+    HeartbeatError, HeartbeatResponse, LicenceServer, LicensingKeys, PinnedRoot,
 };
 use multiview_licence::{EnforcementLevel, LeaseStore};
 
@@ -134,6 +135,18 @@ impl LicenceServer for HostileServer {
         _idem: &str,
         _pop_header: &str,
     ) -> Result<HeartbeatResponse, HeartbeatError> {
+        self.maybe_stall().await;
+        Err(HeartbeatError::Transport("partitioned".to_owned()))
+    }
+    async fn activate(
+        &self,
+        _org: &str,
+        _body: Vec<u8>,
+        _idem: &str,
+        _pop_header: &str,
+    ) -> Result<ActivateResponse, HeartbeatError> {
+        // The first-contact ACTIVATE path is just as hostile (stall / partition) —
+        // it must NOT be able to stall the output clock either (ADR-I008, inv #10).
         self.maybe_stall().await;
         Err(HeartbeatError::Transport("partitioned".to_owned()))
     }
@@ -312,5 +325,319 @@ async fn the_output_clock_ticks_while_a_heartbeat_call_is_stalled_in_flight() {
     assert!(
         store.status().is_none(),
         "the stalled heartbeat installed/removed nothing"
+    );
+}
+
+// ===========================================================================
+// Device ACTIVATE / enrolment never-off-air gate (ADR-I008).
+//
+// The first-contact activate path (`activate_once`) calls `fetch_keys` → verify →
+// `fetch_challenge` → sign → `server.activate(...)`. To prove a stalled/partitioned
+// ACTIVATE POST cannot back-pressure the output clock, the chaos server must let
+// `fetch_keys` (which runs `TrustedKeys::verify`) and `fetch_challenge` SUCCEED, then
+// stall/error ONLY on `activate` — so the chaos genuinely bites the activate POST,
+// not an earlier call. That needs a real attested keyset (a fabricated ECDSA-P256
+// root signs an Ed25519 lease intermediate) + a real device signer for the PoP.
+// ===========================================================================
+
+/// A fixed, deterministic Ed25519 device signer (a known seed) — so `activate_once`
+/// passes its signer guard and builds a real PoP proof. The cli's non-test code has
+/// no signer/RNG; this is dev-only.
+struct FixedDeviceSigner {
+    key: ed25519_dalek::SigningKey,
+}
+impl multiview_licence::heartbeat::DeviceSigner for FixedDeviceSigner {
+    fn public_key_raw(&self) -> [u8; 32] {
+        self.key.verifying_key().to_bytes()
+    }
+    fn sign(&self, message: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer as _;
+        self.key.sign(message).to_bytes()
+    }
+}
+
+/// A fabricated, root-attested keyset rooted at an ECDSA-P256 key we control — so a
+/// served `LicensingKeys` actually passes `TrustedKeys::verify` against this root.
+/// Minimal: one Ed25519 `lease` intermediate, valid now, no revocations. (No lease is
+/// minted — the activate POST stalls/errors before issuing one.)
+struct FabRoot {
+    root: p256::ecdsa::SigningKey,
+    intermediate: ed25519_dalek::SigningKey,
+}
+const FAB_KID: &str = "intermediate-fab";
+const FAB_VALID_FROM: i64 = 1_700_000_000_000;
+const FAB_VALID_UNTIL: i64 = 1_900_000_000_000;
+const FAB_ISSUED_AT: i64 = 1_780_000_000_000;
+impl FabRoot {
+    fn new() -> Self {
+        Self {
+            root: p256::ecdsa::SigningKey::from_bytes(&[7u8; 32].into()).expect("p256 root"),
+            intermediate: ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]),
+        }
+    }
+    fn pinned_root(&self) -> PinnedRoot {
+        let vk = p256::ecdsa::VerifyingKey::from(&self.root);
+        PinnedRoot::from_sec1_bytes(vk.to_encoded_point(false).as_bytes()).expect("fab root parse")
+    }
+    fn root_sign(&self, msg: &[u8]) -> String {
+        use p256::ecdsa::signature::Signer as _;
+        let sig: p256::ecdsa::Signature = self.root.sign(msg);
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes())
+    }
+    fn keys(&self) -> LicensingKeys {
+        use multiview_licence::heartbeat::{canonical_key_preimage, canonical_revocation_preimage};
+        let pubkey = self.intermediate.verifying_key().to_bytes().to_vec();
+        let pre = canonical_key_preimage(
+            FAB_KID,
+            "lease",
+            "conspect.key-attestation.v1",
+            &pubkey,
+            FAB_VALID_FROM,
+            FAB_VALID_UNTIL,
+        );
+        let root_sig = self.root_sign(&pre);
+        let rev_pre =
+            canonical_revocation_preimage(FAB_ISSUED_AT, "conspect.key-revocation.v1", &[]);
+        let rev_sig = self.root_sign(&rev_pre);
+        let root_pub = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            p256::ecdsa::VerifyingKey::from(&self.root)
+                .to_encoded_point(false)
+                .as_bytes(),
+        );
+        let intermediate_pub = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(self.intermediate.verifying_key().to_bytes());
+        let json = serde_json::json!({
+            "version": 1,
+            "root": { "kid": "root", "algorithm": "ecdsa-p256-sha256", "public_key": root_pub,
+                "public_key_encoding": "base64url-uncompressed-p256-point" },
+            "attestation_contract": {
+                "key_statement": "conspect.key-attestation.v1",
+                "revocation_statement": "conspect.key-revocation.v1",
+                "encoding": "deterministic-cbor-rfc8949-section-4.2.1",
+                "key_pre_image": ["key_id","key_type","statement","public_key","valid_from","valid_until"],
+                "revocation_pre_image": ["issued_at","statement","revoked_key_ids"],
+                "field_order": "canonical", "signature": "ecdsa-p256-sha256-raw-r-s-base64url",
+                "public_key_encoding": "raw-32-byte-ed25519-point", "time_unit": "epoch-milliseconds" },
+            "lease_keys": [{ "kid": FAB_KID, "key_type": "lease", "algorithm": "ed25519",
+                "public_key": intermediate_pub, "valid_from": FAB_VALID_FROM,
+                "valid_until": FAB_VALID_UNTIL, "status": "current", "root_sig": root_sig }],
+            "update_keys": [],
+            "revocation": { "statement": "conspect.key-revocation.v1", "issued_at": FAB_ISSUED_AT,
+                "revoked_key_ids": [], "root_revocation_sig": rev_sig }
+        });
+        serde_json::from_value(json).expect("fabricated keyset must parse")
+    }
+}
+
+/// A chaos server for the ACTIVATE gate: `fetch_keys` + `fetch_challenge` SUCCEED (so
+/// `activate_once` reaches the activate POST), and `activate` is the ONLY hostile call
+/// — it stalls in flight forever, or (partition mode) errors every time. `heartbeat`
+/// is unused on this path (a fresh device activates first).
+struct ChaosActivateServer {
+    kit: FabRoot,
+    /// When true, `activate` blocks in flight forever (a real black hole), marking
+    /// `in_flight` so the test can await a genuine concurrent stall.
+    stall_activate: AtomicBool,
+    in_flight: AtomicBool,
+}
+impl ChaosActivateServer {
+    fn stalling() -> Self {
+        Self {
+            kit: FabRoot::new(),
+            stall_activate: AtomicBool::new(true),
+            in_flight: AtomicBool::new(false),
+        }
+    }
+    fn partitioning() -> Self {
+        Self {
+            kit: FabRoot::new(),
+            stall_activate: AtomicBool::new(false),
+            in_flight: AtomicBool::new(false),
+        }
+    }
+    fn is_in_flight(&self) -> bool {
+        self.in_flight.load(Ordering::SeqCst)
+    }
+    fn pinned_root(&self) -> PinnedRoot {
+        self.kit.pinned_root()
+    }
+}
+impl LicenceServer for ChaosActivateServer {
+    async fn fetch_keys(&self) -> Result<LicensingKeys, HeartbeatError> {
+        Ok(self.kit.keys())
+    }
+    async fn fetch_challenge(&self, _org: &str) -> Result<DeviceChallenge, HeartbeatError> {
+        // A generously-future nonce (the client reads the real wall clock) + a
+        // server-assigned instanceId so `activate_once` can build a real request.
+        Ok(DeviceChallenge::new(
+            "9f3a2b6e1c0e9b41a4c92d7e3b8f10c25e6a7d3f49b0c81e2f5a6d7c8b9e0f1a".to_owned(),
+            i64::MAX,
+            "ib_chaos_0001".to_owned(),
+        ))
+    }
+    async fn heartbeat(
+        &self,
+        _org: &str,
+        _body: Vec<u8>,
+        _idem: &str,
+        _pop_header: &str,
+    ) -> Result<HeartbeatResponse, HeartbeatError> {
+        // Not exercised on the activate-first path; fail closed if ever reached.
+        Err(HeartbeatError::Transport(
+            "chaos: heartbeat not used".to_owned(),
+        ))
+    }
+    async fn activate(
+        &self,
+        _org: &str,
+        _body: Vec<u8>,
+        _idem: &str,
+        _pop_header: &str,
+    ) -> Result<ActivateResponse, HeartbeatError> {
+        // THE hostile call: the activate POST either black-holes in flight forever
+        // (stall) or errors (partition). Either way it must NOT stall the clock.
+        if self.stall_activate.load(Ordering::SeqCst) {
+            self.in_flight.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+        Err(HeartbeatError::Transport(
+            "chaos: activate partitioned".to_owned(),
+        ))
+    }
+}
+
+/// A FRESH, un-bound device identity (no binding) — the first-contact ACTIVATE case.
+fn fresh_identity() -> DeviceIdentity {
+    DeviceIdentity {
+        binding_id: None,
+        ..identity()
+    }
+}
+
+/// An ENROLLING client: a fresh device with activate ENABLED **and a real device
+/// signer**, so `run_once` takes the first-contact ACTIVATE path and `activate_once`
+/// runs through its signer guard + `fetch_keys`/`fetch_challenge` to actually REACH
+/// `server.activate(...)` (the call the chaos gate protects).
+fn enrolling_client(
+    server: Arc<ChaosActivateServer>,
+    store: Arc<LeaseStore>,
+) -> HeartbeatClient<ChaosActivateServer> {
+    let pinned = server.pinned_root();
+    let signer: Arc<dyn multiview_licence::heartbeat::DeviceSigner> = Arc::new(FixedDeviceSigner {
+        key: ed25519_dalek::SigningKey::from_bytes(&[0x5a; 32]),
+    });
+    HeartbeatClient::new(
+        server,
+        store,
+        pinned,
+        HeartbeatConfig {
+            org_id: "org_test".to_owned(),
+            min_interval: Duration::from_millis(1),
+            enable_activate: true,
+            ..HeartbeatConfig::default()
+        },
+        fresh_identity(),
+    )
+    .with_signer(signer)
+}
+
+/// THE ACTIVATE-PATH IN-FLIGHT STALL GATE (ADR-I008): a fresh device's first-contact
+/// ACTIVATE **POST**, black-holed in flight, cannot back-pressure the output clock.
+/// The chaos server lets `fetch_keys`/`fetch_challenge` succeed and stalls ONLY on
+/// `server.activate(...)`, so the stall genuinely bites the activate call this gate
+/// protects (inv #1/#10) — not an earlier no-op.
+#[tokio::test]
+async fn the_output_clock_ticks_while_an_activate_call_is_stalled_in_flight() {
+    let store = Arc::new(LeaseStore::new());
+    let mut engine = SoftwareEngine::build_gated(&small_config(), Some(EnforcementLevel::Active))
+        .expect("build");
+
+    // A fresh device that ENROLS — fetch_keys/fetch_challenge succeed, then its
+    // activate POST black-holes.
+    let server = Arc::new(ChaosActivateServer::stalling());
+    let hb = enrolling_client(Arc::clone(&server), Arc::clone(&store));
+    let handle = tokio::spawn(async move { hb.run_forever().await });
+
+    // Wait until the ACTIVATE call is genuinely parked in flight (not a race) — proof
+    // the client reached `server.activate(...)`, past fetch_keys + fetch_challenge.
+    let parked = tokio::time::timeout(Duration::from_secs(5), async {
+        while !server.is_in_flight() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(
+        parked.is_ok(),
+        "the ACTIVATE POST must reach an in-flight stall (past fetch_keys/challenge)"
+    );
+    assert!(
+        !handle.is_finished(),
+        "the activate is stalled (not returned)"
+    );
+
+    // WHILE the activate POST is stalled in flight, drive the output clock — one frame
+    // per tick, never faltered.
+    let time = Arc::new(ManualTimeSource::new());
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.run_for(time, CooperativePacer, 50),
+    )
+    .await
+    .expect("the engine run must not hang while an activate POST is stalled")
+    .expect("the engine drives regardless of an in-flight stalled activate POST");
+    assert_eq!(
+        report.frames, 50,
+        "one frame per tick while an activate POST is stalled in flight"
+    );
+    assert!(
+        !report.faltered,
+        "the output clock never falters during the activate-POST stall"
+    );
+    assert!(
+        !handle.is_finished(),
+        "the activate POST is STILL stalled while the clock ran the whole way"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    assert!(
+        store.status().is_none(),
+        "the stalled activate installed nothing (a fresh device stays last-good/empty)"
+    );
+}
+
+/// A partitioned ACTIVATE POST (the `server.activate(...)` call errors every cycle,
+/// after `fetch_keys`/`fetch_challenge` succeed) churning alongside the output clock
+/// cannot slow it or install anything — the fresh-device fail-closed path keeps the
+/// engine on air (ADR-I008, inv #1/#10).
+#[tokio::test]
+async fn a_partitioned_activate_loop_runs_alongside_the_clock_without_effect() {
+    let store = Arc::new(LeaseStore::new());
+    let mut engine = SoftwareEngine::build_gated(&small_config(), Some(EnforcementLevel::Active))
+        .expect("build");
+
+    let server = Arc::new(ChaosActivateServer::partitioning());
+    let hb = enrolling_client(Arc::clone(&server), Arc::clone(&store));
+    let handle = tokio::spawn(async move { hb.run_forever().await });
+
+    let time = Arc::new(ManualTimeSource::new());
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.run_for(time, CooperativePacer, 50),
+    )
+    .await
+    .expect("the engine run must not hang under activate-POST churn")
+    .expect("the engine drives regardless");
+    assert_eq!(
+        report.frames, 50,
+        "one frame per tick under activate-POST churn"
+    );
+    assert!(!report.faltered, "the output clock never falters");
+
+    handle.abort();
+    let _ = handle.await;
+    assert!(
+        store.status().is_none(),
+        "a partitioned activate POST never installs a lease (fresh device stays empty)"
     );
 }

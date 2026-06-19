@@ -509,6 +509,15 @@ pub struct HeartbeatSettings {
     pub bearer_token: String,
     /// The salted device identity the requests carry (no raw identifiers).
     pub identity: DeviceIdentity,
+    /// Whether first-contact device ACTIVATE / enrolment is enabled (ADR-I008) —
+    /// `true` only when the full device-identity triple required for a valid
+    /// `ActivateRequest` is configured (so a fresh device enrols rather than waiting
+    /// for an install surface). A device that already holds a binding renews
+    /// regardless; this only governs the no-binding path.
+    pub enable_activate: bool,
+    /// The optional paid claim code sent on ACTIVATE (ADR-I008). `None` (the default)
+    /// auto-issues a free non-commercial licence; `Some(code)` redeems a paid order.
+    pub claim_code: Option<String>,
 }
 
 #[cfg(feature = "heartbeat")]
@@ -540,6 +549,9 @@ impl HeartbeatSettings {
     /// The env var the device Ed25519 proof-of-possession public key (base64url)
     /// is read from.
     pub const DEVICE_KEY_ENV: &'static str = "MULTIVIEW_LICENCE_DEVICE_KEY";
+    /// The env var the optional paid claim code is read from (ADR-I008). Unset →
+    /// the free non-commercial auto-issue path on activate.
+    pub const CLAIM_ENV: &'static str = "MULTIVIEW_LICENCE_CLAIM_CODE";
 
     /// Assemble settings from the process environment, or `None` when the
     /// essential ones (org id, pinned root, API base, bearer token) are unset —
@@ -564,12 +576,28 @@ impl HeartbeatSettings {
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
             device_public_key_b64url: non_empty_env(Self::DEVICE_KEY_ENV).unwrap_or_default(),
         };
+        let claim_code = non_empty_env(Self::CLAIM_ENV);
+        // Enable first-contact ACTIVATE only when the device-identity FIELDS a valid
+        // ActivateRequest carries are all configured (ADR-I008): the activate server
+        // assigns the instanceId, but the machine/fingerprint/hardware/discriminator
+        // triple + a ≥70 score must be present, else a fresh device would just earn a
+        // 422. Absent the triple the device is renew-only (NoBinding until an install
+        // surface provides a lease). A device that already holds a binding renews
+        // regardless — this only governs the no-binding path.
+        let enable_activate = !identity.machine_id.is_empty()
+            && !identity.fingerprint_digest.is_empty()
+            && identity.fingerprint_score >= REBIND_THRESHOLD
+            && !identity.hardware_digest.is_empty()
+            && !identity.instance_discriminator_hash.is_empty()
+            && !identity.instance_discriminator_digest.is_empty();
         Some(Self {
             org_id,
             pinned_root_b64url,
             api_base,
             bearer_token,
             identity,
+            enable_activate,
+            claim_code,
         })
     }
 
@@ -582,10 +610,18 @@ impl HeartbeatSettings {
             // matches the URL the transport POSTs to byte-for-byte (ADR-I007). Trim
             // the trailing slash to match the transport's normalisation.
             api_base: self.api_base.trim_end_matches('/').to_owned(),
+            enable_activate: self.enable_activate,
+            claim_code: self.claim_code.clone(),
             ..HeartbeatConfig::default()
         }
     }
 }
+
+/// The Conspect activation fingerprint-match floor (`REBIND_THRESHOLD`): activation
+/// requires a score of at least this (a lower score is a server `422`). Mirrors the
+/// `multiview-licence` fingerprint threshold constant (ADR-0050 §4 / brief §2).
+#[cfg(feature = "heartbeat")]
+const REBIND_THRESHOLD: u8 = 70;
 
 /// Read an environment variable, returning `None` when unset or empty.
 #[cfg(feature = "heartbeat")]
@@ -1307,6 +1343,30 @@ impl multiview_licence::heartbeat::LicenceServer for ConspectHttpServer {
     > {
         self.post_raw_json(
             format!("{}/organisations/{org}/heartbeat", self.api_base),
+            body,
+            idempotency_key,
+            pop_header,
+        )
+        .await
+    }
+
+    async fn activate(
+        &self,
+        org: &str,
+        body: Vec<u8>,
+        idempotency_key: &str,
+        pop_header: &str,
+    ) -> Result<
+        multiview_licence::heartbeat::ActivateResponse,
+        multiview_licence::heartbeat::HeartbeatError,
+    > {
+        // POST /organisations/{org}/activate — the first-contact enrolment (ADR-I008).
+        // Identical transport discipline to `heartbeat`: the EXACT body bytes the PoP
+        // signed over are sent verbatim, with the Idempotency-Key + Conspect-Device-PoP
+        // headers, and `post_raw_json` upholds the burned-nonce error-mapping contract
+        // (4xx → ServerRejected, 5xx/no-response → Transport, Malformed only after 2xx).
+        self.post_raw_json(
+            format!("{}/organisations/{org}/activate", self.api_base),
             body,
             idempotency_key,
             pop_header,

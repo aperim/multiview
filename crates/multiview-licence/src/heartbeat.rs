@@ -1001,16 +1001,25 @@ pub struct DeviceChallenge {
     /// When the nonce expires (epoch milliseconds) — issued + ~120 s. A proof
     /// presented after this is rejected; the client fetches a fresh challenge.
     pub expires_at_ms: i64,
+    /// The **server-assigned** durable instance id (`ib_<uuidv7>`, ADR-0015)
+    /// reserved with this nonce (REQUIRED since Conspect v0.16.0). A **first-contact**
+    /// device (no prior binding) echoes it as the activate `instanceId` and binds it
+    /// into the PoP pre-image's `instance_id`, so the proof, the binding, and the
+    /// lease share ONE server id (ADR-I008). A **renewing** device already knows its
+    /// durable id and signs the PoP over THAT, ignoring this value — so it is
+    /// load-bearing only on the enrolment path.
+    pub instance_id: String,
 }
 
 impl DeviceChallenge {
     /// Assemble a challenge (the in-process fake + the cli transport build it
     /// explicitly; the type is `#[non_exhaustive]`).
     #[must_use]
-    pub fn new(nonce: String, expires_at_ms: i64) -> Self {
+    pub fn new(nonce: String, expires_at_ms: i64, instance_id: String) -> Self {
         Self {
             nonce,
             expires_at_ms,
+            instance_id,
         }
     }
 }
@@ -1057,6 +1066,156 @@ impl HeartbeatResponse {
             next_nonce,
         }
     }
+}
+
+/// A `POST /organisations/{orgId}/activate` request — the **first-contact
+/// enrolment** body (ADR-I008). Distinct from the renew [`HeartbeatRequest`]: it
+/// carries the full device-identity triple, the device-PoP **public** key (set HERE
+/// and only here — the registration path where the server stores it and derives the
+/// lease `cnf_jkt`), and the single-use challenge nonce. The request MUST also carry
+/// the `Conspect-Device-PoP` header (a proof over the same nonce, bound to the
+/// server-assigned `instance_id`).
+///
+/// Serialised camelCase; the byte-exact required set (Conspect v0.9.0 → v0.20.0).
+/// The deprecated `serverNonce` is **never** a field (do not send it; the device
+/// proves liveness via the PoP challenge nonce, not by supplying the lease nonce).
+/// `Deserialize` is derived too (mirroring [`HeartbeatRequest`]) so a server-side
+/// or test consumer can parse the exact serialised bytes back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ActivateRequest {
+    /// The registered machine id this instance runs on.
+    pub machine_id: String,
+    /// The salted hardware-fingerprint digest (lower-case hex SHA-256), carried in
+    /// the signed lease body. Raw serials/MACs never leave the machine.
+    pub fingerprint_digest: String,
+    /// The weighted fingerprint match score (0–100). Activation requires ≥ 70
+    /// (`REBIND_THRESHOLD`); a lower score is a server `422`.
+    pub fingerprint_score: u8,
+    /// The salted hardware digest shared by co-located sibling instances on one
+    /// machine — part of the seat-key identity triple.
+    pub hardware_digest: String,
+    /// The **server-assigned** instance id (`ib_<uuidv7>`) echoed from the
+    /// [`DeviceChallenge::instance_id`] — the seat-consuming, lease-bearing unit the
+    /// activation creates the binding under. Bound into the PoP pre-image too, so
+    /// the proof, the binding, and the lease share one server id.
+    pub instance_id: String,
+    /// The instance discriminator hash — part of the seat-key identity triple.
+    pub instance_discriminator_hash: String,
+    /// The instance discriminator digest (lower-case hex SHA-256).
+    pub instance_discriminator_digest: String,
+    /// The instance's Ed25519 device proof-of-possession **public** key (base64url
+    /// of the raw 32-byte point) — sourced from the persisted device key's public
+    /// half, NOT the legacy `MULTIVIEW_LICENCE_DEVICE_KEY` env string. The server
+    /// verifies the `COSE_Sign1` proof against this key before binding, then embeds
+    /// its RFC 7638 thumbprint as the lease `cnf_jkt` (holder-of-key).
+    pub device_public_key: String,
+    /// The single-use device-PoP challenge nonce (lower-case hex) from
+    /// `GET /challenge`. Bound into the signed PoP pre-image; burned on success.
+    pub nonce: String,
+    /// The 6-character single-use claim code from a paid order. **Omitted**
+    /// (`None`, not serialised) to auto-issue a free non-commercial licence — the
+    /// default self-host path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_code: Option<String>,
+}
+
+/// A `POST /organisations/{orgId}/activate` response (ADR-I008): the signed lease
+/// the activation issued (when issued), the enforcement-ladder rung as data, and the
+/// NEXT single-use device-PoP challenge nonce (DPoP-nonce style) that seeds the
+/// steady-state heartbeat — so the device transitions activate → renew with no extra
+/// `GET /challenge` round-trip.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ActivateResponse {
+    /// The freshly-signed lease (an `ActivationLease` — a superset of
+    /// `HeartbeatLease` that [`ServerLease`] deserialises directly), or `null` when
+    /// none is issued (the device stays last-good).
+    #[serde(default)]
+    pub lease: Option<ServerLease>,
+    /// The enforcement-ladder rung (data inside the 200) — `compliant` on a fresh
+    /// activation.
+    pub enforcement_state: EnforcementState,
+    /// The NEXT single-use device-PoP challenge nonce — signed on the following
+    /// heartbeat so the steady-state hot path needs no extra `GET /challenge`.
+    /// `#[serde(default)]` so a server that omits it leaves it empty (the client then
+    /// cold-starts a fresh `/challenge` next cycle — fail closed, never reuse).
+    #[serde(default)]
+    pub next_nonce: String,
+}
+
+impl ActivateResponse {
+    /// Assemble an activate response (the type is `#[non_exhaustive]`; the
+    /// in-process fake + the cli transport build it explicitly).
+    #[must_use]
+    pub fn new(
+        lease: Option<ServerLease>,
+        enforcement_state: EnforcementState,
+        next_nonce: String,
+    ) -> Self {
+        Self {
+            lease,
+            enforcement_state,
+            next_nonce,
+        }
+    }
+}
+
+/// Assemble the [`ActivateRequest`] for a **first-contact** enrolment (ADR-I008):
+/// the device-identity triple from `identity`, the **server-assigned**
+/// `instance_id` + the challenge `nonce` echoed from `challenge`, and
+/// `device_public_key` = base64url(no-pad) of the signer's raw 32-byte public key
+/// (`public_key_raw`) — the authoritative device key, never the legacy
+/// `MULTIVIEW_LICENCE_DEVICE_KEY` env string. `claim_code` is `None` for the free
+/// tier (omitted from the wire), `Some(code)` for a paid redemption. Pure + total
+/// (mirrors `build_heartbeat_request_for`); the caller serialises it once and signs
+/// the PoP over those exact bytes.
+#[must_use]
+pub fn build_activate_request(
+    identity: &DeviceIdentity,
+    device_public_key_raw: [u8; 32],
+    challenge: &DeviceChallenge,
+    claim_code: Option<&str>,
+) -> ActivateRequest {
+    ActivateRequest {
+        machine_id: identity.machine_id.clone(),
+        fingerprint_digest: identity.fingerprint_digest.clone(),
+        fingerprint_score: identity.fingerprint_score,
+        hardware_digest: identity.hardware_digest.clone(),
+        // Echo the SERVER-assigned instance id — never the device's own
+        // `identity.instance_id`.
+        instance_id: challenge.instance_id.clone(),
+        instance_discriminator_hash: identity.instance_discriminator_hash.clone(),
+        instance_discriminator_digest: identity.instance_discriminator_digest.clone(),
+        device_public_key: base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(device_public_key_raw),
+        nonce: challenge.nonce.clone(),
+        claim_code: claim_code.map(ToOwned::to_owned),
+    }
+}
+
+/// Build the `Conspect-Device-PoP` header for an **activate** request: the base64
+/// `COSE_Sign1` over the canonical pre-image (`htm | htu | sha256(body) |
+/// instance_id | nonce | iat`) with `htm = "POST"`. Identical machinery to
+/// [`pop_header_value`]; the load-bearing difference (ADR-I008) is that `instance_id`
+/// is the **server-assigned** [`DeviceChallenge::instance_id`] (echoed into the
+/// request), so the proof binds the binding the server reserved. `body` is the exact
+/// serialised [`ActivateRequest`] bytes the transport sends; `iat` is epoch seconds.
+///
+/// # Errors
+/// [`PopError`] on a COSE/nonce failure (the caller maps it to a fail-closed
+/// `HeartbeatError::Pop` — no activate is sent without a valid proof).
+pub fn pop_activate_header_value(
+    signer: &dyn DeviceSigner,
+    htu: &str,
+    body: &[u8],
+    instance_id: &str,
+    nonce_hex: &str,
+    iat: i64,
+) -> Result<String, PopError> {
+    pop_header_value(signer, "POST", htu, body, instance_id, nonce_hex, iat)
 }
 
 // ===========================================================================
@@ -1134,6 +1293,29 @@ pub trait LicenceServer: Send + Sync {
         idempotency_key: &str,
         pop_header: &str,
     ) -> impl std::future::Future<Output = Result<HeartbeatResponse, HeartbeatError>> + Send;
+
+    /// `POST /organisations/{org}/activate` — the **first-contact enrolment** call
+    /// (ADR-I008), with a required `Idempotency-Key` and the required
+    /// `Conspect-Device-PoP` header. `body` is the EXACT serialised
+    /// [`ActivateRequest`] bytes the PoP signed over (sent verbatim — no drift); it
+    /// carries `devicePublicKey` + the server-assigned `instanceId` + the challenge
+    /// `nonce`.
+    ///
+    /// The **identical error-mapping contract** as [`heartbeat`](Self::heartbeat)
+    /// applies (the burned-nonce boundary is the same single-use challenge nonce):
+    /// [`HeartbeatError::Transport`] = ambiguous (no response / `5xx`, replay the
+    /// pinned attempt verbatim); [`HeartbeatError::ServerRejected`] = a definitive
+    /// received non-2xx (`401 pop-invalid`/`422` low score); and
+    /// [`HeartbeatError::Malformed`] only after a received `2xx` whose body would not
+    /// parse. The shipped transport decodes the body only after `status.is_success()`,
+    /// upholding it.
+    fn activate(
+        &self,
+        org: &str,
+        body: Vec<u8>,
+        idempotency_key: &str,
+        pop_header: &str,
+    ) -> impl std::future::Future<Output = Result<ActivateResponse, HeartbeatError>> + Send;
 }
 
 /// A failure talking to the licence server. None of these tighten the machine —
@@ -1287,6 +1469,18 @@ pub struct HeartbeatConfig {
     pub min_interval: Duration,
     /// The backoff cap after repeated failures.
     pub max_backoff: Duration,
+    /// Whether **first-contact device ACTIVATE / enrolment** is enabled (ADR-I008).
+    /// `false` keeps the renew-only behaviour: an un-bound device makes no server
+    /// call and returns [`HeartbeatOutcome::NoBinding`]. `true` lets a fresh device
+    /// enrol online (`fetch_challenge` → `activate` → install → renew). Off by
+    /// default; the cli turns it on only when the device-identity triple + the
+    /// activate config are present.
+    pub enable_activate: bool,
+    /// The optional 6-character paid claim code sent on ACTIVATE (ADR-I008). `None`
+    /// (the default) **omits** `claimCode` from the activate body, auto-issuing a
+    /// free non-commercial licence; `Some(code)` redeems a paid entitlement. Unused
+    /// on the renew path.
+    pub claim_code: Option<String>,
 }
 
 impl Default for HeartbeatConfig {
@@ -1299,6 +1493,11 @@ impl Default for HeartbeatConfig {
             api_base: String::new(),
             min_interval: Duration::from_secs(60),
             max_backoff: Duration::from_secs(3600),
+            // Renew-only by default — activate is opt-in (the cli enables it when
+            // the device-identity triple is configured).
+            enable_activate: false,
+            // No paid claim code → the free non-commercial auto-issue path.
+            claim_code: None,
         }
     }
 }
@@ -1309,6 +1508,16 @@ impl Default for HeartbeatConfig {
 pub enum HeartbeatOutcome {
     /// A verified lease was installed; carries the lease serial and `nextDue`.
     Installed {
+        /// The installed lease serial.
+        serial: String,
+        /// When the next heartbeat is due (epoch milliseconds).
+        next_due: i64,
+    },
+    /// A **first-contact ACTIVATE / enrolment** succeeded (ADR-I008): the device
+    /// registered (its `devicePublicKey` is now bound + `cnf_jkt` set server-side),
+    /// the issued lease was installed, and the binding is learned — the next cycle
+    /// RENEWS via the heartbeat path (seeded by the activate response `nextNonce`).
+    Activated {
         /// The installed lease serial.
         serial: String,
         /// When the next heartbeat is due (epoch milliseconds).
@@ -2046,12 +2255,18 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             .binding_id()
             .or_else(|| self.store.current_binding_id());
 
-        // RENEW-ONLY: with no binding there is nothing to renew and the device
-        // cannot self-activate (activate is deferred — the server-issued nonce is
-        // unavailable). No fetch, no idempotency key, no mutation — a benign no-op
-        // that keeps last-good (output stays on air). A lease arrives via an install
-        // surface; a later cycle renews it.
+        // No established binding: either ENROL (first-contact activate, ADR-I008) or
+        // — renew-only — no-op. With `enable_activate` the device registers online:
+        // it fetches a challenge, signs an activate proof bound to the SERVER-assigned
+        // instanceId, installs the issued lease, and learns the binding (the next
+        // cycle then renews). Without it, the renew-only contract holds: no server
+        // call, keep last-good (output on air), `NoBinding` — a lease arrives via an
+        // install surface and a later cycle renews it. BOTH keep last-good on every
+        // failure (never off air, inv #1/#10).
         let Some(established_binding) = established_binding else {
+            if self.config.enable_activate {
+                return self.activate_once().await;
+            }
             let now_ms = (self.now_ms)();
             return Ok(HeartbeatOutcome::NoBinding {
                 next_due: next_due_default(now_ms),
@@ -2221,6 +2436,168 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         Ok(HeartbeatOutcome::Installed { serial, next_due })
     }
 
+    /// One **first-contact ACTIVATE / enrolment** cycle (ADR-I008). Taken by
+    /// [`run_once`](Self::run_once) only when there is NO established binding AND
+    /// `enable_activate` is set. It registers the device online:
+    ///
+    /// 1. Fetch a fresh `GET /challenge` — activate ALWAYS needs one, both for the
+    ///    single-use nonce AND the **server-assigned `instanceId`** the device enrols
+    ///    under (there is no held nonce on first contact). Fail closed on an
+    ///    unreachable / already-expired challenge (keep last-good, never off air).
+    /// 2. Build (or REPLAY) the in-flight attempt as ONE retry unit — exactly the
+    ///    heartbeat discipline: a pinned attempt replays its `{Idempotency-Key, body,
+    ///    nonce, proof}` verbatim; a new op echoes the server `instanceId` into
+    ///    [`ActivateRequest`] + the PoP pre-image, serialises ONCE, signs the proof
+    ///    over those bytes, mints the durable key LAST, and pins the unit.
+    /// 3. `POST /activate` with the same STATUS-AWARE retry: a `ServerRejected`/
+    ///    `Malformed` (a received contact that burned the nonce) drops the pinned
+    ///    attempt + nonce and recovers next cycle; an ambiguous `Transport` keeps it
+    ///    pinned to replay verbatim. Both keep last-good, never panic.
+    /// 4. On a positively-verified [`ActivateResponse`] lease: re-verify trust against
+    ///    a freshly re-fetched key document, install ANCHORED via the body's own
+    ///    `instance_binding_id` (the server-issued binding — `install` is called with
+    ///    `None` since this is the first binding), learn the binding ONLY on a genuine
+    ///    install, and seed the steady-state nonce from the response `nextNonce` so
+    ///    the next cycle RENEWS with no extra `/challenge`.
+    async fn activate_once(&self) -> Result<HeartbeatOutcome, HeartbeatError> {
+        // 1. Pre-network key-trust fast-fail (re-verified at acceptance below).
+        let keys = self.server.fetch_keys().await?;
+        let now_ms = (self.now_ms)();
+        let _ = TrustedKeys::verify(&keys, &self.pinned, now_ms)?;
+
+        // 2. Build or REPLAY the in-flight activate attempt as one retry unit.
+        let attempt = if let Some(pinned) = self.pinned_attempt() {
+            pinned
+        } else {
+            // Fetch a fresh challenge — activate needs the nonce AND the
+            // server-assigned instanceId. Expiry-checked like the renew path: a
+            // round-trip-stale nonce is a fail-closed skip, not a doomed POST.
+            let challenge = self.server.fetch_challenge(&self.config.org_id).await?;
+            let now_after = (self.now_ms)();
+            if challenge.expires_at_ms != 0 && challenge.expires_at_ms <= now_after {
+                return Err(HeartbeatError::Pop(PopError::Nonce(format!(
+                    "fresh activate challenge already expired (expiresAtMs {} <= now {now_after})",
+                    challenge.expires_at_ms
+                ))));
+            }
+            // Echo the server instanceId into the request AND bind it into the proof.
+            let signer = self
+                .device_signer
+                .as_ref()
+                .ok_or_else(|| PopError::Cose("no device signer configured".to_owned()))?;
+            let req = build_activate_request(
+                &self.identity,
+                signer.public_key_raw(),
+                &challenge,
+                self.config.claim_code.as_deref(),
+            );
+            // Serialise ONCE — the transport sends THESE bytes verbatim and the PoP
+            // signs `sha256` of THESE bytes.
+            let body = serde_json::to_vec(&req)
+                .map_err(|e| HeartbeatError::Malformed(format!("activate body serialise: {e}")))?;
+            let pop_header =
+                self.build_activate_pop_header(&body, &challenge.instance_id, &req.nonce)?;
+            // Mint the durable Idempotency-Key LAST (after the fallible PoP build),
+            // then pin the whole unit for verbatim replay.
+            let idempotency_key = self.idempotency_key()?;
+            let attempt = PendingAttempt {
+                idempotency_key,
+                body,
+                pop_header,
+            };
+            self.pin_attempt(attempt.clone());
+            attempt
+        };
+
+        // 3. POST the pinned attempt with the status-aware retry contract.
+        let resp = match self
+            .server
+            .activate(
+                &self.config.org_id,
+                attempt.body.clone(),
+                &attempt.idempotency_key,
+                &attempt.pop_header,
+            )
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err @ (HeartbeatError::ServerRejected(_) | HeartbeatError::Malformed(_))) => {
+                // A RECEIVED contact burned the single-use nonce — drop the pinned
+                // attempt + nonce so the next cycle re-enrols with a fresh challenge.
+                self.reset_on_rejection();
+                return Err(err);
+            }
+            // Ambiguous (no response / 5xx → Transport): leave the attempt pinned to
+            // replay verbatim next cycle (the server dedupes on the Idempotency-Key).
+            Err(err) => return Err(err),
+        };
+        let (lease, _state, next_nonce) = (resp.lease, resp.enforcement_state, resp.next_nonce);
+        // The contact succeeded → this logical operation is DONE. Clear/rotate the
+        // attempt + remember the server's nextNonce (seeds the steady-state renew).
+        self.clear_pending();
+        self.remember_next_nonce(&next_nonce);
+
+        // A null activate lease is a fail-closed keep-last-good (the device is not
+        // enrolled this cycle but never crashed): nothing to install, no binding to
+        // learn. Re-check on the no-binding cadence; a later cycle re-enrols.
+        let now_ms = (self.now_ms)();
+        let next_due = next_due_default(now_ms);
+        let Some(server_lease) = lease else {
+            return Ok(HeartbeatOutcome::NoBinding { next_due });
+        };
+
+        // 4. Verify the issued lease against FRESHLY RE-FETCHED trust, then install
+        //    anchored to the server-issued binding from the SIGNED body. `install` is
+        //    called with `None` (this is the FIRST binding — there is nothing to
+        //    cross-check against yet); the body's own `instance_binding_id` becomes
+        //    the learned anchor on a genuine install.
+        let accept_now_ms = (self.now_ms)();
+        let fresh_keys = self.server.fetch_keys().await?;
+        let trusted = TrustedKeys::verify(&fresh_keys, &self.pinned, accept_now_ms)?;
+        let body = verify_signed_lease_chain(&server_lease, &trusted)?;
+        let serial = match self.install(&server_lease, &body, None)? {
+            InstallOutcome::Installed { serial } => {
+                self.remember_binding_id(&body.instance_binding_id);
+                serial
+            }
+            InstallOutcome::StaleNoop { serial } => serial,
+        };
+        Ok(HeartbeatOutcome::Activated { serial, next_due })
+    }
+
+    /// Build the `Conspect-Device-PoP` header for an ACTIVATE request: the base64
+    /// `COSE_Sign1` over the canonical pre-image with the `/activate` `htu` and the
+    /// **server-assigned** `instance_id` bound in (ADR-I008). Mirrors
+    /// [`build_pop_header`](Self::build_pop_header) but for the activate URL +
+    /// instance id. Fail closed (a missing signer / COSE error is a
+    /// [`HeartbeatError::Pop`] — no activate is sent without a proof).
+    fn build_activate_pop_header(
+        &self,
+        body: &[u8],
+        server_instance_id: &str,
+        nonce_hex: &str,
+    ) -> Result<String, HeartbeatError> {
+        let signer = self
+            .device_signer
+            .as_ref()
+            .ok_or_else(|| PopError::Cose("no device signer configured".to_owned()))?;
+        let htu = format!(
+            "{}/organisations/{}/activate",
+            self.api_base_for_pop(),
+            self.config.org_id
+        );
+        let iat = (self.now_ms)() / 1000; // epoch seconds (server checks ±60s)
+        let header = pop_activate_header_value(
+            signer.as_ref(),
+            &htu,
+            body,
+            server_instance_id,
+            nonce_hex,
+            iat,
+        )?;
+        Ok(header)
+    }
+
     /// Translate a verified server lease into a [`LeaseBinding`] and drive
     /// [`LeaseStore::install_binding`]. The binding is signed with the crate's
     /// own pinned-key envelope so the single install convergence (shared by the
@@ -2347,6 +2724,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             match self.run_once().await {
                 Ok(
                     HeartbeatOutcome::Installed { next_due, .. }
+                    | HeartbeatOutcome::Activated { next_due, .. }
                     | HeartbeatOutcome::LeaseWithheld { next_due, .. }
                     | HeartbeatOutcome::NoBinding { next_due },
                 ) => {

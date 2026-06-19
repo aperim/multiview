@@ -37,9 +37,10 @@ use p256::ecdsa::{Signature as P256Sig, SigningKey as P256Key};
 
 use ed25519_dalek::{Verifier as _, VerifyingKey as EdVerifyingKey};
 use multiview_licence::heartbeat::{
-    canonical_key_preimage, canonical_revocation_preimage, DeviceChallenge, DeviceSigner,
-    EnforcementState, HeartbeatError, HeartbeatRequest, HeartbeatResponse, LeaseBodyFields,
-    LicenceServer, LicensingKeys, PinnedRoot, ServerLease, TrustedKeys,
+    canonical_key_preimage, canonical_revocation_preimage, ActivateRequest, ActivateResponse,
+    DeviceChallenge, DeviceSigner, EnforcementState, HeartbeatError, HeartbeatRequest,
+    HeartbeatResponse, LeaseBodyFields, LicenceServer, LicensingKeys, PinnedRoot, ServerLease,
+    TrustedKeys,
 };
 
 /// The fixed device-key seed the PoP loop tests sign with, so the fake can verify
@@ -598,6 +599,25 @@ pub struct FakeLicenceServer {
     /// nonce is burned), so the client must drop the pinned attempt and recover with a
     /// fresh `/challenge`, never replay the burned nonce.
     malformed_2xx: AtomicBool,
+    // --- device ACTIVATE / enrolment (ADR-I008) ---
+    /// Counts `activate` calls (the enrolment loop test asserts exactly one).
+    activates: AtomicU64,
+    /// The server-assigned durable instance id (`ib_<uuidv7>`) the most recent
+    /// `fetch_challenge` issued — a first-contact device must echo it on activate.
+    last_issued_instance_id: std::sync::Mutex<Option<String>>,
+    /// The `instanceId` the most recent activate REQUEST carried (the test asserts
+    /// it equals the server-assigned id).
+    last_activate_instance_id: std::sync::Mutex<Option<String>>,
+    /// The `devicePublicKey` the most recent activate request carried.
+    last_activate_device_public_key: std::sync::Mutex<Option<String>>,
+    /// Whether the most recent activate's `Conspect-Device-PoP` proof VERIFIED
+    /// against the device public key over the recomputed pre-image — and bound the
+    /// SERVER-assigned instance id.
+    last_activate_pop_verified: AtomicBool,
+    /// The instance binding id a successful `activate` bound the lease to — so the
+    /// subsequent renew (`heartbeat`) serves a lease bound to the SAME id (otherwise
+    /// the renew would `BindingMismatch` against the activate-learned binding).
+    activated_binding: std::sync::Mutex<Option<String>>,
 }
 
 impl FakeLicenceServer {
@@ -632,6 +652,12 @@ impl FakeLicenceServer {
             drop_next_nonce: AtomicBool::new(false),
             reject_pop: AtomicBool::new(false),
             malformed_2xx: AtomicBool::new(false),
+            activates: AtomicU64::new(0),
+            last_issued_instance_id: std::sync::Mutex::new(None),
+            last_activate_instance_id: std::sync::Mutex::new(None),
+            last_activate_device_public_key: std::sync::Mutex::new(None),
+            last_activate_pop_verified: AtomicBool::new(false),
+            activated_binding: std::sync::Mutex::new(None),
         }
     }
 
@@ -728,9 +754,48 @@ impl FakeLicenceServer {
     pub fn set_malformed_2xx(&self, on: bool) {
         self.malformed_2xx.store(on, Ordering::SeqCst);
     }
-    /// Make `heartbeat` reject the proof as `pop-invalid` (401).
+    /// Make `heartbeat`/`activate` reject the proof as `pop-invalid` (401).
     pub fn set_reject_pop(&self, on: bool) {
         self.reject_pop.store(on, Ordering::SeqCst);
+    }
+
+    // --- device ACTIVATE / enrolment (ADR-I008) accessors ---
+    /// How many times `activate` has been called.
+    pub fn activates(&self) -> u64 {
+        self.activates.load(Ordering::SeqCst)
+    }
+    /// The server-assigned instance id the most recent challenge issued.
+    pub fn last_issued_instance_id(&self) -> String {
+        self.last_issued_instance_id
+            .lock()
+            .expect("poisoned")
+            .clone()
+            .unwrap_or_default()
+    }
+    /// The `instanceId` the most recent activate request carried.
+    pub fn last_activate_instance_id(&self) -> Option<String> {
+        self.last_activate_instance_id
+            .lock()
+            .expect("poisoned")
+            .clone()
+    }
+    /// The `devicePublicKey` the most recent activate request carried.
+    pub fn last_activate_device_public_key(&self) -> Option<String> {
+        self.last_activate_device_public_key
+            .lock()
+            .expect("poisoned")
+            .clone()
+    }
+    /// Whether the most recent activate PoP proof verified (and bound the
+    /// server-assigned instance id).
+    pub fn last_activate_pop_verified(&self) -> bool {
+        self.last_activate_pop_verified.load(Ordering::SeqCst)
+    }
+    /// Mint the server-assigned durable instance id reserved with a challenge nonce
+    /// (deterministic per counter), shaped like `ib_<hex>`.
+    fn mint_instance_id(&self) -> String {
+        let n = self.nonce_counter.load(Ordering::SeqCst);
+        format!("ib_{n:032x}")
     }
     /// Mint a fresh, distinct 64-hex challenge nonce (deterministic per counter).
     fn mint_nonce(&self) -> String {
@@ -785,12 +850,45 @@ impl FakeLicenceServer {
         windows_contains(payload, &body_hash) && windows_contains(payload, &nonce_raw)
     }
 
-    /// The binding id the current knobs select for the served lease body.
-    fn served_binding(&self) -> &'static str {
+    /// Like [`verify_pop`] but ALSO requires the signed payload to bind a specific
+    /// `instance_id` (text) — the activate first-contact check: the proof must be
+    /// bound to the SERVER-assigned instanceId the server reserved with the nonce.
+    fn verify_activate_pop(
+        &self,
+        pop_header: &str,
+        body: &[u8],
+        nonce_hex: &str,
+        instance_id: &str,
+    ) -> bool {
+        use coset::{CborSerializable as _, CoseSign1};
+        if !self.verify_pop(pop_header, body, nonce_hex) {
+            return false;
+        }
+        let Ok(cose_bytes) = base64::engine::general_purpose::STANDARD.decode(pop_header) else {
+            return false;
+        };
+        let Ok(sign1) = CoseSign1::from_slice(&cose_bytes) else {
+            return false;
+        };
+        let Some(payload) = sign1.payload.as_deref() else {
+            return false;
+        };
+        // The instance id is a CBOR text string in the pre-image — assert its bytes
+        // appear (the canonical encoder emits it as a tstr).
+        windows_contains(payload, instance_id.as_bytes())
+    }
+
+    /// The binding id the current knobs select for the served lease body. A
+    /// successful `activate` records its server-assigned binding so the subsequent
+    /// renew serves a lease bound to the SAME id (no `BindingMismatch`); absent that,
+    /// the static fabricated binding (the pre-bound renew tests use it directly).
+    fn served_binding(&self) -> String {
         if self.foreign_binding.load(Ordering::SeqCst) {
-            self.kit.foreign_binding_id()
+            self.kit.foreign_binding_id().to_owned()
+        } else if let Some(b) = self.activated_binding.lock().expect("poisoned").clone() {
+            b
         } else {
-            self.kit.binding_id()
+            self.kit.binding_id().to_owned()
         }
     }
     /// The signed lease the current knobs select (foreign binding and/or an
@@ -807,7 +905,7 @@ impl FakeLicenceServer {
         } else {
             self.kit.now_ms() + 35 * 86_400_000
         };
-        self.kit.sign_lease_for(self.served_binding(), not_after)
+        self.kit.sign_lease_for(&self.served_binding(), not_after)
     }
     /// The bindingId the most recent heartbeat request carried.
     pub fn last_binding_id(&self) -> Option<String> {
@@ -912,6 +1010,11 @@ impl LicenceServer for FakeLicenceServer {
         }
         let nonce = self.mint_nonce();
         *self.last_issued_nonce.lock().expect("poisoned") = Some(nonce.clone());
+        // The server-assigned durable instance id reserved with this nonce (v0.16.0):
+        // a first-contact device echoes it on activate. Minted BEFORE the nonce
+        // counter advances again so it pairs with this challenge.
+        let instance_id = self.mint_instance_id();
+        *self.last_issued_instance_id.lock().expect("poisoned") = Some(instance_id.clone());
         // Normally issued generously-future (the client reads the real wall clock,
         // so i64::MAX is never treated as expired). The `challenge_expired` knob
         // returns a clearly-past expiry (1970) so the client's fresh-nonce expiry
@@ -921,7 +1024,7 @@ impl LicenceServer for FakeLicenceServer {
         } else {
             i64::MAX
         };
-        Ok(DeviceChallenge::new(nonce, expires_at_ms))
+        Ok(DeviceChallenge::new(nonce, expires_at_ms, instance_id))
     }
 
     async fn heartbeat(
@@ -1011,6 +1114,69 @@ impl LicenceServer for FakeLicenceServer {
             lease,
             state,
             self.next_due_ms.load(Ordering::SeqCst) as i64,
+            next_nonce,
+        ))
+    }
+
+    async fn activate(
+        &self,
+        _org: &str,
+        body: Vec<u8>,
+        idempotency_key: &str,
+        pop_header: &str,
+    ) -> Result<ActivateResponse, HeartbeatError> {
+        self.maybe_block().await;
+        self.bodies.lock().expect("poisoned").push(body.clone());
+        if let Some(err) = self.record_idempotency_then_maybe_fail(idempotency_key) {
+            return Err(err);
+        }
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(HeartbeatError::Transport("fake offline".to_owned()));
+        }
+        // Parse the EXACT activate body bytes (the same bytes the PoP signed over).
+        let req: ActivateRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(HeartbeatError::Malformed(format!(
+                    "fake activate parse: {e}"
+                )))
+            }
+        };
+        self.activates.fetch_add(1, Ordering::SeqCst);
+        *self.last_activate_instance_id.lock().expect("poisoned") = Some(req.instance_id.clone());
+        *self
+            .last_activate_device_public_key
+            .lock()
+            .expect("poisoned") = Some(req.device_public_key.clone());
+        // VERIFY the activate proof binds THIS body + THIS nonce + the SERVER-assigned
+        // instance id (the device must echo + bind the id the challenge reserved).
+        let expected_instance = self.last_issued_instance_id();
+        let verified = self.verify_activate_pop(pop_header, &body, &req.nonce, &expected_instance);
+        self.last_activate_pop_verified
+            .store(verified, Ordering::SeqCst);
+        // `pop-invalid` (401): the knob forces it, or the proof genuinely failed (a
+        // real server 401s it) — a DEFINITIVE rejection (a response WAS received).
+        if self.reject_pop.load(Ordering::SeqCst)
+            || !verified
+            || req.instance_id != expected_instance
+        {
+            return Err(HeartbeatError::ServerRejected(
+                "fake activate returned HTTP 401 pop-invalid".to_owned(),
+            ));
+        }
+        // The signed lease the activation issues (an ActivationLease — a superset of
+        // HeartbeatLease that the ServerLease type already deserializes), bound to the
+        // server-assigned instance binding id. Record that binding so the subsequent
+        // renew (heartbeat) serves a lease bound to the SAME id.
+        *self.activated_binding.lock().expect("poisoned") = Some(expected_instance.clone());
+        let lease = self
+            .kit
+            .sign_lease_for(&expected_instance, self.kit.now_ms() + 35 * 86_400_000);
+        let next_nonce = self.mint_nonce();
+        *self.last_next_nonce.lock().expect("poisoned") = Some(next_nonce.clone());
+        Ok(ActivateResponse::new(
+            Some(lease),
+            EnforcementState::Compliant,
             next_nonce,
         ))
     }
