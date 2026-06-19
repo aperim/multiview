@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use multiview_config::{ConfigDiff, MultiviewConfig, SourceChange};
+use multiview_config::{ConfigDiff, MultiviewConfig, OverlayChange, SourceChange};
 use multiview_events::{Event, HealthWarning, WarningCode, WarningSeverity};
 
 use crate::{
@@ -830,6 +830,7 @@ pub fn apply_document_diff(
         parts.push(apply_overlay_changes(
             state,
             actor,
+            diff,
             next,
             &mut restart,
             &mut shed,
@@ -1044,73 +1045,65 @@ fn unadopt_overlay_if_modeled(state: &AppState, id: &str) {
 ///   and keeps the section restart-pending. The caller's `restart` set already
 ///   carries `overlays`; a fully-landed live apply REMOVES it (nothing pending).
 ///
+/// The per-overlay delta comes from `diff.overlays` — the FILE BASELINE diff
+/// ([`OverlayChange`], computed by `ConfigDiff::between(baseline, next)`), which
+/// is STABLE across shed retries, exactly like the source path. Round 6 derived
+/// it from the mutated control store and reseeded the store to `next` before the
+/// retry resolved; on a shed the file baseline did not advance, so the next
+/// retry saw the store already == `next`, submitted nothing, falsely reported
+/// `all_landed`, and silently dropped the shed overlay edit (round-7 fix).
+///
 /// The store is reseeded last so the UI overlay list follows the file in every
 /// case (matching `seed_resources` / the other resync paths).
 fn apply_overlay_changes(
     state: &AppState,
     actor: &str,
+    diff: &ConfigDiff,
     next: &MultiviewConfig,
     restart: &mut BTreeSet<String>,
     shed: &mut u32,
 ) -> String {
-    // The store's CURRENT overlays (parsed back to the config type), so the
-    // delta is per-overlay — exactly the id-keyed add/change/remove the REST
-    // routes apply one mutation at a time.
-    let current: Vec<multiview_config::Overlay> = match state.overlays.list() {
-        Ok(list) => list
-            .into_iter()
-            .filter_map(|v| serde_json::from_value(v.resource.body).ok())
-            .collect(),
-        Err(error) => {
-            tracing::warn!(error = %error, "config-file overlay apply: listing overlays failed");
-            Vec::new()
-        }
-    };
-
     let capability = state.live_apply.overlays.clone();
     let mut described: Vec<String> = Vec::new();
     let mut all_landed = capability.is_some();
 
     if capability.is_some() {
-        // Added/changed overlays in the file → live UpsertOverlay (every kind,
-        // so the engine's working set stays coherent — ADR-W022).
-        for overlay in &next.overlays {
-            let changed = current.iter().find(|o| o.id == overlay.id) != Some(overlay);
-            if !changed {
-                continue;
-            }
-            described.push(format!("{} upserted", overlay.id));
-            if submit(
-                state,
-                Command::UpsertOverlay {
-                    op: OperationId::new(),
-                    overlay: Box::new(overlay.clone()),
-                },
-            ) {
-                adopt_overlay_if_modeled(state, overlay.clone());
-            } else {
-                *shed = shed.saturating_add(1);
-                all_landed = false;
-            }
-        }
-        // Removed overlays (present in the store, absent from the file) → live
-        // RemoveOverlay.
-        for overlay in &current {
-            if next.overlays.iter().any(|o| o.id == overlay.id) {
-                continue;
-            }
-            described.push(format!("{} removed", overlay.id));
-            if submit(
-                state,
-                Command::RemoveOverlay {
-                    op: OperationId::new(),
-                    id: overlay.id.clone(),
-                },
-            ) {
-                unadopt_overlay_if_modeled(state, &overlay.id);
-            } else {
-                *shed = shed.saturating_add(1);
-                all_landed = false;
+        // The delta is the BASELINE-derived per-overlay change list, stable
+        // across retries — never the mutated store. Every added/changed overlay
+        // rides `UpsertOverlay` (every kind, so the engine's working set stays
+        // coherent — ADR-W022); every removal rides `RemoveOverlay`.
+        for change in &diff.overlays {
+            match change {
+                OverlayChange::Added(overlay) | OverlayChange::Changed(overlay) => {
+                    described.push(format!("{} upserted", overlay.id));
+                    if submit(
+                        state,
+                        Command::UpsertOverlay {
+                            op: OperationId::new(),
+                            overlay: overlay.clone(),
+                        },
+                    ) {
+                        adopt_overlay_if_modeled(state, (**overlay).clone());
+                    } else {
+                        *shed = shed.saturating_add(1);
+                        all_landed = false;
+                    }
+                }
+                OverlayChange::Removed(id) => {
+                    described.push(format!("{id} removed"));
+                    if submit(
+                        state,
+                        Command::RemoveOverlay {
+                            op: OperationId::new(),
+                            id: id.clone(),
+                        },
+                    ) {
+                        unadopt_overlay_if_modeled(state, id);
+                    } else {
+                        *shed = shed.saturating_add(1);
+                        all_landed = false;
+                    }
+                }
             }
         }
     }

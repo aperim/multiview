@@ -1,9 +1,10 @@
 //! The pure per-section structural diff between two configuration documents
 //! (ADR-W020): the unit the config-file watcher turns into apply actions.
 //!
-//! Exhaustive over every `MultiviewConfig` section: sources (by id —
-//! added/changed/removed), canvas (pinned signal vs cosmetic axes),
-//! layout+cells, and the restart-only sections (`outputs`, `overlays`,
+//! Exhaustive over every `MultiviewConfig` section: sources and overlays (each
+//! by id — added/changed/removed; ADR-W024 round 7 added the per-id overlay
+//! delta the file-watch overlay apply consumes), canvas (pinned signal vs
+//! cosmetic axes), layout+cells, and the restart-only sections (`outputs`,
 //! `probes`, `audio`, `control`, `placement`, `salvos`, `tally_profiles`,
 //! `walls`, `devices`, `sync_groups`, `routing`, `schema_version`).
 #![allow(
@@ -13,7 +14,7 @@
     clippy::indexing_slicing
 )]
 
-use multiview_config::{ConfigDiff, MultiviewConfig, SourceChange};
+use multiview_config::{ConfigDiff, MultiviewConfig, OverlayChange, SourceChange};
 
 /// The baseline two-source, two-cell document every test perturbs.
 const BASE_DOC: &str = r##"schema_version = 1
@@ -157,6 +158,127 @@ fn add_change_and_remove_report_together_deterministically() {
             }
             SourceChange::Removed(id) => {
                 assert_eq!(id, "in_b");
+                "removed"
+            }
+        })
+        .collect();
+    assert_eq!(kinds, vec!["changed", "added", "removed"]);
+}
+
+// ADR-W024 round 7 — overlay changes are reported per-id in `diff.overlays`
+// (baseline-derived, the shape the file-watch overlay apply consumes so its
+// `UpsertOverlay`/`RemoveOverlay` delta is STABLE across shed retries), AND
+// `overlays` still appears in `changed_sections` for uniform reporting.
+
+/// A base document carrying one overlay, so a perturbation can change/remove it.
+const BASE_WITH_OVERLAY: &str = r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr"]
+areas = ["a b"]
+[[sources]]
+id = "in_a"
+kind = "solid"
+color = "#103050"
+[[sources]]
+id = "in_b"
+kind = "bars"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[cells]]
+id = "cell_b"
+area = "b"
+[cells.source]
+input_id = "in_b"
+[[overlays]]
+id = "ov1"
+kind = "clock"
+target = "canvas"
+[[outputs]]
+kind = "hls"
+path = "/tmp/diff-base.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##;
+
+fn base_with_overlay() -> MultiviewConfig {
+    parsed(BASE_WITH_OVERLAY)
+}
+
+#[test]
+fn an_added_overlay_is_reported_added_with_its_document() {
+    // base() has no overlays; next adds ov1.
+    let diff = ConfigDiff::between(&base(), &base_with_overlay());
+    assert_eq!(diff.overlays.len(), 1, "exactly one overlay change");
+    match &diff.overlays[0] {
+        OverlayChange::Added(overlay) => assert_eq!(overlay.id, "ov1"),
+        other => panic!("expected Added(ov1), got {other:?}"),
+    }
+    assert!(
+        diff.changed_sections.contains("overlays"),
+        "overlays must also report in changed_sections for uniform accounting"
+    );
+}
+
+#[test]
+fn a_changed_overlay_carries_the_next_document() {
+    // Re-target the overlay: a per-id change, not an add/remove.
+    let next = parsed(&BASE_WITH_OVERLAY.replace("target = \"canvas\"", "target = \"cell_a\""));
+    let diff = ConfigDiff::between(&base_with_overlay(), &next);
+    assert_eq!(diff.overlays.len(), 1);
+    match &diff.overlays[0] {
+        OverlayChange::Changed(overlay) => assert_eq!(overlay.id, "ov1"),
+        other => panic!("expected Changed(ov1), got {other:?}"),
+    }
+}
+
+#[test]
+fn a_removed_overlay_is_reported_by_id() {
+    // base_with_overlay → base() drops ov1.
+    let diff = ConfigDiff::between(&base_with_overlay(), &base());
+    assert_eq!(diff.overlays.len(), 1);
+    match &diff.overlays[0] {
+        OverlayChange::Removed(id) => assert_eq!(id, "ov1"),
+        other => panic!("expected Removed(ov1), got {other:?}"),
+    }
+}
+
+#[test]
+fn overlay_add_change_and_remove_report_together_deterministically() {
+    // running: ov_keep (clock), ov_drop (label). next: ov_keep CHANGED,
+    // ov_drop REMOVED, ov_new ADDED. Added/Changed ride `next` order, then
+    // Removed in `running` order — exactly the source-path contract.
+    let two_overlays = "[[overlays]]\nid = \"ov_keep\"\nkind = \"clock\"\ntarget = \"canvas\"\n[[overlays]]\nid = \"ov_drop\"\nkind = \"label\"\ntarget = \"canvas\"\ntext = \"x\"\n";
+    let running = parsed(&format!("{BASE_DOC}{two_overlays}"));
+    let next_overlays = "[[overlays]]\nid = \"ov_keep\"\nkind = \"clock\"\ntarget = \"cell_a\"\n[[overlays]]\nid = \"ov_new\"\nkind = \"label\"\ntarget = \"canvas\"\ntext = \"y\"\n";
+    let next = parsed(&format!("{BASE_DOC}{next_overlays}"));
+    let diff = ConfigDiff::between(&running, &next);
+    let kinds: Vec<&str> = diff
+        .overlays
+        .iter()
+        .map(|c| match c {
+            OverlayChange::Added(o) => {
+                assert_eq!(o.id, "ov_new");
+                "added"
+            }
+            OverlayChange::Changed(o) => {
+                assert_eq!(o.id, "ov_keep");
+                "changed"
+            }
+            OverlayChange::Removed(id) => {
+                assert_eq!(id, "ov_drop");
                 "removed"
             }
         })

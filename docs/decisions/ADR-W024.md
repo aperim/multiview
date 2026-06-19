@@ -147,10 +147,15 @@ token fails parse — validated by construction; default `boot`). The **boot** f
 decides. On `resume`, the run reads `<config-dir>/.multiview/active.toml`; if it reads,
 parses, and validates, that document becomes the starting Running state — with the
 **storeless restart-only sections spliced from the BOOT document** (`control`, `placement`,
-`salvos`, `tally_profiles`, `walls`, `routing`, `schema_version` have no control store; the
-boot file is their durable truth and a restart is exactly when they take effect, so a
-boot-file `[control] listen` edit lands on the restart the operator performed instead of
-losing to the stale machine-written copy). The spliced document is re-validated; a
+`walls`, `routing`, `schema_version` have no control store; the boot file is their durable
+truth and a restart is exactly when they take effect, so a boot-file `[control] listen` edit
+lands on the restart the operator performed instead of losing to the stale machine-written
+copy). `salvos` and `tally_profiles` are deliberately NOT in that splice (round 6): they are
+**store-backed always-commit running state** (their definition routes are pure control-plane
+store edits with no engine command — see the round-6 hardening section), so they resume from
+`active.toml` exactly like `sources`/`overlays`, and a boot-file edit to them is picked up
+live by the watcher (which resyncs their stores) rather than discarded on every restart. The
+spliced document is re-validated; a
 combination that no longer validates falls back to boot with the reason surfaced. The engine
 is built from the result, the control stores are seeded from it, the export base document is
 it, and the ADR-W020 watcher's baseline is it — while the watcher keeps watching the BOOT
@@ -311,9 +316,13 @@ porting:
   composition does not capture (e.g. a bare `swap` re-point that only mutates the engine's
   working binding) is missing from Running persistence too — one composition to fix, both
   surfaces improve (known ADR-W015/W019 limitation, unchanged here).
-* Sections without control stores (`control`, `placement`, `salvos`, `tally_profiles`,
-  `walls`, `routing`) cannot hot-revert; revert reports them `restart_only` and the
-  indicator keeps naming them until restart.
+* Sections without control stores (`control`, `placement`, `walls`, `routing`,
+  `schema_version`) cannot hot-revert; revert reports them `restart_only` and the indicator
+  keeps naming them until restart. `salvos` and `tally_profiles` DO have control stores
+  (round 6), so a revert re-converges their stores to Loaded (and `active.toml` follows), but
+  the engine adopts a salvo/tally-profile DEFINITION change only on the next arm/take, so the
+  section is still reported `restart_only` for the running recall — store reverted, recall on
+  next use.
 
 ## Cross-vendor panel hardening
 
@@ -464,3 +473,28 @@ to agree). The three fixes:
   asserted a value that was never submitted was absent. It now ACTUALLY performs the recolor over
   the full bus (committing the store and shedding the engine command) and asserts the store
   committed, so it genuinely exercises the shed-REST path the adopted-snapshot gate guards.
+
+### Round-7 fix — overlay retry lost-update (the re-panel after round 6)
+
+The round-6 `apply_overlay_changes` was correct on a clean apply but had a **lost-update on a
+shed retry (concurrency)**: it computed the overlay delta from the **mutated control store** and
+`resync_store`d the store to `next` BEFORE the retry resolved. On a shed (`apply_change` →
+`Retry`) the file baseline does not advance, but the next retry saw the store already == `next`,
+submitted NO `UpsertOverlay`/`RemoveOverlay`, falsely reported `all_landed`, cleared
+restart/incomplete, and advanced the baseline — so the shed overlay edit was **silently dropped**
+(never delivered to the engine, never adopted). A shed became a false success.
+
+The fix mirrors the source path exactly: the overlay delta is now **baseline-derived**. A new
+`OverlayChange` enum + `diff_overlays` populate `ConfigDiff.overlays` in
+`ConfigDiff::between(baseline, next)` — the same shape and the same stable-across-retries property
+`SourceChange`/`diff_sources` already had. `apply_overlay_changes` consumes `diff.overlays` (never
+`state.overlays.list()`), so on a shed retry the diff is recomputed from the *un-advanced
+baseline* against `next` and the command is re-submitted until it lands. The store reseed still
+runs last (the UI mirror follows the file) but no longer feeds the delta. `apply_layout_change`
+was audited and is already baseline-derived (it derives the working-layout body from `next` and
+gates on `diff.layout_changed`/`diff.canvas_signal_changed`, recomputed from the baseline each
+retry; `adopt_layout` uses `next`), so it had no equivalent bug. Two deterministic tests cover the
+add and the remove directions (fill bus → file edit → assert not-yet-adopted while shed-pending →
+drain → assert re-delivered on retry). META: a live-sheddable file-watch section MUST derive its
+retry delta from the file baseline (the `ConfigDiff`), never from a control store the same apply
+mutates — a store-derived delta self-erases on retry.

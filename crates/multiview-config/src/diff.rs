@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 
 use crate::layout_doc::LayoutCanvas;
-use crate::schema::Source;
+use crate::schema::{Overlay, Source};
 use crate::MultiviewConfig;
 
 /// One source-level change between the running and next documents, keyed by
@@ -46,6 +46,29 @@ pub enum SourceChange {
     Removed(String),
 }
 
+/// One overlay-level change between the running and next documents, keyed by the
+/// overlay's stable `id` (ADR-W024 round 7).
+///
+/// The file-watch overlay apply mirrors the source path: it derives the delta
+/// from THIS list (computed against the stable file baseline by
+/// [`ConfigDiff::between`]), NOT from the mutated control store — a store-derived
+/// delta vanishes on a shed retry (the store is reseeded to `next` before the
+/// retry resolves) and the change is silently lost. Exhaustive (no
+/// `#[non_exhaustive]`): added/changed/removed is the complete id-keyed taxonomy.
+/// The `Overlay` payloads are boxed (an overlay document is large; a `Removed`
+/// id is a thin `String`) — exactly the shape `Command::UpsertOverlay` carries.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OverlayChange {
+    /// An overlay id present in `next` but not in `running`.
+    Added(Box<Overlay>),
+    /// An overlay id present in both whose document differs (the `next` version
+    /// is the one to apply via `UpsertOverlay`).
+    Changed(Box<Overlay>),
+    /// An overlay id present in `running` but not in `next` (apply via
+    /// `RemoveOverlay`).
+    Removed(String),
+}
+
 /// The per-section structural diff between two configuration documents.
 ///
 /// Produced by [`ConfigDiff::between`]; an all-default value (see
@@ -57,6 +80,13 @@ pub struct ConfigDiff {
     /// then `Removed` in `running` declaration order (deterministic — and the
     /// apply order a layout rebinding to a just-added source needs).
     pub sources: Vec<SourceChange>,
+    /// Overlay changes by id (ADR-W024 round 7): `Added`/`Changed` in `next`
+    /// declaration order, then `Removed` in `running` declaration order. The
+    /// file-watch overlay apply derives its `UpsertOverlay`/`RemoveOverlay`
+    /// commands from THIS (baseline-derived, stable across shed retries), never
+    /// from the mutated control store. `overlays` is ALSO in `changed_sections`
+    /// when non-empty (so reporting/restart accounting stays uniform).
+    pub overlays: Vec<OverlayChange>,
     /// The **pinned signal** (width / height / cadence-by-value) changed — a
     /// Class-2 change (ADR-R004): never hot-appliable.
     pub canvas_signal_changed: bool,
@@ -180,6 +210,7 @@ impl ConfigDiff {
 
         let mut diff = Self {
             sources: diff_sources(running, next),
+            overlays: diff_overlays(running, next),
             canvas_signal_changed,
             canvas_cosmetic_changed,
             layout_changed: running_layout != next_layout || running_cells != next_cells,
@@ -194,6 +225,7 @@ impl ConfigDiff {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()
+            && self.overlays.is_empty()
             && !self.canvas_signal_changed
             && !self.canvas_cosmetic_changed
             && !self.layout_changed
@@ -230,6 +262,30 @@ fn diff_sources(running: &MultiviewConfig, next: &MultiviewConfig) -> Vec<Source
     for source in &running.sources {
         if !next.sources.iter().any(|n| n.id == source.id) {
             changes.push(SourceChange::Removed(source.id.clone()));
+        }
+    }
+    changes
+}
+
+/// Diff the overlay lists by id (ADR-W024 round 7), the same shape as
+/// [`diff_sources`]: `Added`/`Changed` in `next` declaration order, then
+/// `Removed` in `running` declaration order. Computed against the file baseline
+/// so the file-watch overlay apply re-derives a STABLE delta on every shed
+/// retry (a store-derived delta vanishes once the store is reseeded to `next`).
+fn diff_overlays(running: &MultiviewConfig, next: &MultiviewConfig) -> Vec<OverlayChange> {
+    let mut changes = Vec::new();
+    for overlay in &next.overlays {
+        match running.overlays.iter().find(|r| r.id == overlay.id) {
+            None => changes.push(OverlayChange::Added(Box::new(overlay.clone()))),
+            Some(previous) if previous != overlay => {
+                changes.push(OverlayChange::Changed(Box::new(overlay.clone())));
+            }
+            Some(_) => {}
+        }
+    }
+    for overlay in &running.overlays {
+        if !next.overlays.iter().any(|n| n.id == overlay.id) {
+            changes.push(OverlayChange::Removed(overlay.id.clone()));
         }
     }
     changes
