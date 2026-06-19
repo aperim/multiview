@@ -154,6 +154,11 @@ ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] 
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 serde_json = { workspace = true }
+# Property tests for the pure media-player transport state machine (ADR-0057 /
+# ADR-0097): the exact-once vamp-exit-latch race over a 2–3-frame vamp segment,
+# and output-anchored stamp monotonicity across loop laps. Matches the
+# workspace proptest pin used by multiview-core/config/etc.
+proptest = "1.5.0"
 
 # The pipeline-ingest integration test needs the `ffmpeg` feature (a libav*
 # build + the `ffmpeg`/`ffprobe` CLIs at runtime).
