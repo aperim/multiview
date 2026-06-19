@@ -262,19 +262,17 @@ pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
             format!("atomic write target {} has no file name", path.display()),
         )
     })?;
-    // Stat the DESTINATION first: when it exists, the temp file inherits its
-    // mode before the rename, so the replace preserves a tightened mode
-    // (chmod-600 stays 600). A missing destination keeps the process default.
-    let dest_permissions = std::fs::metadata(path).ok().map(|meta| meta.permissions());
+    // The mode the temp file lands at, applied BEFORE any content is written
+    // (MAJOR-A / review M3): the state files carry plaintext credentials
+    // (WebRTC ICE password, `static_auth_secret`, WHIP tokens), so the bytes
+    // must never sit at the umask default even transiently. The owner-only
+    // 0600 floor holds on a FIRST create (a missing destination has nothing to
+    // inherit); when the destination already exists with an EVEN STRICTER mode
+    // (e.g. 0400) that tighter mode is preserved across the replace.
+    let target_mode = atomic_target_mode(path);
     let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
     {
-        let mut file = std::fs::File::create(&tmp)?;
-        // Tighten the mode BEFORE the content lands (review M3 residual): a
-        // chmod-600 destination's secrets must never sit world-readable in
-        // the temp file even for the write's duration.
-        if let Some(permissions) = dest_permissions {
-            file.set_permissions(permissions)?;
-        }
+        let mut file = create_owner_only(&tmp, target_mode)?;
         file.write_all(content.as_bytes())?;
         // Durability before visibility: the rename must never expose a file
         // whose bytes are still only in the page cache.
@@ -294,6 +292,70 @@ pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The owner-only (0600) floor for a state-file write, tightened further to a
+/// stricter mode the destination already carries (MAJOR-A): a first create
+/// lands at 0600; an existing `chmod 0400` is preserved. Non-Unix targets are
+/// not a deploy platform (no Windows), so the mode is advisory there.
+#[cfg(unix)]
+fn atomic_target_mode(dest: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    const OWNER_ONLY: u32 = 0o600;
+    match std::fs::metadata(dest) {
+        // Preserve a destination that is already STRICTER than owner-only
+        // (e.g. 0400); otherwise clamp to the 0600 floor (never widen, never
+        // leave the umask default on the secret-bearing file).
+        Ok(meta) => OWNER_ONLY & meta.permissions().mode(),
+        Err(_) => OWNER_ONLY,
+    }
+}
+
+/// Create `tmp` with the owner-only `mode` set at `open(2)` time (MAJOR-A): the
+/// secret bytes never touch a file at the umask default, not even between
+/// `create` and a follow-up `chmod`.
+#[cfg(unix)]
+fn create_owner_only(tmp: &Path, mode: u32) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(tmp)
+}
+
+/// Non-Unix fallback (not a deploy platform): create the temp file without an
+/// explicit mode. The 0600 secret-floor is a Unix permission guarantee.
+#[cfg(not(unix))]
+fn atomic_target_mode(_dest: &Path) -> u32 {
+    0o600
+}
+
+/// Non-Unix fallback: plain create (mode is advisory off Unix).
+#[cfg(not(unix))]
+fn create_owner_only(tmp: &Path, _mode: u32) -> std::io::Result<std::fs::File> {
+    std::fs::File::create(tmp)
+}
+
+/// Create the boot-model state directory (`<config-dir>/.multiview`) with
+/// owner-only 0700 permissions (MAJOR-A): the dir holds `loaded.toml` /
+/// `active.toml`, which carry plaintext credentials. `create_dir_all` applies
+/// the mode only to directories it CREATES (an existing dir keeps its mode), so
+/// this never loosens an operator-tightened parent.
+fn create_state_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
 /// Persist the Loaded snapshot to `loaded.toml` (atomic, machine-written
 /// canonical TOML), creating the state directory on demand.
 ///
@@ -308,7 +370,7 @@ pub fn persist_loaded(model: &BootModel) -> Result<(), String> {
         .to_toml()
         .map_err(|e| format!("rendering the Loaded snapshot: {e}"))?;
     let dir = model.state_dir();
-    std::fs::create_dir_all(&dir)
+    create_state_dir(&dir)
         .map_err(|e| format!("creating the state dir {}: {e}", dir.display()))?;
     write_atomic(&model.loaded_path(), &toml)
         .map_err(|e| format!("writing {}: {e}", model.loaded_path().display()))
@@ -337,7 +399,7 @@ pub fn write_active_serialized(
         // A newer composition already landed; this one is stale.
         return Ok(false);
     }
-    std::fs::create_dir_all(model.state_dir())?;
+    create_state_dir(&model.state_dir())?;
     write_atomic(&model.active_path(), toml)?;
     *last = ticket;
     Ok(true)
