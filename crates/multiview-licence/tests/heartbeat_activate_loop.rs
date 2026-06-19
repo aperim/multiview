@@ -84,7 +84,10 @@ async fn a_fresh_device_with_activate_enabled_enrols_and_installs_a_lease() {
 
     // It fetched a challenge and POSTed an activate whose PoP proof verified, binding
     // the SERVER-assigned instanceId.
-    assert!(server.challenge_fetches() >= 1, "activate fetches a challenge");
+    assert!(
+        server.challenge_fetches() >= 1,
+        "activate fetches a challenge"
+    );
     assert_eq!(server.activates(), 1, "exactly one activate call");
     assert!(
         server.last_activate_pop_verified(),
@@ -171,8 +174,16 @@ async fn activate_disabled_keeps_the_renew_only_no_binding_behaviour() {
         "renew-only: a fresh device with activate disabled is NoBinding, got {outcome:?}"
     );
     assert_eq!(server.activates(), 0, "no activate call when disabled");
-    assert_eq!(server.challenge_fetches(), 0, "no challenge fetch when disabled");
-    assert_eq!(server.heartbeats.load(Ordering::SeqCst), 0, "no heartbeat call when disabled");
+    assert_eq!(
+        server.challenge_fetches(),
+        0,
+        "no challenge fetch when disabled"
+    );
+    assert_eq!(
+        server.heartbeats.load(Ordering::SeqCst),
+        0,
+        "no heartbeat call when disabled"
+    );
 }
 
 #[tokio::test]
@@ -188,7 +199,11 @@ async fn activate_challenge_unreachable_keeps_last_good_and_does_not_panic() {
         .await
         .expect("run_once must not hang");
     assert!(result.is_err(), "an unreachable challenge fails closed");
-    assert_eq!(server.activates(), 0, "no activate without a challenge nonce");
+    assert_eq!(
+        server.activates(),
+        0,
+        "no activate without a challenge nonce"
+    );
     // Nothing was installed — the fresh device holds no lease (keep last-good: an
     // empty store stays empty, never a crash, never a forced tighten).
     assert!(

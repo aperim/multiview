@@ -109,7 +109,11 @@ fn build_activate_request_echoes_the_server_instance_id_not_the_device_one() {
     // On first contact the device ECHOES the server-assigned challenge.instanceId
     // as ActivateRequest.instanceId — never its own DeviceIdentity::instance_id.
     let signer = FixedDeviceSigner::from_seed([42u8; 32]);
-    let challenge = DeviceChallenge::new(NONCE_HEX.to_owned(), i64::MAX, SERVER_INSTANCE_ID.to_owned());
+    let challenge = DeviceChallenge::new(
+        NONCE_HEX.to_owned(),
+        i64::MAX,
+        SERVER_INSTANCE_ID.to_owned(),
+    );
     let req: ActivateRequest = build_activate_request(
         &enrolling_identity(),
         signer.public_key_raw(),
@@ -133,7 +137,11 @@ fn build_activate_request_carries_device_public_key_base64url_raw_32() {
     // public point — sourced from the SIGNER, not the (empty) identity env field.
     let signer = FixedDeviceSigner::from_seed([7u8; 32]);
     let pk_raw = signer.public_key_raw();
-    let challenge = DeviceChallenge::new(NONCE_HEX.to_owned(), i64::MAX, SERVER_INSTANCE_ID.to_owned());
+    let challenge = DeviceChallenge::new(
+        NONCE_HEX.to_owned(),
+        i64::MAX,
+        SERVER_INSTANCE_ID.to_owned(),
+    );
     let req = build_activate_request(&enrolling_identity(), pk_raw, &challenge, None);
 
     let want = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pk_raw);
@@ -153,8 +161,17 @@ fn activate_request_never_serializes_the_deprecated_server_nonce() {
     // serverNonce is DEPRECATED (do not send). The serialized ActivateRequest must
     // contain no `serverNonce` key at all.
     let signer = FixedDeviceSigner::from_seed([9u8; 32]);
-    let challenge = DeviceChallenge::new(NONCE_HEX.to_owned(), i64::MAX, SERVER_INSTANCE_ID.to_owned());
-    let req = build_activate_request(&enrolling_identity(), signer.public_key_raw(), &challenge, None);
+    let challenge = DeviceChallenge::new(
+        NONCE_HEX.to_owned(),
+        i64::MAX,
+        SERVER_INSTANCE_ID.to_owned(),
+    );
+    let req = build_activate_request(
+        &enrolling_identity(),
+        signer.public_key_raw(),
+        &challenge,
+        None,
+    );
     let json = serde_json::to_string(&req).expect("serialize");
     assert!(
         !json.contains("serverNonce"),
@@ -172,7 +189,10 @@ fn activate_request_never_serializes_the_deprecated_server_nonce() {
         "devicePublicKey",
         "nonce",
     ] {
-        assert!(json.contains(field), "activate body must carry {field}: {json}");
+        assert!(
+            json.contains(field),
+            "activate body must carry {field}: {json}"
+        );
     }
 }
 
@@ -181,8 +201,17 @@ fn activate_request_omits_claim_code_for_the_free_tier() {
     // Omitting claimCode auto-issues a free non-commercial licence — so a None claim
     // code must NOT serialize the key at all (not an empty string).
     let signer = FixedDeviceSigner::from_seed([11u8; 32]);
-    let challenge = DeviceChallenge::new(NONCE_HEX.to_owned(), i64::MAX, SERVER_INSTANCE_ID.to_owned());
-    let free = build_activate_request(&enrolling_identity(), signer.public_key_raw(), &challenge, None);
+    let challenge = DeviceChallenge::new(
+        NONCE_HEX.to_owned(),
+        i64::MAX,
+        SERVER_INSTANCE_ID.to_owned(),
+    );
+    let free = build_activate_request(
+        &enrolling_identity(),
+        signer.public_key_raw(),
+        &challenge,
+        None,
+    );
     let json_free = serde_json::to_string(&free).expect("serialize");
     assert!(
         !json_free.contains("claimCode"),
@@ -211,8 +240,17 @@ fn the_activate_pop_proof_binds_the_server_instance_id() {
     let signer = FixedDeviceSigner::from_seed([42u8; 32]);
     let htu = "https://api.conspect.studio/v0/organisations/org_test/activate";
     // The activate body bytes the transport will send (the proof binds sha256 of these).
-    let challenge = DeviceChallenge::new(NONCE_HEX.to_owned(), i64::MAX, SERVER_INSTANCE_ID.to_owned());
-    let req = build_activate_request(&enrolling_identity(), signer.public_key_raw(), &challenge, None);
+    let challenge = DeviceChallenge::new(
+        NONCE_HEX.to_owned(),
+        i64::MAX,
+        SERVER_INSTANCE_ID.to_owned(),
+    );
+    let req = build_activate_request(
+        &enrolling_identity(),
+        signer.public_key_raw(),
+        &challenge,
+        None,
+    );
     let body = serde_json::to_vec(&req).expect("serialize");
     let iat: i64 = 1_790_000_000;
 
@@ -227,15 +265,8 @@ fn the_activate_pop_proof_binds_the_server_instance_id() {
     let sign1 = CoseSign1::from_slice(&cose_bytes).expect("valid COSE_Sign1");
 
     // The payload IS the canonical pre-image bound to the SERVER instance id.
-    let expected_server = canonical_pop_preimage(
-        "POST",
-        htu,
-        &body,
-        SERVER_INSTANCE_ID,
-        NONCE_HEX,
-        iat,
-    )
-    .unwrap();
+    let expected_server =
+        canonical_pop_preimage("POST", htu, &body, SERVER_INSTANCE_ID, NONCE_HEX, iat).unwrap();
     assert_eq!(
         sign1.payload.as_deref(),
         Some(expected_server.as_slice()),

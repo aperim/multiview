@@ -1108,8 +1108,8 @@ pub struct ActivateRequest {
     /// The instance's Ed25519 device proof-of-possession **public** key (base64url
     /// of the raw 32-byte point) — sourced from the persisted device key's public
     /// half, NOT the legacy `MULTIVIEW_LICENCE_DEVICE_KEY` env string. The server
-    /// verifies the COSE_Sign1 proof against this key before binding, then embeds its
-    /// RFC 7638 thumbprint as the lease `cnf_jkt` (holder-of-key).
+    /// verifies the `COSE_Sign1` proof against this key before binding, then embeds
+    /// its RFC 7638 thumbprint as the lease `cnf_jkt` (holder-of-key).
     pub device_public_key: String,
     /// The single-use device-PoP challenge nonce (lower-case hex) from
     /// `GET /challenge`. Bound into the signed PoP pre-image; burned on success.
@@ -2495,7 +2495,8 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             // signs `sha256` of THESE bytes.
             let body = serde_json::to_vec(&req)
                 .map_err(|e| HeartbeatError::Malformed(format!("activate body serialise: {e}")))?;
-            let pop_header = self.build_activate_pop_header(&body, &challenge.instance_id, &req.nonce)?;
+            let pop_header =
+                self.build_activate_pop_header(&body, &challenge.instance_id, &req.nonce)?;
             // Mint the durable Idempotency-Key LAST (after the fallible PoP build),
             // then pin the whole unit for verbatim replay.
             let idempotency_key = self.idempotency_key()?;

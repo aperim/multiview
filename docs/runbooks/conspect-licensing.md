@@ -116,6 +116,7 @@ machine runs unlicensed-honest):
 | `MULTIVIEW_LICENCE_TOKEN` | account JWT bearer (operator role for heartbeat) — never logged |
 | `MULTIVIEW_LICENCE_DIR` | lease-state dir (default `/var/lib/conspect/licence/`) |
 | `MULTIVIEW_LICENCE_DEVICE_KEY` | **legacy public-key string — inert for PoP** (deprecation candidate) |
+| `MULTIVIEW_LICENCE_CLAIM_CODE` | optional 6-char paid claim code sent on **activate** (ADR-I008); **unset → free non-commercial auto-issue** |
 
 The remaining `MULTIVIEW_LICENCE_*` vars (machine/instance/binding ids, fingerprint
 digest/score, hardware/discriminator digests) carry the salted device identity on the
@@ -146,17 +147,34 @@ swappable in the code so a fix is a one-line flip:
    `to_tagged_vec()`.
 
 **Plus the activate-continuity check:** heartbeat verifies the proof against the key
-Conspect stored for this binding at the **original activate**. A **fresh device with no
-activate-registered key will `pop-invalid` until the device-side activate slice lands**
-(deferred, out of scope of the heartbeat client per ADR-I007) — activate is where this
-generated public key first reaches the server (as `devicePublicKey`) and its thumbprint
-becomes the lease `cnf_jkt`. So renewal is *spec-correct*, but an end-to-end live
-renewal also depends on that registration path existing for the binding.
+Conspect stored for this binding at the **original activate**. First-contact device
+**ACTIVATE / enrolment is now implemented** ([ADR-I008](../decisions/ADR-I008.md)):
+activate is where this generated public key first reaches the server (as
+`devicePublicKey`) and its RFC 7638 thumbprint becomes the lease `cnf_jkt`. The client
+enables activate **only when the device-identity triple is configured** (machine id +
+fingerprint digest + a **≥ 70** score + hardware + discriminator hash/digest); a fresh
+device then enrols online (`GET /challenge` → `POST /activate` with a PoP proof bound to
+the **server-assigned `instanceId`** → install the issued lease → renew). Absent that
+triple the device is **renew-only** and onboarding stays via an install surface
+(control-upload / offline file-drop / mesh relay). Either way, a fresh device with **no
+activate-registered key** still `pop-invalid`s on the renew path until it has enrolled
+(or a lease arrives via an install surface).
 
-How to validate: with a real org JWT + an activate-registered binding, run a heartbeat
-and confirm a `200` (a fresh lease + `nextNonce`), not a `401 pop-invalid`. A
-`pop-invalid` points at one of the four items above (or a key/continuity mismatch);
-flip the corresponding item and re-test.
+How to validate (rule-26, REQUIRED — the activate path is spec-correct + self-verifying
+unit-tested but **NOT** live-server-validated here):
+- **Renew:** with a real org JWT + an activate-registered binding, run a heartbeat and
+  confirm a `200` (a fresh lease + `nextNonce`), not a `401 pop-invalid`.
+- **Activate (first contact):** on a fresh device with the identity triple set + activate
+  enabled, confirm `GET /challenge` returns an `instanceId`, the `POST /activate` returns
+  `200` with a signed lease + `nextNonce` (not `401 pop-invalid` / `422`), the server
+  bound the presented `devicePublicKey` (the lease `cnf_jkt` is its thumbprint), and the
+  **next** cycle renews via heartbeat with no extra `/challenge`. The load-bearing
+  first-contact unknowns to confirm against the live server: that the PoP pre-image
+  `instance_id` on activate is the **server-assigned** `DeviceChallenge.instanceId`
+  (echoed), and that activate carries `devicePublicKey` while heartbeat omits it.
+
+A `pop-invalid` points at one of the four byte-level items above (or a key/continuity
+mismatch); flip the corresponding item and re-test.
 
 ## Failure modes (all keep last-good — never off air)
 

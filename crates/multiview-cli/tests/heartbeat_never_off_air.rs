@@ -382,7 +382,10 @@ async fn the_output_clock_ticks_while_an_activate_call_is_stalled_in_flight() {
         parked.is_ok(),
         "the activate-path call must reach an in-flight stall"
     );
-    assert!(!handle.is_finished(), "the activate is stalled (not returned)");
+    assert!(
+        !handle.is_finished(),
+        "the activate is stalled (not returned)"
+    );
 
     // WHILE the activate is stalled in flight, drive the output clock — one frame per
     // tick, never faltered.

@@ -774,7 +774,10 @@ impl FakeLicenceServer {
     }
     /// The `instanceId` the most recent activate request carried.
     pub fn last_activate_instance_id(&self) -> Option<String> {
-        self.last_activate_instance_id.lock().expect("poisoned").clone()
+        self.last_activate_instance_id
+            .lock()
+            .expect("poisoned")
+            .clone()
     }
     /// The `devicePublicKey` the most recent activate request carried.
     pub fn last_activate_device_public_key(&self) -> Option<String> {
@@ -857,10 +860,10 @@ impl FakeLicenceServer {
         nonce_hex: &str,
         instance_id: &str,
     ) -> bool {
+        use coset::{CborSerializable as _, CoseSign1};
         if !self.verify_pop(pop_header, body, nonce_hex) {
             return false;
         }
-        use coset::{CborSerializable as _, CoseSign1};
         let Ok(cose_bytes) = base64::engine::general_purpose::STANDARD.decode(pop_header) else {
             return false;
         };
@@ -1133,21 +1136,29 @@ impl LicenceServer for FakeLicenceServer {
         // Parse the EXACT activate body bytes (the same bytes the PoP signed over).
         let req: ActivateRequest = match serde_json::from_slice(&body) {
             Ok(r) => r,
-            Err(e) => return Err(HeartbeatError::Malformed(format!("fake activate parse: {e}"))),
+            Err(e) => {
+                return Err(HeartbeatError::Malformed(format!(
+                    "fake activate parse: {e}"
+                )))
+            }
         };
         self.activates.fetch_add(1, Ordering::SeqCst);
         *self.last_activate_instance_id.lock().expect("poisoned") = Some(req.instance_id.clone());
-        *self.last_activate_device_public_key.lock().expect("poisoned") =
-            Some(req.device_public_key.clone());
+        *self
+            .last_activate_device_public_key
+            .lock()
+            .expect("poisoned") = Some(req.device_public_key.clone());
         // VERIFY the activate proof binds THIS body + THIS nonce + the SERVER-assigned
         // instance id (the device must echo + bind the id the challenge reserved).
         let expected_instance = self.last_issued_instance_id();
-        let verified =
-            self.verify_activate_pop(pop_header, &body, &req.nonce, &expected_instance);
-        self.last_activate_pop_verified.store(verified, Ordering::SeqCst);
+        let verified = self.verify_activate_pop(pop_header, &body, &req.nonce, &expected_instance);
+        self.last_activate_pop_verified
+            .store(verified, Ordering::SeqCst);
         // `pop-invalid` (401): the knob forces it, or the proof genuinely failed (a
         // real server 401s it) — a DEFINITIVE rejection (a response WAS received).
-        if self.reject_pop.load(Ordering::SeqCst) || !verified || req.instance_id != expected_instance
+        if self.reject_pop.load(Ordering::SeqCst)
+            || !verified
+            || req.instance_id != expected_instance
         {
             return Err(HeartbeatError::ServerRejected(
                 "fake activate returned HTTP 401 pop-invalid".to_owned(),
@@ -1158,7 +1169,9 @@ impl LicenceServer for FakeLicenceServer {
         // server-assigned instance binding id. Record that binding so the subsequent
         // renew (heartbeat) serves a lease bound to the SAME id.
         *self.activated_binding.lock().expect("poisoned") = Some(expected_instance.clone());
-        let lease = self.kit.sign_lease_for(&expected_instance, self.kit.now_ms() + 35 * 86_400_000);
+        let lease = self
+            .kit
+            .sign_lease_for(&expected_instance, self.kit.now_ms() + 35 * 86_400_000);
         let next_nonce = self.mint_nonce();
         *self.last_next_nonce.lock().expect("poisoned") = Some(next_nonce.clone());
         Ok(ActivateResponse::new(
