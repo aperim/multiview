@@ -455,6 +455,15 @@ async fn watch_loop(
                 resync_all_stores(&state, ACTOR, &baseline);
                 clear_apply_incomplete(&state, &path, &mut incomplete_active);
             }
+            // MAJOR-B (unified gate / B-1): the file is at the already-applied
+            // content, so the stores match adopted state — mark adopted and
+            // re-fire so the persister captures it. WITHOUT this, a prior shed's
+            // `requested` advance would leave persistence frozen FOREVER once
+            // the file returns to A (this branch never advanced `adopted`).
+            if let Some(model) = state.boot_model.as_ref() {
+                model.mark_adopted();
+            }
+            state.running_changed.notify_one();
             continue;
         }
         if rejected.as_ref() == Some(&now) {
@@ -523,6 +532,13 @@ async fn watch_loop(
                 resync_all_stores(&state, ACTOR, &baseline);
                 clear_apply_incomplete(&state, &path, &mut incomplete_active);
             }
+            // MAJOR-B (unified gate / B-1): the content matches the last-observed
+            // (adopted) state — mark adopted and re-fire so a prior shed's
+            // `requested` advance can never freeze persistence forever.
+            if let Some(model) = state.boot_model.as_ref() {
+                model.mark_adopted();
+            }
+            state.running_changed.notify_one();
             continue;
         }
         match apply_change(
@@ -638,11 +654,11 @@ fn apply_change(
             "a subsequent valid write applied",
             invalid_active,
         );
-        // MAJOR-B: the file reverted to the running baseline (the stores are
-        // re-converged to adopted state) — re-allow persistence and re-fire so
-        // the persister captures the adopted snapshot.
+        // MAJOR-B (unified gate): the file reverted to the running baseline
+        // (the stores are re-converged to adopted state) — mark adopted and
+        // re-fire so the persister captures the adopted snapshot.
         if let Some(model) = state.boot_model.as_ref() {
-            model.allow_persist();
+            model.mark_adopted();
         }
         state.running_changed.notify_one();
         tracing::debug!(path = %path.display(), "config file rewritten with identical content");
@@ -672,24 +688,25 @@ fn apply_change(
             ),
         );
         publish_apply_incomplete(state, path, outcome.shed, incomplete_active);
-        // MAJOR-B: the stores were optimistically mutated but the engine did
-        // NOT adopt the change (a command was shed). Inhibit `active.toml`
-        // persistence until the retry settles, so a crash in this window can
-        // never resume from store state the engine never ran.
+        // MAJOR-B (unified gate): the stores were optimistically mutated but the
+        // engine did NOT adopt the change (a command was shed) — advance
+        // `requested` without `adopted`, so the persister skips `active.toml`
+        // until the retry lands. A crash in this window can never resume from
+        // store state the engine never ran.
         if let Some(model) = state.boot_model.as_ref() {
-            model.inhibit_persist();
+            model.note_requested();
         }
         return ApplyResult::Retry;
     }
     *baseline = next;
     clear_apply_incomplete(state, path, incomplete_active);
-    // MAJOR-B: the apply landed completely — the stores now reflect adopted
-    // state. Re-allow persistence and re-fire the choke-point signal so the
-    // debounced persister captures this adopted snapshot (the optimistic
-    // store mutation's own `running_changed` may have been consumed by an
-    // inhibited persist pass).
+    // MAJOR-B (unified gate): the apply landed completely — the stores now
+    // reflect adopted state. Mark every requested mutation adopted and re-fire
+    // the choke-point signal so the debounced persister captures this adopted
+    // snapshot (the optimistic store mutation's own `running_changed` may have
+    // been consumed by a skipped persist pass).
     if let Some(model) = state.boot_model.as_ref() {
-        model.allow_persist();
+        model.mark_adopted();
     }
     state.running_changed.notify_one();
     state

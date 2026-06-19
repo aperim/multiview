@@ -320,19 +320,27 @@ porting:
 The 3-lens review surfaced five defects on this design; the fixes are part of the
 implementation:
 
-* **Secrets are 0600 on FIRST write (MAJOR-A).** `loaded.toml`/`active.toml` carry the
-  composed Running config with secrets intact (resume needs the real credentials), so
-  `write_atomic` sets the temp file's mode at `open(2)` time to an owner-only `0600` floor
-  (tightened further if the destination already carries a stricter mode), and the
-  `.multiview` state dir is created `0700` — the plaintext credentials never sit at the
-  umask default, not even transiently.
-* **Persistence reflects only ADOPTED state (MAJOR-B).** A file-watch apply optimistically
-  resyncs the stores, but when an engine command is shed it returns `Retry` without
-  advancing the baseline. While a retry is pending the boot model's `persist_inhibited`
-  flag is set, so `persist_running_now` skips the `active.toml` write; the watcher clears
-  it and re-fires `running_changed` when the retry settles, so `active.toml` never captures
-  store state the engine did not adopt (a crash mid-retry resumes from the last adopted
-  snapshot).
+* **Secret state-file writes are exclusive and fail-closed (MAJOR-A).** `loaded.toml`/
+  `active.toml` carry the composed Running config with secrets intact (resume needs the real
+  credentials). `write_atomic` creates the temp via `tempfile::NamedTempFile::new_in` —
+  `O_EXCL` + an **unpredictable** name + `0600` on Unix — then clamps the final mode to a
+  `0600` floor (stricter if the destination is), `fsync`s, atomically renames (`persist`),
+  and `fsync`s the directory. That defeats both attacks a deterministic `.<name>.tmp` name
+  allowed: a pre-existing world-readable temp inode (the secrets are never written into it)
+  and an attacker-planted symlink at the temp path (it is never opened/followed).
+  `create_state_dir` creates the `.multiview` dir `0700` and **fails closed** when an
+  existing one is group/world-writable or owned by another uid (`rustix::process::geteuid`,
+  a safe wrapper) — refusing to persist there, which never takes output off air (the output
+  clock is untouched).
+* **Persistence reflects only ADOPTED state — one unified gate (MAJOR-B).** The boot model
+  tracks a single adopted-vs-requested generation pair: a store mutation REQUESTED on ANY
+  live-apply path (the file-watcher AND every REST mutation — sources/overlays) advances
+  `requested`; the engine ADOPTING it (the command landed, or the change reverts to a
+  known-adopted store) advances `adopted`. `persist_running_now` writes `active.toml` ONLY
+  when `adopted == requested`, so a shed on **any** path freezes persistence at the last
+  adopted state, and every settle-to-adopted path advances `adopted` so the gate can never
+  stick (closing both the file-watch stuck-inhibit and the REST-shed leak). A crash while a
+  shed is pending resumes from the last adopted snapshot, never unadopted store state.
 * **Promote/watch concurrency is closed (MAJOR-C).** (C1) `bind_and_serve` installs the
   config-file watch handle into `AppState` BEFORE the router serves any request, so a
   promote in the startup window always finds the suppression seam. (C2/C3) `promote` and

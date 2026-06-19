@@ -68,6 +68,13 @@ fn live_apply_upsert(
             overlay: Box::new(overlay),
         })
         .is_ok();
+    // MAJOR-B (unified gate / B-2): a RENDERING overlay whose command SHED is
+    // requested-but-unadopted — gate persistence until it is adopted. A
+    // non-rendering overlay is a restart-only store change (nothing live to
+    // adopt), so it is not gated.
+    if renders {
+        state.note_engine_apply(submitted);
+    }
     if renders && submitted {
         ApplyMode::Live
     } else {
@@ -95,6 +102,11 @@ fn live_apply_remove(
             id: id.to_owned(),
         })
         .is_ok();
+    // MAJOR-B (unified gate / B-2): a shed removal of a RENDERING overlay
+    // leaves it on screen — gate persistence until adopted.
+    if renders {
+        state.note_engine_apply(submitted);
+    }
     if renders && submitted {
         ApplyMode::Live
     } else {

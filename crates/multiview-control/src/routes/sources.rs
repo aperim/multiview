@@ -67,6 +67,13 @@ fn live_apply_upsert(
                 source: Box::new(source),
             })
             .is_ok();
+        // MAJOR-B (unified gate / B-2): this REST mutation already wrote the
+        // store + will audit (firing `running_changed`). Feed the one
+        // adopted-vs-requested gate so a SHED live-apply does not persist
+        // requested-but-unadopted state to `active.toml`: a landed command is
+        // adopted; a shed advances `requested` only (the next adopted mutation,
+        // or a restart, catches `adopted` up).
+        state.note_engine_apply(submitted);
         return if submitted {
             ApplyMode::Live
         } else {
@@ -78,10 +85,11 @@ fn live_apply_upsert(
         // the stored decoded source applies on restart. A shed submit is
         // surfaced (never silent): the stale generator keeps rendering until
         // restart, and the operator should know why.
-        if let Err(err) = state.commands.try_submit(Command::RemoveSource {
+        let removed = state.commands.try_submit(Command::RemoveSource {
             op: OperationId::new(),
             id: source.id.clone(),
-        }) {
+        });
+        if let Err(err) = &removed {
             tracing::warn!(
                 source = %source.id,
                 error = %err,
@@ -89,6 +97,10 @@ fn live_apply_upsert(
                  rendering the old synthetic picture until restart"
             );
         }
+        // MAJOR-B (unified gate / B-2): a shed stop leaves the running engine
+        // still rendering the old synthetic source — gate persistence until it
+        // is adopted (the removal lands, or a restart).
+        state.note_engine_apply(removed.is_ok());
     }
     ApplyMode::Restart
 }
@@ -103,6 +115,10 @@ fn live_apply_remove(state: &AppState, id: &str) -> ApplyMode {
             id: id.to_owned(),
         })
         .is_ok();
+    // MAJOR-B (unified gate / B-2): a shed removal leaves the running engine
+    // still carrying the removed source — feed the persist gate so the
+    // post-delete `active.toml` does not record the removal as adopted.
+    state.note_engine_apply(submitted);
     if submitted {
         ApplyMode::Live
     } else {

@@ -73,12 +73,20 @@ pub struct BootModel {
     /// The monotonically increasing write-ticket source (taken at compose
     /// time, compared in [`write_active_serialized`]).
     write_tickets: AtomicU64,
-    /// Whether a file-watch apply is mid-retry — its stores were optimistically
-    /// mutated but an engine command was SHED, so the change is NOT yet adopted
-    /// (MAJOR-B). While set, [`persist_running_now`] skips writing `active.toml`
-    /// so a crash cannot resume into store state the engine never ran; the
-    /// watcher clears it and re-fires `running_changed` when the retry settles.
-    persist_inhibited: AtomicBool,
+    /// The unified adopted-vs-requested persistence gate (MAJOR-B / panel round
+    /// 2): the count of store mutations REQUESTED across EVERY live-apply path
+    /// (the file-watcher AND all REST mutations). A mutation that sheds an
+    /// engine command advances `requested` but NOT `adopted`.
+    requested_generation: AtomicU64,
+    /// The count of mutations the engine actually ADOPTED (the command landed,
+    /// or the change needs no command). [`persist_running_now`] writes
+    /// `active.toml` ONLY when `adopted == requested` — so a shed (file-watch or
+    /// REST) freezes persistence at the last adopted state until the change is
+    /// adopted (its retry lands, or a later mutation reaches a known-adopted
+    /// store), and it can never stick (any settle-to-adopted path advances
+    /// `adopted`). Closes the file-watch B-1 (stuck inhibit) AND the REST B-2
+    /// (the original defect via REST) with one gate every path feeds.
+    adopted_generation: AtomicU64,
 }
 
 impl BootModel {
@@ -103,7 +111,8 @@ impl BootModel {
             revert_incomplete: AtomicBool::new(false),
             write_serial: std::sync::Mutex::new(0),
             write_tickets: AtomicU64::new(0),
-            persist_inhibited: AtomicBool::new(false),
+            requested_generation: AtomicU64::new(0),
+            adopted_generation: AtomicU64::new(0),
         }
     }
 
@@ -183,26 +192,39 @@ impl BootModel {
         self.revert_incomplete.swap(false, Ordering::AcqRel)
     }
 
-    /// Inhibit `active.toml` persistence (MAJOR-B): a file-watch apply
-    /// optimistically mutated the stores but an engine command was SHED, so the
-    /// change is not yet adopted. Set when the watch apply returns `Retry`.
-    pub fn inhibit_persist(&self) {
-        self.persist_inhibited.store(true, Ordering::Release);
+    /// Record that a store mutation was REQUESTED (MAJOR-B): advances the
+    /// `requested` generation. Call from EVERY live-apply path that mutates the
+    /// stores — the file-watcher and every REST mutation — when the change may
+    /// not have been adopted by the engine (i.e. a command was submitted).
+    /// Returns the new `requested` value.
+    pub fn note_requested(&self) -> u64 {
+        self.requested_generation.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    /// Allow `active.toml` persistence again (MAJOR-B): the file-watch apply
-    /// settled (its retry landed / the file reverted), so the stores once more
-    /// reflect adopted state. The watcher re-fires `running_changed` after this
-    /// so the persister captures the adopted snapshot.
-    pub fn allow_persist(&self) {
-        self.persist_inhibited.store(false, Ordering::Release);
+    /// Mark the stores as fully ADOPTED (MAJOR-B): advance `adopted` to the
+    /// current `requested`, so [`persist_ready`](Self::persist_ready) becomes
+    /// true and `active.toml` captures the adopted state. Call whenever a
+    /// live-apply path reaches a known-adopted store: a non-shed mutation, a
+    /// shed's retry that lands, the file reverting to the running baseline, or
+    /// any settle-to-adopted path. It can never under-advance (it only ever
+    /// moves `adopted` forward), so the gate can never stick.
+    pub fn mark_adopted(&self) {
+        let requested = self.requested_generation.load(Ordering::Acquire);
+        // Monotonic: never move `adopted` backwards (a concurrent shed may have
+        // advanced `requested` past what this caller observed; the next
+        // adoption catches up).
+        self.adopted_generation
+            .fetch_max(requested, Ordering::AcqRel);
     }
 
-    /// Whether persistence is currently inhibited by a mid-retry file-watch
-    /// apply (MAJOR-B): [`persist_running_now`] skips the write while `true`.
+    /// Whether `active.toml` may be persisted now (MAJOR-B): true only when the
+    /// engine has ADOPTED every requested mutation (`adopted >= requested`). A
+    /// shed (file-watch or REST) leaves `adopted` behind, freezing persistence
+    /// at the last adopted state until the change is adopted.
     #[must_use]
-    pub fn persist_inhibited(&self) -> bool {
-        self.persist_inhibited.load(Ordering::Acquire)
+    pub fn persist_ready(&self) -> bool {
+        self.adopted_generation.load(Ordering::Acquire)
+            >= self.requested_generation.load(Ordering::Acquire)
     }
 
     /// Take the next monotonically increasing write ticket (call at compose
@@ -509,13 +531,15 @@ pub async fn persist_running_now(state: &AppState) -> ControlResult<()> {
     let Some(model) = state.boot_model.as_ref() else {
         return Ok(());
     };
-    // MAJOR-B: a file-watch apply is mid-retry — the stores were optimistically
-    // mutated but an engine command was SHED, so the change is NOT adopted.
-    // Skip the write; the watcher clears the inhibit and re-fires
-    // `running_changed` when the retry settles, and `active.toml` then captures
-    // only adopted state. A crash in this window resumes from the last adopted
-    // snapshot, never from store state the engine never ran.
-    if model.persist_inhibited() {
+    // MAJOR-B (unified gate): persist ONLY when the engine has adopted every
+    // requested mutation. A shed on ANY live-apply path (the file-watcher OR a
+    // REST mutation) leaves `adopted` behind `requested`, so the stores hold
+    // state the engine did not adopt — skip the write. The change's adoption
+    // (its retry lands, the file reverts, or a later mutation reaches a
+    // known-adopted store) advances `adopted` and re-fires `running_changed`,
+    // and `active.toml` then captures only adopted state. A crash in this
+    // window resumes from the last adopted snapshot, never unadopted state.
+    if !model.persist_ready() {
         return Ok(());
     }
     let (_document, config) = crate::routes::config::compose_running_config(state)?;
