@@ -252,12 +252,18 @@ pub struct MediaPlayer {
     eof_policy: EofPolicy,
     /// The output media time of the start tick — the anchor for stamping.
     anchor: MediaTime,
-    /// Count of frames published since `anchor` (monotonic across laps); the
-    /// `k` in `publish_at(k) = anchor + k × frame_period`.
+    /// Count of frames published since the current `anchor` (monotonic across
+    /// laps within an anchor epoch); the `k` in
+    /// `publish_at(k) = anchor + k × frame_period`.
     emitted: u64,
     /// The output media time most recently emitted (for the heartbeat cadence
-    /// and the monotonic guarantee).
+    /// and the **strict-monotonic guarantee**: a re-anchor — play/vamp after a
+    /// frame was already emitted — must never rewind the published timeline, so
+    /// every stamp is floored at `last_at + frame_period`).
     last_at: MediaTime,
+    /// Whether any frame has been emitted yet (so the very first frame stamps
+    /// exactly at `anchor`, while every later frame respects the monotone floor).
+    emitted_any: bool,
 }
 
 impl MediaPlayer {
@@ -272,6 +278,7 @@ impl MediaPlayer {
             anchor,
             emitted: 0,
             last_at: anchor,
+            emitted_any: false,
         }
     }
 
@@ -414,38 +421,68 @@ impl MediaPlayer {
 
     // ---- internals ------------------------------------------------------
 
+    /// Re-anchor the output-anchored timeline at `anchor` (a fresh play/vamp).
+    /// Resets the per-anchor frame counter but **never the `emitted_any` /
+    /// `last_at` monotone floor**: if frames were already emitted, the next
+    /// stamp continues strictly forward from `last_at` rather than rewinding to
+    /// `anchor` (the published timeline is strictly monotone across any command
+    /// sequence — the data-plane never-rewind guarantee, inv #1/#3).
     fn reanchor(&mut self, anchor: MediaTime) {
         self.anchor = anchor;
         self.emitted = 0;
-        self.last_at = anchor;
     }
 
-    /// The output-anchored stamp for the `emitted`-th frame:
-    /// `anchor + emitted × frame_period` (media-playout §7.2). Exact integer
-    /// arithmetic — never float, never wall-clock.
-    fn stamp_for(&self, emitted: u64) -> MediaTime {
+    /// The output-anchored stamp for the `emitted`-th frame of the current
+    /// anchor epoch: `anchor + emitted × frame_period` (media-playout §7.2).
+    /// Exact integer arithmetic — never float, never wall-clock.
+    fn anchored_stamp(&self) -> MediaTime {
         // `emitted` is a frame counter; it fits i64 for any realistic run. Clamp
         // (never panic) rather than `as`-cast (lint policy / safety rule 3).
-        let k = i64::try_from(emitted).unwrap_or(i64::MAX);
+        let k = i64::try_from(self.emitted).unwrap_or(i64::MAX);
         let offset = k.saturating_mul(self.geometry.frame_period_ns);
         self.anchor.saturating_add(MediaTime::from_nanos(offset))
     }
 
-    /// Publish the current frame at the next output-anchored stamp and advance
-    /// the emitted-frame cursor.
-    fn publish(&mut self) -> PlayerAction {
-        let at = self.stamp_for(self.emitted);
+    /// Compute the stamp for the next frame to emit and advance the cursors,
+    /// **strictly monotone by construction**: the very first frame stamps at
+    /// `anchor`; every later frame is `max(anchored_stamp, last_at +
+    /// frame_period)` so a re-anchor can never rewind or stall the published
+    /// timeline (the store's monotonic guard would otherwise clamp a rewind into
+    /// a frozen tile).
+    fn next_at(&mut self) -> MediaTime {
+        let anchored = self.anchored_stamp();
+        let at = if self.emitted_any {
+            let floor = self
+                .last_at
+                .saturating_add(MediaTime::from_nanos(self.geometry.frame_period_ns));
+            if anchored.as_nanos() > floor.as_nanos() {
+                anchored
+            } else {
+                floor
+            }
+        } else {
+            anchored
+        };
         self.emitted = self.emitted.saturating_add(1);
+        self.emitted_any = true;
         self.last_at = at;
-        PlayerAction::Publish { at }
+        at
+    }
+
+    /// Publish the current frame at the next (strictly-monotone, output-anchored)
+    /// stamp and advance the emitted-frame cursor.
+    fn publish(&mut self) -> PlayerAction {
+        PlayerAction::Publish { at: self.next_at() }
     }
 
     /// Wrap a loop: seek the open container back to `frame`, discard the
     /// boundary frame, and keep the emitted cursor advancing (monotonic stamps
-    /// across the seam). The executor performs `Demuxer::seek` + decoder flush +
-    /// `PtsNormalizer::mark_discontinuity` on this action. The emitted cursor is
+    /// across the seam). The executor performs the container seek + the decoder
+    /// `flush` (`avcodec_flush_buffers`) on this action. The emitted cursor is
     /// *not* reset — stamps stay monotonic across the lap seam (the executor's
-    /// next decoded frame publishes at the next `k`).
+    /// next decoded frame publishes at the next `k`). No `PtsNormalizer` is
+    /// involved: the player synthesizes its own monotone timeline (ADR-0097 §5
+    /// "Implementation refinement").
     const fn wrap_to(frame: u64) -> PlayerAction {
         PlayerAction::SeekFlushTo { frame }
     }
@@ -476,12 +513,10 @@ impl MediaPlayer {
         }
     }
 
-    /// The stamp for a heartbeat republish: advance the emitted cursor so the
-    /// republished frame reads LIVE (strictly-increasing stamps), never aged.
+    /// The stamp for a heartbeat republish: advance via the same strictly-
+    /// monotone path so the republished frame reads LIVE (strictly-increasing
+    /// stamps), never aged or rewound.
     fn advance_stamp(&mut self) -> MediaTime {
-        let at = self.stamp_for(self.emitted);
-        self.emitted = self.emitted.saturating_add(1);
-        self.last_at = at;
-        at
+        self.next_at()
     }
 }

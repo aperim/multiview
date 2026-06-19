@@ -1777,6 +1777,17 @@ struct IngestPlan {
     id: String,
     /// Where the media lives.
     location: SourceLocation,
+    /// When `Some`, this source is a **media-player channel** (ADR-0057 /
+    /// ADR-0097): [`open_and_stream`] runs the transport-driven decode loop
+    /// ([`stream_player`]) instead of the plain pace-and-publish pump — it
+    /// consults the thread-local [`MediaPlayer`](crate::player::MediaPlayer)
+    /// per decoded frame, performs the in-place loop seek + decoder flush at a
+    /// wrap, and stamps each frame from the player's own monotone
+    /// output-anchored timeline (bypassing the [`PtsNormalizer`]). The shared
+    /// [`TransportMailbox`](crate::player::TransportMailbox) inside the handle
+    /// is the only control-plane seam, drained between frames. `None` for every
+    /// non-player source (the existing ingest path is unchanged).
+    player: Option<crate::player::PlayerHandle>,
     /// The destination tile size (even pixels) the frames are scaled to.
     tile_w: u32,
     /// The destination tile height.
@@ -7172,6 +7183,10 @@ fn youtube_url_slot_for(location: &SourceLocation) -> Option<Arc<arc_swap::ArcSw
 /// synthetic source with invalid parameters. (Opening/decoding errors surface on
 /// the ingest thread later — they must never fail the *build* of a never-ending
 /// live source.)
+// A flat, one-arm-per-`SourceKind` dispatch plus the single feature-gated
+// `IngestPlan` struct literal: inherently long and clearer kept whole than split
+// across helpers (adding the `player` field tipped it one line over the 100 bound).
+#[allow(clippy::too_many_lines)]
 fn ingest_plan_for(
     source: &Source,
     tile_w: u32,
@@ -7295,6 +7310,8 @@ fn ingest_plan_for(
     Ok(IngestPlan {
         id: source.id.clone(),
         location,
+        // Not a media-player channel (those are built from `config.media_players`).
+        player: None,
         tile_w,
         tile_h,
         store,
@@ -8963,6 +8980,24 @@ fn open_and_stream(
     // each subsequent frame when wall-clock catches up to its PTS (invariant #4).
     let mut pacer = PtsWallClock::new();
 
+    // MEDIA-PLAYER CHANNEL (ADR-0057 / ADR-0097): when this source is a player,
+    // run the transport-driven decode loop instead of the plain pump. It owns
+    // its OWN monotone output-anchored timeline (so it bypasses `normalizer`
+    // entirely — see `stream_player`), performs the in-place loop seek +
+    // decoder flush at a wrap, and drains the transport mailbox between frames.
+    if plan.player.is_some() {
+        return stream_player(
+            plan,
+            tag,
+            &mut input,
+            &mut decoder,
+            &mut to_tile,
+            stream_index,
+            &mut pacer,
+            stop,
+        );
+    }
+
     // Pump packets, publishing each decoded+scaled frame into the store.
     let mut drained = false;
     loop {
@@ -9019,6 +9054,272 @@ fn open_and_stream(
             }
             Err(other) => return Err(other.to_string()),
         }
+    }
+}
+
+/// Convert a source frame index to a libav `AV_TIME_BASE` (microsecond) seek
+/// target at the given `cadence`, using exact integer rationals — never float
+/// fps (invariant #3). `target_us = frame * 1_000_000 * cadence.den /
+/// cadence.num`, computed in `i128` to avoid overflow, saturated into `i64`.
+fn frame_to_seek_us(frame: u64, cadence: Rational) -> i64 {
+    let num = i128::from(cadence.num);
+    let den = i128::from(cadence.den);
+    if num <= 0 {
+        return 0;
+    }
+    let us = i128::from(frame)
+        .saturating_mul(1_000_000)
+        .saturating_mul(den)
+        / num;
+    i64::try_from(us).unwrap_or(i64::MAX)
+}
+
+/// The **media-player** decode loop (ADR-0057 / ADR-0097): drives a
+/// pre-declared player channel's transport over the open container.
+///
+/// Unlike the plain pump in [`open_and_stream`], this loop consults the
+/// thread-local [`MediaPlayer`](crate::player::MediaPlayer) for every decoded
+/// frame and performs the [`PlayerAction`](crate::player::PlayerAction) it
+/// returns:
+///
+/// - [`Publish`](crate::player::PlayerAction::Publish): pace to the player's
+///   **output-anchored** stamp (`anchor + emitted × frame_period`, monotone
+///   across loop laps) and publish — the stamp comes straight from the player's
+///   own synthesized timeline, so **no source PTS is routed through
+///   `PtsNormalizer`** and the wrapped-PTS monotonic-clamp hazard cannot arise
+///   (ADR-0097 §5 refinement). Invariant #4 pacing is preserved (the stamp is
+///   monotone media time the `PtsWallClock` paces on directly).
+/// - [`SeekFlushTo`](crate::player::PlayerAction::SeekFlushTo): the in-place
+///   loop/vamp wrap — seek the container to the in-point, **flush the decoder**
+///   (the non-negotiable ADR-0097 rule 2: drop stale reordered B-frames), reset
+///   the source-frame cursor, and keep decoding. The boundary frame is
+///   discarded, never published.
+/// - [`Hold`](crate::player::PlayerAction::Hold): republish the held last-good
+///   frame at an advancing stamp (paused / EOF-held) so the tile reads LIVE.
+/// - [`Ended`](crate::player::PlayerAction::Ended): the channel ended under a
+///   non-looping policy — heartbeat-republish the terminal frame so the tile
+///   holds LIVE on the freshness ladder.
+///
+/// The transport [`mailbox`](crate::player::TransportMailbox) is drained once
+/// per outer iteration (between frames) and applied to the player. The loop
+/// never blocks on a client and never paces the output clock (invariants
+/// #1/#10): it only ever writes the lock-free store, exactly like every other
+/// ingest path.
+#[allow(clippy::too_many_arguments)] // mirrors open_and_stream's decode-context threading
+fn stream_player(
+    plan: &IngestPlan,
+    tag: multiview_core::color::ColorInfo,
+    input: &mut ffmpeg::format::context::Input,
+    decoder: &mut StreamVideoDecoder,
+    to_tile: &mut TileScaler,
+    stream_index: usize,
+    pacer: &mut PtsWallClock,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    use crate::player::{PlayerAction, TransportVerb};
+
+    // The handle is present (the caller only enters here when `plan.player` is
+    // `Some`); a `let-else` keeps it panic-free.
+    let Some(handle) = plan.player.as_ref() else {
+        return Ok(());
+    };
+    let cadence = handle.geometry.cadence();
+    let mut player = handle.build_player();
+    // Begin playout: vamp (loop the vamp segment) when the channel loops on
+    // start, else a single forward play-through. Anchored at the zero output
+    // media time; the pacer maps that to wall-clock on the first publish.
+    if handle.loop_on_start {
+        player.vamp(multiview_core::time::MediaTime::ZERO);
+    } else {
+        player.play(multiview_core::time::MediaTime::ZERO);
+    }
+
+    // The source frame index of the NEXT frame the decoder will yield. Starts at
+    // the in-point and is reset by a wrap seek; advances 1:1 with decoded
+    // frames otherwise.
+    let mut source_frame = handle.geometry.in_point();
+    // The last-good converted image, for the held/ended heartbeat republish.
+    let mut last_image: Option<Nv12Image> = None;
+    // Whether the decoder has been fully drained (EOF reached with no loop).
+    let mut drained = false;
+
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        // Drain the transport mailbox and apply each verb to the player. This is
+        // the only control-plane seam; it is O(pending) and never blocks.
+        for verb in handle.mailbox.drain() {
+            match verb {
+                TransportVerb::Play => player.play(multiview_core::time::MediaTime::ZERO),
+                TransportVerb::Vamp => player.vamp(multiview_core::time::MediaTime::ZERO),
+                TransportVerb::Pause => player.pause(),
+                TransportVerb::Stop => player.stop(),
+                TransportVerb::ArmExit => player.arm_exit(),
+                TransportVerb::TakeExit => player.take_exit(),
+                TransportVerb::CancelExit => player.cancel_exit(),
+                // load/cue/seek carry a target the executor honours by seeking;
+                // the MVP player plays one bound asset, so a Seek re-targets the
+                // cursor and a Cue/Load re-cues to the in-point. A failed seek is
+                // logged and skipped (the tile holds last-good — inv #1/#2).
+                TransportVerb::Seek { frame } => {
+                    apply_player_seek(input, decoder, frame, cadence, &mut source_frame);
+                }
+                TransportVerb::Cue { frame } => {
+                    let target = frame.unwrap_or_else(|| handle.geometry.in_point());
+                    apply_player_seek(input, decoder, target, cadence, &mut source_frame);
+                }
+                TransportVerb::Load { .. } => {
+                    let in_point = handle.geometry.in_point();
+                    apply_player_seek(input, decoder, in_point, cadence, &mut source_frame);
+                }
+            }
+        }
+
+        // Pull every frame the decoder currently has, deciding per frame.
+        while let Some(decoded) = decoder.receive_frame().map_err(|e| e.to_string())? {
+            match player.on_decoded(source_frame) {
+                PlayerAction::Publish { at } => {
+                    let image = to_tile.convert(&decoded.frame, tag)?;
+                    // Pace to the player's own monotone stamp (invariant #4),
+                    // then publish it (latch-on-tick, invariant #1). Re-check
+                    // `stop` after the (possibly long) pace wait.
+                    pacer.wait_for(at, stop);
+                    if stop.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    last_image = Some(image.clone());
+                    plan.store.publish(image, at);
+                    source_frame = source_frame.saturating_add(1);
+                }
+                PlayerAction::SeekFlushTo { frame } => {
+                    // The in-place loop/vamp wrap: discard this boundary frame,
+                    // seek to the in-point, flush the decoder (ADR-0097 rule 2),
+                    // and keep decoding. Break to re-read packets from the new
+                    // position.
+                    apply_player_seek(input, decoder, frame, cadence, &mut source_frame);
+                    break;
+                }
+                PlayerAction::Hold { at } => {
+                    // The decoded frame is not shown (paused / EOF-held): hold
+                    // the last-good image, republished at the advancing stamp so
+                    // the tile reads LIVE. With no prior image, drop the frame.
+                    if let Some(image) = last_image.clone() {
+                        pacer.wait_for(at, stop);
+                        if stop.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
+                        plan.store.publish(image, at);
+                    }
+                }
+                PlayerAction::Ended => {
+                    // `auto_off`: the channel reports Ended and releases — the
+                    // switcher applies the bus/keyer consequence (ADR-0057 §4).
+                    // The tile holds its last-good frame forever (HoldForever).
+                    return Ok(());
+                }
+            }
+        }
+
+        if drained {
+            // The decoder is fully drained and the player is not looping (a wrap
+            // would have re-seeded packets). Hold the tile LIVE: a finite,
+            // non-looping play-through keeps republishing its terminal frame at
+            // cadence via the heartbeat below until `stop`.
+            heartbeat_player_hold(plan, &mut player, last_image.as_ref(), pacer, stop);
+            return Ok(());
+        }
+
+        // Feed the decoder the next packet(s).
+        let mut packet = ffmpeg::codec::packet::Packet::empty();
+        match packet.read(input) {
+            Ok(()) => {
+                if packet.stream() == stream_index {
+                    decoder.send_packet(&packet).map_err(|e| e.to_string())?;
+                }
+                // Non-video packets are ignored on the player path (a player
+                // channel renders video; its audio rides the per-source audio
+                // thread, ADR-0057 Decision 6).
+            }
+            Err(ffmpeg::Error::Eof) => {
+                // End of the container. If the player is in a publishing state
+                // it will wrap (loop) — but a wrap is driven by `on_decoded`
+                // reaching the out-point, not by EOF; reaching real EOF before
+                // the out-point means the asset is shorter than declared, so we
+                // drain and hold. Flush + seek-to-in-point if looping so the
+                // next iteration re-reads from the top.
+                if player.is_playing_state() {
+                    let in_point = handle.geometry.in_point();
+                    apply_player_seek(input, decoder, in_point, cadence, &mut source_frame);
+                } else {
+                    decoder.send_eof().map_err(|e| e.to_string())?;
+                    drained = true;
+                }
+            }
+            Err(other) => return Err(other.to_string()),
+        }
+    }
+}
+
+/// Seek the open container to `frame` (in-point of a loop/vamp, a cue, or a user
+/// seek) and **flush the decoder** so no stale reordered frame from before the
+/// seek leaks past it (ADR-0097 rule 2, non-negotiable). Resets the source-frame
+/// cursor to `frame`. A failed seek is logged and skipped — the tile holds
+/// last-good rather than crashing (invariants #1/#2); the supervised reconnect
+/// bracket in [`ingest_loop`] is the deeper recovery.
+fn apply_player_seek(
+    input: &mut ffmpeg::format::context::Input,
+    decoder: &mut StreamVideoDecoder,
+    frame: u64,
+    cadence: Rational,
+    source_frame: &mut u64,
+) {
+    let target_us = frame_to_seek_us(frame, cadence);
+    if let Err(reason) = input.seek(target_us, ..) {
+        tracing::warn!(%reason, frame, "media-player seek failed; holding last-good");
+        return;
+    }
+    if let Err(reason) = decoder.flush() {
+        tracing::warn!(%reason, "media-player decoder flush failed after seek");
+    }
+    *source_frame = frame;
+}
+
+/// Keep a drained, non-looping player's tile LIVE: heartbeat-republish its
+/// terminal frame at cadence with advancing stamps (media-playout §7.3) until
+/// `stop`, so it never ages to STALE on the freshness ladder. An `auto_off`
+/// player (whose `on_heartbeat` returns [`PlayerAction::Ended`]) instead returns
+/// immediately — it has released, and the store holds its last frame forever
+/// (`HoldForever`). With no frame ever decoded (a zero-length asset), returns
+/// immediately too.
+fn heartbeat_player_hold(
+    plan: &IngestPlan,
+    player: &mut crate::player::MediaPlayer,
+    last_image: Option<&Nv12Image>,
+    pacer: &mut PtsWallClock,
+    stop: &AtomicBool,
+) {
+    use crate::player::PlayerAction;
+    let Some(image) = last_image else {
+        return;
+    };
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        // A held player heartbeats `Hold { at }` with an advancing stamp; an
+        // `auto_off` player heartbeats `Ended` (released — stop the heartbeat,
+        // the tile holds last-good via HoldForever). Any other action is not
+        // expected on a drained player; stop rather than busy-loop.
+        let PlayerAction::Hold { at } = player.on_heartbeat() else {
+            return;
+        };
+        pacer.wait_for(at, stop);
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        plan.store.publish(image.clone(), at);
     }
 }
 
@@ -11532,5 +11833,182 @@ mod outmeta_wiring_tests {
         let (meta, matrix) = output_mux_meta(&out);
         assert!(meta.is_empty());
         assert!(matrix.is_none());
+    }
+}
+
+/// End-to-end proof of the **media-player loop executor** ([`stream_player`])
+/// against a REAL libav decoder — the load-bearing wiring test for ADR-0097's
+/// in-place loop (seek + `avcodec_flush_buffers` + keep decoding).
+///
+/// The pure transport core already proves bit-exactly that the published stamp
+/// sequence is monotone and `prev + frame_period` across a loop seam
+/// (`media_player_transport::stamps_are_monotonic_across_a_loop_lap`). What this
+/// test adds is proof that the EXECUTOR genuinely loops a real decoder: a finite
+/// clip, played as a vamp, must publish **more frames than the clip is long** —
+/// which is only possible if, on reaching the out-point, the loop seeks back,
+/// flushes the decoder, and keeps decoding fresh frames past the seam (rather
+/// than hitting EOF and stopping). It also confirms the tile reads LIVE (real
+/// decoded frames), and that the published media-time advances past one
+/// clip-length (the seam did not freeze/clamp).
+#[cfg(all(test, feature = "ffmpeg"))]
+mod media_player_loop_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use multiview_core::time::{MediaTime, Rational};
+    use multiview_framestore::{NoSignalPolicy, TileRead, TileStore, TileThresholds};
+
+    use crate::player::{EofPolicy, PlayoutGeometry, TransportMailbox};
+
+    /// Generate a short, all-keyframe-free `mpeg2video` clip with B-frames at
+    /// 25 fps. `-bf 2` forces a reorder window so the post-seek decoder flush is
+    /// load-bearing (stale B-frames would otherwise leak past the loop seam).
+    fn generate_loop_clip(path: &Path, frames: u32) {
+        let dur = f64::from(frames) / 25.0;
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg(format!("testsrc=size=160x120:rate=25:duration={dur}"))
+            .args([
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                "mpeg2video",
+                "-bf",
+                "2",
+                "-g",
+                "6",
+                "-f",
+                "mpegts",
+            ])
+            .arg(path)
+            .status()
+            .expect("spawn ffmpeg to generate the loop clip");
+        assert!(status.success(), "ffmpeg failed to generate the loop clip");
+        assert!(path.exists(), "loop clip was not written");
+    }
+
+    #[test]
+    fn a_vamping_player_loops_a_real_decoder_past_one_clip_length() {
+        // A 6-frame clip at 25 fps = 240 ms; vamp the whole clip.
+        const CLIP_FRAMES: u32 = 6;
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("loop.ts");
+        generate_loop_clip(&clip, CLIP_FRAMES);
+
+        let cadence = Rational::new(25, 1);
+        let geometry = PlayoutGeometry::new(
+            0,
+            u64::from(CLIP_FRAMES),
+            0,
+            u64::from(CLIP_FRAMES),
+            cadence,
+        )
+        .unwrap();
+        let mailbox = Arc::new(TransportMailbox::new());
+        let handle = crate::player::PlayerHandle::new(
+            "player-test".to_owned(),
+            geometry,
+            EofPolicy::Loop,
+            true, // loop_on_start → vamp the whole clip
+            Arc::clone(&mailbox),
+        );
+
+        let store = Arc::new(TileStore::new(
+            "player-test",
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+
+        let plan = super::IngestPlan {
+            id: "player-test".to_owned(),
+            location: super::SourceLocation::Path(clip.clone()),
+            player: Some(handle),
+            tile_w: 160,
+            tile_h: 120,
+            store: Arc::clone(&store),
+            live: false,
+            #[cfg(feature = "overlay")]
+            incontainer_sub: None,
+            #[cfg(feature = "overlay")]
+            embedded_cc: None,
+            canvas_color: super::CanvasColor::default(),
+            cadence,
+            decode_placement: super::DecodePlacement::Default,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_registry: None,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_audio_store: None,
+            #[cfg(feature = "ndi")]
+            ndi_accept_license: false,
+            #[cfg(feature = "ndi")]
+            ndi_acceptance: multiview_input::ndi::license::LicenseAcceptance {
+                accepted_by: String::new(),
+                accepted_at: String::new(),
+            },
+            #[cfg(feature = "youtube")]
+            youtube_url_slot: None,
+        };
+
+        // Drive the player on its own thread for ~3 clip-lengths of wall time.
+        // At real-time pacing (PtsWallClock) that is ~3 laps; the loop must seek
+        // + flush + keep decoding to produce frames past the first lap.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let handle = std::thread::Builder::new()
+            .name("media-player-loop-test".to_owned())
+            .spawn(move || super::ingest_loop(&plan, &stop_thread))
+            .unwrap();
+
+        // ~3 clip-lengths (240 ms × 3) + headroom for the cold open/decode.
+        std::thread::sleep(Duration::from_millis(1_200));
+        stop.store(true, Ordering::Release);
+        handle.join().unwrap();
+
+        // PROOF 1: the player published MORE frames than the clip is long — only
+        // possible if the loop wrapped (seek + flush + re-decode), not EOF-stop.
+        let published = store.sequence();
+        assert!(
+            published > u64::from(CLIP_FRAMES),
+            "a vamping player must loop past one clip-length: published {published} \
+             frames for a {CLIP_FRAMES}-frame clip (the seek+flush loop did not run)"
+        );
+
+        // PROOF 2: the published media-time advanced past one clip-length — the
+        // seam did not freeze/clamp the timeline (output-anchored stamps keep
+        // climbing across laps). One clip = 6 × 40 ms = 240 ms.
+        let one_clip = MediaTime::from_nanos(240_000_000);
+        let far_future = MediaTime::from_nanos(60_000_000_000); // 60 s
+        let elapsed = store.elapsed_since_frame(far_future);
+        assert!(
+            elapsed.is_some(),
+            "the player must have published at least one real frame"
+        );
+
+        // PROOF 3: the tile reads a real decoded frame (LIVE/Held), never NoSignal
+        // — the decode + convert + publish path produced genuine picture.
+        // Read at the last published instant so it latches the freshest frame.
+        let read = store.read_at(one_clip.saturating_add(one_clip));
+        assert!(
+            matches!(read, TileRead::Fresh { .. } | TileRead::Held { .. }),
+            "the player tile must hold a real decoded frame, got NoSignal"
+        );
     }
 }

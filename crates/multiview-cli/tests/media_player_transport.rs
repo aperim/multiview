@@ -174,7 +174,7 @@ fn play_stamps_frames_output_anchored_from_the_start_tick() {
         match action {
             PlayerAction::Publish { at } => {
                 let expected = anchor.saturating_add(MediaTime::from_nanos(
-                    (k as i64).saturating_mul(PERIOD_25_NS),
+                    i64::try_from(k).unwrap().saturating_mul(PERIOD_25_NS),
                 ));
                 assert_eq!(at, expected, "frame {k} must be output-anchored");
             }
@@ -220,8 +220,7 @@ fn stamps_are_monotonic_across_a_loop_lap() {
     for w in stamps.windows(2) {
         assert!(
             w[1].as_nanos() > w[0].as_nanos(),
-            "stamps must strictly increase across the lap seam: {:?}",
-            stamps
+            "stamps must strictly increase across the lap seam: {stamps:?}"
         );
         assert_eq!(
             w[1].as_nanos() - w[0].as_nanos(),
