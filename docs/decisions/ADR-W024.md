@@ -353,29 +353,58 @@ implementation:
     **same** lock before reading the snapshot. `try_submit` is the bounded, non-blocking
     drop-oldest push (ADR-W008), so the hold is brief (the same shape as `promote` holding the
     lock across its `spawn_blocking` write) and never touches the output clock (inv #1/#10).
-  - **The snapshot advances by ADOPTED deltas, never by recomposing the live store.** It
-    starts as the startup running config. Each mutation that **adopts live** (its command
-    landed) applies exactly **its own** delta to the snapshot under the lock — an adopted
-    source upsert/remove sets/removes that source on the snapshot; an adopted overlay
-    upsert/remove sets/removes that overlay; an adopted layout sets the snapshot's
-    canvas/layout/cells. A shed or restart-only/non-live mutation applies **nothing** to the
-    snapshot (the engine is not running that change). Because only the specific landed delta is
-    applied, an unrelated landed mutation can never "adopt" a prior shed's change (the round-3
-    over-adoption), and the snapshot always equals exactly what the engine runs — no lag.
-  - `persist_running_now` writes the snapshot, never the live store.
+  - **The snapshot advances by per-section ADOPTED deltas, never by recomposing the live store
+    and never wholesale.** It starts as the startup running config. A section's delta is applied
+    to the snapshot **only when the engine adopted that specific section LIVE** (its command
+    landed): an adopted source upsert/remove (`adopt_source`/`unadopt_source`); an adopted
+    overlay upsert/remove (`adopt_overlay`/`unadopt_overlay`); an adopted layout
+    (`adopt_layout` — sets the snapshot's canvas + layout + cells from the working-layout body).
+    A shed, restart-only, or non-live change applies **nothing**. The file-watch path runs the
+    SAME per-section adoption inside `apply_document_diff` (which already classifies each section
+    live-landed vs restart-only): it adopts only the sections it applied live — never the whole
+    requested document — so a restart-only/non-live file edit (e.g. an `outputs` change, or a
+    non-synthetic source that only applies on restart) never enters `active.toml`. Because only
+    the specific landed delta is applied, an unrelated landed mutation can never adopt a prior
+    shed's change.
+  - `persist_running_now` composes from the store WITHOUT validating, then OVERRIDES every
+    snapshot-backed section (sources, overlays, **canvas/layout/cells**) from the snapshot,
+    validates the result, and writes it. It never writes the live store directly.
 
-  **Adversarial self-check (the two round-3 sequences):**
-  - *Over-adoption (shed `DELETE /sources/in_a` → bus drains → unrelated source/overlay upsert
-    lands).* The shed DELETE applies nothing to the snapshot (the remove was not adopted; the
-    engine still runs `in_a`), so the snapshot keeps `in_a`. The later upsert lands and applies
-    only **its own** add to the snapshot — it does not touch `in_a`. `active.toml` (= the
-    snapshot) keeps `in_a` and gains the new resource: exactly the engine's running set. ✓ No
-    over-adoption (the delete is never adopted by an unrelated landed mutation), no lag.
-  - *Mid-mutation race (persister wakes during an in-flight unadopted mutation).* The mutation
-    holds `config_mutation_lock` across store-write → submit → snapshot-update/mark-diverged.
-    The persister acquires the **same** lock, so it blocks until the mutation fully resolves
-    and then reads a settled snapshot — never a half-applied store or a stale-counter view.
-    Acquire/Release across separate atomics could not give this; the shared lock does. ✓
+  **Complete-coverage proof.** Every section `compose_document_unredacted` writes, classified —
+  *live-sheddable* (MUST be snapshot-backed per landed delta), *restart-only* (the store == the
+  adopted state because its change never applies live, so it is composed straight from the store),
+  or *runtime* (not composed into `active.toml` at all):
+
+  | Section(s) composed | Live engine command? | Class | Snapshot-backed? |
+  |---|---|---|---|
+  | `sources` | `UpsertSource`/`RemoveSource` (synthetic + network on a full run) — **sheddable** | live-sheddable | **yes** (`adopt_source`/`unadopt_source`) |
+  | `overlays` | `UpsertOverlay`/`RemoveOverlay` (rendering kinds) — **sheddable** | live-sheddable | **yes** (`adopt_overlay`/`unadopt_overlay`) |
+  | `canvas` + `layout` + `cells` | `ApplyLayout` — **sheddable** | live-sheddable | **yes** (`adopt_layout`) |
+  | `outputs` | none (output reconfig is restart) | restart-only | no — store == adopted |
+  | `probes`, `devices`, `sync_groups` | none | restart-only | no — store == adopted |
+  | `audio` (audio-routing) | none (PUT defers to restart) | restart-only | no — store == adopted |
+  | `schema_version`, `control`, `placement`, `salvos`, `tally_profiles`, `walls`, `routing` | none — carried verbatim from the immutable `base_document` | restart-only/static | no — never runtime-mutated |
+  | tally state, salvo arm/take, routing crosspoints | engine-runtime only | runtime | n/a — not composed into `active.toml` |
+
+  No live-sheddable section is unbacked, and no restart-only section is wrongly backed: a
+  restart-only change keeps the store (ADR-W018) and `active.toml` composes it from the store
+  (the engine adopts restart-only changes only on the next start, which IS the resume — so the
+  store and the running state agree at resume time).
+
+  **Adversarial self-check (all four sequences):**
+  - *seq-1 over-adoption (shed `DELETE /sources/in_a` → drain → unrelated source/overlay upsert
+    lands).* The shed delete applies nothing to the snapshot (the engine still runs `in_a`); the
+    later upsert applies only its own add. `active.toml` keeps `in_a` and gains the new resource. ✓
+  - *seq-2 mid-mutation race.* Every mutation + the persist hold the one `config_mutation_lock`,
+    so the persister blocks until a mutation fully resolves and reads a settled snapshot. ✓
+  - *seq-3 layout leak (landed `PUT /layouts/working` → SHED `apply-layout`).* The PUT commits the
+    working-layout store (requested), but the `ApplyLayout` sheds, so `adopt_layout` is NOT called
+    — the snapshot keeps the previously-adopted canvas/layout/cells, and persist OVERRIDES those
+    from the snapshot, so `active.toml` keeps the adopted layout and gains nothing unadopted. ✓
+  - *seq-4 watcher over-adopt (a file-watch apply carrying a restart-only/non-live change).* The
+    file-watch `apply_document_diff` adopts only the sections it applies LIVE; a restart-only
+    section (e.g. `outputs`, or a non-synthetic source) is reseeded into the store but applies
+    nothing to the snapshot, so `active.toml` never captures the unadopted change. ✓
 * **Promote/watch concurrency is closed (MAJOR-C).** (C1) `bind_and_serve` installs the
   config-file watch handle into `AppState` BEFORE the router serves any request, so a
   promote in the startup window always finds the suppression seam. (C2/C3) `promote` and
