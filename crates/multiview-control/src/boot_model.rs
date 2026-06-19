@@ -263,21 +263,28 @@ pub fn load_resume_config(boot_path: &Path) -> Result<MultiviewConfig, String> {
     Ok(config)
 }
 
-/// Write `content` to `path` atomically: same-directory temp file →
-/// `fsync(2)` the file → `rename(2)` over the destination → `fsync` the
-/// directory. Readers always observe either the old or the new content, and a
-/// successful write leaves no temp residue. An existing destination's
-/// permission mode is preserved across the replace (review M3: a `chmod 600`
-/// boot/state file must never silently widen to the umask default).
+/// Write `content` to `path` atomically and securely: an EXCLUSIVE,
+/// randomly-named same-directory temp file (`O_EXCL`, mode `0600`) →
+/// `fsync(2)` → `rename(2)` over the destination → `fsync` the directory.
+/// Readers always observe either the old or the new content, and a successful
+/// write leaves no temp residue.
 ///
-/// Single-writer by design (the one persister task / startup path): the temp
-/// name is deterministic (`.<name>.tmp`), so a crash mid-write leaves at most
-/// one temp file that the next successful write replaces.
+/// **Security (MAJOR-A / panel round 2).** The state files carry plaintext
+/// credentials (WebRTC ICE `password`, `static_auth_secret`, WHIP tokens), so
+/// the temp is created with [`tempfile::NamedTempFile::new_in`] — `O_EXCL` + an
+/// **unpredictable** name + `0600` on Unix. That defeats both attacks a
+/// deterministic `.<name>.tmp` name allowed: a pre-existing world-readable temp
+/// inode (the secrets are never written into it), and an attacker-planted
+/// symlink at the temp path (it is never opened/followed). The final mode is
+/// clamped to a `0600` floor (tightened to a stricter mode the destination
+/// already carries). On a fresh deployment the destination directory is assumed
+/// already validated by [`create_state_dir`] (it fails closed on an insecure
+/// dir before any write reaches here).
 ///
 /// # Errors
 ///
-/// Any I/O error from create/write/chmod/sync/rename (a destination with no
-/// parent directory or file name is [`std::io::ErrorKind::InvalidInput`]).
+/// Any I/O error from create/write/chmod/sync/persist (a destination with no
+/// parent directory is [`std::io::ErrorKind::InvalidInput`]).
 pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     use std::io::Write as _;
 
@@ -285,33 +292,29 @@ pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
+    if path.file_name().is_none() {
+        return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("atomic write target {} has no file name", path.display()),
-        )
-    })?;
-    // The mode the temp file lands at, applied BEFORE any content is written
-    // (MAJOR-A / review M3): the state files carry plaintext credentials
-    // (WebRTC ICE password, `static_auth_secret`, WHIP tokens), so the bytes
-    // must never sit at the umask default even transiently. The owner-only
-    // 0600 floor holds on a FIRST create (a missing destination has nothing to
-    // inherit); when the destination already exists with an EVEN STRICTER mode
-    // (e.g. 0400) that tighter mode is preserved across the replace.
-    let target_mode = atomic_target_mode(path);
-    let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
-    {
-        let mut file = create_owner_only(&tmp, target_mode)?;
-        file.write_all(content.as_bytes())?;
-        // Durability before visibility: the rename must never expose a file
-        // whose bytes are still only in the page cache.
-        file.sync_all()?;
+        ));
     }
-    if let Err(error) = std::fs::rename(&tmp, path) {
-        // Never leave the temp file behind on a failed rename.
-        let _ = std::fs::remove_file(&tmp);
-        return Err(error);
-    }
+    // Exclusive, unpredictable, 0600 temp in the SAME directory (so the final
+    // rename is atomic on one filesystem). `NamedTempFile` uses `O_EXCL` + a
+    // random name + 0600 on Unix — a planted file at any guessable name is
+    // never touched, and a planted symlink is never followed.
+    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.flush()?;
+    // Clamp the final mode to the 0600 owner-only floor (or a stricter mode the
+    // destination already carries, e.g. 0400) BEFORE the content becomes
+    // visible at `path`.
+    set_owner_only_mode(tmp.as_file(), atomic_target_mode(path))?;
+    // Durability before visibility: the rename must never expose a file whose
+    // bytes are still only in the page cache.
+    tmp.as_file().sync_all()?;
+    // `persist` is the atomic `rename(2)`; on failure the temp is cleaned up by
+    // `NamedTempFile`'s drop (no residue).
+    tmp.persist(path).map_err(|e| e.error)?;
     // fsync the directory so the rename itself survives a power cut. A
     // filesystem that cannot fsync a directory handle (rare) degrades to the
     // rename's own guarantees rather than failing the (already-visible) write.
@@ -338,46 +341,81 @@ fn atomic_target_mode(dest: &Path) -> u32 {
     }
 }
 
-/// Create `tmp` with the owner-only `mode` set at `open(2)` time (MAJOR-A): the
-/// secret bytes never touch a file at the umask default, not even between
-/// `create` and a follow-up `chmod`.
+/// Set the temp file's permission mode (MAJOR-A): the secrets become visible at
+/// the destination only after this clamp is applied.
 #[cfg(unix)]
-fn create_owner_only(tmp: &Path, mode: u32) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(mode)
-        .open(tmp)
+fn set_owner_only_mode(file: &std::fs::File, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
 }
 
-/// Non-Unix fallback (not a deploy platform): create the temp file without an
-/// explicit mode. The 0600 secret-floor is a Unix permission guarantee.
+/// Non-Unix fallback (not a deploy platform): the mode is advisory off Unix.
 #[cfg(not(unix))]
 fn atomic_target_mode(_dest: &Path) -> u32 {
     0o600
 }
 
-/// Non-Unix fallback: plain create (mode is advisory off Unix).
+/// Non-Unix fallback: no-op mode set (mode is advisory off Unix).
 #[cfg(not(unix))]
-fn create_owner_only(tmp: &Path, _mode: u32) -> std::io::Result<std::fs::File> {
-    std::fs::File::create(tmp)
+fn set_owner_only_mode(_file: &std::fs::File, _mode: u32) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Create the boot-model state directory (`<config-dir>/.multiview`) with
-/// owner-only 0700 permissions (MAJOR-A): the dir holds `loaded.toml` /
-/// `active.toml`, which carry plaintext credentials. `create_dir_all` applies
-/// the mode only to directories it CREATES (an existing dir keeps its mode), so
-/// this never loosens an operator-tightened parent.
+/// owner-only 0700 permissions, and FAIL CLOSED on an insecure existing one
+/// (MAJOR-A / panel round 2): the dir holds `loaded.toml` / `active.toml`,
+/// which carry plaintext credentials, so a group/world-writable dir (where an
+/// attacker could swap the state files) — or one we do not own — is refused
+/// rather than written into. Refusing does NOT take output off air (this is
+/// control-plane persistence; the output clock is untouched). `DirBuilder.mode`
+/// applies only to the dir it CREATES, so an existing dir is validated, never
+/// silently loosened or tightened.
+///
+/// # Errors
+///
+/// [`std::io::ErrorKind::PermissionDenied`] when an existing state dir is
+/// group/world-writable or not owned by this process; any I/O error from the
+/// create/stat.
 fn create_state_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt as _;
+        use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(dir)
+            .create(dir)?;
+        // Validate the (possibly pre-existing) directory: it must not be
+        // group/world-writable and must be owned by us — otherwise an attacker
+        // could replace the secret-bearing state files.
+        let meta = std::fs::metadata(dir)?;
+        let mode = meta.permissions().mode();
+        if mode & 0o022 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "the state dir {} is group/world-writable (mode {:o}); refusing to \
+                     persist credential-bearing state files there",
+                    dir.display(),
+                    mode & 0o7777
+                ),
+            ));
+        }
+        // `rustix::process::geteuid` is a SAFE wrapper (this crate forbids
+        // `unsafe`); no `libc` FFI here.
+        let our_uid = rustix::process::geteuid().as_raw();
+        if meta.uid() != our_uid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "the state dir {} is owned by uid {} (not this process's {}); refusing \
+                     to persist credential-bearing state files there",
+                    dir.display(),
+                    meta.uid(),
+                    our_uid
+                ),
+            ));
+        }
+        Ok(())
     }
     #[cfg(not(unix))]
     {
