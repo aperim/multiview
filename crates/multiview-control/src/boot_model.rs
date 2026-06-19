@@ -73,6 +73,12 @@ pub struct BootModel {
     /// The monotonically increasing write-ticket source (taken at compose
     /// time, compared in [`write_active_serialized`]).
     write_tickets: AtomicU64,
+    /// Whether a file-watch apply is mid-retry — its stores were optimistically
+    /// mutated but an engine command was SHED, so the change is NOT yet adopted
+    /// (MAJOR-B). While set, [`persist_running_now`] skips writing `active.toml`
+    /// so a crash cannot resume into store state the engine never ran; the
+    /// watcher clears it and re-fires `running_changed` when the retry settles.
+    persist_inhibited: AtomicBool,
 }
 
 impl BootModel {
@@ -97,6 +103,7 @@ impl BootModel {
             revert_incomplete: AtomicBool::new(false),
             write_serial: std::sync::Mutex::new(0),
             write_tickets: AtomicU64::new(0),
+            persist_inhibited: AtomicBool::new(false),
         }
     }
 
@@ -174,6 +181,28 @@ impl BootModel {
     #[must_use]
     pub fn take_revert_incomplete(&self) -> bool {
         self.revert_incomplete.swap(false, Ordering::AcqRel)
+    }
+
+    /// Inhibit `active.toml` persistence (MAJOR-B): a file-watch apply
+    /// optimistically mutated the stores but an engine command was SHED, so the
+    /// change is not yet adopted. Set when the watch apply returns `Retry`.
+    pub fn inhibit_persist(&self) {
+        self.persist_inhibited.store(true, Ordering::Release);
+    }
+
+    /// Allow `active.toml` persistence again (MAJOR-B): the file-watch apply
+    /// settled (its retry landed / the file reverted), so the stores once more
+    /// reflect adopted state. The watcher re-fires `running_changed` after this
+    /// so the persister captures the adopted snapshot.
+    pub fn allow_persist(&self) {
+        self.persist_inhibited.store(false, Ordering::Release);
+    }
+
+    /// Whether persistence is currently inhibited by a mid-retry file-watch
+    /// apply (MAJOR-B): [`persist_running_now`] skips the write while `true`.
+    #[must_use]
+    pub fn persist_inhibited(&self) -> bool {
+        self.persist_inhibited.load(Ordering::Acquire)
     }
 
     /// Take the next monotonically increasing write ticket (call at compose
@@ -443,6 +472,15 @@ pub async fn persist_running_now(state: &AppState) -> ControlResult<()> {
     let Some(model) = state.boot_model.as_ref() else {
         return Ok(());
     };
+    // MAJOR-B: a file-watch apply is mid-retry — the stores were optimistically
+    // mutated but an engine command was SHED, so the change is NOT adopted.
+    // Skip the write; the watcher clears the inhibit and re-fires
+    // `running_changed` when the retry settles, and `active.toml` then captures
+    // only adopted state. A crash in this window resumes from the last adopted
+    // snapshot, never from store state the engine never ran.
+    if model.persist_inhibited() {
+        return Ok(());
+    }
     let (_document, config) = crate::routes::config::compose_running_config(state)?;
     let toml = config
         .to_toml()

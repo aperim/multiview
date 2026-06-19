@@ -606,6 +606,13 @@ fn apply_change(
             "a subsequent valid write applied",
             invalid_active,
         );
+        // MAJOR-B: the file reverted to the running baseline (the stores are
+        // re-converged to adopted state) — re-allow persistence and re-fire so
+        // the persister captures the adopted snapshot.
+        if let Some(model) = state.boot_model.as_ref() {
+            model.allow_persist();
+        }
+        state.running_changed.notify_one();
         tracing::debug!(path = %path.display(), "config file rewritten with identical content");
         return ApplyResult::Settled;
     }
@@ -633,10 +640,26 @@ fn apply_change(
             ),
         );
         publish_apply_incomplete(state, path, outcome.shed, incomplete_active);
+        // MAJOR-B: the stores were optimistically mutated but the engine did
+        // NOT adopt the change (a command was shed). Inhibit `active.toml`
+        // persistence until the retry settles, so a crash in this window can
+        // never resume from store state the engine never ran.
+        if let Some(model) = state.boot_model.as_ref() {
+            model.inhibit_persist();
+        }
         return ApplyResult::Retry;
     }
     *baseline = next;
     clear_apply_incomplete(state, path, incomplete_active);
+    // MAJOR-B: the apply landed completely — the stores now reflect adopted
+    // state. Re-allow persistence and re-fire the choke-point signal so the
+    // debounced persister captures this adopted snapshot (the optimistic
+    // store mutation's own `running_changed` may have been consumed by an
+    // inhibited persist pass).
+    if let Some(model) = state.boot_model.as_ref() {
+        model.allow_persist();
+    }
+    state.running_changed.notify_one();
     state
         .config_watch
         .record_applied(now_ms(state), &outcome.summary);
