@@ -49,6 +49,7 @@
     "@eslint/js": "^10.0.1",
     "@lingui/babel-plugin-lingui-macro": "^6.4.0",
     "@lingui/cli": "^6.4.0",
+    "@lingui/format-po": "^6.4.0",
     "@lingui/vite-plugin": "^6.4.0",
     "@playwright/test": "^1.61.0",
     "@tailwindcss/vite": "^4.3.1",
@@ -58,7 +59,7 @@
     "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^6.0.2",
+    "@vitejs/plugin-react": "^5.2.0",
     "@vitest/coverage-v8": "^4.1.9",
     "babel-plugin-macros": "^3.1.0",
     "eslint": "^10.5.0",
@@ -75,6 +76,12 @@
     "vitest": "^4.1.8"
   },
   "overrides": {
-    "esbuild": "0.28.1"
+    "esbuild": "0.28.1",
+    "eslint-plugin-jsx-a11y": {
+      "eslint": "$eslint"
+    },
+    "openapi-typescript": {
+      "typescript": "$typescript"
+    }
   }
 }

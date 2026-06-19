@@ -446,13 +446,21 @@ function StreamCell({
   readonly deviceId: string;
   readonly status: DeviceStatus | undefined;
 }): JSX.Element {
+  const { t } = useLingui();
   const first = (status?.streams ?? []).at(0);
   if (first === undefined) {
     return <PlaceholderCell label={<Trans>No active stream.</Trans>} />;
   }
+  // Explicit accessible name: the link's content is two adjacent inline badges
+  // ("encode" + "healthy") with only a visual gap, so the computed accessible
+  // name concatenates to "encodehealthy" (no separator). Name it directly so a
+  // screen reader announces "encode healthy" as two words and the name is
+  // deterministic regardless of inline text-concatenation rules.
+  const health = first.healthy ? t`healthy` : t`unhealthy`;
   return (
     <Link
       to={`/devices/${encodeURIComponent(deviceId)}?tab=streams`}
+      aria-label={`${first.role} ${health}`}
       className="inline-flex items-center gap-1.5 underline-offset-2 hover:underline"
     >
       <Badge variant="outline">{first.role}</Badge>
