@@ -21,7 +21,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use multiview_licence::heartbeat::{HeartbeatClient, HeartbeatOutcome};
+use multiview_licence::heartbeat::{HeartbeatClient, HeartbeatError, HeartbeatOutcome};
 use multiview_licence::{EnforcementLevel, LeaseStore};
 
 mod fake;
@@ -256,7 +256,15 @@ async fn a_malformed_2xx_body_keeps_last_good_and_recovers_with_a_fresh_challeng
     let res = tokio::time::timeout(Duration::from_secs(5), client.run_once())
         .await
         .expect("run_once must not hang");
-    assert!(res.is_err(), "a malformed 2xx body surfaces an error");
+    // The CONTRACT premise: a received-2xx-with-bad-body surfaces as the DEFINITIVE
+    // `Malformed` variant SPECIFICALLY — never `Transport` (the ambiguous, replay-only
+    // case). The whole "drop the burned nonce, don't replay" branch hinges on this
+    // variant, so pin it (not just `is_err`).
+    assert!(
+        matches!(res, Err(HeartbeatError::Malformed(_))),
+        "a received 2xx whose body will not parse is the DEFINITIVE Malformed variant \
+         (the server burned the nonce), not an ambiguous Transport error: got {res:?}"
+    );
     assert_eq!(
         store.current().unwrap().lease.serial,
         serial,
