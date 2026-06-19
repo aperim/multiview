@@ -2239,7 +2239,8 @@ async fn shed_apply_layout_does_not_persist_unadopted_layout() {
 /// that adds a RESTART-ONLY change (here a NETWORK source, which is restart-only
 /// on a synthetic-only run) must NOT enter `active.toml` — the engine never
 /// adopted it LIVE. The round-4 watcher copied the whole requested document into
-/// the snapshot (adopt_document), leaking restart-only file edits.
+/// the snapshot wholesale, leaking restart-only file edits; round 5 adopts only
+/// the per-section deltas the engine applied live.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restart_only_file_watch_change_is_not_persisted_as_adopted() {
     let r = rig(BOOT_DOC);
