@@ -2923,6 +2923,800 @@
         }
       }
     },
+    "/api/v1/media/players": {
+      "get": {
+        "tags": [
+          "media-players"
+        ],
+        "summary": "`GET /api/v1/media/players` — list the configured players (role: read).",
+        "operationId": "list_players",
+        "responses": {
+          "200": {
+            "description": "The configured media players.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Resource"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/players/{id}": {
+      "get": {
+        "tags": [
+          "media-players"
+        ],
+        "summary": "`GET /api/v1/media/players/{id}` — fetch one configured player (role: read).",
+        "operationId": "get_player",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media-player id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The media player.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resource"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No media player with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/players/{id}/cue": {
+      "post": {
+        "tags": [
+          "media-players"
+        ],
+        "summary": "`POST /api/v1/media/players/{id}/cue` — cue to in-point or a frame\n(role: write; 202).",
+        "operationId": "cue_player",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media-player id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransportBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Cue accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No media player with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/players/{id}/exit/arm": {
+      "post": {
+        "tags": [
+          "media-players"
+        ],
+        "summary": "`POST /api/v1/media/players/{id}/exit/arm` — arm the vamp exit\n(role: write; 202).",
+        "operationId": "arm_exit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media-player id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Arm accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No media player with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/players/{id}/exit/cancel": {
+      "post": {
+        "tags": [
+          "media-players"
+        ],
+        "summary": "`POST /api/v1/media/players/{id}/exit/cancel` — cancel an armed vamp exit\n(role: write; 202).",
+        "operationId": "cancel_exit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media-player id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Cancel accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No media player with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/players/{id}/exit/take": {
+      "post": {
+        "tags": [
+          "media-players"
+        ],
+        "summary": "`POST /api/v1/media/players/{id}/exit/take` — take the vamp exit (arm + fire\nat the soonest boundary) (role: write; 202).",
+        "operationId": "take_exit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media-player id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Take accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No media player with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/players/{id}/load": {
+      "post": {
+        "tags": [
+          "media-players"
+        ],
+        "summary": "`POST /api/v1/media/players/{id}/load` — load an asset (role: write; 202).",
+        "operationId": "load_player",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media-player id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransportBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Load accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No media player with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Missing/invalid asset.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/players/{id}/pause": {
+      "post": {
+        "tags": [
+          "media-players"
+        ],
+        "summary": "`POST /api/v1/media/players/{id}/pause` — pause (role: write; 202).",
+        "operationId": "pause_player",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media-player id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Pause accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No media player with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/players/{id}/play": {
+      "post": {
+        "tags": [
+          "media-players"
+        ],
+        "summary": "`POST /api/v1/media/players/{id}/play` — play forward (role: write; 202).",
+        "operationId": "play_player",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media-player id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Play accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No media player with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/players/{id}/seek": {
+      "post": {
+        "tags": [
+          "media-players"
+        ],
+        "summary": "`POST /api/v1/media/players/{id}/seek` — seek to a frame (role: write; 202).",
+        "operationId": "seek_player",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media-player id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransportBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Seek accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No media player with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/players/{id}/stop": {
+      "post": {
+        "tags": [
+          "media-players"
+        ],
+        "summary": "`POST /api/v1/media/players/{id}/stop` — stop / re-cue (role: write; 202).",
+        "operationId": "stop_player",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Media-player id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Stop accepted; outcome on the realtime stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No media player with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Engine command bus at capacity; shed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/mesh/peers": {
       "get": {
         "tags": [
@@ -5238,7 +6032,7 @@
         },
         "responses": {
           "200": {
-            "description": "The replaced source (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` for synthetic kinds applied to the running engine, `restart` otherwise (ADR-W018).",
+            "description": "The replaced source (new ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine applies it at a frame boundary (synthetic kinds on every run; network/file kinds on a full-engine run — an edit swaps the producer behind the same tile store), `restart` otherwise (ADR-W018).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5328,7 +6122,7 @@
         },
         "responses": {
           "201": {
-            "description": "The created source (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` for synthetic kinds (bars/solid/clock) applied to the running engine at a frame boundary, `restart` otherwise (ADR-W018).",
+            "description": "The created source (ETag in the response header). X-Multiview-Apply declares how it takes effect: `live` when the running engine applies it at a frame boundary — synthetic kinds (bars/solid/clock) on every run, network/file kinds (rtsp/hls/ts/srt/rtmp/rist/file) on a full-engine run — `restart` otherwise (ndi/youtube/aes67, or a run without the decoder; ADR-W018).",
             "content": {
               "application/json": {
                 "schema": {
@@ -9459,7 +10253,7 @@
       },
       "HeartbeatStatus": {
         "type": "object",
-        "description": "The read-only heartbeat-status surface (`GET /api/v1/licensing/heartbeat-status`).\n\nWith no licence-server client yet (blocked on the external wire-protocol doc,\nbrief §14 O1), this reports **honestly from local state**: the transport the\nactive lease arrived over, the lease install instant as `last_at`, the lease's\n`next_contact_due` as `next_due`, and the exhaustive payload-field list. There\nis **no** mutating endpoint for the heartbeat (the spec mandates none) — the\n`POST /api/v1/account/licence/heartbeat` force-now action is a later,\nfeature-gated item (brief §11 #4), not this read surface.",
+        "description": "The read-only heartbeat-status surface (`GET /api/v1/licensing/heartbeat-status`).\n\nThis reports **honestly from local lease state** — the transport the active\nlease arrived over, the lease install instant as `last_at`, the lease's\n`next_contact_due` as `next_due`, and the exhaustive payload-field list —\nregardless of whether the cli's feature-gated `heartbeat` loop\n(CONSPECT-3/ADR-0096) is the producer that installed the lease (it drives the\nsame `LeaseStore::install_binding` convergence the offline file-drop uses).\nThere is **no** mutating endpoint for the heartbeat (the spec mandates none) —\nthe `POST /api/v1/account/licence/heartbeat` force-now action is a later,\nfeature-gated item (brief §11 #4), not this read surface.",
         "required": [
           "transport",
           "payload_fields"
@@ -13895,6 +14689,28 @@
         ],
         "description": "`OpenAPI` mirror of `multiview_config::timer::TimerTarget` (tagged by\n`target`; flattened into the `Timer` source variant alongside `kind`)."
       },
+      "TransportBody": {
+        "type": "object",
+        "description": "The optional JSON body a transport verb may carry: an `asset` (for `load`)\nand/or a `frame` (for `cue`/`seek`). All fields are optional so a verb that\nneeds no body (`play`/`pause`/`stop`, or `cue`/`seek` to the in-point) may\ncarry an empty body.",
+        "properties": {
+          "asset": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The media-library asset id (required for `load`, ignored otherwise)."
+          },
+          "frame": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The target frame, asset-relative, integer frames at the output cadence\n(ADR-T015); used by `cue`/`seek`. Absent cues/seeks to the in-point.",
+            "minimum": 0
+          }
+        }
+      },
       "TransportParams": {
         "type": "object",
         "description": "One leg's RTP transport parameters (IS-05 supports up to two legs for\nST 2022-7 redundancy; this models one).",
@@ -14145,6 +14961,10 @@
     {
       "name": "salvos",
       "description": "Salvo definitions + arm/take/cancel"
+    },
+    {
+      "name": "media-players",
+      "description": "Media-player transport (ADR-0057/ADR-0097): load/cue/play/pause/stop/seek + the vamp-exit arm/take/cancel triad"
     },
     {
       "name": "routing",

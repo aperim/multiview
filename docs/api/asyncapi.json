@@ -225,6 +225,9 @@
                   "$ref": "#/components/schemas/SalvoEvent"
                 },
                 {
+                  "$ref": "#/components/schemas/MediaPlayerEvent"
+                },
+                {
                   "$ref": "#/components/schemas/DeviceStatus"
                 },
                 {
@@ -310,7 +313,8 @@
                 "logs",
                 "jobs",
                 "preview",
-                "devices"
+                "devices",
+                "switcher"
               ],
               "type": "string"
             },
@@ -385,6 +389,16 @@
         },
         "summary": "Progress of a REST command job correlated by `corr` (topic `jobs`).",
         "title": "Long-running job progress"
+      },
+      "MediaPlayerEvent": {
+        "contentType": "application/json",
+        "description": "Emitted on topic `switcher` with envelope `id` = player id. A LOSSLESS lifecycle event kept in the bounded replay ring (ADR-RT008): discrete transport-state changes (cued / playing / paused / stopped / vamping{exit_armed} / eof / loading) plus the playhead `position_frames`. It must never be conflated — a control surface reconstructs authoritative player history from it. Per-frame position is NOT streamed; clients interpolate `position_frames` between events at the output cadence.",
+        "name": "MediaPlayerEvent",
+        "payload": {
+          "$ref": "#/components/schemas/MediaPlayerEvent"
+        },
+        "summary": "A media player transitioned transport state (media.player_state on topic `switcher`).",
+        "title": "Media-player transport-state lifecycle"
       },
       "OutputStatus": {
         "contentType": "application/json",
@@ -1275,6 +1289,139 @@
         ],
         "type": "string"
       },
+      "MediaPlayerEvent": {
+        "description": "Data body of `media.player_state` (ADR-RT008): a media player's discrete transport-state transition, envelope `id` = player id. LOSSLESS — kept in the replay ring, never conflated. `position_frames` is the playhead in integer frames at the output cadence (never a float; clients interpolate between events).",
+        "properties": {
+          "asset": {
+            "description": "The asset currently loaded in the player, if any.",
+            "type": "string"
+          },
+          "player": {
+            "description": "Stable media-player id (matches the envelope `id`).",
+            "type": "string"
+          },
+          "position_frames": {
+            "description": "Playhead position at the transition, in integer frames at the output cadence.",
+            "format": "uint64",
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/MediaPlayerState"
+          }
+        },
+        "required": [
+          "player",
+          "state",
+          "position_frames"
+        ],
+        "type": "object"
+      },
+      "MediaPlayerState": {
+        "description": "A media player's discrete transport state (tagged by `kind`, never untagged). The `vamping` variant carries `exit_armed`: when set, the current vamp lap finishes then the player exits cleanly at the boundary. `#[non_exhaustive]`: a client must treat an unknown kind as forward-compatible, not an error.",
+        "discriminator": "kind",
+        "oneOf": [
+          {
+            "description": "Opening/decoding the asset toward the cue point; not yet primed.",
+            "properties": {
+              "kind": {
+                "const": "loading",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Asset loaded, in-point frame primed, holding paused — ready to take.",
+            "properties": {
+              "kind": {
+                "const": "cued",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Playing forward at the output cadence.",
+            "properties": {
+              "kind": {
+                "const": "playing",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Paused, holding the current frame.",
+            "properties": {
+              "kind": {
+                "const": "paused",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Stopped/idle; no asset rolling.",
+            "properties": {
+              "kind": {
+                "const": "stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Looping a fill segment to hold until a cue (the VT vamp/exit feature).",
+            "properties": {
+              "exit_armed": {
+                "description": "Whether a clean exit is armed: finish the current lap, then leave the vamp at the boundary.",
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "vamping",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "exit_armed"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Reached end-of-file with no loop/vamp engaged.",
+            "properties": {
+              "kind": {
+                "const": "eof",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ],
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
       "OutputRunState": {
         "description": "Running state of an output sink.",
         "enum": [
@@ -1992,7 +2139,7 @@
       "name": "The Multiview Authors",
       "url": "https://github.com/aperim/multiview"
     },
-    "description": "WebSocket and SSE realtime event stream for the Multiview engine. Every message uses a single versioned envelope (ADR-RT002). Topics: tiles, inputs, outputs, audio.meters, alerts, alarms, tally, layout, config, logs, jobs, preview, system, capabilities, devices. The WebSocket endpoint (/api/v1/ws) is bidirectional (events + subscription control frames); the SSE endpoint (/api/v1/events) is server-to-client only.",
+    "description": "WebSocket and SSE realtime event stream for the Multiview engine. Every message uses a single versioned envelope (ADR-RT002). Topics: tiles, inputs, outputs, audio.meters, alerts, alarms, tally, layout, config, logs, jobs, preview, system, capabilities, devices, switcher. The WebSocket endpoint (/api/v1/ws) is bidirectional (events + subscription control frames); the SSE endpoint (/api/v1/events) is server-to-client only.",
     "externalDocs": {
       "description": "Realtime API reference",
       "url": "https://github.com/aperim/multiview/blob/main/docs/api/realtime.md"
