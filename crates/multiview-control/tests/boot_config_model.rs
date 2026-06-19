@@ -1119,6 +1119,134 @@ async fn a_shed_file_watch_apply_is_not_persisted_as_adopted() {
     persist.abort();
 }
 
+/// MAJOR-B round 2 / B-1 (panel): the persist gate must never STICK. A applied
+/// → edit to B while the bus is full (B sheds, `requested` advances) → edit the
+/// file back to A: the watcher reaches the already-applied content, so the
+/// stores are adopted again. The gate must clear (`persist_ready`) and
+/// `active.toml` must update — never freeze stale because the settle-to-A path
+/// forgot to advance `adopted`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_persist_gate_clears_when_a_shed_edit_reverts_to_adopted() {
+    let r = rig_with(BOOT_DOC, 1);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        WatchOptions::default().with_poll_interval(TEST_POLL),
+    );
+    let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
+
+    // Let A (the boot config) persist first.
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("#101418")))
+        .await,
+        "the initial adopted state A must persist"
+    );
+
+    // Occupy the capacity-1 bus so the file edit to B sheds.
+    assert!(
+        r.state
+            .commands
+            .try_submit(Command::UpsertSource {
+                op: multiview_control::OperationId::new(),
+                source: Box::new(r.config.sources[0].clone()),
+            })
+            .is_ok(),
+        "fill the bus"
+    );
+    // Edit to B: the watcher's UpsertSource sheds → the gate freezes.
+    std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#7b7b7b")).expect("edit to B");
+    assert!(
+        wait_until(SETTLE, || has_active_warning(
+            &r.warnings,
+            "config-file-apply-incomplete"
+        ))
+        .await,
+        "the shed edit to B raises the incomplete warning (the gate is frozen)"
+    );
+    assert!(
+        !model.persist_ready(),
+        "while B is shed-pending the gate must NOT be ready"
+    );
+
+    // Now edit the file BACK to A. The watcher reaches the already-applied
+    // content; the gate must clear and active.toml must reflect A (never B).
+    std::fs::write(&r.boot_path, BOOT_DOC).expect("edit back to A");
+    assert!(
+        wait_until(SETTLE, || model.persist_ready()).await,
+        "the gate must CLEAR once the file reverts to the adopted content (never stick)"
+    );
+    // active.toml is A, and never the unadopted B.
+    let text = std::fs::read_to_string(&active_path).expect("read active");
+    assert!(text.contains("#101418"), "active.toml reflects the adopted A");
+    assert!(
+        !text.contains("#7b7b7b"),
+        "active.toml must never carry the shed/unadopted B"
+    );
+
+    watch.stop();
+    persist.abort();
+}
+
+/// MAJOR-B round 2 / B-2 (panel): the original defect via REST. A REST source
+/// upsert that SHEDS (the engine bus is full) updates the store + audits BEFORE
+/// the bus, so without the unified gate the persister would write the
+/// requested-but-unadopted source state to `active.toml`. The gate must freeze
+/// persistence: `active.toml` must NOT carry the shed REST change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shed_rest_source_upsert_is_not_persisted_as_adopted() {
+    let mut r = rig_with(BOOT_DOC, 1);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let active_path = model.active_path();
+    let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
+
+    // Occupy the capacity-1 bus so the REST upsert's own UpsertSource sheds.
+    assert!(
+        r.state
+            .commands
+            .try_submit(Command::UpsertSource {
+                op: multiview_control::OperationId::new(),
+                source: Box::new(r.config.sources[0].clone()),
+            })
+            .is_ok(),
+        "fill the bus"
+    );
+
+    // A REST recolor of in_a to a SYNTHETIC colour (a live-appliable kind) whose
+    // UpsertSource sheds on the full bus → ApplyMode::Restart, store mutated,
+    // audit fires running_changed — but the engine never adopted it.
+    recolor_in_a(&r, "#3c3c3c").await;
+    assert!(
+        !model.persist_ready(),
+        "a shed REST live-apply must leave the persist gate not-ready"
+    );
+
+    // Give the persister several windows to (wrongly) write the unadopted state.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    if let Ok(text) = std::fs::read_to_string(&active_path) {
+        assert!(
+            !text.contains("#3c3c3c"),
+            "active.toml must not persist the shed/unadopted REST source state as adopted"
+        );
+    }
+
+    // Drain the bus + a follow-up adopted edit catches the gate up and persists.
+    let _ = r.commands.try_drain();
+    recolor_in_a(&r, "#4d4d4d").await;
+    assert!(
+        wait_until(SETTLE, || std::fs::read_to_string(&active_path)
+            .ok()
+            .is_some_and(|t| t.contains("#4d4d4d")))
+        .await,
+        "a later adopted REST mutation must catch the gate up and persist"
+    );
+    persist.abort();
+}
+
 /// `write_atomic` replaces the destination in one rename and leaves no
 /// temp-file residue.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
