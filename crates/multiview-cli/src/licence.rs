@@ -2029,7 +2029,10 @@ mod tests {
         // And the key really was generated + persisted (0600), proving load did not
         // merely no-op.
         let key_path = dir.path().join("device-key.ed25519");
-        assert!(key_path.exists(), "the device key is generated after tightening");
+        assert!(
+            key_path.exists(),
+            "the device key is generated after tightening"
+        );
         let key_mode = std::fs::metadata(&key_path)
             .expect("key file exists")
             .permissions()
