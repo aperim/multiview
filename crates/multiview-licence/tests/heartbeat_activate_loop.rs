@@ -16,6 +16,7 @@
 )]
 #![cfg(feature = "heartbeat")]
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -131,7 +132,7 @@ async fn after_activate_the_device_renews_seeded_by_the_activate_next_nonce() {
         "the second cycle must RENEW via heartbeat, got {second:?}"
     );
     assert_eq!(
-        server.heartbeats(),
+        server.heartbeats.load(Ordering::SeqCst),
         1,
         "the second cycle is a heartbeat renew"
     );
@@ -171,7 +172,7 @@ async fn activate_disabled_keeps_the_renew_only_no_binding_behaviour() {
     );
     assert_eq!(server.activates(), 0, "no activate call when disabled");
     assert_eq!(server.challenge_fetches(), 0, "no challenge fetch when disabled");
-    assert_eq!(server.heartbeats(), 0, "no heartbeat call when disabled");
+    assert_eq!(server.heartbeats.load(Ordering::SeqCst), 0, "no heartbeat call when disabled");
 }
 
 #[tokio::test]
@@ -188,7 +189,12 @@ async fn activate_challenge_unreachable_keeps_last_good_and_does_not_panic() {
         .expect("run_once must not hang");
     assert!(result.is_err(), "an unreachable challenge fails closed");
     assert_eq!(server.activates(), 0, "no activate without a challenge nonce");
-    assert!(store.status().unwrap().enforcement != EnforcementLevel::Active);
+    // Nothing was installed — the fresh device holds no lease (keep last-good: an
+    // empty store stays empty, never a crash, never a forced tighten).
+    assert!(
+        store.status().is_none(),
+        "a failed enrolment must install no lease"
+    );
 }
 
 #[tokio::test]
@@ -205,5 +211,8 @@ async fn activate_rejected_pop_invalid_keeps_last_good() {
         .expect("run_once must not hang");
     assert!(result.is_err(), "a rejected activate proof fails closed");
     // The device is NOT licensed (nothing installed), but is not crashed.
-    assert!(store.status().unwrap().enforcement != EnforcementLevel::Active);
+    assert!(
+        store.status().is_none(),
+        "a rejected activate must install no lease"
+    );
 }
