@@ -1258,6 +1258,100 @@ async fn first_persist_writes_state_files_0600_in_a_0700_dir() {
     );
 }
 
+/// MAJOR-A round 2 (panel, security): a PRE-EXISTING world-readable temp file
+/// at the deterministic `.<name>.tmp` path (a prior crash / old binary) must
+/// NOT receive the plaintext secret bytes. With an exclusive, randomly-named
+/// temp the planted file is simply ignored; the real destination ends up 0600
+/// and the planted 0644 file never holds our content.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_atomic_ignores_a_preexisting_world_readable_temp() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("active.toml");
+    // An attacker / a prior crash left the deterministic temp name at 0644.
+    let planted = dir.path().join(".active.toml.tmp");
+    std::fs::write(&planted, "stale = 0\n").expect("plant temp");
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o644)).expect("chmod 644");
+
+    write_atomic(&path, "token = \"super-secret\"\n").expect("write");
+
+    assert_eq!(
+        mode_of(&path),
+        0o600,
+        "the destination must be 0600 regardless of any planted temp file"
+    );
+    // If the planted 0644 file still exists, it must NOT carry our secret.
+    if let Ok(text) = std::fs::read_to_string(&planted) {
+        assert!(
+            !text.contains("super-secret"),
+            "the secret must never be written into a pre-existing world-readable temp inode"
+        );
+    }
+}
+
+/// MAJOR-A round 2 (panel, security): a SYMLINK planted at the temp path in a
+/// shared `.multiview` must NOT be followed — `open()` through it would write
+/// the secrets to the link target and the rename would install the symlink as
+/// `active.toml`. An exclusive, randomly-named temp defeats the attack: the
+/// planted symlink at the deterministic name is untouched, and the real file is
+/// a regular 0600 file carrying the content.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_atomic_does_not_follow_a_symlink_planted_at_the_temp_path() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let target = dir.path().join("attacker-target");
+    std::fs::write(&target, "").expect("create attacker target");
+    let path = dir.path().join("active.toml");
+    // The attacker pre-plants the deterministic temp name as a symlink.
+    let planted = dir.path().join(".active.toml.tmp");
+    std::os::unix::fs::symlink(&target, &planted).expect("plant symlink");
+
+    write_atomic(&path, "token = \"super-secret\"\n").expect("write");
+
+    // The real destination is a REGULAR file (not the symlink) at 0600.
+    let meta = std::fs::symlink_metadata(&path).expect("stat dest");
+    assert!(
+        meta.file_type().is_file(),
+        "active.toml must be a regular file, never an installed symlink"
+    );
+    assert_eq!(mode_of(&path), 0o600, "the destination must be 0600");
+    // The attacker target must NOT have received the secret through the link.
+    let target_text = std::fs::read_to_string(&target).expect("read target");
+    assert!(
+        !target_text.contains("super-secret"),
+        "the secret must never be written through a planted symlink"
+    );
+}
+
+/// MAJOR-A round 2 (panel, security): persistence must FAIL-CLOSED when the
+/// `.multiview` state dir is group/world-writable (an attacker could swap the
+/// state files). Refusing to persist does NOT take output off air (the output
+/// clock is untouched — control-plane persistence only). A first persist into a
+/// 0777 state dir must write nothing and surface an error.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persist_refuses_a_group_or_world_writable_state_dir() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let r = rig(BOOT_DOC);
+    let model = r.state.boot_model.clone().expect("rig wires a boot model");
+    let state_dir = model.state_dir();
+    std::fs::create_dir_all(&state_dir).expect("create state dir");
+    // An insecure, world-writable state dir.
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o777))
+        .expect("chmod 777 the state dir");
+
+    let result = persist_running_now(&r.state).await;
+    assert!(
+        result.is_err(),
+        "persistence must fail-closed on a group/world-writable state dir"
+    );
+    assert!(
+        !model.active_path().exists(),
+        "no active.toml (with plaintext secrets) may be written into an insecure dir"
+    );
+}
+
 /// Review B1 interleaving (1) — the settle-window race: promote writes W and
 /// banks its expect token, but an external edit E lands BEFORE W settles, so
 /// the watcher's first settled observation is E. E is a REAL external change:
