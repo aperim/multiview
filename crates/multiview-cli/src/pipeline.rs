@@ -12227,7 +12227,6 @@ mod media_player_boot_tests {
 
     use multiview_compositor::pipeline::CanvasColor;
     use multiview_config::MultiviewConfig;
-    use multiview_core::time::Rational;
 
     /// A canvas + one cell + a media library (one clip with a declared
     /// out-point + vamp window) + a media player defaulting to it.
