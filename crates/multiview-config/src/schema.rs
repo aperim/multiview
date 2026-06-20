@@ -638,6 +638,30 @@ pub enum SourceKind {
         /// Filesystem path.
         path: String,
     },
+    /// A still image bound by a media-library asset id (ADR-0057 Decision 1).
+    ///
+    /// The single decoded frame of the referenced
+    /// [`MediaAsset`](crate::MediaAsset) (a `still`-kind asset) held
+    /// indefinitely. The `asset` ref is resolved against `media_library.assets`
+    /// by [`MultiviewConfig::validate`](crate::MultiviewConfig::validate); a
+    /// distinct serde tag from the player binding makes a both-populated payload
+    /// structurally impossible.
+    Still {
+        /// The referenced [`MediaAsset::id`](crate::MediaAsset::id) (a
+        /// `still`-kind asset in `media_library.assets`).
+        asset: String,
+    },
+    /// A binding to a pre-declared media-player channel (ADR-0057 Decision 2).
+    ///
+    /// References a [`MediaPlayer`](crate::MediaPlayer) by id; the player owns
+    /// one supervised ingest from boot and load/cue swaps what it plays. The
+    /// `player` ref is resolved against `media_players` by
+    /// [`MultiviewConfig::validate`](crate::MultiviewConfig::validate).
+    MediaPlayer {
+        /// The referenced [`MediaPlayer::id`](crate::MediaPlayer::id) in
+        /// `media_players`.
+        player: String,
+    },
     /// AES67 / SMPTE ST 2110-30 PCM-audio RTP input (open-audio over IP).
     ///
     /// Tier 0 binding is a static SDP session (RFC 4566/8866) pasted or fetched

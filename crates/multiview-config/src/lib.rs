@@ -37,6 +37,7 @@ pub mod error;
 pub mod failover;
 pub mod grid;
 pub mod layout_doc;
+pub mod media;
 pub mod placement;
 pub mod probe;
 pub mod program;
@@ -68,6 +69,10 @@ pub use discovery::DiscoveryConfig;
 pub use error::ConfigError;
 pub use failover::{default_failover_slate, FailoverSlate};
 pub use layout_doc::{LayoutCanvas, LayoutDocument};
+pub use media::{
+    frames_for_ms, EofPolicy, MediaAsset, MediaAssetKind, MediaLibrary, MediaPlayer,
+    MediaPlayerAudio,
+};
 pub use placement::{DevicePin, MigrationPolicy, PinVendor, PlacementConfig, PlacementWeights};
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
 pub use program::{ProgramId, ProgramKind, ProgramSpec};
@@ -299,6 +304,18 @@ pub struct MultiviewConfig {
     /// system settings (NDI I/O stays inert — unaccepted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<SystemConfig>,
+    /// The media library (ADR-0057 Decision 1): a root directory plus declared
+    /// [`MediaAsset`]s (stills, clips, audio). Absent ⇒ no media library is
+    /// configured. Asset ids are referenced by media players' `default` and by
+    /// [`SourceKind::Still`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_library: Option<MediaLibrary>,
+    /// Media-player channels (ADR-0057 Decision 2): pre-declared, bus-selectable
+    /// source channels, each owning one supervised ingest from boot. The MVP
+    /// allows at most two ([`MultiviewConfig::validate`] enforces the bound).
+    /// Bound onto the canvas by [`SourceKind::MediaPlayer`].
+    #[serde(default)]
+    pub media_players: Vec<MediaPlayer>,
 }
 
 /// Parse a `#RGB` / `#RRGGBB` hex color into its `(r, g, b)` bytes.
@@ -432,6 +449,7 @@ impl MultiviewConfig {
         self.validate_system()?;
         self.validate_placement()?;
         self.validate_routing()?;
+        self.validate_media()?;
         if let Some(timing) = &self.timing {
             timing.validate()?;
         }
@@ -562,6 +580,123 @@ impl MultiviewConfig {
                         "device {:?} is a member of sync groups {previous:?} and {:?} (a \
                          device may belong to at most one sync group)",
                         member.device, group.id
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the media library and media players (ADR-0057 Decisions 1/2,
+    /// ADR-0097 vamp window, [media-playout §3/§15](../docs/research/media-playout.md)):
+    ///
+    /// - each asset's playout window nests as `in_point ≤ vamp_in < vamp_out ≤
+    ///   out_point` when the fields are present (a zero-length or half-specified
+    ///   vamp window is rejected), and `in_point ≤ out_point` when only those are
+    ///   present;
+    /// - asset ids and player ids are each unique;
+    /// - every player `default` resolves to a declared asset, and every
+    ///   [`SourceKind::Still`] / [`SourceKind::MediaPlayer`] binding resolves to a
+    ///   declared asset / player;
+    /// - the MVP bound of **at most two** media players is respected.
+    fn validate_media(&self) -> Result<(), ConfigError> {
+        // Asset ids (also the resolution set for `Still`/player `default` refs).
+        let mut asset_ids: HashSet<&str> = HashSet::new();
+        if let Some(library) = &self.media_library {
+            asset_ids.reserve(library.assets.len());
+            for asset in &library.assets {
+                if !asset_ids.insert(asset.id.as_str()) {
+                    return Err(ConfigError::Validation(format!(
+                        "duplicate media asset id {:?}",
+                        asset.id
+                    )));
+                }
+                Self::validate_asset_window(asset)?;
+            }
+        }
+
+        // MVP bound: at most two media-player channels.
+        if self.media_players.len() > 2 {
+            return Err(ConfigError::Validation(format!(
+                "{} media players configured: the MVP allows at most 2 (ADR-0057)",
+                self.media_players.len()
+            )));
+        }
+
+        // Player ids unique + every `default` resolves to a declared asset.
+        let mut player_ids: HashSet<&str> = HashSet::with_capacity(self.media_players.len());
+        for player in &self.media_players {
+            if !player_ids.insert(player.id.as_str()) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate media player id {:?}",
+                    player.id
+                )));
+            }
+            if let Some(asset) = &player.default {
+                if !asset_ids.contains(asset.as_str()) {
+                    return Err(ConfigError::Validation(format!(
+                        "media player {:?} default references unknown asset {asset:?}",
+                        player.id
+                    )));
+                }
+            }
+        }
+
+        // Source bindings resolve: `Still { asset }` → an asset, `MediaPlayer {
+        // player }` → a player.
+        for source in &self.sources {
+            match &source.kind {
+                SourceKind::Still { asset } if !asset_ids.contains(asset.as_str()) => {
+                    return Err(ConfigError::Validation(format!(
+                        "source {:?} still binding references unknown asset {asset:?}",
+                        source.id
+                    )));
+                }
+                SourceKind::MediaPlayer { player } if !player_ids.contains(player.as_str()) => {
+                    return Err(ConfigError::Validation(format!(
+                        "source {:?} media_player binding references unknown player {player:?}",
+                        source.id
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate a single asset's integer-frame playout window (ADR-0097): the
+    /// vamp pair must be both-present-or-both-absent, and the four points must
+    /// nest as `in_point ≤ vamp_in < vamp_out ≤ out_point`. With only `in`/`out`
+    /// present, `in_point ≤ out_point` is enforced. Absent endpoints default to
+    /// the open bounds (`0` / `u64::MAX`) so the nesting checks compose.
+    fn validate_asset_window(asset: &MediaAsset) -> Result<(), ConfigError> {
+        let in_point = asset.in_point_frames.unwrap_or(0);
+        let out_point = asset.out_point_frames.unwrap_or(u64::MAX);
+        if in_point > out_point {
+            return Err(ConfigError::Validation(format!(
+                "media asset {:?}: in_point_frames {in_point} > out_point_frames {out_point}",
+                asset.id
+            )));
+        }
+        match (asset.vamp_in_frames, asset.vamp_out_frames) {
+            (None, None) => {}
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(ConfigError::Validation(format!(
+                    "media asset {:?}: vamp_in_frames and vamp_out_frames must both be set or \
+                     both omitted (a half-specified vamp window is ambiguous)",
+                    asset.id
+                )));
+            }
+            (Some(vamp_in), Some(vamp_out)) => {
+                // Reject a degenerate (zero-length) vamp segment and any window
+                // not nested as in ≤ vamp_in < vamp_out ≤ out.
+                if !(in_point <= vamp_in && vamp_in < vamp_out && vamp_out <= out_point) {
+                    return Err(ConfigError::Validation(format!(
+                        "media asset {:?}: vamp window must satisfy in_point ≤ vamp_in < \
+                         vamp_out ≤ out_point (got in={in_point} vamp_in={vamp_in} \
+                         vamp_out={vamp_out} out={out_point})",
+                        asset.id
                     )));
                 }
             }
@@ -1283,6 +1418,12 @@ impl Source {
             | SourceKind::Rtmp { .. }
             | SourceKind::Ndi { .. }
             | SourceKind::File { .. }
+            // The `still` asset ref and `media_player` channel ref are resolved
+            // against `media_library` / `media_players` at the document level
+            // (`MultiviewConfig::validate_media`), not per-source — there are no
+            // per-source structural fields to check here.
+            | SourceKind::Still { .. }
+            | SourceKind::MediaPlayer { .. }
             // AES67's binding (SDP / multicast group / PTP domain) is a runtime
             // ingest concern, like the network URL kinds — accepted as authored.
             | SourceKind::Aes67 { .. } => {}

@@ -14,6 +14,7 @@ import { NotFoundPage } from "../pages/NotFoundPage";
 import { MonitoringPage } from "../pages/MonitoringPage";
 import { TallyPage } from "../pages/TallyPage";
 import { SalvosPage } from "../pages/SalvosPage";
+import { MediaPlayersPage } from "../pages/MediaPlayersPage";
 import { AlarmsPage } from "../pages/AlarmsPage";
 import { AudioPage } from "../pages/AudioPage";
 import { DeviceDetailPage } from "../pages/DeviceDetailPage";
@@ -70,6 +71,7 @@ export const router = createBrowserRouter([
       { path: "monitoring", element: <MonitoringPage /> },
       { path: "tally", element: <TallyPage /> },
       { path: "salvos", element: <SalvosPage /> },
+      { path: "media-players", element: <MediaPlayersPage /> },
       { path: "alarms", element: <AlarmsPage /> },
       { path: "system", element: <SystemPage /> },
       { path: "system/actions", element: <SystemActionsPage /> },

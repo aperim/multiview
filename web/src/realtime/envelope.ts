@@ -219,6 +219,8 @@ import type {
   DeviceStreamStatus,
   DeviceSyncSummary,
   ImpactClass,
+  MediaPlayerEvent,
+  MediaPlayerState,
   SyncCapability,
 } from "./generated-types";
 
@@ -519,4 +521,74 @@ export function parseTileStateDelta(
     delta.since_ts = record.since_ts;
   }
   return delta;
+}
+
+// --- switcher topic: media players (ADR-0057 / ADR-0097 / ADR-RT008) ---------
+
+// Narrow an unknown value to a `MediaPlayerState` (the discriminated transport
+// state, tagged by `kind`). The seven known kinds from the generated AsyncAPI
+// schema are pinned here so a spec/runtime divergence is immediately visible;
+// `vamping` additionally requires a boolean `exit_armed`. An unrecognized or
+// malformed shape returns `undefined` and the whole frame is dropped (§2:
+// unknown shapes are dropped, never thrown on) — forward-compatible.
+function parseMediaPlayerState(value: unknown): MediaPlayerState | undefined {
+  const record = asRecord(value);
+  if (record === undefined || typeof record.kind !== "string") {
+    return undefined;
+  }
+  switch (record.kind) {
+    case "loading":
+    case "cued":
+    case "playing":
+    case "paused":
+    case "stopped":
+    case "eof":
+      return { kind: record.kind };
+    case "vamping":
+      if (typeof record.exit_armed !== "boolean") {
+        return undefined;
+      }
+      return { kind: "vamping", exit_armed: record.exit_armed };
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Narrow an envelope `data` to a `media.player_state` event (topic `switcher`,
+ * envelope `id` = player id; ADR-RT008). A LOSSLESS transport-state transition:
+ * the player's new {@link MediaPlayerState} plus the integer `position_frames`
+ * playhead and the optional loaded `asset`. A malformed payload is dropped.
+ */
+export function parseMediaPlayerEvent(
+  data: unknown,
+): MediaPlayerEvent | undefined {
+  const record = asRecord(data);
+  if (record === undefined) {
+    return undefined;
+  }
+  if (
+    typeof record.player !== "string" ||
+    typeof record.position_frames !== "number"
+  ) {
+    return undefined;
+  }
+  const state = parseMediaPlayerState(record.state);
+  if (state === undefined) {
+    return undefined;
+  }
+  const event: {
+    player: string;
+    position_frames: number;
+    state: MediaPlayerState;
+    asset?: string;
+  } = {
+    player: record.player,
+    position_frames: record.position_frames,
+    state,
+  };
+  if (typeof record.asset === "string") {
+    event.asset = record.asset;
+  }
+  return event;
 }

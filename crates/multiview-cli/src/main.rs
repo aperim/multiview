@@ -658,13 +658,15 @@ async fn run_pipeline_until_ctrl_c(
             pipeline.subtitle_route_slot(),
             pipeline.overlay_apply_slot(),
             hub.handle(),
+            pipeline.player_mailboxes(),
         ));
         #[cfg(not(feature = "overlay"))]
-        let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
+        let drain: ControlDrain = Box::new(control::command_drain_with_live_sources_and_players(
             command_rx,
             config.clone(),
             Arc::clone(&publisher),
             hub.handle(),
+            pipeline.player_mailboxes(),
         ));
         (Some(handle), drain, Some(hub), Some(watch), Some(persist))
     } else {
@@ -1019,6 +1021,8 @@ async fn run_software_until_ctrl_c(
             shutdown_rx,
         )
         .await?;
+        // The software engine has no libav decode, so no media-player channels
+        // run on this path — the plain 4-arg form (no player mailboxes).
         let drain: ControlDrain = Box::new(control::command_drain_with_live_sources(
             command_rx,
             config.clone(),

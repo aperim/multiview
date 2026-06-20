@@ -1609,6 +1609,15 @@ pub struct Pipeline {
     /// thread per plan; the threads publish into [`Self::stores`] as frames
     /// arrive (never buffered ahead of the clock — the BUG-2 fix).
     ingest_plans: Vec<IngestPlan>,
+    /// Per-media-player transport mailboxes (ADR-0057 / ADR-0097), keyed by
+    /// player id: the bounded two-class seam (state verbs conflated latest-wins;
+    /// targeted load/cue/seek a bounded drop-oldest FIFO) the control-plane
+    /// command drain submits transport verbs to, drained by each player's ingest
+    /// thread between frames. Exposed to the run wiring via
+    /// [`Self::player_mailboxes`] so the command drain
+    /// ([`crate::control::command_drain_with_seams`]) can address every declared
+    /// channel. Empty when no media players are configured.
+    player_mailboxes: std::collections::HashMap<String, Arc<crate::player::TransportMailbox>>,
     /// The shared WHIP publisher rendezvous (ADR-T014): the control plane's
     /// `WhipProvider` writes a negotiated publisher into it and each webrtc
     /// source's `drive_webrtc` loop reads. Exposed to the run wiring via
@@ -1777,6 +1786,17 @@ struct IngestPlan {
     id: String,
     /// Where the media lives.
     location: SourceLocation,
+    /// When `Some`, this source is a **media-player channel** (ADR-0057 /
+    /// ADR-0097): [`open_and_stream`] runs the transport-driven decode loop
+    /// ([`stream_player`]) instead of the plain pace-and-publish pump — it
+    /// consults the thread-local [`MediaPlayer`](crate::player::MediaPlayer)
+    /// per decoded frame, performs the in-place loop seek + decoder flush at a
+    /// wrap, and stamps each frame from the player's own monotone
+    /// output-anchored timeline (bypassing the [`PtsNormalizer`]). The shared
+    /// [`TransportMailbox`](crate::player::TransportMailbox) inside the handle
+    /// is the only control-plane seam, drained between frames. `None` for every
+    /// non-player source (the existing ingest path is unchanged).
+    player: Option<crate::player::PlayerHandle>,
     /// The destination tile size (even pixels) the frames are scaled to.
     tile_w: u32,
     /// The destination tile height.
@@ -2027,6 +2047,19 @@ impl Pipeline {
             }
         }
 
+        // Boot-spawn the configured media-player channels (ADR-0057 / ADR-0097):
+        // each rolling player gets its own player `IngestPlan` (driven by the
+        // transport state machine) + last-good store; every declared player gets
+        // a registered transport mailbox the control-plane command drain submits
+        // verbs to. A player channel is a source like any other — the engine only
+        // samples its store per tick (inv #1/#10).
+        let media_player_boot = build_media_player_boot(config, &layout, cadence, canvas_color);
+        let player_mailboxes = media_player_boot.mailboxes;
+        for (id, store) in media_player_boot.stores {
+            stores.insert(id, store);
+        }
+        ingest_plans.extend(media_player_boot.plans);
+
         // WHIP ingest wiring (ADR-T014, `webrtc-native`): one shared publisher
         // rendezvous registry the control plane's WhipProvider writes to and each
         // webrtc source's `drive_webrtc` loop reads from. Stamp it (and, for an
@@ -2167,6 +2200,7 @@ impl Pipeline {
             #[cfg(feature = "gpu")]
             live_island: Arc::new(arc_swap::ArcSwapOption::empty()),
             ingest_plans,
+            player_mailboxes,
             #[cfg(feature = "webrtc-native")]
             webrtc_registry,
             #[cfg(feature = "webrtc-native")]
@@ -2322,6 +2356,19 @@ impl Pipeline {
     #[must_use]
     pub fn opens_encode_session(&self) -> bool {
         self.encoder.name.ends_with("_nvenc")
+    }
+
+    /// The per-media-player transport mailboxes (ADR-0057 / ADR-0097), keyed by
+    /// player id: hand this to the control-plane command drain
+    /// ([`crate::control::command_drain_with_seams`] /
+    /// [`crate::control::command_drain_with_live_sources`]) so a `MediaTransport`
+    /// or exit command reaches the addressed running player channel. Cloned
+    /// (the `Arc<TransportMailbox>` values are shared with the ingest threads).
+    #[must_use]
+    pub fn player_mailboxes(
+        &self,
+    ) -> std::collections::HashMap<String, Arc<crate::player::TransportMailbox>> {
+        self.player_mailboxes.clone()
     }
 
     /// The shared per-source producer stop registry (ADR-W018): hand this to
@@ -7172,6 +7219,10 @@ fn youtube_url_slot_for(location: &SourceLocation) -> Option<Arc<arc_swap::ArcSw
 /// synthetic source with invalid parameters. (Opening/decoding errors surface on
 /// the ingest thread later — they must never fail the *build* of a never-ending
 /// live source.)
+// A flat, one-arm-per-`SourceKind` dispatch plus the single feature-gated
+// `IngestPlan` struct literal: inherently long and clearer kept whole than split
+// across helpers (adding the `player` field tipped it one line over the 100 bound).
+#[allow(clippy::too_many_lines)]
 fn ingest_plan_for(
     source: &Source,
     tile_w: u32,
@@ -7295,6 +7346,8 @@ fn ingest_plan_for(
     Ok(IngestPlan {
         id: source.id.clone(),
         location,
+        // Not a media-player channel (those are built from `config.media_players`).
+        player: None,
         tile_w,
         tile_h,
         store,
@@ -7330,6 +7383,176 @@ fn ingest_plan_for(
         #[cfg(feature = "youtube")]
         youtube_url_slot,
     })
+}
+
+/// Map the config-schema [`EofPolicy`](multiview_config::media::EofPolicy) onto
+/// the player transport core's [`EofPolicy`](crate::player::EofPolicy).
+fn map_eof_policy(policy: multiview_config::media::EofPolicy) -> crate::player::EofPolicy {
+    use crate::player::EofPolicy as P;
+    use multiview_config::media::EofPolicy as C;
+    match policy {
+        C::Loop => P::Loop,
+        C::Black => P::Black,
+        C::AutoOff => P::AutoOff,
+        // `HoldLastFrame` (the default) and any future `#[non_exhaustive]` variant
+        // this build does not know about both hold the last-good frame.
+        _ => P::HoldLastFrame,
+    }
+}
+
+/// The result of boot-spawning the configured media-player channels: the player
+/// [`IngestPlan`]s (each with a `player` handle) and the per-player
+/// [`TransportMailbox`](crate::player::TransportMailbox) the control-plane
+/// command drain submits transport verbs to, keyed by player id.
+struct MediaPlayerBoot {
+    plans: Vec<IngestPlan>,
+    stores: Vec<(String, Arc<TileStore<Nv12Image>>)>,
+    mailboxes: std::collections::HashMap<String, Arc<crate::player::TransportMailbox>>,
+}
+
+/// Build the boot-time media-player channels from `config.media_players`
+/// (ADR-0057 / ADR-0097).
+///
+/// Each player that has a `default` asset **with a declared `out_point_frames`**
+/// boot-spawns a player [`IngestPlan`] that plays (or vamps, per `loop_default`)
+/// the asset over its `[in_point, out_point)` window, looping the
+/// `[vamp_in, vamp_out)` sub-window (defaulting to the whole clip). A player with
+/// no default, or whose default asset has no declared out-point (the asset's
+/// frame count is not known without probing — probe-at-load is post-MVP), boots
+/// **idle**: its mailbox is still registered (so a later `load`/transport command
+/// is honoured once probe-at-load lands), but no plan rolls now — surfaced with a
+/// warning, never a silent skip.
+///
+/// All players' mailboxes are returned regardless, so the control-plane command
+/// drain can address every declared channel.
+// One per-player block that resolves the asset, validates the geometry, builds
+// the store + mailbox + handle, and constructs the (feature-gated) player
+// `IngestPlan` literal: inherently long and clearer kept whole than split across
+// helpers that would each take most of these locals.
+#[allow(clippy::too_many_lines)]
+fn build_media_player_boot(
+    config: &MultiviewConfig,
+    layout: &Layout,
+    cadence: Rational,
+    canvas_color: CanvasColor,
+) -> MediaPlayerBoot {
+    let mut boot = MediaPlayerBoot {
+        plans: Vec::new(),
+        stores: Vec::new(),
+        mailboxes: std::collections::HashMap::new(),
+    };
+    let library = config.media_library.as_ref();
+    let root = library.and_then(|l| l.root.as_deref());
+
+    for player in &config.media_players {
+        // Every declared channel gets a registered mailbox so the control plane
+        // can address it, even when it boots idle.
+        let mailbox = Arc::new(crate::player::TransportMailbox::new());
+        boot.mailboxes
+            .insert(player.id.clone(), Arc::clone(&mailbox));
+
+        // Resolve the default asset (if any) and require a declared out-point to
+        // boot a rolling channel.
+        let Some(asset_id) = player.default.as_deref() else {
+            tracing::info!(player = %player.id, "media player boots idle (no default asset)");
+            continue;
+        };
+        let asset = library.and_then(|l| l.assets.iter().find(|a| a.id == asset_id));
+        let Some(asset) = asset else {
+            tracing::warn!(
+                player = %player.id, asset = %asset_id,
+                "media player boots idle: default asset not found in the media library"
+            );
+            continue;
+        };
+        let Some(out_point) = asset.out_point_frames else {
+            tracing::warn!(
+                player = %player.id, asset = %asset_id,
+                "media player boots idle: default asset declares no out_point_frames \
+                 (probe-at-load is post-MVP)"
+            );
+            continue;
+        };
+        let in_point = asset.in_point_frames.unwrap_or(0);
+        // The vamp window defaults to the whole trimmed clip when unset.
+        let vamp_in = asset.vamp_in_frames.unwrap_or(in_point);
+        let vamp_out = asset.vamp_out_frames.unwrap_or(out_point);
+        let geometry = match crate::player::PlayoutGeometry::new(
+            in_point, out_point, vamp_in, vamp_out, cadence,
+        ) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(
+                    player = %player.id, asset = %asset_id, error = %e,
+                    "media player boots idle: invalid playout geometry"
+                );
+                continue;
+            }
+        };
+
+        // Resolve the asset path against the library root.
+        let path = match root {
+            Some(r) => std::path::Path::new(r).join(&asset.path),
+            None => std::path::PathBuf::from(&asset.path),
+        };
+
+        let (tile_w, tile_h) = cell_pixel_size(layout, &player.id)
+            .unwrap_or((config.canvas.width, config.canvas.height));
+        let store = Arc::new(TileStore::new(
+            player.id.clone(),
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let eof_policy = map_eof_policy(player.eof_policy);
+        let handle = crate::player::PlayerHandle::new(
+            player.id.clone(),
+            geometry,
+            eof_policy,
+            player.loop_default,
+            mailbox,
+        );
+
+        boot.stores.push((player.id.clone(), Arc::clone(&store)));
+        boot.plans.push(IngestPlan {
+            id: player.id.clone(),
+            location: SourceLocation::Path(path),
+            player: Some(handle),
+            tile_w,
+            tile_h,
+            store,
+            // A media player is a finite asset played under transport control;
+            // it is not a live (reconnect-forever) source — the player loop owns
+            // its own loop/hold lifecycle.
+            live: false,
+            #[cfg(feature = "overlay")]
+            incontainer_sub: None,
+            #[cfg(feature = "overlay")]
+            embedded_cc: None,
+            canvas_color,
+            cadence,
+            decode_placement: DecodePlacement::Default,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_registry: None,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_audio_store: None,
+            #[cfg(feature = "ndi")]
+            ndi_accept_license: false,
+            #[cfg(feature = "ndi")]
+            ndi_acceptance: multiview_input::ndi::license::LicenseAcceptance {
+                accepted_by: String::new(),
+                accepted_at: String::new(),
+            },
+            #[cfg(feature = "youtube")]
+            youtube_url_slot: None,
+        });
+        tracing::info!(
+            player = %player.id, asset = %asset_id,
+            in_point, out_point, vamp_in, vamp_out,
+            looping = player.loop_default,
+            "media player boot-spawned"
+        );
+    }
+    boot
 }
 
 /// Resolve a source's **audio** decode plan (AUD-2): the libav-openable location
@@ -7509,6 +7732,14 @@ fn resolve_incontainer_sub_route(
         // host-memory video receive); there is no container to open here.
         #[cfg(feature = "ndi")]
         SourceLocation::Ndi { .. } => return None,
+        // A WHIP/webrtc source is a depacketized RTP video receive (no libav
+        // container to open here), so it carries no in-container subtitle
+        // stream — mirroring the NDI arm. Pre-existing #181-era cross-feature
+        // gap (the overlay-gated match lacked the webrtc-native variant arm, so
+        // `--features overlay,webrtc-native` failed E0004); folded in here as the
+        // `pipeline.rs` owner (task #137), not a media-player change.
+        #[cfg(feature = "webrtc-native")]
+        SourceLocation::Webrtc { .. } => return None,
     };
     let demux = match Demuxer::open(path) {
         Ok(d) => d,
@@ -8963,6 +9194,24 @@ fn open_and_stream(
     // each subsequent frame when wall-clock catches up to its PTS (invariant #4).
     let mut pacer = PtsWallClock::new();
 
+    // MEDIA-PLAYER CHANNEL (ADR-0057 / ADR-0097): when this source is a player,
+    // run the transport-driven decode loop instead of the plain pump. It owns
+    // its OWN monotone output-anchored timeline (so it bypasses `normalizer`
+    // entirely — see `stream_player`), performs the in-place loop seek +
+    // decoder flush at a wrap, and drains the transport mailbox between frames.
+    if plan.player.is_some() {
+        return stream_player(
+            plan,
+            tag,
+            &mut input,
+            &mut decoder,
+            &mut to_tile,
+            stream_index,
+            &mut pacer,
+            stop,
+        );
+    }
+
     // Pump packets, publishing each decoded+scaled frame into the store.
     let mut drained = false;
     loop {
@@ -9019,6 +9268,444 @@ fn open_and_stream(
             }
             Err(other) => return Err(other.to_string()),
         }
+    }
+}
+
+/// Convert a source frame index to a libav `AV_TIME_BASE` (microsecond) seek
+/// target at the given `cadence`, using exact integer rationals — never float
+/// fps (invariant #3). `target_us = frame * 1_000_000 * cadence.den /
+/// cadence.num`, computed in `i128` to avoid overflow, saturated into `i64`.
+fn frame_to_seek_us(frame: u64, cadence: Rational) -> i64 {
+    let num = i128::from(cadence.num);
+    let den = i128::from(cadence.den);
+    if num <= 0 {
+        return 0;
+    }
+    let us = i128::from(frame)
+        .saturating_mul(1_000_000)
+        .saturating_mul(den)
+        / num;
+    i64::try_from(us).unwrap_or(i64::MAX)
+}
+
+/// The media-player fail-safe: after this many consecutive open→decode→EOF laps
+/// that publish ZERO frames, the asset cannot be played at its declared geometry
+/// (truncated / zero-frame / corrupt, or an in-point/target past the real clip
+/// end) — `stream_player` gives up re-seeking and holds last-good, so the ingest
+/// thread can never spin seek→EOF→seek (rule 26 / inv #1).
+const MAX_UNPRODUCTIVE_LAPS: u32 = 3;
+
+/// The **media-player** decode loop (ADR-0057 / ADR-0097): drives a
+/// pre-declared player channel's transport over the open container.
+///
+/// Unlike the plain pump in [`open_and_stream`], this loop consults the
+/// thread-local [`MediaPlayer`](crate::player::MediaPlayer) for every decoded
+/// frame and performs the [`PlayerAction`](crate::player::PlayerAction) it
+/// returns:
+///
+/// - [`Publish`](crate::player::PlayerAction::Publish): pace to the player's
+///   **output-anchored** stamp (`anchor + emitted × frame_period`, monotone
+///   across loop laps) and publish — the stamp comes straight from the player's
+///   own synthesized timeline, so **no source PTS is routed through
+///   `PtsNormalizer`** and the wrapped-PTS monotonic-clamp hazard cannot arise
+///   (ADR-0097 §5 refinement). Invariant #4 pacing is preserved (the stamp is
+///   monotone media time the `PtsWallClock` paces on directly).
+/// - [`SeekFlushTo`](crate::player::PlayerAction::SeekFlushTo): the in-place
+///   loop/vamp wrap — seek the container to the in-point, **flush the decoder**
+///   (the non-negotiable ADR-0097 rule 2: drop stale reordered B-frames), reset
+///   the source-frame cursor, and keep decoding. The boundary frame is
+///   discarded, never published.
+/// - [`Hold`](crate::player::PlayerAction::Hold): republish the held last-good
+///   frame at an advancing stamp (paused / EOF-held) so the tile reads LIVE.
+/// - [`Ended`](crate::player::PlayerAction::Ended): the channel ended under a
+///   non-looping policy — heartbeat-republish the terminal frame so the tile
+///   holds LIVE on the freshness ladder.
+///
+/// The transport [`mailbox`](crate::player::TransportMailbox) is drained once
+/// per outer iteration (between frames) and applied to the player. The loop
+/// never blocks on a client and never paces the output clock (invariants
+/// #1/#10): it only ever writes the lock-free store, exactly like every other
+/// ingest path.
+#[allow(clippy::too_many_arguments)]
+// mirrors open_and_stream's decode-context threading
+// One cohesive decode loop: drain the mailbox, then per decoded frame run the
+// frame-accurate-seek alignment + the PlayerAction (publish/wrap/hold/end), then
+// feed the next packet. Splitting the per-action arms into helpers would thread
+// most of these locals (input/decoder/pacer/store/pending_target/last_image)
+// through each and obscure the single-pass control flow; kept whole.
+#[allow(clippy::too_many_lines)]
+fn stream_player(
+    plan: &IngestPlan,
+    tag: multiview_core::color::ColorInfo,
+    input: &mut ffmpeg::format::context::Input,
+    decoder: &mut StreamVideoDecoder,
+    to_tile: &mut TileScaler,
+    stream_index: usize,
+    pacer: &mut PtsWallClock,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    use crate::player::{PlayerAction, TransportVerb};
+
+    // The handle is present (the caller only enters here when `plan.player` is
+    // `Some`); a `let-else` keeps it panic-free.
+    let Some(handle) = plan.player.as_ref() else {
+        return Ok(());
+    };
+    let cadence = handle.geometry.cadence();
+    let mut player = handle.build_player();
+    // Begin playout: vamp (loop the vamp segment) when the channel loops on
+    // start, else a single forward play-through. Anchored at the zero output
+    // media time; the pacer maps that to wall-clock on the first publish. A
+    // vamping channel starts at the vamp-in (it loops the [vamp_in, vamp_out)
+    // window); a plain play starts at the clip in-point.
+    let start_frame = if handle.loop_on_start {
+        player.vamp(multiview_core::time::MediaTime::ZERO);
+        handle.geometry.vamp_in()
+    } else {
+        player.play(multiview_core::time::MediaTime::ZERO);
+        handle.geometry.in_point()
+    };
+
+    // The source frame index of the NEXT frame the decoder will yield. Starts at
+    // the start frame and is reset by a wrap seek; advances 1:1 with decoded
+    // frames otherwise.
+    let mut source_frame = start_frame;
+    // A pending **frame-accurate seek target**: when `Some(t)`, the decoder has
+    // just been seeked to a keyframe at-or-before `t` (libav seeks land on a
+    // keyframe ≤ target), so the loop **decodes-and-discards** every frame whose
+    // index is `< t` and only publishes once the decoded frame's index reaches
+    // `t` — so the first published frame after a seek/loop-wrap is EXACTLY the
+    // in-point, even for a non-keyframe in-point (frame-accurate vamp/exit, no
+    // pre-target frame at the seam). `None` ⇒ frames advance 1:1.
+    let mut pending_target: Option<u64> = Some(start_frame);
+    let frame_period_ns = handle.geometry.frame_period_ns();
+    // The asset's PTS origin: the canonical-ns PTS of the FIRST decoded frame
+    // (frame 0). A container (e.g. MPEG-TS) commonly starts PTS at a non-zero
+    // offset, so a source frame index is `(pts − first_pts) / frame_period`, not
+    // the absolute PTS — captured once, then frame indices are 0-based and the
+    // frame-accurate seek-to-target math is offset-independent.
+    let mut first_pts_ns: Option<i64> = None;
+    // The last-good frame **handle** (an `Arc`, shared with the store) for the
+    // held/ended heartbeat republish: republishing is an `Arc::clone` (a refcount
+    // bump), never a pixel-plane copy — no per-frame heap allocation on the hold
+    // path (bounded-memory data plane, inv #5 / rule 22).
+    let mut last_image: Option<Arc<Nv12Image>> = None;
+    // Whether the decoder has been fully drained (EOF reached with no loop, or a
+    // fail-safe gave up): the loop falls through to `heartbeat_player_hold`, which
+    // holds last-good forever — the tile rides the framestore state machine and
+    // the output clock keeps ticking undisturbed (inv #1).
+    let mut drained = false;
+    // FAIL-SAFE bounds against a bad/truncated/corrupt asset spinning the ingest
+    // thread (rule 26 — bad inputs are the purpose; inv #1 — never stall output):
+    // `discarded` counts frames dropped since the last seek while aligning to a
+    // frame-accurate target; `unproductive_laps` counts consecutive open→decode→
+    // EOF cycles that published ZERO frames. Either exceeding its bound is a clear
+    // "this asset cannot satisfy this geometry" signal → stop seeking and HOLD
+    // last-good, never busy-re-arm seek→EOF→seek.
+    let mut discarded: u64 = 0;
+    let mut produced_this_lap: u64 = 0;
+    let mut unproductive_laps: u32 = 0;
+    // `true` once demux EOF has flushed the decoder this lap: the next decode
+    // pass drains the decoder's DELAYED (reordered / B-frame) frames — which
+    // libav only emits after the EOF flush — before the lap is judged
+    // productive/unproductive. (A good B-frame clip's publishable frames can be
+    // buffered until this flush; judging at demux EOF alone would wrongly call
+    // such a lap empty.)
+    let mut eof_flushing = false;
+    // The discard budget: a generous multiple of the declared clip length plus a
+    // floor, so a legitimate keyframe-bracketed seek (discarding back to the prior
+    // keyframe) always succeeds, but an unreachable target (past clip end) or a
+    // PTS/index mismatch cannot discard forever.
+    let max_discard = handle
+        .geometry
+        .out_point()
+        .saturating_mul(2)
+        .saturating_add(256);
+
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        // Drain the transport mailbox and apply each verb to the player. This is
+        // the only control-plane seam; O(pending), it takes the mailbox's short
+        // uncontended mutex for a `mem::take`, and never awaits or back-pressures
+        // the output clock (inv #1/#10).
+        for verb in handle.mailbox.drain() {
+            match verb {
+                TransportVerb::Play => player.play(multiview_core::time::MediaTime::ZERO),
+                TransportVerb::Vamp => player.vamp(multiview_core::time::MediaTime::ZERO),
+                TransportVerb::Pause => player.pause(),
+                TransportVerb::Stop => player.stop(),
+                TransportVerb::ArmExit => player.arm_exit(),
+                TransportVerb::TakeExit => player.take_exit(),
+                TransportVerb::CancelExit => player.cancel_exit(),
+                // load/cue/seek carry a target the executor honours by seeking;
+                // the MVP player plays one bound asset, so a Seek re-targets the
+                // cursor and a Cue/Load re-cues to the in-point. A failed seek is
+                // logged and skipped (the tile holds last-good — inv #1/#2).
+                TransportVerb::Seek { frame } => {
+                    apply_player_seek(input, decoder, frame, cadence, &mut pending_target);
+                }
+                TransportVerb::Cue { frame } => {
+                    let target = frame.unwrap_or_else(|| handle.geometry.in_point());
+                    apply_player_seek(input, decoder, target, cadence, &mut pending_target);
+                }
+                TransportVerb::Load { .. } => {
+                    let in_point = handle.geometry.in_point();
+                    apply_player_seek(input, decoder, in_point, cadence, &mut pending_target);
+                }
+            }
+        }
+
+        // Pull every frame the decoder currently has, deciding per frame.
+        while let Some(decoded) = decoder.receive_frame().map_err(|e| e.to_string())? {
+            // Establish the asset's PTS origin from the very first decoded frame
+            // (a container may start PTS at a non-zero offset).
+            let origin = *first_pts_ns.get_or_insert_with(|| decoded.meta.pts.as_nanos());
+            // Frame-accurate seek: after a seek/loop-wrap, libav landed on a
+            // keyframe at-or-before the requested in-point, so decode-and-discard
+            // every frame whose index is before the target; only once a decoded
+            // frame reaches the target do we align and start publishing — so no
+            // pre-target frame is ever shown at the seam.
+            if let Some(target) = pending_target {
+                let idx = frame_index_of(&decoded, origin, frame_period_ns);
+                if idx < target {
+                    // FAIL-SAFE: bound the decode-discard so an unreachable target
+                    // (past clip end) or a PTS/index mismatch cannot discard
+                    // forever. Give up → drain + hold last-good (inv #1/#2).
+                    discarded = discarded.saturating_add(1);
+                    if discarded > max_discard {
+                        tracing::warn!(
+                            player = %plan.id, target, discarded,
+                            "media player: seek target unreachable (discard budget exhausted) — \
+                             holding last-good"
+                        );
+                        drained = true;
+                        break;
+                    }
+                    continue;
+                }
+                // Target reached: aligned. Reset the discard budget for the next
+                // seek.
+                pending_target = None;
+                source_frame = idx;
+                discarded = 0;
+            }
+            match player.on_decoded(source_frame) {
+                PlayerAction::Publish { at } => {
+                    let image = to_tile.convert(&decoded.frame, tag)?;
+                    // Pace to the player's own monotone stamp (invariant #4),
+                    // then publish it (latch-on-tick, invariant #1). Re-check
+                    // `stop` after the (possibly long) pace wait. Wrap the frame
+                    // in an `Arc` ONCE and publish that handle; the held last-good
+                    // is the same `Arc` (a refcount bump, not a pixel copy).
+                    pacer.wait_for(at, stop);
+                    if stop.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    let image = Arc::new(image);
+                    last_image = Some(Arc::clone(&image));
+                    plan.store.publish_arc(image, at);
+                    source_frame = source_frame.saturating_add(1);
+                    produced_this_lap = produced_this_lap.saturating_add(1);
+                }
+                PlayerAction::SeekFlushTo { frame } => {
+                    // The in-place loop/vamp wrap: discard this boundary frame,
+                    // seek to the in-point, flush the decoder (ADR-0097 rule 2),
+                    // and keep decoding (the decode-discard above lands the first
+                    // published frame exactly on the in-point). A wrap that
+                    // published frames is a healthy lap → reset the unproductive
+                    // counter; break to re-read packets from the new position.
+                    apply_player_seek(input, decoder, frame, cadence, &mut pending_target);
+                    discarded = 0;
+                    unproductive_laps = 0;
+                    produced_this_lap = 0;
+                    break;
+                }
+                PlayerAction::Hold { at } => {
+                    // The decoded frame is not shown (paused / EOF-held): hold
+                    // the last-good handle, republished at the advancing stamp so
+                    // the tile reads LIVE. Republish is an `Arc::clone` (refcount
+                    // bump) — no pixel-plane copy. With no prior frame, drop it.
+                    if let Some(image) = &last_image {
+                        pacer.wait_for(at, stop);
+                        if stop.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
+                        plan.store.publish_arc(Arc::clone(image), at);
+                    }
+                }
+                PlayerAction::Ended => {
+                    // `auto_off`: the channel reports Ended and releases — the
+                    // switcher applies the bus/keyer consequence (ADR-0057 §4).
+                    // The tile holds its last-good frame forever (HoldForever).
+                    return Ok(());
+                }
+            }
+        }
+
+        // The decoder has been flushed at demux EOF and its DELAYED frames have
+        // now been drained by the `while` above — so the lap can be judged
+        // productive/unproductive on the COMPLETE frame set (B-frame / reordered
+        // frames buffered until the flush are counted). Decide the loop here.
+        if eof_flushing {
+            eof_flushing = false;
+            if player.is_playing_state() {
+                // FAIL-SAFE: a full open→decode→EOF-flush lap that published ZERO
+                // frames is an unplayable asset for this geometry (truncated /
+                // zero-frame / corrupt, or an in-point/target past the real clip
+                // end). Re-seeking forever would spin the ingest thread (rule 26 /
+                // inv #1). After `MAX_UNPRODUCTIVE_LAPS` such laps, give up → hold
+                // last-good, never busy-re-arm seek→EOF→seek. A lap that published
+                // ANY frame (during decode OR the flush) is productive.
+                if produced_this_lap == 0 {
+                    unproductive_laps = unproductive_laps.saturating_add(1);
+                    if unproductive_laps >= MAX_UNPRODUCTIVE_LAPS {
+                        tracing::warn!(
+                            player = %plan.id, laps = unproductive_laps,
+                            "media player: asset produced no frames for this geometry — \
+                             holding last-good (no further re-seek)"
+                        );
+                        drained = true;
+                    }
+                } else {
+                    unproductive_laps = 0;
+                }
+                if !drained {
+                    // Re-arm the next loop from the in-point (this re-seek flushes
+                    // the decoder again, clearing the EOF state).
+                    produced_this_lap = 0;
+                    let in_point = handle.geometry.in_point();
+                    apply_player_seek(input, decoder, in_point, cadence, &mut pending_target);
+                }
+            } else {
+                // Not looping: the play-through ended — drain and hold.
+                drained = true;
+            }
+        }
+
+        if drained {
+            // The decoder is fully drained and the player is not looping (a wrap
+            // would have re-seeded packets). Hold the tile LIVE: a finite,
+            // non-looping play-through keeps republishing its terminal frame at
+            // cadence via the heartbeat below until `stop`.
+            heartbeat_player_hold(plan, &mut player, last_image.as_ref(), pacer, stop);
+            return Ok(());
+        }
+
+        // While flushing the decoder's delayed frames after demux EOF, do not
+        // read more packets — loop back to drain the decoder first.
+        if eof_flushing {
+            continue;
+        }
+
+        // Feed the decoder the next packet(s).
+        let mut packet = ffmpeg::codec::packet::Packet::empty();
+        match packet.read(input) {
+            Ok(()) => {
+                if packet.stream() == stream_index {
+                    decoder.send_packet(&packet).map_err(|e| e.to_string())?;
+                }
+                // Non-video packets are ignored on the player path (a player
+                // channel renders video; its audio rides the per-source audio
+                // thread, ADR-0057 Decision 6).
+            }
+            Err(ffmpeg::Error::Eof) => {
+                // Demux EOF: flush the decoder so its DELAYED (reordered /
+                // B-frame) frames emit, then loop back to DRAIN + publish them
+                // before judging this lap (the productivity decision happens above
+                // once `eof_flushing` frames are drained). This is the same
+                // EOF-flush behaviour the decoder-flush tests document.
+                decoder.send_eof().map_err(|e| e.to_string())?;
+                eof_flushing = true;
+            }
+            Err(other) => return Err(other.to_string()),
+        }
+    }
+}
+
+/// Seek the open container to `frame` (in-point of a loop/vamp, a cue, or a user
+/// seek) and **flush the decoder** so no stale reordered frame from before the
+/// seek leaks past it (ADR-0097 rule 2, non-negotiable). Arms the **pending
+/// frame-accurate target** at `frame`: libav lands on a keyframe at-or-before
+/// `frame`, so the decode loop discards forward to `frame` before publishing,
+/// making the first published frame exactly the requested in-point even for a
+/// non-keyframe in-point. A failed seek is logged and skipped — the tile holds
+/// last-good rather than crashing (invariants #1/#2); the supervised reconnect
+/// bracket in [`ingest_loop`] is the deeper recovery.
+fn apply_player_seek(
+    input: &mut ffmpeg::format::context::Input,
+    decoder: &mut StreamVideoDecoder,
+    frame: u64,
+    cadence: Rational,
+    pending_target: &mut Option<u64>,
+) {
+    let target_us = frame_to_seek_us(frame, cadence);
+    if let Err(reason) = input.seek(target_us, ..) {
+        tracing::warn!(%reason, frame, "media-player seek failed; holding last-good");
+        return;
+    }
+    if let Err(reason) = decoder.flush() {
+        tracing::warn!(%reason, "media-player decoder flush failed after seek");
+    }
+    *pending_target = Some(frame);
+}
+
+/// The 0-based source frame index of a decoded frame: `(meta.pts − origin) /
+/// frame_period`, rounded to nearest, where `origin` is the asset's first-frame
+/// PTS (a container may start PTS at a non-zero offset). Used to align a
+/// frame-accurate seek to its target.
+fn frame_index_of(
+    decoded: &multiview_ffmpeg::DecodedVideoFrame,
+    origin_ns: i64,
+    frame_period_ns: i64,
+) -> u64 {
+    if frame_period_ns <= 0 {
+        return 0;
+    }
+    let rel_ns = decoded.meta.pts.as_nanos().saturating_sub(origin_ns).max(0);
+    // Round to nearest: (rel + period/2) / period.
+    let idx = rel_ns.saturating_add(frame_period_ns / 2) / frame_period_ns;
+    u64::try_from(idx).unwrap_or(0)
+}
+
+/// Keep a drained, non-looping player's tile LIVE: heartbeat-republish its
+/// terminal frame at cadence with advancing stamps (media-playout §7.3) until
+/// `stop`, so it never ages to STALE on the freshness ladder. An `auto_off`
+/// player (whose `on_heartbeat` returns [`PlayerAction::Ended`]) instead returns
+/// immediately — it has released, and the store holds its last frame forever
+/// (`HoldForever`). With no frame ever decoded (a zero-length asset), returns
+/// immediately too.
+fn heartbeat_player_hold(
+    plan: &IngestPlan,
+    player: &mut crate::player::MediaPlayer,
+    last_image: Option<&Arc<Nv12Image>>,
+    pacer: &mut PtsWallClock,
+    stop: &AtomicBool,
+) {
+    use crate::player::PlayerAction;
+    let Some(image) = last_image else {
+        return;
+    };
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        // A held player heartbeats `Hold { at }` with an advancing stamp; an
+        // `auto_off` player heartbeats `Ended` (released — stop the heartbeat,
+        // the tile holds last-good via HoldForever). Any other action is not
+        // expected on a drained player; stop rather than busy-loop.
+        let PlayerAction::Hold { at } = player.on_heartbeat() else {
+            return;
+        };
+        pacer.wait_for(at, stop);
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        // Republish the held handle — an `Arc::clone` (refcount bump), never a
+        // pixel-plane copy.
+        plan.store.publish_arc(Arc::clone(image), at);
     }
 }
 
@@ -11532,5 +12219,733 @@ mod outmeta_wiring_tests {
         let (meta, matrix) = output_mux_meta(&out);
         assert!(meta.is_empty());
         assert!(matrix.is_none());
+    }
+}
+
+/// End-to-end proof of the **media-player loop executor** ([`stream_player`])
+/// against a REAL libav decoder — the load-bearing wiring test for ADR-0097's
+/// in-place loop (seek + `avcodec_flush_buffers` + keep decoding).
+///
+/// The pure transport core already proves bit-exactly that the published stamp
+/// sequence is monotone and `prev + frame_period` across a loop seam
+/// (`media_player_transport::stamps_are_monotonic_across_a_loop_lap`). What this
+/// test adds is proof that the EXECUTOR genuinely loops a real decoder: a finite
+/// clip, played as a vamp, must publish **more frames than the clip is long** —
+/// which is only possible if, on reaching the out-point, the loop seeks back,
+/// flushes the decoder, and keeps decoding fresh frames past the seam (rather
+/// than hitting EOF and stopping). It also confirms the tile reads LIVE (real
+/// decoded frames), and that the published media-time advances past one
+/// clip-length (the seam did not freeze/clamp).
+#[cfg(all(test, feature = "ffmpeg"))]
+mod media_player_loop_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::as_conversions,
+        clippy::too_many_lines
+    )]
+
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use ffmpeg_next as ffmpeg;
+    use multiview_core::time::{MediaTime, Rational};
+    use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
+
+    use crate::player::{EofPolicy, PlayoutGeometry, TransportMailbox};
+
+    /// A cheap content fingerprint of an NV12 image: FNV-1a over the Y plane's
+    /// in-stride bytes. Two frames with the same picture hash equal; different
+    /// `testsrc` frames (a moving pattern) hash differently — enough to identify
+    /// WHICH source frame a published tile is, without OCR.
+    fn nv12_fingerprint(img: &super::Nv12Image) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for &b in img.y_plane() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    /// Decode the first `count` frames of `clip` to scaled NV12 (the same tile
+    /// size the player uses) and return their fingerprints, indexed by source
+    /// frame number — the independent reference for "which frame is on the tile".
+    fn reference_fingerprints(clip: &Path, tile_w: u32, tile_h: u32, count: u64) -> Vec<u64> {
+        use multiview_ffmpeg::StreamVideoDecoder;
+        multiview_ffmpeg::ensure_initialized().unwrap();
+        let mut input = ffmpeg::format::input(&clip).unwrap();
+        let (stream_index, params, time_base, declared_fps) =
+            super::best_video_stream_params(&input).unwrap();
+        let (decoder, _hw) =
+            StreamVideoDecoder::new_preferring_hw(params, time_base, false, None).unwrap();
+        let mut decoder = decoder.with_declared_fps(Some(declared_fps));
+        let tag = super::CanvasColor::default().output_tag();
+        let mut to_tile = super::TileScaler::new(tile_w, tile_h);
+        let mut out = Vec::new();
+        let mut drained = false;
+        'outer: loop {
+            while let Some(decoded) = decoder.receive_frame().unwrap() {
+                let img = to_tile.convert(&decoded.frame, tag).unwrap();
+                out.push(nv12_fingerprint(&img));
+                if out.len() as u64 >= count {
+                    break 'outer;
+                }
+            }
+            if drained {
+                break;
+            }
+            let mut packet = ffmpeg::codec::packet::Packet::empty();
+            match packet.read(&mut input) {
+                Ok(()) => {
+                    if packet.stream() == stream_index {
+                        decoder.send_packet(&packet).unwrap();
+                    }
+                }
+                Err(ffmpeg::Error::Eof) => {
+                    decoder.send_eof().unwrap();
+                    drained = true;
+                }
+                Err(e) => panic!("reference decode read error: {e}"),
+            }
+        }
+        out
+    }
+
+    /// Generate a short, all-keyframe-free `mpeg2video` clip with B-frames at
+    /// 25 fps. `-bf 2` forces a reorder window so the post-seek decoder flush is
+    /// load-bearing (stale B-frames would otherwise leak past the loop seam).
+    fn generate_loop_clip(path: &Path, frames: u32) {
+        let dur = f64::from(frames) / 25.0;
+        let status = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg(format!("testsrc=size=160x120:rate=25:duration={dur}"))
+            .args([
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                "mpeg2video",
+                "-bf",
+                "2",
+                "-g",
+                "6",
+                "-f",
+                "mpegts",
+            ])
+            .arg(path)
+            .status()
+            .expect("spawn ffmpeg to generate the loop clip");
+        assert!(status.success(), "ffmpeg failed to generate the loop clip");
+        assert!(path.exists(), "loop clip was not written");
+    }
+
+    #[test]
+    fn a_vamping_player_loops_frame_accurately_over_a_non_keyframe_vamp_window() {
+        // A 12-frame clip at 25 fps, GOP = 6 → keyframes at source frames 0 and
+        // 6 ONLY. Vamp the window [3, 9): both vamp_in (3) and the post-wrap
+        // re-entry are NON-KEYFRAMES, so a correct loop MUST keyframe-seek (to 0
+        // for the 3..6 span) then DECODE-AND-DISCARD forward to frame 3 — never
+        // publishing a pre-target frame (0,1,2) at the seam. This is the exact
+        // case the naive `*source_frame = frame` after a keyframe seek got wrong.
+        const CLIP_FRAMES: u32 = 12;
+        const VAMP_IN: u64 = 3;
+        const VAMP_OUT: u64 = 9;
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("loop.ts");
+        generate_loop_clip(&clip, CLIP_FRAMES);
+
+        let tile_w = 160;
+        let tile_h = 120;
+        // Independent reference: the fingerprint of every source frame [0, 12),
+        // so we can identify WHICH source frame each published tile is.
+        let refs = reference_fingerprints(&clip, tile_w, tile_h, u64::from(CLIP_FRAMES));
+        assert!(
+            refs.len() >= usize::try_from(CLIP_FRAMES).unwrap(),
+            "reference decode produced too few frames: {}",
+            refs.len()
+        );
+        // Sanity: testsrc frames differ, so the reference fingerprints in the
+        // pre-target span and the vamp window must be distinguishable.
+        let in_window: std::collections::HashSet<u64> = (VAMP_IN..VAMP_OUT)
+            .map(|i| refs[usize::try_from(i).unwrap()])
+            .collect();
+        let pre_target: std::collections::HashSet<u64> = (0..VAMP_IN)
+            .map(|i| refs[usize::try_from(i).unwrap()])
+            .collect();
+        assert!(
+            pre_target.is_disjoint(&in_window),
+            "test fixture invalid: pre-target and vamp-window frames are not distinguishable"
+        );
+
+        let cadence = Rational::new(25, 1);
+        let geometry =
+            PlayoutGeometry::new(0, u64::from(CLIP_FRAMES), VAMP_IN, VAMP_OUT, cadence).unwrap();
+        let mailbox = Arc::new(TransportMailbox::new());
+        let handle = crate::player::PlayerHandle::new(
+            "player-test".to_owned(),
+            geometry,
+            EofPolicy::Loop,
+            true, // loop_on_start → vamp the [3,9) window
+            Arc::clone(&mailbox),
+        );
+
+        let store = Arc::new(TileStore::new(
+            "player-test",
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+
+        let plan = super::IngestPlan {
+            id: "player-test".to_owned(),
+            location: super::SourceLocation::Path(clip.clone()),
+            player: Some(handle),
+            tile_w,
+            tile_h,
+            store: Arc::clone(&store),
+            live: false,
+            #[cfg(feature = "overlay")]
+            incontainer_sub: None,
+            #[cfg(feature = "overlay")]
+            embedded_cc: None,
+            canvas_color: super::CanvasColor::default(),
+            cadence,
+            decode_placement: super::DecodePlacement::Default,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_registry: None,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_audio_store: None,
+            #[cfg(feature = "ndi")]
+            ndi_accept_license: false,
+            #[cfg(feature = "ndi")]
+            ndi_acceptance: multiview_input::ndi::license::LicenseAcceptance {
+                accepted_by: String::new(),
+                accepted_at: String::new(),
+            },
+            #[cfg(feature = "youtube")]
+            youtube_url_slot: None,
+        };
+
+        // A recorder thread snapshots the published tile's (stamp, fingerprint)
+        // as fast as it can while the player runs — across several laps this
+        // captures the published CONTENT and the monotone published media-time.
+        let captured: Arc<Mutex<Vec<(i64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec_store = Arc::clone(&store);
+        let rec_captured = Arc::clone(&captured);
+        let rec_stop = Arc::new(AtomicBool::new(false));
+        let rec_stop_t = Arc::clone(&rec_stop);
+        let recorder = std::thread::Builder::new()
+            .name("media-player-recorder".to_owned())
+            .spawn(move || {
+                let far = MediaTime::from_nanos(600_000_000_000);
+                let mut last_seq = 0u64;
+                while !rec_stop_t.load(Ordering::Acquire) {
+                    let seq = rec_store.sequence();
+                    if seq != last_seq {
+                        last_seq = seq;
+                        if let Some(frame) = rec_store.read_at(far).frame() {
+                            // The stamp is the store's last published instant.
+                            let stamp = rec_store
+                                .elapsed_since_frame(far)
+                                .map_or(0, |e| far.as_nanos() - e.as_nanos());
+                            let fp = nv12_fingerprint(frame);
+                            rec_captured.lock().unwrap().push((stamp, fp));
+                        }
+                    }
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            })
+            .unwrap();
+
+        // Drive the player ~5 vamp-window-lengths of wall time (window = 6 × 40 ms
+        // = 240 ms) so it loops several times across the non-keyframe seam.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let player_thread = std::thread::Builder::new()
+            .name("media-player-loop-test".to_owned())
+            .spawn(move || super::ingest_loop(&plan, &stop_thread))
+            .unwrap();
+
+        std::thread::sleep(Duration::from_millis(1_500));
+        stop.store(true, Ordering::Release);
+        player_thread.join().unwrap();
+        rec_stop.store(true, Ordering::Release);
+        recorder.join().unwrap();
+
+        let captured = captured.lock().unwrap().clone();
+
+        // PROOF 1 — it LOOPED across the non-keyframe seam: more frames published
+        // than one vamp window holds (only possible via keyframe-seek + flush +
+        // decode-discard + re-decode, not EOF-stop).
+        let published = store.sequence();
+        let window_len = VAMP_OUT - VAMP_IN;
+        assert!(
+            published > window_len,
+            "a vamping player must loop past one vamp window: published {published} \
+             for a {window_len}-frame window (the seek+flush+discard loop did not run)"
+        );
+
+        // PROOF 2 — FRAME-ACCURATE: every captured published tile is a frame in
+        // the vamp window [3, 9); NONE is a pre-target keyframe-span frame (0,1,2).
+        // A naive seek (`*source_frame = frame` after a keyframe seek) would
+        // publish frame 0/1/2 at the seam — this asserts it never does.
+        assert!(
+            !captured.is_empty(),
+            "the recorder captured no published frames"
+        );
+        for &(_, fp) in &captured {
+            assert!(
+                !pre_target.contains(&fp),
+                "a PRE-TARGET frame (source < vamp_in={VAMP_IN}) was published — \
+                 the seek is not frame-accurate (published a keyframe-span frame at the seam)"
+            );
+            assert!(
+                in_window.contains(&fp),
+                "a published tile is not a frame in the vamp window [{VAMP_IN}, {VAMP_OUT})"
+            );
+        }
+
+        // PROOF 3 — the published media-time is MONOTONE across the seam (never
+        // froze/clamped): captured stamps are non-decreasing and the timeline
+        // advanced well past one window (no nanosecond-clamp at the wrap).
+        for w in captured.windows(2) {
+            assert!(
+                w[1].0 >= w[0].0,
+                "published media-time must be monotone across the loop seam: {:?} then {:?}",
+                w[0].0,
+                w[1].0
+            );
+        }
+        let max_stamp = captured.iter().map(|&(s, _)| s).max().unwrap();
+        let one_window_ns = i64::try_from(window_len).unwrap() * 40_000_000;
+        assert!(
+            max_stamp > one_window_ns,
+            "the published timeline must advance past one window (got {max_stamp} ns ≤ \
+             {one_window_ns} ns — the seam froze/clamped)"
+        );
+    }
+
+    #[test]
+    fn an_unplayable_asset_holds_last_good_without_spinning_the_ingest_thread() {
+        // FAIL-SAFE (rule 26 / inv #1): a vamp window whose frames DO NOT EXIST in
+        // the asset (here a 4-frame clip but a declared out-point of 12 + vamp
+        // [8, 12)) must NOT cycle seek→EOF→seek forever on the ingest thread — the
+        // decode-discard can never reach frame 8, and every open→decode→EOF lap
+        // publishes zero frames. The player must bound the discard / unproductive
+        // laps, give up, and HOLD last-good — the ingest thread TERMINATES ON ITS
+        // OWN (no `stop` set), leaving the output clock undisturbed. Against the
+        // pre-fix code this loops forever and the assertion below times out.
+        const REAL_FRAMES: u32 = 4;
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("short.ts");
+        generate_loop_clip(&clip, REAL_FRAMES);
+
+        let cadence = Rational::new(25, 1);
+        // Declared geometry far exceeds the real 4-frame clip: BOTH the in-point
+        // (8) and the vamp window [8, 12) are entirely past the real end, so every
+        // open→decode→EOF lap (which re-seeks to the in-point) decodes only frames
+        // 0..3, discards them all (idx < 8), and publishes NOTHING — a genuine
+        // unproductive spin the fail-safe must break.
+        let geometry = PlayoutGeometry::new(8, 12, 8, 12, cadence).unwrap();
+        let mailbox = Arc::new(TransportMailbox::new());
+        let handle = crate::player::PlayerHandle::new(
+            "vt-bad".to_owned(),
+            geometry,
+            EofPolicy::Loop,
+            true,
+            Arc::clone(&mailbox),
+        );
+        let store = Arc::new(TileStore::new(
+            "vt-bad",
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let plan = super::IngestPlan {
+            id: "vt-bad".to_owned(),
+            location: super::SourceLocation::Path(clip.clone()),
+            player: Some(handle),
+            tile_w: 160,
+            tile_h: 120,
+            store: Arc::clone(&store),
+            live: false,
+            #[cfg(feature = "overlay")]
+            incontainer_sub: None,
+            #[cfg(feature = "overlay")]
+            embedded_cc: None,
+            canvas_color: super::CanvasColor::default(),
+            cadence,
+            decode_placement: super::DecodePlacement::Default,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_registry: None,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_audio_store: None,
+            #[cfg(feature = "ndi")]
+            ndi_accept_license: false,
+            #[cfg(feature = "ndi")]
+            ndi_acceptance: multiview_input::ndi::license::LicenseAcceptance {
+                accepted_by: String::new(),
+                accepted_at: String::new(),
+            },
+            #[cfg(feature = "youtube")]
+            youtube_url_slot: None,
+        };
+
+        // Drive the player WITHOUT ever setting `stop`: the fail-safe must end the
+        // thread on its own when the asset cannot satisfy the geometry.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let player_thread = std::thread::Builder::new()
+            .name("media-player-failsafe-test".to_owned())
+            .spawn(move || super::ingest_loop(&plan, &stop_thread))
+            .unwrap();
+
+        // Poll for self-termination for up to ~5 s. A correct fail-safe bounds the
+        // discard + unproductive laps and returns well within this; a spin never
+        // finishes (the pre-fix RED).
+        let mut finished = false;
+        for _ in 0..500 {
+            if player_thread.is_finished() {
+                finished = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            finished,
+            "the player ingest thread did NOT terminate on an unplayable asset — \
+             it is spinning seek→EOF→seek (the fail-safe is missing)"
+        );
+        // Stop is a no-op (already finished); join to reap.
+        stop.store(true, Ordering::Release);
+        player_thread.join().unwrap();
+
+        // The output path is undisturbed: the tile rides the framestore state
+        // machine (last-good / NO_SIGNAL). A reader never blocks — confirm the
+        // store responds (here: no real frame was ever decodable, so it holds
+        // NO_SIGNAL under the Slate-vs-HoldForever read, never a hang).
+        let _ = store.read_at(MediaTime::from_nanos(1_000_000_000));
+    }
+
+    #[test]
+    fn a_b_frame_clip_publishes_its_eof_flush_delayed_frames_each_lap() {
+        // A `-bf 2` clip holds its trailing reorder-window frames in the decoder
+        // until the EOF FLUSH (decoder_flush.rs proves `sent − emitted ≥ 1` frames
+        // are buffered awaiting EOF). The player MUST drain + publish those
+        // flush-delayed frames before re-seeking the next lap — otherwise the last
+        // frame(s) of the window are LOST every lap (and, in the extreme, a lap
+        // that publishes nothing until the flush is wrongly judged unproductive
+        // and given up). Vamp the WHOLE 6-frame clip and assert that, across
+        // several laps, EVERY source frame's content is published — including the
+        // reorder-buffered ones. Against the pre-flush judgment the buffered
+        // frames are flushed away (lost) and the captured set is incomplete.
+        const REAL_FRAMES: u64 = 6;
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("bframe.ts");
+        generate_loop_clip(&clip, u32::try_from(REAL_FRAMES).unwrap());
+
+        let tile_w = 160;
+        let tile_h = 120;
+        let refs = reference_fingerprints(&clip, tile_w, tile_h, REAL_FRAMES);
+        assert!(
+            refs.len() >= usize::try_from(REAL_FRAMES).unwrap(),
+            "reference decode produced too few frames: {}",
+            refs.len()
+        );
+        let want: std::collections::HashSet<u64> = refs.iter().copied().collect();
+
+        let cadence = Rational::new(25, 1);
+        let geometry = PlayoutGeometry::new(0, REAL_FRAMES, 0, REAL_FRAMES, cadence).unwrap();
+        let mailbox = Arc::new(TransportMailbox::new());
+        let handle = crate::player::PlayerHandle::new(
+            "vt-bframe".to_owned(),
+            geometry,
+            EofPolicy::Loop,
+            true,
+            Arc::clone(&mailbox),
+        );
+        let store = Arc::new(TileStore::new(
+            "vt-bframe",
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let plan = super::IngestPlan {
+            id: "vt-bframe".to_owned(),
+            location: super::SourceLocation::Path(clip.clone()),
+            player: Some(handle),
+            tile_w,
+            tile_h,
+            store: Arc::clone(&store),
+            live: false,
+            #[cfg(feature = "overlay")]
+            incontainer_sub: None,
+            #[cfg(feature = "overlay")]
+            embedded_cc: None,
+            canvas_color: super::CanvasColor::default(),
+            cadence,
+            decode_placement: super::DecodePlacement::Default,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_registry: None,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_audio_store: None,
+            #[cfg(feature = "ndi")]
+            ndi_accept_license: false,
+            #[cfg(feature = "ndi")]
+            ndi_acceptance: multiview_input::ndi::license::LicenseAcceptance {
+                accepted_by: String::new(),
+                accepted_at: String::new(),
+            },
+            #[cfg(feature = "youtube")]
+            youtube_url_slot: None,
+        };
+
+        // Capture every distinct published frame fingerprint across the run.
+        let captured: Arc<Mutex<std::collections::HashSet<u64>>> =
+            Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let rec_store = Arc::clone(&store);
+        let rec_captured = Arc::clone(&captured);
+        let rec_stop = Arc::new(AtomicBool::new(false));
+        let rec_stop_t = Arc::clone(&rec_stop);
+        let recorder = std::thread::Builder::new()
+            .name("media-player-bframe-recorder".to_owned())
+            .spawn(move || {
+                let far = MediaTime::from_nanos(600_000_000_000);
+                let mut last_seq = 0u64;
+                while !rec_stop_t.load(Ordering::Acquire) {
+                    let seq = rec_store.sequence();
+                    if seq != last_seq {
+                        last_seq = seq;
+                        if let Some(frame) = rec_store.read_at(far).frame() {
+                            rec_captured.lock().unwrap().insert(nv12_fingerprint(frame));
+                        }
+                    }
+                    std::thread::sleep(Duration::from_micros(100));
+                }
+            })
+            .unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let player_thread = std::thread::Builder::new()
+            .name("media-player-bframe-test".to_owned())
+            .spawn(move || super::ingest_loop(&plan, &stop_thread))
+            .unwrap();
+
+        // ~10 laps (clip = 6 × 40 ms = 240 ms): plenty for the poller to catch
+        // every per-lap frame including the flush-delayed ones.
+        std::thread::sleep(Duration::from_millis(2_500));
+        let still_running = !player_thread.is_finished();
+        stop.store(true, Ordering::Release);
+        player_thread.join().unwrap();
+        rec_stop.store(true, Ordering::Release);
+        recorder.join().unwrap();
+
+        // It kept looping a GOOD clip (never wrongly given up).
+        assert!(
+            still_running,
+            "a good B-frame clip was WRONGLY given up / held — the fail-safe judged \
+             the lap before the EOF flush drained the delayed frames"
+        );
+        // COMPLETENESS: every source frame's content was published across laps —
+        // including the reorder-buffered frames that emit only on the EOF flush.
+        // Against the pre-fix code those frames are flushed away and never appear.
+        let got = captured.lock().unwrap().clone();
+        let missing: Vec<u64> = want.difference(&got).copied().collect();
+        assert!(
+            missing.is_empty(),
+            "the player dropped {} of {} source frames — flush-delayed (reorder) \
+             frames were lost instead of published before the re-seek",
+            missing.len(),
+            want.len()
+        );
+    }
+}
+
+/// Boot-spawn of media-player channels from `config.media_players` (ADR-0057 /
+/// ADR-0097): [`build_media_player_boot`] turns a configured player + its
+/// default library asset into a player [`IngestPlan`] (carrying a `player`
+/// handle) + a registered transport mailbox. Feature-independent (no libav).
+#[cfg(test)]
+mod media_player_boot_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use multiview_compositor::pipeline::CanvasColor;
+    use multiview_config::MultiviewConfig;
+
+    /// A canvas + one cell + a media library (one clip with a declared
+    /// out-point + vamp window) + a media player defaulting to it.
+    fn config_with_player() -> MultiviewConfig {
+        let doc = r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "vt-1"
+[media_library]
+root = "/srv/media"
+[[media_library.assets]]
+id = "opener"
+kind = "clip"
+path = "opener.ts"
+in_point_frames = 0
+out_point_frames = 100
+vamp_in_frames = 10
+vamp_out_frames = 90
+[[media_players]]
+id = "vt-1"
+default = "opener"
+loop_default = true
+"##;
+        MultiviewConfig::load_from_toml(doc).expect("parse media-player config")
+    }
+
+    #[test]
+    fn build_media_player_boot_spawns_a_rolling_player_with_geometry_and_mailbox() {
+        let config = config_with_player();
+        let layout = config.solve_layout().expect("layout solves");
+        let cadence = config.canvas.fps.rational();
+        let boot =
+            super::build_media_player_boot(&config, &layout, cadence, CanvasColor::default());
+
+        // One rolling player plan + one store + one mailbox.
+        assert_eq!(
+            boot.plans.len(),
+            1,
+            "the player with a declared-geometry asset rolls"
+        );
+        assert_eq!(boot.stores.len(), 1);
+        assert!(
+            boot.mailboxes.contains_key("vt-1"),
+            "the player's transport mailbox is registered for the control plane"
+        );
+
+        let plan = &boot.plans[0];
+        assert_eq!(plan.id, "vt-1");
+        assert!(
+            !plan.live,
+            "a media player is not a reconnect-forever live source"
+        );
+        let handle = plan
+            .player
+            .as_ref()
+            .expect("the plan carries a player handle");
+        // The geometry is the asset's declared window (the vamp sub-window loops).
+        assert_eq!(handle.geometry.in_point(), 0);
+        assert_eq!(handle.geometry.out_point(), 100);
+        assert_eq!(handle.geometry.vamp_in(), 10);
+        assert_eq!(handle.geometry.vamp_out(), 90);
+        assert_eq!(handle.geometry.cadence(), cadence);
+        assert!(
+            handle.loop_on_start,
+            "loop_default = true ⇒ the channel vamps on start"
+        );
+        // The asset path resolves against the library root.
+        let super::SourceLocation::Path(p) = &plan.location else {
+            panic!("expected a Path location for the player's asset");
+        };
+        assert_eq!(p.to_str().unwrap(), "/srv/media/opener.ts");
+    }
+
+    #[test]
+    fn a_player_without_a_default_asset_boots_idle_but_keeps_its_mailbox() {
+        let mut config = config_with_player();
+        // Drop the default asset binding: the channel boots idle (no plan) but
+        // its mailbox stays registered so a later load command is honoured.
+        config.media_players[0].default = None;
+        let layout = config.solve_layout().expect("layout solves");
+        let cadence = config.canvas.fps.rational();
+        let boot =
+            super::build_media_player_boot(&config, &layout, cadence, CanvasColor::default());
+        assert!(boot.plans.is_empty(), "no default asset ⇒ no rolling plan");
+        assert!(
+            boot.mailboxes.contains_key("vt-1"),
+            "an idle player still registers its mailbox"
+        );
+    }
+}
+
+/// Data-plane handle-sharing (ADR-0097 / inv #5 / rule 22): the media-player
+/// publish + hold path must share the decoded frame by `Arc` handle, never copy
+/// the NV12 pixel planes per frame. Pure store + image logic (no libav).
+#[cfg(test)]
+mod media_player_handle_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::sync::Arc;
+
+    use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
+    use multiview_core::time::MediaTime;
+    use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
+
+    fn test_image(width: u32, height: u32) -> Nv12Image {
+        let y_len = usize::try_from(width * height).unwrap();
+        let y = vec![0x80u8; y_len];
+        let uv = vec![0x80u8; y_len / 2];
+        Nv12Image::new(width, height, y, uv, CanvasColor::default().output_tag()).unwrap()
+    }
+
+    #[test]
+    fn publish_arc_holds_the_same_buffer_handle_no_pixel_copy() {
+        // The executor wraps each decoded frame in an `Arc` ONCE and publishes
+        // that handle; the held last-good + every heartbeat republish are
+        // `Arc::clone`s of the SAME handle (a refcount bump, not a pixel-plane
+        // copy). Prove the store holds the exact buffer that was published —
+        // reading it back yields a pointer-equal `Arc`, so the hold/republish
+        // path allocates ZERO new NV12 buffers per frame.
+        let store: TileStore<Nv12Image> =
+            TileStore::new("h", TileThresholds::default(), NoSignalPolicy::HoldForever);
+        let frame = Arc::new(test_image(64, 48));
+
+        // Publish the handle (what `stream_player` does: `publish_arc`).
+        store.publish_arc(Arc::clone(&frame), MediaTime::from_nanos(0));
+
+        // Read it back; the store must hold the SAME underlying buffer.
+        let read = store.read_at(MediaTime::from_nanos(0));
+        let held = read.frame().expect("a frame is held");
+        assert!(
+            Arc::ptr_eq(held, &frame),
+            "the store must hold the published Arc itself (no pixel-plane copy)"
+        );
+
+        // A heartbeat republish (hold path) is `Arc::clone` of the same handle —
+        // republishing it leaves the store pointing at the same buffer still.
+        store.publish_arc(Arc::clone(&frame), MediaTime::from_nanos(40_000_000));
+        let read2 = store.read_at(MediaTime::from_nanos(40_000_000));
+        let held2 = read2.frame().expect("a frame is held");
+        assert!(
+            Arc::ptr_eq(held2, &frame),
+            "the heartbeat republish must reuse the same buffer handle (refcount bump only)"
+        );
+
+        // The only owners are `frame` (this test) + the store's slot/ring — the
+        // strong count reflects shared handles, never duplicated pixel buffers.
+        assert!(
+            Arc::strong_count(&frame) >= 2,
+            "the buffer is shared by handle (strong_count = {})",
+            Arc::strong_count(&frame)
+        );
     }
 }

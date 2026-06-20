@@ -113,8 +113,8 @@ pub use auth::{
     authorize_object, authorize_output, provision_admin_keys, Action, ApiKeyStore, Principal, Role,
 };
 pub use command::{
-    command_bus, resolve_layout_document, Command, CommandReceiver, CommandSender, OperationId,
-    ResolvedLayout, SubmitError,
+    command_bus, resolve_layout_document, Command, CommandReceiver, CommandSender,
+    MediaTransportVerb, OperationId, ResolvedLayout, SubmitError,
 };
 pub use concurrency::{IdempotencyKey, IdempotencyStore, IfMatch, Reservation, Version};
 pub use devices::{
@@ -153,10 +153,11 @@ pub use problem::{Problem, PROBLEM_JSON};
 pub use realtime::{CorrKey, CorrRegistry, RealtimeFrame, SessionStream};
 pub use repository::{InMemoryRepository, Layout, LayoutInput, Repository, VersionedLayout};
 pub use resource_store::{
-    DeviceKind, InMemoryDeviceStore, InMemoryOutputStore, InMemoryOverlayStore,
-    InMemoryResourceStore, InMemorySourceStore, InMemorySyncGroupStore, OutputKind, OverlayKind,
-    Resource, ResourceInput, ResourceKind, ResourceRepository, SourceKind, SyncGroupKind,
-    VersionedResource, DEVICE_KIND, OUTPUT_KIND, OVERLAY_KIND, SOURCE_KIND, SYNC_GROUP_KIND,
+    DeviceKind, InMemoryDeviceStore, InMemoryMediaPlayerStore, InMemoryOutputStore,
+    InMemoryOverlayStore, InMemoryResourceStore, InMemorySourceStore, InMemorySyncGroupStore,
+    MediaPlayerKind, OutputKind, OverlayKind, Resource, ResourceInput, ResourceKind,
+    ResourceRepository, SourceKind, SyncGroupKind, VersionedResource, DEVICE_KIND,
+    MEDIA_PLAYER_KIND, OUTPUT_KIND, OVERLAY_KIND, SOURCE_KIND, SYNC_GROUP_KIND,
 };
 pub use router::{
     ingest_route, route_follow, route_follow_all, RouteBinding, RouteFollowUpdate, RouteTable,

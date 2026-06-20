@@ -219,7 +219,7 @@ export const DOCS_REGISTRY: readonly DocsPageEntry[] = [
   {
     path: "/help/features",
     title: msg`Feature guide`,
-    summary: msg`Layouts, sources, outputs, overlays, tally, salvos, and alarms — what each one is.`,
+    summary: msg`Layouts, sources, outputs, overlays, tally, salvos, media players, and alarms — what each one is.`,
     keywords: ["features", "multiviewer", "guide"],
     sections: [
       {
@@ -251,6 +251,11 @@ export const DOCS_REGISTRY: readonly DocsPageEntry[] = [
         id: "salvos",
         title: msg`Salvos`,
         keywords: ["recall", "preset", "atomic", "switch"],
+      },
+      {
+        id: "media-players",
+        title: msg`Media players`,
+        keywords: ["vt", "clip", "playout", "cue", "vamp", "loop", "opener"],
       },
       {
         id: "alarms",

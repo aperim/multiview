@@ -154,6 +154,14 @@ pub mod wallclock;
 /// renderer needs the `overlay` feature.
 pub mod synth;
 
+/// The **media-player transport** state machine (ADR-0057 + ADR-0097): the
+/// pure, deterministic playout core (load/cue/play/pause/stop/seek, in-place
+/// loop, and the vamp-and-exit extension) that drives a pre-declared
+/// media-player channel. Feature-independent (no libav/GPU), so it builds and
+/// is property-tested in the CI-green default build; the `ffmpeg`-gated ingest
+/// executor in [`pipeline`] performs the [`player::PlayerAction`]s it returns.
+pub mod player;
+
 /// The full libav\* end-to-end `multiview run` pipeline (ingest → composite →
 /// encode-once → fan out to file/HLS sinks). Behind the off-by-default `ffmpeg`
 /// feature so the baseline build stays pure-Rust; software H.264/H.265 needs
