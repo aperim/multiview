@@ -40,6 +40,12 @@ pub const SCOPED_TOKEN: &str = "scoped-key.scoped-secret-jkl";
 /// An operator scoped to a single **output** id (`wall-1`) for per-output BOLA
 /// tests: it may address head `wall-1` but is denied any other head.
 pub const OUTPUT_SCOPED_TOKEN: &str = "out-scoped-key.out-scoped-secret-mno";
+/// An operator scoped to the object allowlist `["cast-session-savable",
+/// "dev-savable"]` for the cast-save positive path: it owns BOTH the fixture
+/// session id and the promoted device id, so a save-as-device promotion of that
+/// session into that device passes both per-object authorizations (proving the
+/// save guard does not over-restrict a properly-scoped principal).
+pub const CAST_SAVE_SCOPED_TOKEN: &str = "cast-save-key.cast-save-secret-pqr";
 
 /// A fixed, deterministic acknowledgement timestamp used in tests.
 pub const ACK_NANOS: i64 = 1_700_000_000_000_000_000;
@@ -122,6 +128,19 @@ pub fn seeded_keys() -> ApiKeyStore {
             role: Role::Operator,
             scoped_object_ids: None,
             scoped_output_ids: Some(vec!["wall-1".to_owned()]),
+        },
+    );
+    keys.register(
+        "cast-save-key",
+        "cast-save-secret-pqr",
+        Principal {
+            key_id: "cast-save-key".to_owned(),
+            role: Role::Operator,
+            scoped_object_ids: Some(vec![
+                "cast-session-savable".to_owned(),
+                "dev-savable".to_owned(),
+            ]),
+            scoped_output_ids: None,
         },
     );
     keys

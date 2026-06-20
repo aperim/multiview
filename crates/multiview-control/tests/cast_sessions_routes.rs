@@ -24,10 +24,11 @@ use multiview_control::devices::cast::runtime::CastSessionFactory;
 use multiview_control::devices::cast::session::{
     CastSessionConfig, ScriptedChannel, ScriptedConnector, ScriptedInbound,
 };
+use multiview_control::devices::cast::store::CastSessionRecord;
 use multiview_control::devices::DevicePollerRegistry;
 use support::{
-    body_json, delete_if_match, get, harness_with, post_json, send, ADMIN_TOKEN, OPERATOR_TOKEN,
-    SCOPED_TOKEN, VIEWER_TOKEN,
+    body_json, delete_if_match, get, harness_with, post_json, send, ADMIN_TOKEN,
+    CAST_SAVE_SCOPED_TOKEN, OPERATOR_TOKEN, OUTPUT_SCOPED_TOKEN, SCOPED_TOKEN, VIEWER_TOKEN,
 };
 
 /// The delivery map the routes resolve outputs against: two HLS renditions.
@@ -376,6 +377,142 @@ async fn save_denies_a_session_outside_the_scoped_allowlist() {
         StatusCode::NOT_FOUND,
         "the denied save must not have created the promoted device"
     );
+}
+
+/// BOLA (OWASP API1, conventions §H / ADR-W005): `start_cast_session` casts a
+/// caller-supplied **output** (a program rendition / head). An **output-scoped**
+/// principal (confined to a subset of heads) must not cast a rendition outside
+/// its allowlist — exactly as `salvos` gates a head with `authorize_output`.
+///
+/// `OUTPUT_SCOPED_TOKEN` is an operator scoped to output `wall-1`. The cast
+/// harness serves renditions `out-a`/`out-b` (so `out-b` clears the
+/// served-rendition validation) but neither is `wall-1`, so starting a cast onto
+/// `out-b` must be a `403` — and, because the check precedes any side effect,
+/// nothing is minted: no session row, no spawned actor, no membership event.
+#[tokio::test]
+async fn start_denies_an_output_outside_the_scoped_allowlist() {
+    let h = cast_harness();
+
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions",
+            OUTPUT_SCOPED_TOKEN,
+            &start_body(Some("out-b")),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "an output-scoped principal must not cast a rendition outside its allowlist (BOLA)"
+    );
+    let problem = body_json(resp).await;
+    assert_eq!(problem["type"], "/problems/forbidden");
+
+    // No side effect: the denied start minted no session (the list is empty).
+    let resp = send(&h.router, get("/api/v1/cast/sessions", ADMIN_TOKEN)).await;
+    let list = body_json(resp).await;
+    assert!(
+        list.as_array().expect("an array").is_empty(),
+        "a denied start must not mint a session"
+    );
+}
+
+/// The positive path of the same guard: an output-scoped principal may cast a
+/// rendition that IS inside its allowlist. Proves the `authorize_output` gate
+/// does not over-restrict — a `wall-1`-scoped operator can start a cast onto
+/// `wall-1`.
+#[tokio::test]
+async fn start_allows_an_output_inside_the_scoped_allowlist() {
+    // A delivery map that additionally serves `wall-1` (the output the scoped
+    // principal is confined to).
+    let delivery = {
+        let mut d = CastDelivery::new();
+        d.insert(
+            "wall-1",
+            CastMediaTarget {
+                url: "http://192.0.2.7:8080/hls/wall-1/w.m3u8".to_owned(),
+                format: HlsSegmentFormat::Fmp4,
+            },
+        );
+        Arc::new(d)
+    };
+    let registry = {
+        let factory = CastSessionFactory::new(
+            Arc::new(ScriptedConnector::new(vec![])),
+            Arc::clone(&delivery),
+            CastSessionConfig::test_fast(),
+        );
+        Arc::new(DevicePollerRegistry::with_factory(Arc::new(factory)))
+    };
+    let h = harness_with(|state| {
+        state
+            .with_device_pollers(Arc::clone(&registry))
+            .with_cast_delivery(Arc::clone(&delivery))
+    });
+
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions",
+            OUTPUT_SCOPED_TOKEN,
+            &start_body(Some("wall-1")),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "an output-scoped principal may cast a rendition inside its allowlist"
+    );
+    let created = body_json(resp).await;
+    assert_eq!(created["output"], "wall-1");
+}
+
+/// Positive path of the save BOLA guard: a principal scoped to BOTH the session
+/// id AND the target device id may still promote its OWN session. Proves the new
+/// `authorize_object(&id)` on save does not over-restrict a properly-scoped
+/// principal (the negative path is `save_denies_a_session_outside_the_scoped_allowlist`).
+///
+/// The session id is server-minted per start, so the fixture session is seeded
+/// directly into the store under the known id `cast-session-savable`;
+/// `CAST_SAVE_SCOPED_TOKEN` is scoped to `["cast-session-savable", "dev-savable"]`.
+#[tokio::test]
+async fn save_allows_a_scoped_principal_to_promote_its_own_session() {
+    let h = harness_with(|state| {
+        // Seed a fixture session under a KNOWN id (start mints uuids; the scoped
+        // principal's allowlist names this exact id).
+        state.cast_sessions.insert(CastSessionRecord {
+            id: "cast-session-savable".to_owned(),
+            name: Some("Savable".to_owned()),
+            address: "[2001:db8::20]:8009".to_owned(),
+            output: "out-b".to_owned(),
+            media_url: "http://192.0.2.7:8080/hls/out-b/b.m3u8".to_owned(),
+            started_unix_ns: None,
+        });
+        state.with_cast_delivery(delivery())
+    });
+
+    // The scoped principal owns BOTH the session id and the device id: the save
+    // promotion authorizes both objects and succeeds.
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions/cast-session-savable/save",
+            CAST_SAVE_SCOPED_TOKEN,
+            &serde_json::json!({ "device_id": "dev-savable" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "a principal scoped to its own session + device may promote it (guard not over-restrictive)"
+    );
+    let device = body_json(resp).await;
+    assert_eq!(device["id"], "dev-savable");
+    assert_eq!(device["body"]["driver"], "cast");
 }
 
 #[tokio::test]
