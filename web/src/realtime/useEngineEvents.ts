@@ -5,7 +5,7 @@
 // than merging. The hook NEVER blocks render — the socket lives in a ref, all
 // state lands via setState/Query-cache writes from event callbacks.
 import { useEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { QueryClient } from "@tanstack/react-query";
 
 import { getStoredToken } from "../api/token";
@@ -16,6 +16,7 @@ import {
   parseDeviceDiscovered,
   parseDeviceEvent,
   parseDeviceStatus,
+  parseMediaPlayerEvent,
   parseTileStateDelta,
   parseTilesSnapshot,
 } from "./envelope";
@@ -24,7 +25,11 @@ import type {
   Envelope,
   TileSnapshotEntry,
 } from "./envelope";
-import type { DeviceDiscovered, DeviceStatus } from "./generated-types";
+import type {
+  DeviceDiscovered,
+  DeviceStatus,
+  MediaPlayerEvent,
+} from "./generated-types";
 import { resourceKeys } from "../resources/queries";
 // `LifecycleState` (LIVE/STALE/RECONNECTING/NO_SIGNAL) comes from the generated
 // AsyncAPI schema types — the canonical source of truth for tile lifecycle values
@@ -65,6 +70,18 @@ export const DISCOVERED_LIVE_QUERY_KEY = [
  * one the UI shows no age rather than fabricating it.
  */
 export const ENGINE_CLOCK_QUERY_KEY = ["realtime", "engineClock"] as const;
+
+/**
+ * The Query key for the latest-wins per-player transport-state map
+ * (`media.player_state` on the `switcher` topic, keyed by the player id =
+ * envelope `id`; ADR-RT008). A LOSSLESS lifecycle event, but the UI only needs
+ * the newest state per player, so it conflates to latest-wins here.
+ */
+export const MEDIA_PLAYER_STATE_QUERY_KEY = [
+  "realtime",
+  "switcher",
+  "players",
+] as const;
 
 /** The engine-monotonic ↔ wall-clock pairing (see ENGINE_CLOCK_QUERY_KEY). */
 export interface EngineClockRef {
@@ -231,6 +248,22 @@ function applyDeviceStatus(client: QueryClient, envelope: Envelope): void {
   );
 }
 
+function applyMediaPlayerState(client: QueryClient, envelope: Envelope): void {
+  const event = parseMediaPlayerEvent(envelope.data);
+  if (event === undefined) {
+    return;
+  }
+  // Latest wins, scoped by player id (the envelope `id` and the payload's
+  // `player` agree; the payload is authoritative for the key).
+  client.setQueryData<Record<string, MediaPlayerEvent>>(
+    MEDIA_PLAYER_STATE_QUERY_KEY,
+    (current): Record<string, MediaPlayerEvent> => ({
+      ...(current ?? {}),
+      [event.player]: event,
+    }),
+  );
+}
+
 function pushDeviceEvent(client: QueryClient, envelope: Envelope): void {
   const event = parseDeviceEvent(envelope.t, envelope.data);
   if (event === undefined) {
@@ -366,6 +399,10 @@ export function useEngineEvents(): EngineEvents {
             applyDeviceStatus(queryClient, envelope);
             return;
           }
+          case "media.player_state": {
+            applyMediaPlayerState(queryClient, envelope);
+            return;
+          }
           case "device.adopted":
           case "device.removed":
           case "device.mode":
@@ -392,4 +429,23 @@ export function useEngineEvents(): EngineEvents {
   }, [queryClient]);
 
   return { status, lastSeq, gaps };
+}
+
+/**
+ * Read the latest-wins per-player transport-state map that {@link useEngineEvents}
+ * populates from `media.player_state` events (keyed by player id). A component
+ * must also mount {@link useEngineEvents} somewhere in the tree for the socket to
+ * run; this selector only reads the cache (it never opens a connection), so a
+ * player with no event yet is simply absent from the map.
+ */
+export function useMediaPlayerStates(): Record<string, MediaPlayerEvent> {
+  const query = useQuery<Record<string, MediaPlayerEvent>>({
+    queryKey: MEDIA_PLAYER_STATE_QUERY_KEY,
+    // The cache is written only by the event reducer; never fetched.
+    queryFn: (): Record<string, MediaPlayerEvent> => ({}),
+    enabled: false,
+    initialData: {},
+  });
+  // `initialData` makes `data` always defined.
+  return query.data;
 }

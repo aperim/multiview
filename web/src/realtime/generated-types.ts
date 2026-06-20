@@ -309,6 +309,43 @@ export type LagAction = "conflated" | "resnapshot";
 /** Tile/input lifecycle state (invariant #2: Live → Stale → Reconnecting → NoSignal). */
 export type LifecycleState = "LIVE" | "STALE" | "RECONNECTING" | "NO_SIGNAL";
 
+/** Data body of `media.player_state` (ADR-RT008): a media player's discrete transport-state transition, envelope `id` = player id. LOSSLESS — kept in the replay ring, never conflated. `position_frames` is the playhead in integer frames at the output cadence (never a float; clients interpolate between events). */
+export interface MediaPlayerEvent {
+  /** The asset currently loaded in the player, if any. */
+  readonly asset?: string;
+  /** Stable media-player id (matches the envelope `id`). */
+  readonly player: string;
+  /** Playhead position at the transition, in integer frames at the output cadence. */
+  readonly position_frames: number;
+  readonly state: MediaPlayerState;
+}
+
+/** A media player's discrete transport state (tagged by `kind`, never untagged). The `vamping` variant carries `exit_armed`: when set, the current vamp lap finishes then the player exits cleanly at the boundary. `#[non_exhaustive]`: a client must treat an unknown kind as forward-compatible, not an error. */
+export type MediaPlayerState =
+  | {
+  readonly kind: "loading";
+}
+  | {
+  readonly kind: "cued";
+}
+  | {
+  readonly kind: "playing";
+}
+  | {
+  readonly kind: "paused";
+}
+  | {
+  readonly kind: "stopped";
+}
+  | {
+  /** Whether a clean exit is armed: finish the current lap, then leave the vamp at the boundary. */
+  readonly exit_armed: boolean;
+  readonly kind: "vamping";
+}
+  | {
+  readonly kind: "eof";
+};
+
 /** Running state of an output sink. */
 export type OutputRunState = "starting" | "running" | "migrating" | "error";
 
