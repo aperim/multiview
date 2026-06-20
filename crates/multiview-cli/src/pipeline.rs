@@ -7730,6 +7730,14 @@ fn resolve_incontainer_sub_route(
         // host-memory video receive); there is no container to open here.
         #[cfg(feature = "ndi")]
         SourceLocation::Ndi { .. } => return None,
+        // A WHIP/webrtc source is a depacketized RTP video receive (no libav
+        // container to open here), so it carries no in-container subtitle
+        // stream — mirroring the NDI arm. Pre-existing #181-era cross-feature
+        // gap (the overlay-gated match lacked the webrtc-native variant arm, so
+        // `--features overlay,webrtc-native` failed E0004); folded in here as the
+        // `pipeline.rs` owner (task #137), not a media-player change.
+        #[cfg(feature = "webrtc-native")]
+        SourceLocation::Webrtc { .. } => return None,
     };
     let demux = match Demuxer::open(path) {
         Ok(d) => d,

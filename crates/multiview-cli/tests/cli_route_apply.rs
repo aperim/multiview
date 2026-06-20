@@ -304,6 +304,7 @@ async fn run_capturing(
         subtitle_slot,
         pipeline.overlay_apply_slot(),
         live_hub.handle(),
+        pipeline.player_mailboxes(),
     );
 
     // The capture/relay task: wait for the run to publish frames, snapshot the
@@ -435,6 +436,7 @@ async fn run_command_to_hls(pipeline: &mut Pipeline, config: &MultiviewConfig, c
         subtitle_slot,
         pipeline.overlay_apply_slot(),
         live_hub.handle(),
+        pipeline.player_mailboxes(),
     );
 
     let stop_for_relay = stop.clone();
