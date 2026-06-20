@@ -254,6 +254,7 @@ export function MediaPlayersPage(): JSX.Element {
               <TableHead>{t`Player`}</TableHead>
               <TableHead>{t`State`}</TableHead>
               <TableHead>{t`Loaded asset`}</TableHead>
+              <TableHead>{t`Configured default`}</TableHead>
               <TableHead className="text-right">{t`Position (frames)`}</TableHead>
               <TableHead>{t`Transport`}</TableHead>
               <TableHead>{t`Vamp exit`}</TableHead>
@@ -266,7 +267,13 @@ export function MediaPlayersPage(): JSX.Element {
               const isVamping = live?.state.kind === 'vamping';
               const exitArmed =
                 live?.state.kind === 'vamping' && live.state.exit_armed;
-              const loadedAsset = live?.asset ?? configuredDefaultAsset(player);
+              // The LOADED asset is authoritative ONLY from live `media.player_state`
+              // — never fabricated from config. A boot-idle player with a configured
+              // default has loaded nothing until a load command confirms it on the
+              // realtime stream, so show idle until then (rule 27 — no aspirational
+              // state). The configured default is shown separately below.
+              const loadedAsset = live?.asset;
+              const configuredDefault = configuredDefaultAsset(player);
               const busy = transport.isPending;
               return (
                 <TableRow key={player.id}>
@@ -295,6 +302,17 @@ export function MediaPlayersPage(): JSX.Element {
                   <TableCell>
                     {loadedAsset !== undefined && loadedAsset !== '' ? (
                       <code className="text-xs">{loadedAsset}</code>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">
+                        <Trans>Not loaded</Trans>
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {configuredDefault !== undefined && configuredDefault !== '' ? (
+                      <code className="text-xs text-muted-foreground">
+                        {configuredDefault}
+                      </code>
                     ) : (
                       <span className="text-xs text-muted-foreground">
                         <Trans>None</Trans>
