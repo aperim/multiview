@@ -136,7 +136,9 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # --locked enforces the committed Cargo.lock (cargo ignores it otherwise),
+        # so the lint build is deterministic (rule 33).
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   test:
     name: check + test (${{ matrix.os }})
@@ -157,15 +159,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Default features are pure-Rust (no FFmpeg/GPU), so CI needs no native libs.
+      # --locked enforces the committed Cargo.lock (cargo ignores it otherwise),
+      # so check + test are deterministic (rule 33).
       - name: cargo check
-        run: cargo check --workspace
+        run: cargo check --locked --workspace
       - name: cargo test
         # Skip the compositor per-tick perf BUDGET test on shared CI runners: it
         # asserts a wall-clock ceiling only meaningful on consistent hardware
         # (ADR-E009 — perf gates run on dedicated runners). The tile-driven
         # SCALING correctness is covered unconditionally by
         # tile_driven_scales_with_coverage_not_tile_count.
-        run: cargo test --workspace -- --skip tile_driven_meets_budget
+        run: cargo test --locked --workspace -- --skip tile_driven_meets_budget
 
   # ── feature-gated clippy + test matrix (IN-7) ────────────────────────────────
   # The default `lint` and `test` jobs run with default features only (pure-Rust,
@@ -241,6 +245,31 @@ jobs:
           # default `software` feature.
           - crate: multiview-cli
             feature: heartbeat
+          # Overlay text engine (cosmic-text + swash + etagere atlas + bundled OFL
+          # fonts; ADR-R007/ADR-E002). Pure Rust — GPU-free and links NO ffmpeg —
+          # so it lints + tests on the bare runner. The default `lint`/`test` jobs
+          # build NONE of this: a cosmic-text 0.19 `set_text` signature break
+          # reached main (the text.rs render path lives in `multiview-compositor`
+          # under `--features overlay`) because no gate built the overlay feature
+          # (PR #203). These legs gate that surface going forward.
+          #
+          # The text rasterizer + the GPU overlay sub-pass live in
+          # `multiview-compositor`'s `overlay` feature — this is the leg that
+          # actually compiles the cosmic-text `Buffer`/`FontSystem` call sites.
+          - crate: multiview-compositor
+            feature: overlay
+          # The `multiview-cli` umbrella `overlay` feature gates
+          # `multiview-compositor/overlay` (it does NOT imply `ffmpeg` — it is the
+          # GPU-free, LGPL-clean overlay tier the `nvidia`/`apple`/`linux-vaapi`/
+          # `full` presets all pull in), plus the cli's own overlay wiring + tests.
+          - crate: multiview-cli
+            feature: overlay
+          # NOTE: `multiview-overlay --features libass` is gated by a SEPARATE
+          # clippy-only job (`feature-clippy-overlay-libass`) below, NOT this
+          # clippy+test matrix: the crate's `subtitle` test suite asserts the
+          # libass-OFF fallback (`AssCapability::detect() == Unavailable`)
+          # unconditionally, so `cargo test --features libass` is red by design —
+          # the clippy lint is the coverage that closes the gap.
           # WebRTC native egress/ingest (str0m + aws-lc-rs). The default `lint`
           # and `test` jobs build none of these, so the wave-1 union (#141↔#147)
           # broke `webrtc-native` silently on main; this leg gates it going
@@ -272,13 +301,15 @@ jobs:
           # Scope the cache per feature so entries don't collide across matrix legs.
           key: feature-${{ matrix.crate }}-${{ matrix.feature }}
       - name: clippy (${{ matrix.feature }})
-        # --all-targets: also lints integration-test binaries under the feature.
-        # -D warnings: matches the default `lint` job gate.
+        # --locked: enforce the committed Cargo.lock for a deterministic build
+        # (rule 33). --all-targets: also lints integration-test binaries under
+        # the feature. -D warnings: matches the default `lint` job gate.
         # Hardware/network live paths are gated in the tests themselves via
         # #[ignore] or cfg_attr(not(feature=...), ignore), so this never needs
         # a real NIC, PTP device, MQTT broker, or NDI sender.
         run: >
           cargo clippy
+          --locked
           -p ${{ matrix.crate }}
           --features ${{ matrix.feature }}
           --all-targets
@@ -288,10 +319,60 @@ jobs:
         # Hardware-gated tests carry #[ignore] and are excluded from shared CI
         # by default; they run on dedicated self-hosted runners with the real
         # devices attached.
+        #
+        # --skip tile_driven_meets_budget: the compositor per-tick perf BUDGET
+        # test asserts a wall-clock ceiling only meaningful on consistent
+        # hardware (ADR-E009/ADR-0022 — perf gates run on dedicated runners), so
+        # it is flaky on shared CI. The default `test` job skips it for the same
+        # reason; mirror that here for the `multiview-compositor`/`overlay` leg
+        # (it lives only in that crate, so the flag is a no-op for every other
+        # leg). The tile-driven SCALING correctness stays covered unconditionally
+        # by tile_driven_scales_with_coverage_not_tile_count.
         run: >
           cargo test
+          --locked
           -p ${{ matrix.crate }}
           --features ${{ matrix.feature }}
+          -- --skip tile_driven_meets_budget
+
+  # ── multiview-overlay libass clippy (clippy-only; closes a #134 gap) ─────────
+  # `multiview-overlay`'s off-by-default `libass` capability gate (the ASS/SSA
+  # subtitle burn-in seam, ADR-R007/R008) has zero coverage in the default
+  # `lint`/`test` jobs. It gets its OWN clippy-only job rather than a slot in the
+  # `feature-clippy` clippy+test matrix because the crate's `subtitle` integration
+  # test asserts the libass-OFF fallback (`AssCapability::detect() == Unavailable`)
+  # UNCONDITIONALLY — so `cargo test -p multiview-overlay --features libass` is red
+  # by design (the capability flips to `Available` once the feature is on). The
+  # clippy lint is the gap-closing coverage: it proves the libass-gated code
+  # type-checks + lints. The crate is pure Rust here (the native libass/HarfBuzz/
+  # FriBidi toolchain is wired downstream), so it runs on the bare runner.
+  feature-clippy-overlay-libass:
+    name: feature-gated clippy (multiview-overlay, libass)
+    runs-on: ubuntu-latest
+    # A single crate clippy under one feature (~1min warm); a cold per-feature
+    # cargo cache can take a few minutes. 20min matches the `feature-clippy` legs.
+    timeout-minutes: 20
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-multiview-overlay-libass
+      - name: clippy (libass)
+        # --locked enforces the committed Cargo.lock (rule 33). --all-targets also
+        # lints the test binaries under the feature; -D warnings matches the
+        # default `lint` gate. (No `test` step — see the job comment.)
+        run: >
+          cargo clippy
+          --locked
+          -p multiview-overlay
+          --features libass
+          --all-targets
+          -- -D warnings
 
   # ── ffmpeg-linked webrtc-native clippy (closes the #154 follow-up gap) ───────
   # The `feature-clippy` matrix above runs on a libav-FREE runner, so it cannot
@@ -396,19 +477,40 @@ jobs:
             echo "LD_LIBRARY_PATH=${FFMPEG_PREFIX}/lib"
           } >> "$GITHUB_ENV"
       - name: clippy multiview-cli --features webrtc-native
-        # The ffmpeg-linked target the libav-free matrix cannot build. -D warnings
-        # matches the default `lint` gate; --all-targets also lints test binaries.
+        # The ffmpeg-linked target the libav-free matrix cannot build. --locked
+        # enforces the committed Cargo.lock (rule 33); -D warnings matches the
+        # default `lint` gate; --all-targets also lints test binaries.
         run: >
           cargo clippy
+          --locked
           -p multiview-cli
           --features webrtc-native
+          --all-targets
+          -- -D warnings
+      - name: clippy multiview-cli --features overlay,webrtc-native
+        # The overlay × webrtc-native cross-feature pair (#137): both gate code in
+        # `multiview-cli`, and `webrtc-native` implies `ffmpeg`, so this combo can
+        # only build on this ffmpeg-equipped leg — not on the libav-free
+        # `feature-clippy` matrix. A `cargo build` of the binary never runs these
+        # clippy lints, and no leg built the pair, so a non-exhaustive `match` over
+        # `SourceLocation` (the overlay-gated `resolve_incontainer_sub_route`
+        # missing the webrtc-native `Webrtc` arm) slipped through (fixed in PR #202).
+        # This step gates the pair going forward. --locked enforces the committed
+        # Cargo.lock (rule 33).
+        run: >
+          cargo clippy
+          --locked
+          -p multiview-cli
+          --features overlay,webrtc-native
           --all-targets
           -- -D warnings
       - name: clippy multiview-preview --features webrtc
         # The paired preview WHEP seam. Built here alongside the cli target so the
         # whole webrtc-native surface is clippy-gated in one ffmpeg-equipped leg.
+        # --locked enforces the committed Cargo.lock (rule 33).
         run: >
           cargo clippy
+          --locked
           -p multiview-preview
           --features webrtc
           --all-targets
@@ -591,3 +693,55 @@ jobs:
         # The webServer block builds the SPA and serves it; the specs mock the API.
         working-directory: web
         run: npm run test:e2e
+
+  # ── i18n catalog freshness (lingui extract + compile must be committed) ──────
+  # The production `vite build` lingui macro STRIPS the source-string fallback, so
+  # any `<Trans>`/`t` string NOT present in the compiled catalog renders as a
+  # content-hash ID *in production only* (dev/test keep the fallback, so vitest +
+  # build stay green). The other web gates (eslint/tsc/vitest/build) never run
+  # `lingui extract`, so a catalog that drifts behind the source strings ships
+  # broken hash IDs with a green CI. This job makes that drift a hard failure: it
+  # runs the SAME canonical scripts the app uses (web/package.json `i18n:extract` /
+  # `i18n:compile` → lingui.config.ts), with `--clean` so obsolete entries are
+  # pruned too, then `git diff --exit-code` on web/src/locales/** — failing if the
+  # committed catalogs differ from a fresh extract+compile of the current sources.
+  i18n-catalogs:
+    name: i18n catalog freshness (lingui)
+    runs-on: ubuntu-latest
+    # npm ci + a lingui extract + compile over the source tree (~1-2min). 15min
+    # absorbs a cold npm cache while still failing a wedge far under 6h.
+    timeout-minutes: 15
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install
+        working-directory: web
+        run: npm ci
+      - name: extract message catalogs (lingui extract --clean)
+        # The canonical `i18n:extract` script (`lingui extract`) plus `--clean` to
+        # also drop obsolete entries — re-scans every `t`/`<Trans>` macro in src/
+        # into the per-locale PO catalogs. Any new/changed string surfaces here.
+        working-directory: web
+        run: npm run i18n:extract -- --clean
+      - name: compile message catalogs (lingui compile)
+        # The canonical `i18n:compile` script — regenerates the compiled `.ts`
+        # catalogs the production build imports (the prod macro strips the source
+        # fallback, so these MUST match the `.po` sources).
+        working-directory: web
+        run: npm run i18n:compile
+      - name: catalogs are fresh (no uncommitted drift)
+        # Fail if the committed catalogs differ from the fresh extract+compile.
+        # The fix is local: run `npm --prefix web run i18n:extract -- --clean &&
+        # npm --prefix web run i18n:compile` and commit web/src/locales/**.
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code -- web/src/locales/; then
+            echo "::error::i18n catalogs are stale. Run 'npm --prefix web run i18n:extract -- --clean && npm --prefix web run i18n:compile' and commit web/src/locales/**."
+            exit 1
+          fi

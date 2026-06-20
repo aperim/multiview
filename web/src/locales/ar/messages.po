@@ -90,10 +90,6 @@ msgstr ""
 msgid "{short} NVENC encode sessions trend"
 msgstr ""
 
-#: src/pages/SimplePages.tsx:578
-#~ msgid "/media/clip.mp4"
-#~ msgstr ""
-
 #. placeholder {0}: record.repeated
 #: src/pages/LogsPage.tsx:209
 msgid "×{0}"
@@ -243,10 +239,6 @@ msgstr ""
 msgid "A bearer token the publisher presents on the WHIP POST. Leave blank to require a control-plane API key with Write scope instead — publishing is never anonymous."
 msgstr ""
 
-#: src/pages/SimplePages.tsx:945
-#~ msgid "A codec is required for this output kind."
-#~ msgstr ""
-
 #: src/pages/SupportPage.tsx:484
 msgid "A context pack carries diagnostics, logs, and a redacted config — never media, never raw identifiers, never secret values. It leaves the machine only when you explicitly attach it to a ticket."
 msgstr ""
@@ -254,10 +246,6 @@ msgstr ""
 #: src/pages/docs/ConfigPage.tsx:125
 msgid "A CSS-grid layout with <0>columns</0> and <1>rows</1> track lists (<2>fr</2> / <3>px</3> / <4>%</4>), a <5>gap</5>, and an <6>areas</6> map that names where each cell sits."
 msgstr ""
-
-#: src/pages/SimplePages.tsx:942
-#~ msgid "A destination is required for this output kind."
-#~ msgstr ""
 
 #: src/pages/CastPage.tsx:134
 msgid "A device id is required"
@@ -299,10 +287,6 @@ msgstr ""
 msgid "A location/title drawn on the face. Leave blank for none."
 msgstr ""
 
-#: src/pages/SimplePages.tsx:676
-#~ msgid "A locator is required for this source kind."
-#~ msgstr ""
-
 #: src/pages/docs/DevicesHelpPage.tsx:33
 msgid "A managed device is a piece of hardware Multiview supervises: a hardware decoder feeding a TV, a display node driving a video wall, or a cast target. The device entry you adopt is desired state — driver, management address, mode, credentials — and a supervised driver continuously converges the real device onto it: it probes, reconnects, re-applies the mode, and reports status."
 msgstr ""
@@ -326,12 +310,6 @@ msgstr ""
 #: src/pages/docs/concepts/CodecsPage.tsx:40
 msgid "A multiviewer is inherently a transcoder: it must decode every source to composite them into one canvas, and then encode that canvas for its outputs. What it never does is transcode each tile separately — the cost would multiply by the number of tiles for no benefit."
 msgstr ""
-
-#: src/pages/SimplePages.tsx:671
-#: src/pages/SimplePages.tsx:939
-#: src/pages/SimplePages.tsx:1117
-#~ msgid "A name is required."
-#~ msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:119
 msgid "A named factory arrangement: <0>2x2</0>, <1>3x3</1>, <2>1+5</2>, or <3>pip</3>."
@@ -406,10 +384,6 @@ msgstr ""
 msgid "A software fallback always exists, so a build without any GPU still works — just with less headroom."
 msgstr ""
 
-#: src/pages/SimplePages.tsx:679
-#~ msgid "A solid source needs a hex colour like #101014 or #abc."
-#~ msgstr ""
-
 #: src/pages/docs/FeaturesPage.tsx:40
 msgid "A source is a managed input. Each one owns its ingest, decode, color handling, and reconnect behaviour, and is referenced by tiles via a stable id. Supported kinds include RTSP, HLS, MPEG-TS, SRT, RTMP, NDI, file, and a built-in synthetic test pattern. When a source stops delivering frames, its tile holds the last good frame and moves through a clear state machine — live, stale, reconnecting, no-signal — while the engine reconnects without disturbing the rest of the wall."
 msgstr ""
@@ -426,10 +400,6 @@ msgstr ""
 msgid "A sync group names the devices that should present together, with a per-member <0>offset_ms</0> trim (a fixed presentation delay for path-length differences) and a <1>target_skew_ms</1> drift threshold. The group claims the weakest member's tier — adding one vendor decoder to a wall of display nodes makes the whole group bounded-skew, and the UI says so rather than over-claiming. A member drifting past the target raises a warning alarm; \"Measure\" runs an on-demand skew measurement whose result arrives on the realtime stream."
 msgstr ""
 
-#: src/pages/SimplePages.tsx:1120
-#~ msgid "A target is required."
-#~ msgstr ""
-
 #: src/pages/docs/concepts/GlossaryPage.tsx:258
 msgid "A TCP push protocol that remains the most widely accepted way to send a live stream to a platform. Classic RTMP carries H.264 and AAC only; enhanced endpoints negotiate newer codecs. Latency is typically a few seconds."
 msgstr ""
@@ -437,10 +407,6 @@ msgstr ""
 #: src/pages/docs/ComposePage.tsx:53
 msgid "A tiny nginx that serves the HLS volume over HTTP so you can open the stream in a player at <0>http://[::1]:8888/multiview.m3u8</0>."
 msgstr ""
-
-#: src/pages/docs/ComposePage.tsx:53
-#~ msgid "A tiny nginx that serves the HLS volume over HTTP so you can open the stream in a player at <0>http://localhost:8888/multiview.m3u8</0>."
-#~ msgstr ""
 
 #: src/pages/docs/concepts/ColorPage.tsx:26
 msgid "A video stream does not just carry pixel values — it carries an agreement about what those values <0>mean</0>. Three standards cover almost everything: <1>BT.601</1> (standard definition), <2>BT.709</2> (high definition — the default assumption for most content today), and <3>BT.2020</3> (ultra-HD and HDR, with a much wider color gamut). Each defines its own recipe for turning the YUV numbers in the stream back into red, green, and blue."
@@ -544,10 +510,6 @@ msgstr ""
 #: src/pages/LayoutsPage.tsx:272
 msgid "Accessible editing path: Cells form + Inspector in the editor"
 msgstr ""
-
-#: src/pages/LayoutsPage.tsx:137
-#~ msgid "Accessible editing path: planned (Cells form + Inspector)"
-#~ msgstr ""
 
 #: src/pages/SettingsPage.tsx:263
 msgid "Accessible toasts announce via a live region."
@@ -834,12 +796,6 @@ msgstr ""
 msgid "An honest comparison — figures are typical classes, not guarantees; the network you run on dominates:"
 msgstr ""
 
-#: src/pages/SimplePages.tsx:668
-#: src/pages/SimplePages.tsx:936
-#: src/pages/SimplePages.tsx:1114
-#~ msgid "An identifier is required."
-#~ msgstr ""
-
 #: src/pages/DevicesPage.tsx:386
 msgid "An NDI service is added as an NDI source, not adopted."
 msgstr ""
@@ -978,10 +934,6 @@ msgstr ""
 #: src/pages/DeviceDetailPage.tsx:985
 msgid "Apply mode"
 msgstr ""
-
-#: src/pages/LayoutsPage.tsx:145
-#~ msgid "Apply-layout accepted"
-#~ msgstr ""
 
 #: src/layout/components/GridLayoutEditor.tsx:566
 msgid "Area cell"
@@ -1504,17 +1456,9 @@ msgstr ""
 msgid "Changes saved here are stored, not yet live: the engine does not hot-add outputs. Apply them by exporting the configuration and restarting Multiview. Layout apply, source swap, routing, and salvos act on the running engine immediately."
 msgstr ""
 
-#: src/resources/FormControls.tsx:333
-#~ msgid "Changes saved here are stored, not yet live: the engine does not hot-add sources or outputs. Apply them by exporting the configuration and restarting Multiview. Layout apply, source swap, routing, and salvos act on the running engine immediately."
-#~ msgstr ""
-
 #: src/components/account/chrome.tsx:152
 msgid "Changes to sources, outputs, and layouts are read-only until the next licensing contact."
 msgstr ""
-
-#: src/pages/docs/concepts/CodecsPage.tsx:142
-#~ msgid "Changing an output's codec is a controlled restart of that output (consumers reconnect); it never interrupts the compositor or the other outputs. The codec field on an output is validated against what the transport can carry — for example <0>h265</0> is rejected on classic RTMP — and against what the host can actually encode."
-#~ msgstr ""
 
 #: src/pages/docs/concepts/CodecsPage.tsx:143
 msgid "Changing an output's codec today is a configuration change, not a live switch: stored edits take effect by exporting the config and restarting the engine (the API marks these resources <0>apply: restart</0>). The codec token is also only lightly checked at present — if the build cannot encode the requested codec, the pipeline logs a warning and falls back to MPEG-2 rather than failing the run. So choose a codec your build and transport are known to carry (classic RTMP, for example, carries H.264 only), and verify the output really uses it — for example with <1>ffprobe</1>."
@@ -1657,10 +1601,6 @@ msgstr ""
 #: src/docs/registry.ts:551
 msgid "Color spaces, limited vs full range, and HDR — why mismatches look washed-out or crushed."
 msgstr ""
-
-#: src/pages/SimplePages.tsx:760
-#~ msgid "Colour"
-#~ msgstr ""
 
 #: src/layout/components/CellPropertiesPanel.tsx:275
 msgid "Colour (hex)"
@@ -2153,11 +2093,6 @@ msgstr ""
 msgid "CPU"
 msgstr ""
 
-#: src/components/SystemFooter.tsx:131
-#: src/pages/SystemPage.tsx:174
-#~ msgid "CPU utilisation trend"
-#~ msgstr ""
-
 #: src/components/SystemFooter.tsx:236
 msgid "CPU utilisation trend (host total)"
 msgstr ""
@@ -2266,10 +2201,6 @@ msgstr ""
 #: src/pages/AccountPage.tsx:183
 msgid "Deactivate this machine"
 msgstr ""
-
-#: src/components/SystemFooter.tsx:153
-#~ msgid "DEC"
-#~ msgstr ""
 
 #: src/pages/docs/concepts/LatencyPage.tsx:121
 msgid "Decide who needs low latency. An operator wall watching for faults wants seconds at most; overflow viewing in a browser can tolerate plain HLS."
@@ -2506,10 +2437,6 @@ msgstr ""
 #: src/pages/SourcesPage.tsx:554
 msgid "Direction"
 msgstr ""
-
-#: src/pages/SimplePages.tsx:672
-#~ msgid "Disabled"
-#~ msgstr ""
 
 #: src/pages/SourcesPage.tsx:648
 msgid "Discard the source wall-clock"
@@ -2892,11 +2819,6 @@ msgstr ""
 #: src/pages/SourcesPage.tsx:636
 msgid "Embedded CEA-608/708"
 msgstr ""
-
-#: src/pages/SimplePages.tsx:667
-#: src/pages/SimplePages.tsx:777
-#~ msgid "Enabled"
-#~ msgstr ""
 
 #: src/docs/registry.ts:538
 #: src/pages/docs/concepts/CodecsPage.tsx:129
@@ -3335,18 +3257,6 @@ msgstr ""
 msgid "GPU"
 msgstr ""
 
-#: src/components/SystemFooter.tsx:137
-#~ msgid "GPU 0 compute utilisation trend"
-#~ msgstr ""
-
-#: src/components/SystemFooter.tsx:156
-#~ msgid "GPU 0 decoder utilisation trend"
-#~ msgstr ""
-
-#: src/components/SystemFooter.tsx:143
-#~ msgid "GPU 0 VRAM usage trend"
-#~ msgstr ""
-
 #: src/pages/docs/ContainerPage.tsx:85
 msgid "GPU acceleration is opt-in. The compose stack ships two overlay files that add the right device access; you can apply the same settings to a plain <0>docker run</0>."
 msgstr ""
@@ -3369,10 +3279,6 @@ msgstr ""
 #: src/pages/SourcesPage.tsx:773
 msgid "GPU vendor"
 msgstr ""
-
-#: src/components/SystemFooter.tsx:134
-#~ msgid "GPU0"
-#~ msgstr ""
 
 #: src/pages/SystemPage.tsx:342
 msgid "GPUs"
@@ -3911,10 +3817,6 @@ msgstr ""
 msgid "Layout saved, but apply failed"
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:115
-#~ msgid "Layout saved; apply accepted"
-#~ msgstr ""
-
 #: src/app/navigation.tsx:48
 #: src/docs/registry.ts:227
 #: src/pages/DashboardPage.tsx:58
@@ -3922,10 +3824,6 @@ msgstr ""
 #: src/pages/LayoutsPage.tsx:196
 msgid "Layouts"
 msgstr "التخطيطات"
-
-#: src/docs/registry.ts:222
-#~ msgid "Layouts, sources, outputs, overlays, tally, salvos, and alarms — what each one is."
-#~ msgstr ""
 
 #: src/docs/registry.ts:222
 msgid "Layouts, sources, outputs, overlays, tally, salvos, media players, and alarms — what each one is."
@@ -4258,10 +4156,6 @@ msgstr ""
 msgid "Locator"
 msgstr ""
 
-#: src/pages/SimplePages.tsx:570
-#~ msgid "Locator URL"
-#~ msgstr ""
-
 #: src/pages/docs/concepts/GlossaryPage.tsx:76
 msgid "Locking every device's frame timing to one shared reference signal so all frames start at the same instant across a facility. Classically an analog black-burst or tri-level signal; in IP facilities PTP carries the same role. Genlock aligns <0>phase</0>; timecode merely labels frames."
 msgstr ""
@@ -4566,10 +4460,6 @@ msgid "Multiview"
 msgstr ""
 
 #: src/pages/docs/concepts/CodecsPage.tsx:131
-#~ msgid "Multiview composites the canvas <0>once</0> per tick, encodes it <1>once per rendition</1>, and fans the same encoded packets out to every output that wants that rendition. Serving the wall over HLS, RTSP, and an SRT push at the same codec, resolution, and bitrate costs one encode — not three. A second encode is created only when an output genuinely needs a different codec, resolution, or bitrate."
-#~ msgstr ""
-
-#: src/pages/docs/concepts/CodecsPage.tsx:131
 msgid "Multiview composites the canvas <0>once</0> per tick, encodes it <1>once per rendition</1>, and fans the same encoded packets out to every output that wants that rendition. Writing the wall to HLS while pushing it to an RTMP and an SRT destination at the same codec, resolution, and bitrate costs one encode — not three. A second encode is created only when an output genuinely needs a different codec, resolution, or bitrate."
 msgstr ""
 
@@ -4588,10 +4478,6 @@ msgstr ""
 #: src/pages/docs/concepts/LatencyPage.tsx:134
 msgid "Multiview itself never trades the output cadence away: under load it degrades the cheapest tiles first and keeps the program output's timing intact."
 msgstr ""
-
-#: src/pages/LayoutsPage.tsx:156
-#~ msgid "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas."
-#~ msgstr ""
 
 #: src/pages/LayoutsPage.tsx:199
 msgid "Multiview layouts. The accessible editor offers a form-based path equivalent to the drag-and-drop canvas. Apply is live on the running engine."
@@ -5029,10 +4915,6 @@ msgstr ""
 msgid "Not in a sync group."
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:83
-#~ msgid "Not in the running engine — no live state until a config export + restart binds it to a tile."
-#~ msgstr ""
-
 #: src/pages/SourcesPage.tsx:97
 msgid "Not in the running engine — no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
 msgstr ""
@@ -5098,10 +4980,6 @@ msgstr ""
 #: src/components/SystemFooter.tsx:160
 msgid "NVENC"
 msgstr ""
-
-#: src/components/SystemFooter.tsx:150
-#~ msgid "NVENC encode sessions trend"
-#~ msgstr ""
 
 #: src/pages/SystemPage.tsx:201
 msgid "NVENC sessions"
@@ -6501,14 +6379,6 @@ msgstr ""
 msgid "Stored. Synthetic sources (bars, solid colour, clock, timer) and — on a full-engine run — network/file sources apply to the running engine immediately; NDI / YouTube / AES67 (and any kind on the software engine) go live via config export + restart. The response header declares which applied."
 msgstr ""
 
-#: src/pages/SourcesPage.tsx:919
-#~ msgid "Stored. Synthetic sources (bars, solid colour, clock, timer) apply to the running engine immediately; other kinds go live via config export + restart."
-#~ msgstr ""
-
-#: src/pages/SourcesPage.tsx:541
-#~ msgid "Stored. Synthetic sources (bars, solid colour, clock) apply to the running engine immediately; other kinds go live via config export + restart."
-#~ msgstr ""
-
 #: src/pages/docs/concepts/GlossaryPage.tsx:40
 msgid "Storing color information at lower resolution than brightness, exploiting the eye's lower sensitivity to color detail. Written as ratios: 4:4:4 keeps full color, 4:2:2 halves it horizontally (production quality), and 4:2:0 quarters it (virtually all delivery video). Almost every stream Multiview ingests and emits is 4:2:0."
 msgstr ""
@@ -6617,14 +6487,6 @@ msgstr ""
 #: src/pages/SourcesPage.tsx:908
 msgid "Synthetic sources (bars, solid colour, clock, timer) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources (RTSP, HLS, MPEG-TS, SRT, RTMP, RIST, file) also apply live on a full-engine run; on the software engine, and for NDI / YouTube / AES67, they are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
 msgstr ""
-
-#: src/pages/SourcesPage.tsx:908
-#~ msgid "Synthetic sources (bars, solid colour, clock, timer) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
-#~ msgstr ""
-
-#: src/pages/SourcesPage.tsx:531
-#~ msgid "Synthetic sources (bars, solid colour, clock) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
-#~ msgstr ""
 
 #: src/app/navigation.tsx:63
 #: src/pages/SystemPage.tsx:236
@@ -6804,10 +6666,6 @@ msgstr ""
 msgid "The cell is too small."
 msgstr ""
 
-#: src/pages/SimplePages.tsx:688
-#~ msgid "The clock timezone offset must be a whole number between −720 and 840 minutes."
-#~ msgstr ""
-
 #: src/pages/docs/ContainerPage.tsx:151
 msgid "The compose stack uses a real liveness check: the HLS playlist must have been rewritten within the last 30 seconds. Because the segmenter rewrites the playlist every segment, a fresh timestamp proves the output clock is still producing frames. The check uses only coreutils, so it works on the slim runtime."
 msgstr ""
@@ -6973,10 +6831,6 @@ msgstr ""
 msgid "The moment a fresh frame arrives — from any state — the tile snaps straight back to LIVE. The hold, stale, and no-signal windows are automatic: the engine uses built-in, broadcast-tuned values and derives its stream-liveness checks from each source's own frame cadence, so a low-frame-rate source is not misread as stalled. There is nothing for an operator to configure."
 msgstr ""
 
-#: src/pages/docs/concepts/ResiliencePage.tsx:65
-#~ msgid "The moment a fresh frame arrives — from any state — the tile snaps straight back to LIVE. The hold, stale, and no-signal windows are configurable per deployment."
-#~ msgstr ""
-
 #: src/pages/docs/concepts/GlossaryPage.tsx:138
 msgid "The most recent valid frame a tile has received, held on screen whenever its source hiccups so a brief dropout is invisible. Tiles escalate from holding the last-good frame to a reconnect indicator and finally a \"no signal\" slate if the source stays away."
 msgstr ""
@@ -7081,10 +6935,6 @@ msgstr ""
 #: src/pages/docs/ComposePage.tsx:104
 msgid "The stack publishes the management API and this web UI on <0>8080</0> (the mounted config carries a <1>[control]</1> listener; authenticate with the <2>MULTIVIEW_CONTROL_TOKEN</2> bearer token), the test RTSP feed on <3>8554</3> (for host inspection), and the HLS HTTP server on <4>8888</4>. HLS/LL-HLS plus RTMP and SRT push outputs run today; the live RTSP and NDI output <5>servers</5> are on the roadmap."
 msgstr ""
-
-#: src/pages/docs/ComposePage.tsx:104
-#~ msgid "The stack publishes the test RTSP feed on <0>8554</0> (for host inspection) and the HLS HTTP server on <1>8888</1>. There is no control-API or web-UI port yet: the current binary composites, encodes, and writes HLS or file output to disk, but does not yet bind a network listener. The live RTSP, NDI, and RTMP output <2>servers</2> and the API listener are on the roadmap."
-#~ msgstr ""
 
 #: src/layout/components/validationMessages.tsx:79
 msgid "The stored area map was ragged and has been normalized for editing; saving will persist the repaired map."
@@ -7258,10 +7108,6 @@ msgstr ""
 msgid "This is why the wall keeps running through any input failure: the output's timing is independent of every input by construction. Frame rates are handled as exact fractions (NTSC 29.97 is <0>30000/1001</0>, never a rounded decimal), so the cadence cannot drift over long runs."
 msgstr ""
 
-#: src/pages/LayoutEditorPage.tsx:148
-#~ msgid "This layout uses a grid or preset placement that the free-form editor cannot modify yet. Editing is read-only."
-#~ msgstr ""
-
 #: src/pages/LayoutEditorPage.tsx:286
 msgid "This layout uses the factory preset \"{preset}\". To edit it, convert it to an editable form first — nothing changes until you save."
 msgstr ""
@@ -7302,10 +7148,6 @@ msgstr ""
 msgid "This permanently removes the profile's mapping rules."
 msgstr ""
 
-#: src/pages/SimplePages.tsx:424
-#~ msgid "This permanently removes the resource. Running outputs are not affected until a new configuration is applied."
-#~ msgstr ""
-
 #: src/pages/SalvosPage.tsx:418
 msgid "This permanently removes the salvo definition."
 msgstr ""
@@ -7321,10 +7163,6 @@ msgstr ""
 #: src/pages/PlaceholderPage.tsx:27
 msgid "This screen is part of an upcoming milestone."
 msgstr ""
-
-#: src/pages/SourcesPage.tsx:79
-#~ msgid "This source is not part of the running engine, so it has no live state. It joins after a config export + restart binds it to a tile."
-#~ msgstr ""
 
 #: src/pages/SourcesPage.tsx:93
 msgid "This source is not part of the running engine, so it has no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
@@ -7388,10 +7226,6 @@ msgstr ""
 #: src/pages/SourcesPage.tsx:532
 msgid "Timezone offset (minutes from UTC)"
 msgstr ""
-
-#: src/pages/SimplePages.tsx:796
-#~ msgid "Timezone offset (minutes)"
-#~ msgstr ""
 
 #: src/docs/registry.ts:459
 #: src/pages/docs/concepts/TimingSyncPage.tsx:17
