@@ -456,6 +456,12 @@ segment_ms = 1000
 /// plane + live program preview. Proves ingestion, processing, output, and
 /// management are one process — and that serving never stalls the output clock
 /// (inv #1) nor back-pressures the engine (inv #10).
+// A single linear end-to-end proof that one process *ingests/composites/encodes*
+// AND *serves* the control API + live program preview concurrently; its deliberate
+// setup → concurrent-run → assert flow is legitimately long (just over the 100-line
+// clippy cap once the `webrtc-native` feature adds its bind-arg). Splitting it would
+// only shuffle locals into a wide tuple, not aid the reader — so suppress, not carve.
+#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn pipeline_serves_control_api_and_live_preview_while_ingesting() {
     use std::sync::Arc;
