@@ -23,8 +23,9 @@ pub struct PlayerHandle {
     /// Whether the channel begins looping (vamping) on its first play, vs a
     /// single play-through. Derived from the config `loop_default`.
     pub loop_on_start: bool,
-    /// The shared, bounded, conflated-latest command seam the ingest thread
-    /// drains between frames.
+    /// The shared, bounded two-class command seam (state verbs conflated
+    /// latest-wins; targeted load/cue/seek a bounded drop-oldest FIFO) the ingest
+    /// thread drains between frames.
     pub mailbox: Arc<TransportMailbox>,
 }
 

@@ -1168,9 +1168,13 @@ impl CommandDrain {
     /// running `drive`. Returns the number of re-points applied **this tick**
     /// (bounded by [`MAX_REPOINTS_PER_TICK`]).
     ///
-    /// Never blocks, never awaits — it drains a non-blocking queue (O(pending)),
-    /// applies O(1) re-points, and publishes drop-oldest events, so the output
-    /// clock is never stalled by control (invariants #1 + #10).
+    /// Never awaits, and is never back-pressured by a slow consumer — it drains a
+    /// non-blocking queue (O(pending)), applies O(1) re-points, publishes
+    /// drop-oldest events, and (for a media-transport command) takes a short
+    /// uncontended `std::sync::Mutex` to push into a player's bounded mailbox (the
+    /// player's drain holds that lock only for a `mem::take`, never across a
+    /// decode/publish). So the output clock is never stalled by control
+    /// (invariants #1 + #10).
     pub fn apply(&mut self, drive: &mut CompositorDrive<Nv12Image>) -> usize {
         // First tick: hand the drive the cell ids (in config-cell order, which is
         // exactly `solve_layout`'s core-cell order) so `rebind_cell` can address

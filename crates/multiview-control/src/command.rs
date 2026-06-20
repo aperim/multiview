@@ -404,10 +404,12 @@ pub enum Command {
     },
     /// Drive a pre-declared media player's transport (ADR-0057 Decision 4,
     /// ADR-0097): load/cue/play/pause/stop/seek. All Class-1 Hot — the engine
-    /// drain writes the player's latest-wins transport slot at a frame
-    /// boundary; the player thread reads it between frames and never paces the
-    /// engine (inv #1/#10). The player channel exists from boot, so a transport
-    /// verb never spawns or tears an engine-path thread (sidesteps ADR-W018).
+    /// drain submits the verb into the player's bounded two-class transport
+    /// mailbox (state verbs conflated latest-wins; targeted load/cue/seek a
+    /// bounded drop-oldest FIFO) at a frame boundary; the player thread drains it
+    /// between frames and never paces the engine (inv #1/#10). The player channel
+    /// exists from boot, so a transport verb never spawns or tears an engine-path
+    /// thread (sidesteps ADR-W018).
     MediaTransport {
         /// Correlation id for the async outcome.
         op: OperationId,

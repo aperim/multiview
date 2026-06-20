@@ -8,9 +8,10 @@
 //! (`exit/arm`/`exit/take`/`exit/cancel`) stages and commits a clean exit at the
 //! next vamp boundary — mirroring the salvo arm/take/cancel triad
 //! ([`crate::routes::salvos`]). Every verb is **Class-1 Hot** (invariant #11):
-//! the engine drain writes the player's latest-wins transport slot at a frame
-//! boundary; the player thread reads it between frames and never paces the
-//! engine (inv #1/#10).
+//! the engine drain submits the verb into the player's bounded two-class
+//! transport mailbox (state verbs conflated latest-wins; targeted load/cue/seek a
+//! bounded drop-oldest FIFO) at a frame boundary; the player thread drains it
+//! between frames and never paces the engine (inv #1/#10).
 //!
 //! Routes (errors are RFC 9457 problem documents):
 //!

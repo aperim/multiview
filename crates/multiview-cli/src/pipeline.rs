@@ -1610,11 +1610,13 @@ pub struct Pipeline {
     /// arrive (never buffered ahead of the clock — the BUG-2 fix).
     ingest_plans: Vec<IngestPlan>,
     /// Per-media-player transport mailboxes (ADR-0057 / ADR-0097), keyed by
-    /// player id: the bounded, conflated-latest seam the control-plane command
-    /// drain submits transport verbs to, drained by each player's ingest thread
-    /// between frames. Exposed to the run wiring via [`Self::player_mailboxes`]
-    /// so the command drain ([`crate::control::command_drain_with_seams`]) can
-    /// address every declared channel. Empty when no media players are configured.
+    /// player id: the bounded two-class seam (state verbs conflated latest-wins;
+    /// targeted load/cue/seek a bounded drop-oldest FIFO) the control-plane
+    /// command drain submits transport verbs to, drained by each player's ingest
+    /// thread between frames. Exposed to the run wiring via
+    /// [`Self::player_mailboxes`] so the command drain
+    /// ([`crate::control::command_drain_with_seams`]) can address every declared
+    /// channel. Empty when no media players are configured.
     player_mailboxes: std::collections::HashMap<String, Arc<crate::player::TransportMailbox>>,
     /// The shared WHIP publisher rendezvous (ADR-T014): the control plane's
     /// `WhipProvider` writes a negotiated publisher into it and each webrtc
@@ -9403,6 +9405,13 @@ fn stream_player(
     let mut discarded: u64 = 0;
     let mut produced_this_lap: u64 = 0;
     let mut unproductive_laps: u32 = 0;
+    // `true` once demux EOF has flushed the decoder this lap: the next decode
+    // pass drains the decoder's DELAYED (reordered / B-frame) frames — which
+    // libav only emits after the EOF flush — before the lap is judged
+    // productive/unproductive. (A good B-frame clip's publishable frames can be
+    // buffered until this flush; judging at demux EOF alone would wrongly call
+    // such a lap empty.)
+    let mut eof_flushing = false;
     // The discard budget: a generous multiple of the declared clip length plus a
     // floor, so a legitimate keyframe-bracketed seek (discarding back to the prior
     // keyframe) always succeeds, but an unreachable target (past clip end) or a
@@ -9534,6 +9543,46 @@ fn stream_player(
             }
         }
 
+        // The decoder has been flushed at demux EOF and its DELAYED frames have
+        // now been drained by the `while` above — so the lap can be judged
+        // productive/unproductive on the COMPLETE frame set (B-frame / reordered
+        // frames buffered until the flush are counted). Decide the loop here.
+        if eof_flushing {
+            eof_flushing = false;
+            if player.is_playing_state() {
+                // FAIL-SAFE: a full open→decode→EOF-flush lap that published ZERO
+                // frames is an unplayable asset for this geometry (truncated /
+                // zero-frame / corrupt, or an in-point/target past the real clip
+                // end). Re-seeking forever would spin the ingest thread (rule 26 /
+                // inv #1). After `MAX_UNPRODUCTIVE_LAPS` such laps, give up → hold
+                // last-good, never busy-re-arm seek→EOF→seek. A lap that published
+                // ANY frame (during decode OR the flush) is productive.
+                if produced_this_lap == 0 {
+                    unproductive_laps = unproductive_laps.saturating_add(1);
+                    if unproductive_laps >= MAX_UNPRODUCTIVE_LAPS {
+                        tracing::warn!(
+                            player = %plan.id, laps = unproductive_laps,
+                            "media player: asset produced no frames for this geometry — \
+                             holding last-good (no further re-seek)"
+                        );
+                        drained = true;
+                    }
+                } else {
+                    unproductive_laps = 0;
+                }
+                if !drained {
+                    // Re-arm the next loop from the in-point (this re-seek flushes
+                    // the decoder again, clearing the EOF state).
+                    produced_this_lap = 0;
+                    let in_point = handle.geometry.in_point();
+                    apply_player_seek(input, decoder, in_point, cadence, &mut pending_target);
+                }
+            } else {
+                // Not looping: the play-through ended — drain and hold.
+                drained = true;
+            }
+        }
+
         if drained {
             // The decoder is fully drained and the player is not looping (a wrap
             // would have re-seeded packets). Hold the tile LIVE: a finite,
@@ -9541,6 +9590,12 @@ fn stream_player(
             // cadence via the heartbeat below until `stop`.
             heartbeat_player_hold(plan, &mut player, last_image.as_ref(), pacer, stop);
             return Ok(());
+        }
+
+        // While flushing the decoder's delayed frames after demux EOF, do not
+        // read more packets — loop back to drain the decoder first.
+        if eof_flushing {
+            continue;
         }
 
         // Feed the decoder the next packet(s).
@@ -9555,42 +9610,13 @@ fn stream_player(
                 // thread, ADR-0057 Decision 6).
             }
             Err(ffmpeg::Error::Eof) => {
-                // End of the container. If the player is in a publishing state it
-                // loops by re-seeking to the in-point and re-reading (a wrap is
-                // normally driven by `on_decoded` reaching the out-point; hitting
-                // real EOF first means the asset is shorter than declared).
-                //
-                // FAIL-SAFE: a cycle that published ZERO frames is an unplayable
-                // asset for this geometry (truncated / zero-frame / corrupt, or a
-                // target past the real clip end). Re-seeking forever would spin
-                // the ingest thread (rule 26 / inv #1). After
-                // `MAX_UNPRODUCTIVE_LAPS` such cycles, give up → drain + hold
-                // last-good, never busy-re-arm seek→EOF→seek.
-                if player.is_playing_state() {
-                    if produced_this_lap == 0 {
-                        unproductive_laps = unproductive_laps.saturating_add(1);
-                        if unproductive_laps >= MAX_UNPRODUCTIVE_LAPS {
-                            tracing::warn!(
-                                player = %plan.id, laps = unproductive_laps,
-                                "media player: asset produced no frames for this geometry — \
-                                 holding last-good (no further re-seek)"
-                            );
-                            decoder.send_eof().map_err(|e| e.to_string())?;
-                            drained = true;
-                            continue;
-                        }
-                    } else {
-                        // A productive lap: reset the unproductive counter and
-                        // re-arm the next loop from the in-point.
-                        unproductive_laps = 0;
-                    }
-                    produced_this_lap = 0;
-                    let in_point = handle.geometry.in_point();
-                    apply_player_seek(input, decoder, in_point, cadence, &mut pending_target);
-                } else {
-                    decoder.send_eof().map_err(|e| e.to_string())?;
-                    drained = true;
-                }
+                // Demux EOF: flush the decoder so its DELAYED (reordered /
+                // B-frame) frames emit, then loop back to DRAIN + publish them
+                // before judging this lap (the productivity decision happens above
+                // once `eof_flushing` frames are drained). This is the same
+                // EOF-flush behaviour the decoder-flush tests document.
+                decoder.send_eof().map_err(|e| e.to_string())?;
+                eof_flushing = true;
             }
             Err(other) => return Err(other.to_string()),
         }
@@ -12607,6 +12633,139 @@ mod media_player_loop_tests {
         // store responds (here: no real frame was ever decodable, so it holds
         // NO_SIGNAL under the Slate-vs-HoldForever read, never a hang).
         let _ = store.read_at(MediaTime::from_nanos(1_000_000_000));
+    }
+
+    #[test]
+    fn a_b_frame_clip_publishes_its_eof_flush_delayed_frames_each_lap() {
+        // A `-bf 2` clip holds its trailing reorder-window frames in the decoder
+        // until the EOF FLUSH (decoder_flush.rs proves `sent − emitted ≥ 1` frames
+        // are buffered awaiting EOF). The player MUST drain + publish those
+        // flush-delayed frames before re-seeking the next lap — otherwise the last
+        // frame(s) of the window are LOST every lap (and, in the extreme, a lap
+        // that publishes nothing until the flush is wrongly judged unproductive
+        // and given up). Vamp the WHOLE 6-frame clip and assert that, across
+        // several laps, EVERY source frame's content is published — including the
+        // reorder-buffered ones. Against the pre-flush judgment the buffered
+        // frames are flushed away (lost) and the captured set is incomplete.
+        const REAL_FRAMES: u64 = 6;
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("bframe.ts");
+        generate_loop_clip(&clip, u32::try_from(REAL_FRAMES).unwrap());
+
+        let tile_w = 160;
+        let tile_h = 120;
+        let refs = reference_fingerprints(&clip, tile_w, tile_h, REAL_FRAMES);
+        assert!(
+            refs.len() >= usize::try_from(REAL_FRAMES).unwrap(),
+            "reference decode produced too few frames: {}",
+            refs.len()
+        );
+        let want: std::collections::HashSet<u64> = refs.iter().copied().collect();
+
+        let cadence = Rational::new(25, 1);
+        let geometry = PlayoutGeometry::new(0, REAL_FRAMES, 0, REAL_FRAMES, cadence).unwrap();
+        let mailbox = Arc::new(TransportMailbox::new());
+        let handle = crate::player::PlayerHandle::new(
+            "vt-bframe".to_owned(),
+            geometry,
+            EofPolicy::Loop,
+            true,
+            Arc::clone(&mailbox),
+        );
+        let store = Arc::new(TileStore::new(
+            "vt-bframe",
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let plan = super::IngestPlan {
+            id: "vt-bframe".to_owned(),
+            location: super::SourceLocation::Path(clip.clone()),
+            player: Some(handle),
+            tile_w,
+            tile_h,
+            store: Arc::clone(&store),
+            live: false,
+            #[cfg(feature = "overlay")]
+            incontainer_sub: None,
+            #[cfg(feature = "overlay")]
+            embedded_cc: None,
+            canvas_color: super::CanvasColor::default(),
+            cadence,
+            decode_placement: super::DecodePlacement::Default,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_registry: None,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_audio_store: None,
+            #[cfg(feature = "ndi")]
+            ndi_accept_license: false,
+            #[cfg(feature = "ndi")]
+            ndi_acceptance: multiview_input::ndi::license::LicenseAcceptance {
+                accepted_by: String::new(),
+                accepted_at: String::new(),
+            },
+            #[cfg(feature = "youtube")]
+            youtube_url_slot: None,
+        };
+
+        // Capture every distinct published frame fingerprint across the run.
+        let captured: Arc<Mutex<std::collections::HashSet<u64>>> =
+            Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let rec_store = Arc::clone(&store);
+        let rec_captured = Arc::clone(&captured);
+        let rec_stop = Arc::new(AtomicBool::new(false));
+        let rec_stop_t = Arc::clone(&rec_stop);
+        let recorder = std::thread::Builder::new()
+            .name("media-player-bframe-recorder".to_owned())
+            .spawn(move || {
+                let far = MediaTime::from_nanos(600_000_000_000);
+                let mut last_seq = 0u64;
+                while !rec_stop_t.load(Ordering::Acquire) {
+                    let seq = rec_store.sequence();
+                    if seq != last_seq {
+                        last_seq = seq;
+                        if let Some(frame) = rec_store.read_at(far).frame() {
+                            rec_captured.lock().unwrap().insert(nv12_fingerprint(frame));
+                        }
+                    }
+                    std::thread::sleep(Duration::from_micros(100));
+                }
+            })
+            .unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let player_thread = std::thread::Builder::new()
+            .name("media-player-bframe-test".to_owned())
+            .spawn(move || super::ingest_loop(&plan, &stop_thread))
+            .unwrap();
+
+        // ~10 laps (clip = 6 × 40 ms = 240 ms): plenty for the poller to catch
+        // every per-lap frame including the flush-delayed ones.
+        std::thread::sleep(Duration::from_millis(2_500));
+        let still_running = !player_thread.is_finished();
+        stop.store(true, Ordering::Release);
+        player_thread.join().unwrap();
+        rec_stop.store(true, Ordering::Release);
+        recorder.join().unwrap();
+
+        // It kept looping a GOOD clip (never wrongly given up).
+        assert!(
+            still_running,
+            "a good B-frame clip was WRONGLY given up / held — the fail-safe judged \
+             the lap before the EOF flush drained the delayed frames"
+        );
+        // COMPLETENESS: every source frame's content was published across laps —
+        // including the reorder-buffered frames that emit only on the EOF flush.
+        // Against the pre-fix code those frames are flushed away and never appear.
+        let got = captured.lock().unwrap().clone();
+        let missing: Vec<u64> = want.difference(&got).copied().collect();
+        assert!(
+            missing.is_empty(),
+            "the player dropped {} of {} source frames — flush-delayed (reorder) \
+             frames were lost instead of published before the re-seek",
+            missing.len(),
+            want.len()
+        );
     }
 }
 
