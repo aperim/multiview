@@ -156,6 +156,92 @@ fn mailbox_collapses_only_the_state_verbs_keeping_targets() {
     );
 }
 
+#[test]
+fn mailbox_bounds_targeted_verbs_drop_oldest_keeping_order() {
+    // A stalled consumer (never drains): targeted verbs must NOT grow unbounded
+    // (inv #10 / safety §5). Submit far more than the cap of distinct seeks; the
+    // mailbox keeps at most the cap, dropping the OLDEST, and the retained ones
+    // stay in submission order (NOT collapsed latest-wins).
+    let mb = TransportMailbox::new();
+    // Submit 50 distinct seeks without ever draining.
+    for f in 0..50u64 {
+        mb.submit(TransportVerb::Seek { frame: f });
+    }
+    let drained = mb.drain();
+    // Bounded: never more than the cap.
+    assert!(
+        drained.len() <= 16,
+        "targeted queue must be bounded (got {} pending)",
+        drained.len()
+    );
+    assert!(!drained.is_empty(), "the most recent seeks are retained");
+    // Drop-OLDEST + order-preserving: the retained seeks are the NEWEST `len`
+    // frames, in ascending (submission) order — the oldest were evicted.
+    let frames: Vec<u64> = drained
+        .iter()
+        .map(|v| match v {
+            TransportVerb::Seek { frame } => *frame,
+            other => panic!("expected only Seek verbs, got {other:?}"),
+        })
+        .collect();
+    // Strictly increasing (FIFO order preserved, not reordered/collapsed).
+    for w in frames.windows(2) {
+        assert!(
+            w[1] > w[0],
+            "retained targeted verbs must keep submission order: {frames:?}"
+        );
+    }
+    // The newest frame (49) survived; an early one (0) was dropped.
+    assert_eq!(
+        *frames.last().unwrap(),
+        49,
+        "the newest seek is always retained"
+    );
+    assert!(
+        !frames.contains(&0),
+        "the oldest seek was dropped (drop-oldest): {frames:?}"
+    );
+}
+
+#[test]
+fn mailbox_state_verbs_never_count_against_the_targeted_cap() {
+    // Interleaving many state verbs must not evict targeted verbs (state verbs
+    // conflate to one and do not consume the targeted budget).
+    let mb = TransportMailbox::new();
+    mb.submit(TransportVerb::Seek { frame: 1 });
+    for _ in 0..100 {
+        mb.submit(TransportVerb::Play);
+        mb.submit(TransportVerb::Pause);
+    }
+    mb.submit(TransportVerb::Seek { frame: 2 });
+    let drained = mb.drain();
+    // Exactly the two seeks (in order) + at most one conflated state verb.
+    let seeks: Vec<u64> = drained
+        .iter()
+        .filter_map(|v| match v {
+            TransportVerb::Seek { frame } => Some(*frame),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(seeks, vec![1, 2], "both distinct seeks survive in order");
+    let state_count = drained
+        .iter()
+        .filter(|v| {
+            matches!(
+                v,
+                TransportVerb::Play
+                    | TransportVerb::Pause
+                    | TransportVerb::Stop
+                    | TransportVerb::Vamp
+                    | TransportVerb::ArmExit
+                    | TransportVerb::TakeExit
+                    | TransportVerb::CancelExit
+            )
+        })
+        .count();
+    assert!(state_count <= 1, "state verbs conflate to at most one");
+}
+
 // ---------------------------------------------------------------------------
 // 2. Output-anchored stamping (media-playout §7.2)
 // ---------------------------------------------------------------------------

@@ -57,13 +57,30 @@ pub enum TransportVerb {
     CancelExit,
 }
 
-/// The shared mailbox: a single bounded slot of pending verbs, conflated
-/// latest-wins, drained wholesale between frames.
+/// The maximum number of **targeted** verbs (load/cue/seek) held pending before
+/// the oldest is dropped. Small: a player polls its mailbox every frame, so more
+/// than a handful of un-drained distinct seeks means a stalled consumer, and the
+/// newest intents are the ones worth keeping. State-collapsing verbs do not
+/// count against this (they conflate to at most one).
+const MAX_TARGETED_PENDING: usize = 16;
+
+/// The shared transport mailbox. Two classes of verb, two bounded disciplines —
+/// **the queue can never grow without bound** (inv #10, safety §5):
 ///
-/// Cloneable handle semantics: both the control-plane writer and the ingest
-/// thread hold an [`std::sync::Arc`] to the same `TransportMailbox`. The lock
-/// is held only for the O(1) push/drain of a tiny `Vec` — never across a
-/// decode, a publish, or an `.await` (invariants #1/#10).
+/// - **State-collapsing** verbs (play/vamp/pause/stop/arm/take/cancel-exit)
+///   are **conflated latest-wins**: a new one supersedes any earlier pending
+///   state verb, so at most one is ever held.
+/// - **Targeted** verbs (load/cue/seek) carry distinct targets, so they are
+///   held in a **bounded FIFO** (cap [`MAX_TARGETED_PENDING`], **drop-oldest**
+///   on overflow with a warning) — order-preserving (each distinct seek is
+///   honoured in submission order; they are **not** collapsed latest-wins,
+///   which would lose intended intermediate seeks).
+///
+/// Drained wholesale between frames. Cloneable handle semantics: both the
+/// control-plane writer and the ingest thread hold an [`std::sync::Arc`] to the
+/// same `TransportMailbox`. The lock is held only for the O(1) push/drain of a
+/// tiny `Vec` — never across a decode, a publish, or an `.await` (inv #1/#10);
+/// the writer never blocks and the reader never awaits.
 #[derive(Debug, Default)]
 pub struct TransportMailbox {
     pending: Mutex<Vec<TransportVerb>>,
@@ -76,12 +93,9 @@ impl TransportMailbox {
         Self::default()
     }
 
-    /// Submit a verb (control-plane side). Conflation rule: a new
-    /// **state-collapsing** verb (play/pause/stop/vamp/arm/take/cancel)
-    /// supersedes any *earlier* state-collapsing verb still pending, so a slow
-    /// thread applies only the latest intent; **targeted** verbs
-    /// (load/cue/seek) are appended in order (they carry distinct targets that
-    /// must each be honoured). Never blocks.
+    /// Submit a verb (control-plane side). Bounded by construction (see the type
+    /// docs): a state-collapsing verb conflates latest-wins; a targeted verb
+    /// joins a bounded drop-oldest FIFO. Never blocks; never grows unbounded.
     pub fn submit(&self, verb: TransportVerb) {
         // Poisoned lock: the data plane must not panic — fall back to a no-op
         // (the thread keeps playing last-good; the operator can re-submit).
@@ -89,7 +103,24 @@ impl TransportMailbox {
             return;
         };
         if is_state_collapsing(&verb) {
+            // Conflate: at most one state-collapsing verb pending.
             pending.retain(|v| !is_state_collapsing(v));
+            pending.push(verb);
+            return;
+        }
+        // Targeted verb: bounded FIFO, drop-oldest on overflow. Count the
+        // targeted verbs already pending; if at the cap, evict the oldest one
+        // (the first targeted verb in submission order) before pushing.
+        let targeted = pending.iter().filter(|v| !is_state_collapsing(v)).count();
+        if targeted >= MAX_TARGETED_PENDING {
+            if let Some(pos) = pending.iter().position(|v| !is_state_collapsing(v)) {
+                let dropped = pending.remove(pos);
+                tracing::warn!(
+                    ?dropped,
+                    cap = MAX_TARGETED_PENDING,
+                    "media transport mailbox full: dropped the oldest targeted verb (drop-oldest)"
+                );
+            }
         }
         pending.push(verb);
     }
