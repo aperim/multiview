@@ -9428,7 +9428,9 @@ fn stream_player(
         }
 
         // Drain the transport mailbox and apply each verb to the player. This is
-        // the only control-plane seam; it is O(pending) and never blocks.
+        // the only control-plane seam; O(pending), it takes the mailbox's short
+        // uncontended mutex for a `mem::take`, and never awaits or back-pressures
+        // the output clock (inv #1/#10).
         for verb in handle.mailbox.drain() {
             match verb {
                 TransportVerb::Play => player.play(multiview_core::time::MediaTime::ZERO),

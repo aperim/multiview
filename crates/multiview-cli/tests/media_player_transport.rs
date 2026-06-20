@@ -99,7 +99,8 @@ fn geometry_rejects_non_positive_cadence() {
 }
 
 // ---------------------------------------------------------------------------
-// 1b. Transport mailbox — conflated latest-wins, drain in order
+// 1b. Transport mailbox — two-class: state verbs conflated latest-wins, targeted
+//     verbs a bounded drop-oldest ordered FIFO; drained in order
 // ---------------------------------------------------------------------------
 
 #[test]
