@@ -17,12 +17,18 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use multiview_control::devices::cast::media::{CastDelivery, CastMediaTarget, HlsSegmentFormat};
+use multiview_control::devices::cast::protocol::{
+    CastFrame, NS_MEDIA, NS_RECEIVER, PLATFORM_RECEIVER_ID, SENDER_ID,
+};
 use multiview_control::devices::cast::runtime::CastSessionFactory;
-use multiview_control::devices::cast::session::{CastSessionConfig, ScriptedConnector};
+use multiview_control::devices::cast::session::{
+    CastSessionConfig, ScriptedChannel, ScriptedConnector, ScriptedInbound,
+};
+use multiview_control::devices::cast::store::CastSessionRecord;
 use multiview_control::devices::DevicePollerRegistry;
 use support::{
-    body_json, delete_if_match, get, harness_with, post_json, send, ADMIN_TOKEN, OPERATOR_TOKEN,
-    VIEWER_TOKEN,
+    body_json, delete_if_match, get, harness_with, post_json, send, ADMIN_TOKEN,
+    CAST_SAVE_SCOPED_TOKEN, OPERATOR_TOKEN, OUTPUT_SCOPED_TOKEN, SCOPED_TOKEN, VIEWER_TOKEN,
 };
 
 /// The delivery map the routes resolve outputs against: two HLS renditions.
@@ -304,6 +310,211 @@ async fn save_promotes_the_session_to_a_cast_device() {
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 }
 
+/// BOLA (OWASP API1, conventions §H / ADR-W005): the save-as-device promotion
+/// touches TWO objects — the target `device_id` it creates AND the path session
+/// `id` it reads + retires. A principal scoped to its own object allowlist that
+/// is authorized for the target device but NOT for the session id must be
+/// **denied** the promotion: otherwise a scoped operator can promote another
+/// tenant's running session into a device it controls.
+///
+/// `SCOPED_TOKEN` is an operator scoped to the object allowlist
+/// `["scoped-layout"]`. Saving with `device_id: "scoped-layout"` clears the
+/// device-id authorization (that id is in the allowlist), so the ONLY thing that
+/// can deny this request is authorizing the session path id — which is a
+/// `cast-session-…` id outside the allowlist. The request must be a `403`,
+/// exactly as `get`/`stop`/`volume` deny an unauthorized session id.
+#[tokio::test]
+async fn save_denies_a_session_outside_the_scoped_allowlist() {
+    let h = cast_harness();
+
+    // An operator starts an ad-hoc session (it owns a `cast-session-…` id the
+    // scoped principal is NOT authorized for).
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions",
+            OPERATOR_TOKEN,
+            &start_body(Some("out-b")),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().expect("a session id").to_owned();
+
+    // The scoped operator is authorized for object "scoped-layout" but NOT for
+    // the session id. It targets a device id INSIDE its allowlist, so the
+    // device-id authorization passes; the session path id is the lone gate.
+    let resp = send(
+        &h.router,
+        post_json(
+            &format!("/api/v1/cast/sessions/{id}/save"),
+            SCOPED_TOKEN,
+            &serde_json::json!({ "device_id": "scoped-layout" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a scoped principal must not promote a session id outside its allowlist (BOLA)"
+    );
+    let problem = body_json(resp).await;
+    assert_eq!(problem["type"], "/problems/forbidden");
+
+    // The session was NOT promoted: it is still an ephemeral session (the
+    // denied request had no side effect), and no device was created.
+    let resp = send(&h.router, get("/api/v1/cast/sessions", ADMIN_TOKEN)).await;
+    let list = body_json(resp).await;
+    assert_eq!(
+        list.as_array().expect("an array").len(),
+        1,
+        "the denied save must not have retired the ephemeral session"
+    );
+    let resp = send(&h.router, get("/api/v1/devices/scoped-layout", ADMIN_TOKEN)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "the denied save must not have created the promoted device"
+    );
+}
+
+/// BOLA (OWASP API1, conventions §H / ADR-W005): `start_cast_session` casts a
+/// caller-supplied **output** (a program rendition / head). An **output-scoped**
+/// principal (confined to a subset of heads) must not cast a rendition outside
+/// its allowlist — exactly as `salvos` gates a head with `authorize_output`.
+///
+/// `OUTPUT_SCOPED_TOKEN` is an operator scoped to output `wall-1`. The cast
+/// harness serves renditions `out-a`/`out-b` (so `out-b` clears the
+/// served-rendition validation) but neither is `wall-1`, so starting a cast onto
+/// `out-b` must be a `403` — and, because the check precedes any side effect,
+/// nothing is minted: no session row, no spawned actor, no membership event.
+#[tokio::test]
+async fn start_denies_an_output_outside_the_scoped_allowlist() {
+    let h = cast_harness();
+
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions",
+            OUTPUT_SCOPED_TOKEN,
+            &start_body(Some("out-b")),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "an output-scoped principal must not cast a rendition outside its allowlist (BOLA)"
+    );
+    let problem = body_json(resp).await;
+    assert_eq!(problem["type"], "/problems/forbidden");
+
+    // No side effect: the denied start minted no session (the list is empty).
+    let resp = send(&h.router, get("/api/v1/cast/sessions", ADMIN_TOKEN)).await;
+    let list = body_json(resp).await;
+    assert!(
+        list.as_array().expect("an array").is_empty(),
+        "a denied start must not mint a session"
+    );
+}
+
+/// The positive path of the same guard: an output-scoped principal may cast a
+/// rendition that IS inside its allowlist. Proves the `authorize_output` gate
+/// does not over-restrict — a `wall-1`-scoped operator can start a cast onto
+/// `wall-1`.
+#[tokio::test]
+async fn start_allows_an_output_inside_the_scoped_allowlist() {
+    // A delivery map that additionally serves `wall-1` (the output the scoped
+    // principal is confined to).
+    let delivery = {
+        let mut d = CastDelivery::new();
+        d.insert(
+            "wall-1",
+            CastMediaTarget {
+                url: "http://192.0.2.7:8080/hls/wall-1/w.m3u8".to_owned(),
+                format: HlsSegmentFormat::Fmp4,
+            },
+        );
+        Arc::new(d)
+    };
+    let registry = {
+        let factory = CastSessionFactory::new(
+            Arc::new(ScriptedConnector::new(vec![])),
+            Arc::clone(&delivery),
+            CastSessionConfig::test_fast(),
+        );
+        Arc::new(DevicePollerRegistry::with_factory(Arc::new(factory)))
+    };
+    let h = harness_with(|state| {
+        state
+            .with_device_pollers(Arc::clone(&registry))
+            .with_cast_delivery(Arc::clone(&delivery))
+    });
+
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions",
+            OUTPUT_SCOPED_TOKEN,
+            &start_body(Some("wall-1")),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "an output-scoped principal may cast a rendition inside its allowlist"
+    );
+    let created = body_json(resp).await;
+    assert_eq!(created["output"], "wall-1");
+}
+
+/// Positive path of the save BOLA guard: a principal scoped to BOTH the session
+/// id AND the target device id may still promote its OWN session. Proves the new
+/// `authorize_object(&id)` on save does not over-restrict a properly-scoped
+/// principal (the negative path is `save_denies_a_session_outside_the_scoped_allowlist`).
+///
+/// The session id is server-minted per start, so the fixture session is seeded
+/// directly into the store under the known id `cast-session-savable`;
+/// `CAST_SAVE_SCOPED_TOKEN` is scoped to `["cast-session-savable", "dev-savable"]`.
+#[tokio::test]
+async fn save_allows_a_scoped_principal_to_promote_its_own_session() {
+    let h = harness_with(|state| {
+        // Seed a fixture session under a KNOWN id (start mints uuids; the scoped
+        // principal's allowlist names this exact id).
+        state.cast_sessions.insert(CastSessionRecord {
+            id: "cast-session-savable".to_owned(),
+            name: Some("Savable".to_owned()),
+            address: "[2001:db8::20]:8009".to_owned(),
+            output: "out-b".to_owned(),
+            media_url: "http://192.0.2.7:8080/hls/out-b/b.m3u8".to_owned(),
+            started_unix_ns: None,
+        });
+        state.with_cast_delivery(delivery())
+    });
+
+    // The scoped principal owns BOTH the session id and the device id: the save
+    // promotion authorizes both objects and succeeds.
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions/cast-session-savable/save",
+            CAST_SAVE_SCOPED_TOKEN,
+            &serde_json::json!({ "device_id": "dev-savable" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "a principal scoped to its own session + device may promote it (guard not over-restrictive)"
+    );
+    let device = body_json(resp).await;
+    assert_eq!(device["id"], "dev-savable");
+    assert_eq!(device["body"]["driver"], "cast");
+}
+
 #[tokio::test]
 async fn volume_dispatches_to_the_running_session() {
     let h = cast_harness();
@@ -437,6 +648,10 @@ async fn stop_clears_the_tombstone_so_session_ids_stay_bounded() {
     let wiring = PollerWiring {
         broadcaster: DeviceBroadcaster::new(engine, Arc::new(DeviceStatusRegistry::new())),
         drivers: Arc::new(DeviceDriverRegistry::new()),
+        cast_sessions: std::sync::Arc::new(
+            multiview_control::devices::cast::store::CastSessionStore::new(),
+        ),
+        clock: std::sync::Arc::new(|| multiview_core::time::MediaTime::from_nanos(0)),
     };
     assert!(
         registry_probe.start(&dev, &wiring),
@@ -548,4 +763,259 @@ async fn ephemeral_sessions_never_reach_the_config_export() {
         !text.contains(&id),
         "the session id never appears anywhere in the export"
     );
+}
+
+// ---------------------------------------------------------------------------
+// DEV-D3.1: session started-at + membership lifecycle events.
+// ---------------------------------------------------------------------------
+
+/// An inbound frame from the device (scripted-channel test vocabulary,
+/// mirroring the `cast_session.rs` builders).
+fn from_device(namespace: &str, payload: &serde_json::Value) -> CastFrame {
+    CastFrame {
+        namespace: namespace.to_owned(),
+        source: PLATFORM_RECEIVER_ID.to_owned(),
+        destination: SENDER_ID.to_owned(),
+        payload: payload.to_string(),
+    }
+}
+
+/// A `RECEIVER_STATUS` carrying the launched Default Media Receiver.
+fn receiver_status_with_app() -> CastFrame {
+    from_device(
+        NS_RECEIVER,
+        &serde_json::json!({
+            "type": "RECEIVER_STATUS",
+            "requestId": 0,
+            "status": { "applications": [{
+                "appId": "CC1AD845",
+                "sessionId": "s-1",
+                "transportId": "t-1",
+                "displayName": "Default Media Receiver"
+            }] }
+        }),
+    )
+}
+
+/// A `MEDIA_STATUS` with one active (PLAYING) media session.
+fn media_status_playing() -> CastFrame {
+    from_device(
+        NS_MEDIA,
+        &serde_json::json!({
+            "type": "MEDIA_STATUS",
+            "requestId": 0,
+            "status": [{ "mediaSessionId": 1, "playerState": "PLAYING" }]
+        }),
+    )
+}
+
+#[tokio::test]
+async fn start_and_stop_publish_cast_session_lifecycle_events() {
+    // Gap 2 (DEV-D3.1): session-list MEMBERSHIP changes must ride the lossless
+    // devices lane immediately — never only the SPA's 15 s REST re-poll.
+    let h = cast_harness();
+    let mut events = h.engine.subscribe();
+
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions",
+            OPERATOR_TOKEN,
+            &start_body(Some("out-b")),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().expect("a session id").to_owned();
+
+    let mut started = None;
+    while let Ok(envelope) = events.try_recv() {
+        if let multiview_events::Event::CastSessionStarted(s) = &*envelope.event {
+            started = Some(s.clone());
+        }
+    }
+    let started = started.expect("POST published cast.session.started");
+    assert_eq!(started.session_id, id);
+    assert_eq!(started.name.as_deref(), Some("Lounge TV"));
+    assert_eq!(started.address, "[2001:db8::20]:8009");
+    assert_eq!(started.output, "out-b");
+
+    let resp = send(
+        &h.router,
+        delete_if_match(&format!("/api/v1/cast/sessions/{id}"), OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let mut removed = false;
+    while let Ok(envelope) = events.try_recv() {
+        if let multiview_events::Event::CastSessionRemoved(r) = &*envelope.event {
+            removed = removed || r.session_id == id;
+        }
+    }
+    assert!(removed, "DELETE published cast.session.removed");
+}
+
+#[tokio::test]
+async fn save_promotion_publishes_cast_session_removed() {
+    // The save-as-device promotion retires the EPHEMERAL record (playback
+    // continues under the device id): membership changed, so the removal
+    // event rides the lane here too.
+    let h = cast_harness();
+    let mut events = h.engine.subscribe();
+
+    let resp = send(
+        &h.router,
+        post_json("/api/v1/cast/sessions", OPERATOR_TOKEN, &start_body(None)),
+    )
+    .await;
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().expect("a session id").to_owned();
+
+    let resp = send(
+        &h.router,
+        post_json(
+            &format!("/api/v1/cast/sessions/{id}/save"),
+            OPERATOR_TOKEN,
+            &serde_json::json!({ "device_id": "dev-save-events" }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let mut removed = false;
+    while let Ok(envelope) = events.try_recv() {
+        if let multiview_events::Event::CastSessionRemoved(r) = &*envelope.event {
+            removed = removed || r.session_id == id;
+        }
+    }
+    assert!(
+        removed,
+        "save published cast.session.removed for the session id"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_start_publishes_no_lifecycle_event() {
+    // The no-live-driver 409 records nothing — and must announce nothing.
+    let h = harness_with(|state| state.with_cast_delivery(delivery()));
+    let mut events = h.engine.subscribe();
+    let resp = send(
+        &h.router,
+        post_json("/api/v1/cast/sessions", OPERATOR_TOKEN, &start_body(None)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    while let Ok(envelope) = events.try_recv() {
+        assert!(
+            !matches!(
+                &*envelope.event,
+                multiview_events::Event::CastSessionStarted(_)
+            ),
+            "a refused start must not announce a session"
+        );
+    }
+}
+
+#[tokio::test]
+async fn started_unix_ns_is_absent_until_the_receiver_accepts_the_load() {
+    // Gap 1 (DEV-D3.1): the served doc carries the start stamp ONLY once the
+    // receiver accepted the LOAD. This harness's connector refuses every
+    // connect, so no LOAD is ever accepted — the field must stay absent
+    // (stamping at REST-accept time would lie about failed loads).
+    let h = cast_harness();
+    let resp = send(
+        &h.router,
+        post_json("/api/v1/cast/sessions", OPERATOR_TOKEN, &start_body(None)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().expect("a session id").to_owned();
+    assert!(
+        created.get("started_unix_ns").is_none(),
+        "no stamp before the LOAD is accepted: {created}"
+    );
+
+    let resp = send(
+        &h.router,
+        get(&format!("/api/v1/cast/sessions/{id}"), VIEWER_TOKEN),
+    )
+    .await;
+    let doc = body_json(resp).await;
+    assert!(
+        doc.get("started_unix_ns").is_none(),
+        "GET mirrors the absent stamp: {doc}"
+    );
+}
+
+#[tokio::test]
+async fn started_unix_ns_appears_once_the_receiver_accepts_the_load() {
+    // A full scripted establishment: connect → CONNECT → LAUNCH →
+    // RECEIVER_STATUS → CONNECT → LOAD → MEDIA_STATUS(PLAYING). The accept
+    // point stamps the session record from the control plane's injectable
+    // clock (the same `AckClock` the audit log stamps with, Unix
+    // nanoseconds), and the REST docs expose it as `started_unix_ns`.
+    const NOW_UNIX_NS: i64 = 1_765_000_000_123_456_789;
+    let (channel, _sent) = ScriptedChannel::new(vec![
+        ScriptedInbound::Frame(receiver_status_with_app()),
+        ScriptedInbound::Frame(media_status_playing()),
+        ScriptedInbound::Hang,
+    ]);
+    let factory = CastSessionFactory::new(
+        Arc::new(ScriptedConnector::new(vec![channel])),
+        delivery(),
+        CastSessionConfig::test_fast(),
+    );
+    let registry = Arc::new(DevicePollerRegistry::with_factory(Arc::new(factory)));
+    let h = harness_with(move |state| {
+        state
+            .with_device_pollers(registry)
+            .with_cast_delivery(delivery())
+            .with_ack_clock(Arc::new(|| {
+                multiview_core::time::MediaTime::from_nanos(NOW_UNIX_NS)
+            }))
+    });
+
+    let resp = send(
+        &h.router,
+        post_json("/api/v1/cast/sessions", OPERATOR_TOKEN, &start_body(None)),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().expect("a session id").to_owned();
+
+    // The supervised actor establishes asynchronously (test_fast cadences):
+    // poll the GET until the accept-point stamp lands.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let stamped = loop {
+        let resp = send(
+            &h.router,
+            get(&format!("/api/v1/cast/sessions/{id}"), VIEWER_TOKEN),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let doc = body_json(resp).await;
+        if let Some(value) = doc
+            .get("started_unix_ns")
+            .and_then(serde_json::Value::as_i64)
+        {
+            break value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the LOAD-accept stamp never landed: {doc}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(
+        stamped, NOW_UNIX_NS,
+        "the stamp is the injectable control-plane clock at the accept point"
+    );
+
+    // The list view carries the same stamp.
+    let resp = send(&h.router, get("/api/v1/cast/sessions", VIEWER_TOKEN)).await;
+    let list = body_json(resp).await;
+    assert_eq!(list[0]["started_unix_ns"].as_i64(), Some(NOW_UNIX_NS));
 }

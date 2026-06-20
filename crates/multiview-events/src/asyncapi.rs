@@ -547,6 +547,7 @@ fn build_messages_device_events() -> serde_json::Map<String, Value> {
         "contentType": "application/json",
         "payload": { "$ref": "#/components/schemas/DeviceDiscovered" }
     }));
+    insert_cast_session_messages(&mut map);
     map.insert("TimingStatus".to_owned(), json!({
         "name": "TimingStatus",
         "title": "Outbound presentation epoch + sync telemetry",
@@ -563,6 +564,42 @@ fn build_messages_device_events() -> serde_json::Map<String, Value> {
         "payload": { "$ref": "#/components/schemas/TimingStatus" }
     }));
     map
+}
+
+/// Insert the two ephemeral cast-session lifecycle message definitions
+/// (`cast.session.started` / `cast.session.removed`) into the `devices`-topic
+/// message map. Extracted from [`build_messages_device_events`] to keep that
+/// builder under the function-length budget.
+fn insert_cast_session_messages(map: &mut serde_json::Map<String, Value>) {
+    map.insert("CastSessionStarted".to_owned(), json!({
+        "name": "CastSessionStarted",
+        "title": "Ephemeral cast session started",
+        "summary": "An ad-hoc cast session was started (cast.session.started on topic `devices`; lossless lifecycle lane).",
+        "description": concat!(
+            "Emitted on topic `devices` with envelope `id` = session id when ",
+            "`POST /api/v1/cast/sessions` accepts a start (the runtime record ",
+            "exists and its supervised actor is spawned): the session-list ",
+            "MEMBERSHIP changed, so clients refresh the list immediately instead ",
+            "of waiting for a REST re-poll. The session's live state rides the ",
+            "conflated `device.status` lane keyed by the same session id.",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/CastSessionStarted" }
+    }));
+    map.insert("CastSessionRemoved".to_owned(), json!({
+        "name": "CastSessionRemoved",
+        "title": "Ephemeral cast session removed",
+        "summary": "An ad-hoc cast session was removed (cast.session.removed on topic `devices`; lossless lifecycle lane).",
+        "description": concat!(
+            "Emitted on topic `devices` with envelope `id` = session id when a ",
+            "session is stopped (`DELETE /api/v1/cast/sessions/{id}` — the ",
+            "receiver STOP that clears the TV) or promoted to a saved device ",
+            "(`POST /{id}/save` retires the ephemeral record while playback ",
+            "continues under the promoted device id).",
+        ),
+        "contentType": "application/json",
+        "payload": { "$ref": "#/components/schemas/CastSessionRemoved" }
+    }));
 }
 
 /// Build control-frame message definitions ($hello, $subscribe, …).
@@ -673,6 +710,8 @@ fn event_payload_one_of() -> Value {
         { "$ref": "#/components/schemas/DeviceError" },
         { "$ref": "#/components/schemas/DeviceSync" },
         { "$ref": "#/components/schemas/DeviceDiscovered" },
+        { "$ref": "#/components/schemas/CastSessionStarted" },
+        { "$ref": "#/components/schemas/CastSessionRemoved" },
         { "$ref": "#/components/schemas/TimingStatus" },
         { "$ref": "#/components/schemas/Hello" },
         { "$ref": "#/components/schemas/Subscribe" },
@@ -762,6 +801,8 @@ fn device_event_schemas() -> Value {
         "SyncChange": sync_change_schema(),
         "DeviceSync": device_sync_schema(),
         "DeviceDiscovered": device_discovered_schema(),
+        "CastSessionStarted": cast_session_started_schema(),
+        "CastSessionRemoved": cast_session_removed_schema(),
         "WallClockRef": wall_clock_ref_schema(),
         "SyncGroupSkew": sync_group_skew_schema(),
         "TimingStatus": timing_status_schema()
@@ -1661,6 +1702,39 @@ fn device_removed_schema() -> Value {
         "required": ["device_id"],
         "properties": {
             "device_id": { "type": "string", "description": "The registry device id that was removed." }
+        }
+    })
+}
+
+fn cast_session_started_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of `cast.session.started`: an ephemeral cast session was started ",
+            "(session-list membership changed). The session's live state rides the ",
+            "conflated `device.status` lane keyed by the same session id.",
+        ),
+        "required": ["session_id", "address", "output"],
+        "properties": {
+            "session_id": { "type": "string", "description": "The runtime session id (`cast-session-…`, UUID-fresh per start)." },
+            "name": { "type": "string", "description": "The operator-facing name, if given." },
+            "address": { "type": "string", "description": "The device authority dialled (`host[:port]`, IPv6 bracketed)." },
+            "output": { "type": "string", "description": "The output id whose HLS rendition the session casts." }
+        }
+    })
+}
+
+fn cast_session_removed_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": concat!(
+            "Data body of `cast.session.removed`: an ephemeral cast session was removed — ",
+            "stopped (the receiver STOP that clears the TV) or promoted to a saved device ",
+            "(playback continues under the promoted device id).",
+        ),
+        "required": ["session_id"],
+        "properties": {
+            "session_id": { "type": "string", "description": "The runtime session id that was removed." }
         }
     })
 }

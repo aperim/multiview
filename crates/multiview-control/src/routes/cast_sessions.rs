@@ -100,6 +100,13 @@ pub struct CastSessionDoc {
     /// `ADOPTING`/`ONLINE`/`DEGRADED`), read from the latest-wins status
     /// registry.
     pub state: String,
+    /// When the receiver **accepted** the session's `LOAD` (the first
+    /// `MEDIA_STATUS` attributing an active media session to the actor — the
+    /// moment the cast verifiably began showing), as Unix nanoseconds from
+    /// the control plane's clock. Absent until then: a session whose LOAD was
+    /// refused, or is still establishing, has not started (DEV-D3.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_unix_ns: Option<i64>,
 }
 
 /// The `POST /api/v1/cast/sessions/{id}/save` request body.
@@ -149,6 +156,7 @@ fn doc(state: &AppState, record: CastSessionRecord) -> CastSessionDoc {
         output: record.output,
         media_url: record.media_url,
         state: session_state,
+        started_unix_ns: record.started_unix_ns,
     }
 }
 
@@ -235,6 +243,12 @@ pub(crate) async fn start_cast_session(
             )
         })?;
     let (output, target) = resolve_target(delivery, request.output.as_deref())?;
+    // Per-output BOLA (ADR-W005 / OWASP API1): the cast target is a program
+    // rendition/head, so an output-scoped principal may only cast a rendition
+    // inside its allowlist — mirroring how `salvos` gates a head. Checked on the
+    // RESOLVED output and BEFORE any side effect (no record, no actor, no event),
+    // so a cross-output start casts nothing.
+    crate::auth::authorize_output(&principal, &output)?;
 
     let id = format!("cast-session-{}", uuid::Uuid::new_v4());
     // The runtime device document the factory resolves (driver gating + the
@@ -256,10 +270,26 @@ pub(crate) async fn start_cast_session(
     // domain uses (DEV-A4).
     state.device_pollers.clear_tombstone(&id);
     state.device_status.ensure(&id);
-    if !state.device_pollers.start(&device, &state.poller_wiring()) {
+    // The record is inserted BEFORE the actor spawn: the actor's LOAD-accept
+    // hook stamps `started_unix_ns` into this record through the poller
+    // wiring's store (DEV-D3.1), and a fast establishment (millisecond test
+    // cadences, a quick LAN device) must never race an absent record.
+    let record = CastSessionRecord {
+        id: id.clone(),
+        name: request.name.clone(),
+        address: request.address.clone(),
+        output,
+        media_url: target.url.clone(),
+        started_unix_ns: None,
+    };
+    state.cast_sessions.insert(record.clone());
+    let wiring = state.poller_wiring();
+    if !state.device_pollers.start(&device, &wiring) {
         // The factory does not manage cast devices: this build carries no
         // live cast driver (the off-by-default `cast` feature is off).
-        // Refuse honestly instead of recording a session that casts nothing.
+        // Refuse honestly instead of recording a session that casts nothing —
+        // and announce nothing.
+        state.cast_sessions.remove(&id);
         state.device_status.forget(&id);
         return Err(ControlError::Conflict(
             "no live cast driver in this build (the `cast` feature is off) — cannot start a \
@@ -267,15 +297,16 @@ pub(crate) async fn start_cast_session(
                 .to_owned(),
         ));
     }
-
-    let record = CastSessionRecord {
-        id: id.clone(),
-        name: request.name.clone(),
-        address: request.address.clone(),
-        output,
-        media_url: target.url.clone(),
-    };
-    state.cast_sessions.insert(record.clone());
+    // Membership changed: announce it on the lossless devices lane so clients
+    // refresh their session list immediately (DEV-D3.1); the SPA's 15 s REST
+    // re-poll stays as the degraded path. Non-blocking drop-oldest publish
+    // (invariant #10).
+    let _seq = wiring.broadcaster.cast_session_started(
+        &id,
+        record.name.clone(),
+        &record.address,
+        &record.output,
+    );
     state.audit(
         &principal.key_id,
         AuditAction::Create,
@@ -287,7 +318,10 @@ pub(crate) async fn start_cast_session(
             "media_url": record.media_url,
         })),
     );
-    Ok((StatusCode::CREATED, Json(doc(&state, record))).into_response())
+    // Serve the store's current row: a fast establishment may already have
+    // stamped started-at between the spawn and this response.
+    let served = state.cast_sessions.get(&id).unwrap_or(record);
+    Ok((StatusCode::CREATED, Json(doc(&state, served))).into_response())
 }
 
 /// `GET /api/v1/cast/sessions` — list the live ephemeral sessions (role: read).
@@ -400,6 +434,10 @@ pub(crate) async fn stop_cast_session(
     state.device_pollers.clear_tombstone(&id);
     state.device_status.forget(&id);
     state.device_drivers.forget(&id);
+    // Membership changed: announce the removal on the lossless devices lane
+    // (DEV-D3.1) so clients drop the row immediately instead of waiting for
+    // the REST re-poll. Non-blocking drop-oldest publish (invariant #10).
+    let _seq = state.poller_wiring().broadcaster.cast_session_removed(&id);
     state.audit(
         &principal.key_id,
         AuditAction::Delete,
@@ -443,6 +481,11 @@ pub(crate) async fn save_cast_session(
     Json(request): Json<SaveCastSessionRequest>,
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
+    // A promotion touches TWO objects — authorize BOTH (BOLA, ADR-W005): the
+    // path session `id` being read + retired (matching get/stop/volume), and
+    // the target `device_id` being created. Authorizing only the device would
+    // let a scoped principal promote another tenant's session into its device.
+    crate::auth::authorize_object(&principal, &id)?;
     crate::auth::authorize_object(&principal, &request.device_id)?;
     let record = state
         .cast_sessions
@@ -491,6 +534,9 @@ pub(crate) async fn save_cast_session(
     state.device_pollers.clear_tombstone(&id);
     state.device_status.forget(&id);
     state.device_drivers.forget(&id);
+    // The EPHEMERAL session left the list (playback continues under the
+    // promoted device id): announce the membership change (DEV-D3.1).
+    let _seq = state.poller_wiring().broadcaster.cast_session_removed(&id);
 
     // Start the promoted device's supervised actor (the same registry path an
     // adopt takes). With no live cast driver in this build the device simply

@@ -9260,6 +9260,14 @@
             "type": "string",
             "description": "The output id whose rendition the session casts."
           },
+          "started_unix_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the receiver **accepted** the session's `LOAD` (the first\n`MEDIA_STATUS` attributing an active media session to the actor — the\nmoment the cast verifiably began showing), as Unix nanoseconds from\nthe control plane's clock. Absent until then: a session whose LOAD was\nrefused, or is still establishing, has not started (DEV-D3.1)."
+          },
           "state": {
             "type": "string",
             "description": "The session's live lifecycle state (the DEV-A3 wire vocabulary, e.g.\n`ADOPTING`/`ONLINE`/`DEGRADED`), read from the latest-wins status\nregistry."
