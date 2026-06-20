@@ -311,6 +311,10 @@ msgstr ""
 msgid "A managed device is declarative desired state: adopting starts a supervised driver that probes and converges it."
 msgstr ""
 
+#: src/pages/docs/FeaturesPage.tsx:151
+msgid "A media player is a pre-declared channel that rolls a clip or still with VT (video-tape) transport: load an asset, cue to its in-point, play, pause, stop, and seek. For openers and loops it can vamp — loop a fill segment to hold until a cue — and then exit cleanly at the next loop boundary: arm the exit to leave after the current lap finishes, take it to leave at the soonest boundary, or cancel a pending exit to keep vamping. The transport panel shows each player's live state and playhead."
+msgstr ""
+
 #: src/resources/FormControls.tsx:72
 msgid "A mount point must start with /, e.g. /multiview."
 msgstr ""
@@ -549,7 +553,7 @@ msgstr ""
 msgid "Accessible toasts announce via a live region."
 msgstr ""
 
-#: src/app/navigation.tsx:69
+#: src/app/navigation.tsx:71
 #: src/pages/AccountPage.tsx:139
 msgid "Account"
 msgstr ""
@@ -684,7 +688,7 @@ msgstr ""
 msgid "Adopt and manage hardware around the multiview — decoders, display nodes, and cast targets."
 msgstr ""
 
-#: src/docs/registry.ts:270
+#: src/docs/registry.ts:275
 msgid "Adopt decoders, display nodes, and cast targets; lifecycle states, drivers, and stream binding."
 msgstr ""
 
@@ -718,12 +722,12 @@ msgstr ""
 msgid "Adopting applies immediately: the control plane seeds the device in ADOPTING and starts its supervised driver. Program output never depends on any device (it rides tile resilience/failover instead), and config export captures devices for restarts."
 msgstr ""
 
-#: src/docs/registry.ts:298
+#: src/docs/registry.ts:303
 #: src/pages/docs/DevicesAdoptHelpPage.tsx:17
 msgid "Adopting devices"
 msgstr ""
 
-#: src/docs/registry.ts:309
+#: src/docs/registry.ts:314
 #: src/pages/docs/DevicesAdoptHelpPage.tsx:48
 msgid "Adopting step by step"
 msgstr ""
@@ -745,7 +749,7 @@ msgstr ""
 msgid "Advisories (saving still allowed):"
 msgstr ""
 
-#: src/docs/registry.ts:319
+#: src/docs/registry.ts:324
 #: src/pages/docs/DevicesAdoptHelpPage.tsx:76
 msgid "After adoption"
 msgstr ""
@@ -762,14 +766,14 @@ msgstr ""
 msgid "Alarm when offline"
 msgstr ""
 
-#: src/app/navigation.tsx:60
-#: src/docs/registry.ts:257
+#: src/app/navigation.tsx:62
+#: src/docs/registry.ts:262
 #: src/pages/AlarmsPage.tsx:152
-#: src/pages/docs/FeaturesPage.tsx:149
+#: src/pages/docs/FeaturesPage.tsx:164
 msgid "Alarms"
 msgstr ""
 
-#: src/pages/docs/FeaturesPage.tsx:151
+#: src/pages/docs/FeaturesPage.tsx:166
 msgid "Alarms are raised by content-aware fault probes attached to a tile. Probes can detect a black picture, a frozen picture, audio silence, and loudness that drifts from an EBU R128 target. Each probe has a severity and dwell timers, so a brief glitch does not trip an alarm while a sustained fault does. Severities follow the standard cleared / indeterminate / warning / minor / major / critical scale."
 msgstr ""
 
@@ -783,6 +787,10 @@ msgstr ""
 
 #: src/pages/LayoutsPage.tsx:239
 msgid "All configured layouts."
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:251
+msgid "All configured media players."
 msgstr ""
 
 #: src/pages/SalvosPage.tsx:207
@@ -816,6 +824,10 @@ msgstr ""
 
 #: src/pages/SystemPage.tsx:91
 msgid "AMD"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:193
+msgid "An asset id is required"
 msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:241
@@ -991,8 +1003,16 @@ msgstr ""
 msgid "Arm"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:411
+msgid "Arm exit"
+msgstr ""
+
 #: src/pages/SalvosPage.tsx:251
 msgid "Arm salvo"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:405
+msgid "Arm vamp exit"
 msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:164
@@ -1005,6 +1025,10 @@ msgstr ""
 
 #: src/pages/DataPage.tsx:343
 msgid "Assemble a redacted local diagnostics bundle for your own troubleshooting — logs and engine state, never media or raw identifiers. Built from the local buffer, independent of telemetry consent."
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:473
+msgid "Asset id"
 msgstr ""
 
 #: src/layout/components/AreaMatrixEditor.tsx:281
@@ -1028,7 +1052,7 @@ msgstr ""
 msgid "Attached automatically"
 msgstr ""
 
-#: src/app/navigation.tsx:51
+#: src/app/navigation.tsx:52
 #: src/pages/AudioPage.tsx:339
 #: src/pages/OutputsPage.tsx:581
 msgid "Audio"
@@ -1046,7 +1070,7 @@ msgstr ""
 msgid "Audio silence"
 msgstr ""
 
-#: src/app/navigation.tsx:64
+#: src/app/navigation.tsx:66
 #: src/pages/AuditPage.tsx:55
 msgid "Audit"
 msgstr ""
@@ -1086,7 +1110,7 @@ msgstr ""
 msgid "Automatic (EDID preferred mode)"
 msgstr ""
 
-#: src/docs/registry.ts:523
+#: src/docs/registry.ts:528
 #: src/pages/docs/concepts/CodecsPage.tsx:79
 msgid "AV1"
 msgstr ""
@@ -1155,7 +1179,7 @@ msgstr ""
 msgid "Bindable streams"
 msgstr ""
 
-#: src/docs/registry.ts:290
+#: src/docs/registry.ts:295
 #: src/pages/docs/DevicesHelpPage.tsx:138
 msgid "Binding device streams"
 msgstr ""
@@ -1164,7 +1188,7 @@ msgstr ""
 msgid "Bit→colour rules"
 msgstr ""
 
-#: src/docs/registry.ts:623
+#: src/docs/registry.ts:628
 #: src/pages/docs/concepts/GlossaryPage.tsx:26
 msgid "Bitrate"
 msgstr ""
@@ -1234,7 +1258,7 @@ msgstr ""
 msgid "Bring it up and down"
 msgstr ""
 
-#: src/docs/registry.ts:618
+#: src/docs/registry.ts:623
 msgid "Broadcast and streaming terms used across Multiview, alphabetized and searchable."
 msgstr ""
 
@@ -1285,6 +1309,7 @@ msgstr ""
 #: src/pages/DeviceDetailPage.tsx:1091
 #: src/pages/DeviceDetailPage.tsx:1210
 #: src/pages/LayoutsPage.tsx:310
+#: src/pages/MediaPlayersPage.tsx:493
 #: src/pages/SalvosPage.tsx:281
 #: src/pages/SalvosPage.tsx:395
 #: src/pages/SalvosPage.tsx:433
@@ -1295,8 +1320,16 @@ msgstr ""
 msgid "Cancel"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:435
+msgid "Cancel exit"
+msgstr ""
+
 #: src/pages/SalvosPage.tsx:275
 msgid "Cancel salvo"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:429
+msgid "Cancel vamp exit"
 msgstr ""
 
 #: src/layout/components/AreaMatrixEditor.tsx:170
@@ -1364,7 +1397,7 @@ msgstr ""
 msgid "Carry the file to an online portal to obtain a signed lease."
 msgstr ""
 
-#: src/app/navigation.tsx:54
+#: src/app/navigation.tsx:55
 #: src/pages/CastPage.tsx:215
 #: src/pages/CastPage.tsx:257
 msgid "Cast"
@@ -1511,13 +1544,13 @@ msgstr ""
 msgid "Choose light, dark, or follow the system."
 msgstr ""
 
-#: src/docs/registry.ts:446
+#: src/docs/registry.ts:451
 #: src/pages/docs/concepts/LatencyPage.tsx:143
 #: src/pages/docs/concepts/TransportsPage.tsx:239
 msgid "Choosing a transport"
 msgstr ""
 
-#: src/docs/registry.ts:628
+#: src/docs/registry.ts:633
 #: src/pages/docs/concepts/GlossaryPage.tsx:38
 msgid "Chroma subsampling"
 msgstr ""
@@ -1597,22 +1630,22 @@ msgstr ""
 msgid "Codec"
 msgstr ""
 
-#: src/docs/registry.ts:502
+#: src/docs/registry.ts:507
 #: src/pages/docs/concepts/CodecsPage.tsx:16
 msgid "Codecs & transcoding"
 msgstr ""
 
-#: src/docs/registry.ts:545
+#: src/docs/registry.ts:550
 #: src/pages/docs/concepts/ColorPage.tsx:14
 msgid "Color management"
 msgstr ""
 
-#: src/docs/registry.ts:633
+#: src/docs/registry.ts:638
 #: src/pages/docs/concepts/GlossaryPage.tsx:51
 msgid "Color range"
 msgstr ""
 
-#: src/docs/registry.ts:551
+#: src/docs/registry.ts:556
 #: src/pages/docs/concepts/ColorPage.tsx:24
 msgid "Color spaces"
 msgstr ""
@@ -1621,7 +1654,7 @@ msgstr ""
 msgid "Color spaces, limited vs full range, and HDR — and why a mismatch makes a tile look washed-out, crushed, or oddly tinted."
 msgstr ""
 
-#: src/docs/registry.ts:546
+#: src/docs/registry.ts:551
 msgid "Color spaces, limited vs full range, and HDR — why mismatches look washed-out or crushed."
 msgstr ""
 
@@ -1645,10 +1678,13 @@ msgstr ""
 msgid "Columns"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:145
 #: src/pages/SalvosPage.tsx:153
 msgid "Command accepted"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:151
+#: src/pages/MediaPlayersPage.tsx:172
 #: src/pages/SalvosPage.tsx:159
 msgid "Command failed"
 msgstr ""
@@ -1721,6 +1757,10 @@ msgstr ""
 
 #: src/pages/OutputsPage.tsx:720
 msgid "Configure output servers and renditions."
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:257
+msgid "Configured default"
 msgstr ""
 
 #: src/pages/ProbesPage.tsx:488
@@ -1896,6 +1936,10 @@ msgstr ""
 msgid "Could not load alarms:"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:208
+msgid "Could not load asset"
+msgstr ""
+
 #: src/pages/CastPage.tsx:303
 msgid "Could not load cast sessions:"
 msgstr ""
@@ -1919,6 +1963,10 @@ msgstr ""
 
 #: src/pages/LayoutsPage.tsx:223
 msgid "Could not load layouts:"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:238
+msgid "Could not load media players:"
 msgstr ""
 
 #: src/pages/OutputsPage.tsx:734
@@ -2145,7 +2193,7 @@ msgstr ""
 msgid "Creates an ordinary managed source bound to this device via device_ref."
 msgstr ""
 
-#: src/docs/registry.ts:314
+#: src/docs/registry.ts:319
 #: src/pages/docs/DevicesAdoptHelpPage.tsx:63
 msgid "Credentials"
 msgstr ""
@@ -2169,6 +2217,22 @@ msgstr ""
 msgid "CUDA-enabled image (NVDEC / NVENC plus a wgpu compositor) for NVIDIA GPUs."
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:353
+msgid "Cue"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:166
+msgid "Cue accepted"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:347
+msgid "Cue player to in-point"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:122
+msgid "Cued"
+msgstr ""
+
 #: src/pages/DeviceDetailPage.tsx:958
 msgid "Current mode: {currentMode}"
 msgstr ""
@@ -2185,12 +2249,12 @@ msgstr ""
 msgid "D:HH:MM:SS (drop day when zero)"
 msgstr ""
 
-#: src/app/navigation.tsx:46
+#: src/app/navigation.tsx:47
 #: src/pages/DashboardPage.tsx:50
 msgid "Dashboard"
 msgstr "لوحة القيادة"
 
-#: src/app/navigation.tsx:70
+#: src/app/navigation.tsx:72
 #: src/pages/DataPage.tsx:377
 msgid "Data"
 msgstr ""
@@ -2403,7 +2467,7 @@ msgstr ""
 msgid "Device-reported streams"
 msgstr ""
 
-#: src/app/navigation.tsx:53
+#: src/app/navigation.tsx:54
 #: src/docs/registry.ts:158
 #: src/pages/DevicesPage.tsx:656
 #: src/pages/docs/ConfigPage.tsx:329
@@ -2476,7 +2540,7 @@ msgstr ""
 msgid "Discovery"
 msgstr ""
 
-#: src/docs/registry.ts:304
+#: src/docs/registry.ts:309
 #: src/pages/docs/DevicesAdoptHelpPage.tsx:27
 msgid "Discovery is untrusted"
 msgstr ""
@@ -2485,7 +2549,7 @@ msgstr ""
 msgid "Discovery results are an untrusted inventory of mDNS hints — they are not devices, and a scan never adopts anything. Adopting always requires your explicit confirmation: the Adopt button only prefills the dialog."
 msgstr ""
 
-#: src/docs/registry.ts:299
+#: src/docs/registry.ts:304
 msgid "Discovery scans are untrusted hints; adoption is always an explicit operator confirmation."
 msgstr ""
 
@@ -2513,12 +2577,12 @@ msgstr ""
 msgid "Display name (optional)"
 msgstr ""
 
-#: src/docs/registry.ts:638
+#: src/docs/registry.ts:643
 #: src/pages/docs/concepts/GlossaryPage.tsx:63
 msgid "Display node"
 msgstr ""
 
-#: src/docs/registry.ts:327
+#: src/docs/registry.ts:332
 #: src/pages/docs/DisplayNodesHelpPage.tsx:16
 #: src/pages/docs/SyncHelpPage.tsx:42
 msgid "Display nodes"
@@ -2533,7 +2597,7 @@ msgstr ""
 msgid "docker run and docker compose, GPU access, volumes, healthchecks, and the API token."
 msgstr ""
 
-#: src/app/navigation.tsx:65
+#: src/app/navigation.tsx:67
 msgid "Docs"
 msgstr ""
 
@@ -2596,7 +2660,7 @@ msgstr ""
 msgid "Driver vocabulary; the driver re-converges the device onto this mode whenever it comes online. Leave blank to keep the device's current mode."
 msgstr ""
 
-#: src/docs/registry.ts:285
+#: src/docs/registry.ts:290
 #: src/pages/docs/DevicesHelpPage.tsx:93
 msgid "Drivers and what they support"
 msgstr ""
@@ -2834,7 +2898,7 @@ msgstr ""
 #~ msgid "Enabled"
 #~ msgstr ""
 
-#: src/docs/registry.ts:533
+#: src/docs/registry.ts:538
 #: src/pages/docs/concepts/CodecsPage.tsx:129
 msgid "Encode once, fan out many"
 msgstr ""
@@ -2855,6 +2919,10 @@ msgstr ""
 msgid "Encoder utilisation: ours over device total"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:132
+msgid "End of file"
+msgstr ""
+
 #: src/pages/SupportPage.tsx:178
 msgid "Enforcement"
 msgstr ""
@@ -2867,7 +2935,7 @@ msgstr ""
 msgid "Engine default (reclock to house)"
 msgstr ""
 
-#: src/docs/registry.ts:338
+#: src/docs/registry.ts:343
 #: src/pages/docs/DisplayNodesHelpPage.tsx:41
 msgid "Enrollment"
 msgstr ""
@@ -2993,6 +3061,10 @@ msgstr ""
 msgid "Example sync group"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:294
+msgid "exit armed"
+msgstr ""
+
 #: src/pages/LicencePage.tsx:157
 msgid "Expired"
 msgstr ""
@@ -3064,7 +3136,7 @@ msgstr ""
 msgid "File path"
 msgstr ""
 
-#: src/docs/registry.ts:441
+#: src/docs/registry.ts:446
 #: src/pages/docs/concepts/TransportsPage.tsx:226
 msgid "Files and synthetic sources"
 msgstr ""
@@ -3188,8 +3260,8 @@ msgstr ""
 msgid "Gaps must be whole pixel counts (0 or more)."
 msgstr ""
 
-#: src/docs/registry.ts:472
-#: src/docs/registry.ts:643
+#: src/docs/registry.ts:477
+#: src/docs/registry.ts:648
 #: src/pages/docs/concepts/GlossaryPage.tsx:74
 #: src/pages/docs/concepts/TimingSyncPage.tsx:51
 msgid "Genlock"
@@ -3208,7 +3280,7 @@ msgstr ""
 msgid "Give this to a publisher (OBS ≥ 30, GStreamer whipclientsink, or a browser) to push media into this source. Relative to the control plane origin."
 msgstr ""
 
-#: src/docs/registry.ts:599
+#: src/docs/registry.ts:604
 #: src/pages/docs/concepts/LatencyPage.tsx:26
 msgid "Glass-to-glass latency"
 msgstr ""
@@ -3217,7 +3289,7 @@ msgstr ""
 msgid "Glass-to-glass latency is the time from light hitting a camera sensor (\"first glass\") to the picture appearing on a display (\"second glass\"). It is a chain of small budgets, and every hop adds some: the camera's own encoder, the network transport, any receive/jitter buffering, decoding, compositing, re-encoding the canvas, the output transport, and finally the viewer's player buffer. No single component \"is\" the latency — the chain is."
 msgstr ""
 
-#: src/docs/registry.ts:594
+#: src/docs/registry.ts:599
 msgid "Glass-to-glass latency, what each protocol adds, and the trade-offs against robustness."
 msgstr ""
 
@@ -3225,7 +3297,7 @@ msgstr ""
 msgid "Glitchy, corrupt, and malformed inputs are the expected workload, not an edge case: decode errors on one stream are tolerated and recovered per tile, and a broken track inside a transport (for example a damaged subtitle rendition) is warned about and recovered without killing the streams alongside it."
 msgstr ""
 
-#: src/docs/registry.ts:617
+#: src/docs/registry.ts:622
 #: src/pages/docs/concepts/GlossaryPage.tsx:16
 msgid "Glossary"
 msgstr ""
@@ -3250,7 +3322,7 @@ msgstr ""
 msgid "Good; degrades over poor links"
 msgstr ""
 
-#: src/docs/registry.ts:648
+#: src/docs/registry.ts:653
 #: src/pages/docs/concepts/GlossaryPage.tsx:86
 msgid "GOP (Group of Pictures)"
 msgstr ""
@@ -3335,7 +3407,7 @@ msgstr ""
 msgid "H.264 (also called AVC) is the most widely supported video codec in existence: every browser, phone, set-top box, and hardware decoder of the last 15+ years plays it. It is the safe default for compatibility. Note that software H.264/H.265 encoders carry a GPL license obligation in Multiview's build, so the default (license-clean) image encodes them only with a hardware encoder; choosing a software H.264 encode means using the GPL image variant."
 msgstr ""
 
-#: src/docs/registry.ts:513
+#: src/docs/registry.ts:518
 #: src/pages/docs/concepts/CodecsPage.tsx:50
 msgid "H.264 / AVC"
 msgstr ""
@@ -3344,7 +3416,7 @@ msgstr ""
 msgid "H.265 (HEVC) compresses roughly 30–50% better than H.264 at the same quality, which matters most at 4K and for 10-bit/HDR content. The trade-offs: encoding costs more compute, patent licensing is more complicated, and playback support — while now broad on hardware — is still patchier in browsers than H.264. Classic RTMP cannot carry it; newer endpoints and MPEG-TS based transports can."
 msgstr ""
 
-#: src/docs/registry.ts:518
+#: src/docs/registry.ts:523
 #: src/pages/docs/concepts/CodecsPage.tsx:65
 msgid "H.265 / HEVC"
 msgstr ""
@@ -3353,7 +3425,7 @@ msgstr ""
 msgid "Hand this machine to a new owner. The 72-hour transfer window and the same-machine fingerprint check apply when the licence server confirms the move."
 msgstr ""
 
-#: src/docs/registry.ts:528
+#: src/docs/registry.ts:533
 #: src/pages/docs/concepts/CodecsPage.tsx:93
 msgid "Hardware acceleration"
 msgstr ""
@@ -3378,12 +3450,12 @@ msgstr ""
 msgid "Have an online neighbour relay the exchange over the local mesh — no file to carry (see the Mesh screen)."
 msgstr ""
 
-#: src/docs/registry.ts:561
+#: src/docs/registry.ts:566
 #: src/pages/docs/concepts/ColorPage.tsx:89
 msgid "HDR"
 msgstr ""
 
-#: src/docs/registry.ts:653
+#: src/docs/registry.ts:658
 #: src/pages/docs/concepts/GlossaryPage.tsx:99
 msgid "HDR (High Dynamic Range)"
 msgstr ""
@@ -3449,7 +3521,7 @@ msgstr ""
 msgid "HLS / LL-HLS"
 msgstr ""
 
-#: src/docs/registry.ts:416
+#: src/docs/registry.ts:421
 #: src/pages/docs/concepts/TransportsPage.tsx:149
 msgid "HLS and LL-HLS"
 msgstr ""
@@ -3514,7 +3586,7 @@ msgstr ""
 msgid "HTTP(S) management endpoint. Wrap IPv6 literals in brackets."
 msgstr ""
 
-#: src/docs/registry.ts:658
+#: src/docs/registry.ts:663
 #: src/pages/docs/concepts/GlossaryPage.tsx:110
 msgid "ICE (Interactive Connectivity Establishment)"
 msgstr ""
@@ -3688,7 +3760,7 @@ msgstr ""
 msgid "Its tiles overlap (picture-in-picture), which a grid cannot express. Convert to free-form instead."
 msgstr ""
 
-#: src/docs/registry.ts:663
+#: src/docs/registry.ts:668
 #: src/pages/docs/concepts/GlossaryPage.tsx:124
 msgid "Jitter buffer"
 msgstr ""
@@ -3766,12 +3838,12 @@ msgstr ""
 msgid "Last seen"
 msgstr ""
 
-#: src/docs/registry.ts:668
+#: src/docs/registry.ts:673
 #: src/pages/docs/concepts/GlossaryPage.tsx:136
 msgid "Last-good frame"
 msgstr ""
 
-#: src/docs/registry.ts:580
+#: src/docs/registry.ts:585
 #: src/pages/docs/concepts/ResiliencePage.tsx:77
 msgid "Last-good frames"
 msgstr ""
@@ -3784,7 +3856,7 @@ msgstr ""
 msgid "latched"
 msgstr ""
 
-#: src/docs/registry.ts:593
+#: src/docs/registry.ts:598
 #: src/pages/docs/concepts/LatencyPage.tsx:16
 msgid "Latency"
 msgstr ""
@@ -3843,7 +3915,7 @@ msgstr ""
 #~ msgid "Layout saved; apply accepted"
 #~ msgstr ""
 
-#: src/app/navigation.tsx:47
+#: src/app/navigation.tsx:48
 #: src/docs/registry.ts:227
 #: src/pages/DashboardPage.tsx:58
 #: src/pages/docs/FeaturesPage.tsx:25
@@ -3852,7 +3924,11 @@ msgid "Layouts"
 msgstr "التخطيطات"
 
 #: src/docs/registry.ts:222
-msgid "Layouts, sources, outputs, overlays, tally, salvos, and alarms — what each one is."
+#~ msgid "Layouts, sources, outputs, overlays, tally, salvos, and alarms — what each one is."
+#~ msgstr ""
+
+#: src/docs/registry.ts:222
+msgid "Layouts, sources, outputs, overlays, tally, salvos, media players, and alarms — what each one is."
 msgstr ""
 
 #: src/pages/MeshPage.tsx:170
@@ -3907,7 +3983,7 @@ msgstr ""
 msgid "Level"
 msgstr ""
 
-#: src/app/navigation.tsx:68
+#: src/app/navigation.tsx:70
 #: src/pages/LicencePage.tsx:459
 msgid "Licence"
 msgstr ""
@@ -3924,7 +4000,7 @@ msgstr ""
 msgid "Licensing heartbeat"
 msgstr ""
 
-#: src/docs/registry.ts:280
+#: src/docs/registry.ts:285
 #: src/pages/docs/DevicesHelpPage.tsx:54
 msgid "Lifecycle states"
 msgstr ""
@@ -3941,7 +4017,7 @@ msgstr ""
 msgid "Limited content interpreted as full: blacks turn grey, the picture looks <0>washed out and low-contrast</0>."
 msgstr ""
 
-#: src/docs/registry.ts:556
+#: src/docs/registry.ts:561
 #: src/pages/docs/concepts/ColorPage.tsx:52
 msgid "Limited vs full range"
 msgstr ""
@@ -4010,9 +4086,38 @@ msgstr ""
 msgid "Live tiles from the engine stream."
 msgstr ""
 
-#: src/docs/registry.ts:673
+#: src/docs/registry.ts:678
 #: src/pages/docs/concepts/GlossaryPage.tsx:148
 msgid "LL-HLS (Low-Latency HLS)"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:341
+#: src/pages/MediaPlayersPage.tsx:496
+msgid "Load"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:460
+msgid "Load a media-library asset into this player. It cues to the asset's in-point, ready to take."
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:201
+msgid "Load accepted"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:457
+msgid "Load asset"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:335
+msgid "Load asset into player"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:256
+msgid "Loaded asset"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:120
+msgid "Loading"
 msgstr ""
 
 #: src/pages/AlarmsPage.tsx:200
@@ -4066,6 +4171,10 @@ msgstr ""
 
 #: src/pages/LogsPage.tsx:154
 msgid "Loading logs…"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:234
+msgid "Loading media players…"
 msgstr ""
 
 #: src/pages/OutputsPage.tsx:733
@@ -4157,7 +4266,7 @@ msgstr ""
 msgid "Locking every device's frame timing to one shared reference signal so all frames start at the same instant across a facility. Classically an analog black-burst or tri-level signal; in IP facilities PTP carries the same role. Genlock aligns <0>phase</0>; timecode merely labels frames."
 msgstr ""
 
-#: src/app/navigation.tsx:63
+#: src/app/navigation.tsx:65
 #: src/pages/LogsPage.tsx:90
 msgid "Logs"
 msgstr ""
@@ -4172,6 +4281,10 @@ msgstr ""
 
 #: src/pages/CastPage.tsx:237
 msgid "Looking for Cast receivers…"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:394
+msgid "Loop default"
 msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:292
@@ -4227,12 +4340,12 @@ msgstr ""
 msgid "Manage sync groups"
 msgstr ""
 
-#: src/docs/registry.ts:678
+#: src/docs/registry.ts:683
 #: src/pages/docs/concepts/GlossaryPage.tsx:159
 msgid "Managed device"
 msgstr ""
 
-#: src/docs/registry.ts:269
+#: src/docs/registry.ts:274
 #: src/pages/docs/DevicesHelpPage.tsx:21
 msgid "Managed devices"
 msgstr ""
@@ -4283,7 +4396,7 @@ msgstr ""
 msgid "Measured"
 msgstr ""
 
-#: src/docs/registry.ts:367
+#: src/docs/registry.ts:372
 #: src/pages/docs/SyncHelpPage.tsx:84
 msgid "Measured, never assumed"
 msgstr ""
@@ -4293,9 +4406,20 @@ msgstr ""
 msgid "Measurement running"
 msgstr ""
 
+#: src/app/navigation.tsx:60
+#: src/docs/registry.ts:257
+#: src/pages/docs/FeaturesPage.tsx:149
+#: src/pages/MediaPlayersPage.tsx:220
+msgid "Media players"
+msgstr ""
+
 #: src/pages/AuditPage.tsx:112
 #: src/pages/SystemActionsPage.tsx:236
 msgid "Media time"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:478
+msgid "Media-library asset id"
 msgstr ""
 
 #: src/pages/docs/concepts/TransportsPage.tsx:297
@@ -4316,7 +4440,7 @@ msgstr ""
 msgid "Memory"
 msgstr ""
 
-#: src/app/navigation.tsx:71
+#: src/app/navigation.tsx:73
 #: src/pages/MeshPage.tsx:281
 msgid "Mesh"
 msgstr ""
@@ -4347,7 +4471,7 @@ msgstr ""
 msgid "missing area: {0}"
 msgstr ""
 
-#: src/docs/registry.ts:683
+#: src/docs/registry.ts:688
 #: src/pages/docs/concepts/GlossaryPage.tsx:171
 msgid "MLDv2"
 msgstr ""
@@ -4380,7 +4504,7 @@ msgstr ""
 msgid "Momentary (400 ms)"
 msgstr ""
 
-#: src/app/navigation.tsx:56
+#: src/app/navigation.tsx:57
 #: src/pages/MonitoringPage.tsx:117
 msgid "Monitoring"
 msgstr ""
@@ -4414,7 +4538,7 @@ msgstr ""
 msgid "Move to area…"
 msgstr ""
 
-#: src/docs/registry.ts:688
+#: src/docs/registry.ts:693
 #: src/pages/docs/concepts/GlossaryPage.tsx:183
 msgid "MPEG-TS (Transport Stream)"
 msgstr ""
@@ -4423,12 +4547,12 @@ msgstr ""
 msgid "MPEG-TS / UDP multicast"
 msgstr ""
 
-#: src/docs/registry.ts:421
+#: src/docs/registry.ts:426
 #: src/pages/docs/concepts/TransportsPage.tsx:173
 msgid "MPEG-TS over UDP and multicast"
 msgstr ""
 
-#: src/docs/registry.ts:693
+#: src/docs/registry.ts:698
 #: src/pages/docs/concepts/GlossaryPage.tsx:195
 msgid "Multicast"
 msgstr ""
@@ -4489,7 +4613,7 @@ msgstr ""
 msgid "Multiview's own display-node software for single-board computers and spare PCs driving displays; enrolled nodes are located by their keypair identity rather than an address, and present frame-accurate synchronized output."
 msgstr ""
 
-#: src/docs/registry.ts:328
+#: src/docs/registry.ts:333
 msgid "Multiview's own playout endpoints: enrolled, frame-accurate wall heads on small computers."
 msgstr ""
 
@@ -4551,8 +4675,8 @@ msgstr ""
 msgid "Navigation"
 msgstr ""
 
-#: src/docs/registry.ts:393
-#: src/docs/registry.ts:698
+#: src/docs/registry.ts:398
+#: src/docs/registry.ts:703
 #: src/pages/docs/concepts/GlossaryPage.tsx:208
 #: src/pages/docs/concepts/TransportsPage.tsx:78
 #: src/pages/docs/concepts/TransportsPage.tsx:282
@@ -4746,12 +4870,20 @@ msgstr ""
 msgid "No licence is installed on this machine. Use the offline exchange to install a signed lease."
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:298
+msgid "No live state"
+msgstr ""
+
 #: src/pages/DashboardPage.tsx:102
 msgid "No live tiles yet. They appear once the engine streams a snapshot."
 msgstr ""
 
 #: src/pages/LogsPage.tsx:163
 msgid "No log records match the filter."
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:243
+msgid "No media players are configured. Declare them under<0>media_players</0> in the config."
 msgstr ""
 
 #: src/pages/DevicesPage.tsx:589
@@ -4859,6 +4991,7 @@ msgstr ""
 msgid "Nodes enrol with a keypair identity: the node proves itself with its key, not with a network address, so a node keeps its identity across DHCP changes and re-images. That is why the management address is optional for the <0>displaynode</0> driver — an enrolled node finds the controller and authenticates itself. After a network loss the node reconnects with its enrolled identity, re-pulls its stream, and re-converges its sync offset before un-muting its output."
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:318
 #: src/pages/SalvosPage.tsx:240
 msgid "None"
 msgstr ""
@@ -4902,6 +5035,10 @@ msgstr ""
 
 #: src/pages/SourcesPage.tsx:97
 msgid "Not in the running engine — no live state. Synthetic sources join live once a tile binds them; other kinds join after a config export + restart."
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:307
+msgid "Not loaded"
 msgstr ""
 
 #: src/pages/DeviceDetailPage.tsx:190
@@ -4953,7 +5090,7 @@ msgstr ""
 msgid "Notifications"
 msgstr ""
 
-#: src/docs/registry.ts:703
+#: src/docs/registry.ts:708
 #: src/pages/docs/concepts/GlossaryPage.tsx:219
 msgid "NV12"
 msgstr ""
@@ -5096,6 +5233,9 @@ msgstr ""
 
 #: src/pages/LayoutEditorPage.tsx:118
 #: src/pages/LayoutsPage.tsx:148
+#: src/pages/MediaPlayersPage.tsx:146
+#: src/pages/MediaPlayersPage.tsx:167
+#: src/pages/MediaPlayersPage.tsx:202
 #: src/pages/SalvosPage.tsx:154
 #: src/pages/TallyPage.tsx:142
 msgid "Operation id"
@@ -5158,7 +5298,7 @@ msgstr ""
 msgid "Output path"
 msgstr ""
 
-#: src/app/navigation.tsx:49
+#: src/app/navigation.tsx:50
 #: src/docs/registry.ts:153
 #: src/docs/registry.ts:237
 #: src/pages/docs/ConfigPage.tsx:258
@@ -5175,7 +5315,7 @@ msgstr ""
 msgid "Over the layout drop zone."
 msgstr ""
 
-#: src/app/navigation.tsx:50
+#: src/app/navigation.tsx:51
 #: src/docs/registry.ts:148
 #: src/docs/registry.ts:242
 #: src/layout/components/SourcePalette.tsx:224
@@ -5232,6 +5372,18 @@ msgstr ""
 
 #: src/pages/SettingsPage.tsx:192
 msgid "Paste the control-plane bearer token. Set it from the MULTIVIEW_CONTROL_TOKEN environment variable, or copy the bootstrap token the server logs once at startup. Stored in this browser only and sent as a Bearer token to the same-origin API."
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:377
+msgid "Pause"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:371
+msgid "Pause player"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:126
+msgid "Paused"
 msgstr ""
 
 #: src/pages/MeshPage.tsx:241
@@ -5295,6 +5447,27 @@ msgstr ""
 msgid "Plan (dry run)"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:365
+msgid "Play"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:359
+msgid "Play player"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:254
+#: src/pages/MediaPlayersPage.tsx:469
+msgid "Player"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:124
+msgid "Playing"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:258
+msgid "Position (frames)"
+msgstr ""
+
 #: src/pages/MonitoringPage.tsx:95
 msgid "Pre-encode canvas approximation"
 msgstr ""
@@ -5342,7 +5515,7 @@ msgstr ""
 msgid "Probe requested"
 msgstr ""
 
-#: src/app/navigation.tsx:59
+#: src/app/navigation.tsx:61
 #: src/pages/ProbesPage.tsx:474
 msgid "Probes"
 msgstr ""
@@ -5401,14 +5574,14 @@ msgstr ""
 msgid "PTP (IEEE 1588) is genlock's IP-network successor. A \"grandmaster\" clock distributes time over ordinary Ethernet, and every device on the network disciplines its own clock to it — typically to within a microsecond. The broadcast profile, SMPTE ST 2059, adds the convention that frame boundaries are computable from the time itself, so two PTP-locked devices agree not just on the time of day but on exactly when each frame starts. This single mechanism replaces both the genlock signal (phase) and timecode distribution (labels) in an IP facility, and is the timing backbone of SMPTE ST 2110 installations."
 msgstr ""
 
-#: src/docs/registry.ts:477
-#: src/docs/registry.ts:708
+#: src/docs/registry.ts:482
+#: src/docs/registry.ts:713
 #: src/pages/docs/concepts/GlossaryPage.tsx:232
 #: src/pages/docs/concepts/TimingSyncPage.tsx:76
 msgid "PTP (Precision Time Protocol)"
 msgstr ""
 
-#: src/docs/registry.ts:713
+#: src/docs/registry.ts:718
 #: src/pages/docs/concepts/GlossaryPage.tsx:244
 msgid "PTS (Presentation Timestamp)"
 msgstr ""
@@ -5527,7 +5700,7 @@ msgstr ""
 msgid "Reconfiguration locked"
 msgstr ""
 
-#: src/docs/registry.ts:585
+#: src/docs/registry.ts:590
 #: src/pages/docs/concepts/ResiliencePage.tsx:100
 msgid "Reconnect behaviour"
 msgstr ""
@@ -5699,12 +5872,12 @@ msgstr ""
 msgid "Reset-lite — a brief controlled reset"
 msgstr ""
 
-#: src/docs/registry.ts:343
+#: src/docs/registry.ts:348
 #: src/pages/docs/DisplayNodesHelpPage.tsx:57
 msgid "Resilience"
 msgstr ""
 
-#: src/docs/registry.ts:569
+#: src/docs/registry.ts:574
 #: src/pages/docs/concepts/ResiliencePage.tsx:16
 msgid "Resilience & the tile lifecycle"
 msgstr ""
@@ -5791,7 +5964,7 @@ msgstr ""
 msgid "Routes to"
 msgstr ""
 
-#: src/app/navigation.tsx:55
+#: src/app/navigation.tsx:56
 #: src/pages/RoutingPage.tsx:227
 msgid "Routing"
 msgstr ""
@@ -5810,8 +5983,8 @@ msgstr ""
 msgid "Rows"
 msgstr ""
 
-#: src/docs/registry.ts:411
-#: src/docs/registry.ts:718
+#: src/docs/registry.ts:416
+#: src/docs/registry.ts:723
 #: src/pages/docs/concepts/GlossaryPage.tsx:256
 #: src/pages/docs/concepts/TransportsPage.tsx:128
 #: src/pages/docs/concepts/TransportsPage.tsx:296
@@ -5822,8 +5995,8 @@ msgstr ""
 msgid "RTMP is a TCP push protocol that remains the lingua franca for sending a stream <0>to</0> a service — most streaming platforms still ingest it. Classic RTMP carries H.264 video and AAC audio only; newer \"enhanced\" endpoints negotiate H.265 and AV1. As an input it appears when an encoder or app pushes to Multiview; as an output it is how Multiview pushes the composed canvas to a platform."
 msgstr ""
 
-#: src/docs/registry.ts:388
-#: src/docs/registry.ts:723
+#: src/docs/registry.ts:393
+#: src/docs/registry.ts:728
 #: src/pages/docs/concepts/GlossaryPage.tsx:267
 #: src/pages/docs/concepts/TransportsPage.tsx:54
 #: src/pages/docs/concepts/TransportsPage.tsx:275
@@ -5842,7 +6015,7 @@ msgstr ""
 msgid "RTSP transport"
 msgstr ""
 
-#: src/docs/registry.ts:376
+#: src/docs/registry.ts:381
 msgid "RTSP, NDI, SRT, RTMP, HLS, MPEG-TS, and files: how each carries video and which to use where."
 msgstr ""
 
@@ -5863,7 +6036,7 @@ msgstr ""
 msgid "Salted digests and a signed lease request — never raw serials, MAC addresses, or media. The exhaustive list:"
 msgstr ""
 
-#: src/docs/registry.ts:728
+#: src/docs/registry.ts:733
 #: src/pages/docs/concepts/GlossaryPage.tsx:279
 msgid "Salvo"
 msgstr ""
@@ -5880,7 +6053,7 @@ msgstr ""
 msgid "Salvo saved"
 msgstr ""
 
-#: src/app/navigation.tsx:58
+#: src/app/navigation.tsx:59
 #: src/docs/registry.ts:252
 #: src/pages/docs/FeaturesPage.tsx:137
 #: src/pages/SalvosPage.tsx:171
@@ -5967,7 +6140,7 @@ msgstr ""
 msgid "Scope"
 msgstr ""
 
-#: src/docs/registry.ts:733
+#: src/docs/registry.ts:738
 #: src/pages/docs/concepts/GlossaryPage.tsx:290
 msgid "SDP (Session Description Protocol)"
 msgstr ""
@@ -6081,7 +6254,7 @@ msgstr ""
 msgid "Set volume"
 msgstr ""
 
-#: src/app/navigation.tsx:66
+#: src/app/navigation.tsx:68
 #: src/pages/SettingsPage.tsx:147
 msgid "Settings"
 msgstr "الإعدادات"
@@ -6184,7 +6357,7 @@ msgstr ""
 msgid "Source URL"
 msgstr ""
 
-#: src/app/navigation.tsx:48
+#: src/app/navigation.tsx:49
 #: src/docs/registry.ts:138
 #: src/docs/registry.ts:232
 #: src/layout/components/SourcePalette.tsx:203
@@ -6202,8 +6375,8 @@ msgstr ""
 msgid "Spend buffer where the network is bad (the internet leg), not where it is good (the facility LAN)."
 msgstr ""
 
-#: src/docs/registry.ts:398
-#: src/docs/registry.ts:738
+#: src/docs/registry.ts:403
+#: src/docs/registry.ts:743
 #: src/pages/docs/concepts/GlossaryPage.tsx:302
 #: src/pages/docs/concepts/TransportsPage.tsx:106
 #: src/pages/docs/concepts/TransportsPage.tsx:289
@@ -6262,6 +6435,7 @@ msgstr ""
 #: src/pages/AlarmsPage.tsx:183
 #: src/pages/CastPage.tsx:319
 #: src/pages/DevicesPage.tsx:552
+#: src/pages/MediaPlayersPage.tsx:255
 msgid "State"
 msgstr ""
 
@@ -6285,7 +6459,12 @@ msgstr ""
 
 #: src/pages/CastPage.tsx:382
 #: src/pages/CastPage.tsx:606
+#: src/pages/MediaPlayersPage.tsx:389
 msgid "Stop"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:383
+msgid "Stop player"
 msgstr ""
 
 #: src/pages/CastPage.tsx:376
@@ -6294,6 +6473,10 @@ msgstr ""
 
 #: src/pages/CastPage.tsx:590
 msgid "Stop this cast session?"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:128
+msgid "Stopped"
 msgstr ""
 
 #: src/pages/DevicesPage.tsx:711
@@ -6390,7 +6573,7 @@ msgstr ""
 msgid "Successive frames differing by less than this per-mille of full-scale luma count as frozen."
 msgstr ""
 
-#: src/app/navigation.tsx:72
+#: src/app/navigation.tsx:74
 #: src/pages/SupportPage.tsx:527
 msgid "Support"
 msgstr ""
@@ -6411,14 +6594,14 @@ msgstr ""
 msgid "Sync"
 msgstr ""
 
-#: src/docs/registry.ts:743
+#: src/docs/registry.ts:748
 #: src/pages/DevicesPage.tsx:627
 #: src/pages/docs/concepts/GlossaryPage.tsx:314
 msgid "Sync group"
 msgstr ""
 
 #: src/docs/registry.ts:163
-#: src/docs/registry.ts:362
+#: src/docs/registry.ts:367
 #: src/pages/DevicesPage.tsx:678
 #: src/pages/docs/ConfigPage.tsx:355
 #: src/pages/docs/SyncHelpPage.tsx:68
@@ -6426,7 +6609,7 @@ msgstr ""
 msgid "Sync groups"
 msgstr ""
 
-#: src/docs/registry.ts:351
+#: src/docs/registry.ts:356
 #: src/pages/docs/SyncHelpPage.tsx:17
 msgid "Synchronized output"
 msgstr ""
@@ -6443,12 +6626,12 @@ msgstr ""
 #~ msgid "Synthetic sources (bars, solid colour, clock) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
 #~ msgstr ""
 
-#: src/app/navigation.tsx:61
+#: src/app/navigation.tsx:63
 #: src/pages/SystemPage.tsx:236
 msgid "System"
 msgstr ""
 
-#: src/app/navigation.tsx:62
+#: src/app/navigation.tsx:64
 #: src/pages/SystemActionsPage.tsx:297
 msgid "System actions"
 msgstr ""
@@ -6462,6 +6645,10 @@ msgstr ""
 msgid "Take applied"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:423
+msgid "Take exit"
+msgstr ""
+
 #: src/pages/RoutingPage.tsx:249
 msgid "Take kind"
 msgstr ""
@@ -6470,14 +6657,18 @@ msgstr ""
 msgid "Take salvo"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:417
+msgid "Take vamp exit"
+msgstr ""
+
 #: src/pages/LayoutEditorPage.tsx:118
 #: src/pages/LayoutsPage.tsx:148
 msgid "Takes effect at the next frame boundary."
 msgstr ""
 
-#: src/app/navigation.tsx:57
+#: src/app/navigation.tsx:58
 #: src/docs/registry.ts:247
-#: src/docs/registry.ts:748
+#: src/docs/registry.ts:753
 #: src/pages/docs/concepts/GlossaryPage.tsx:326
 #: src/pages/docs/FeaturesPage.tsx:124
 #: src/pages/TallyPage.tsx:178
@@ -6714,7 +6905,7 @@ msgstr ""
 msgid "The grid cannot be solved yet — fix the validation errors to see the placement preview."
 msgstr ""
 
-#: src/docs/registry.ts:352
+#: src/docs/registry.ts:357
 msgid "The honest sync tier ladder, sync groups, offsets, and measured (never assumed) skew."
 msgstr ""
 
@@ -6750,7 +6941,7 @@ msgstr ""
 msgid "The lease is long past contact, so starting a new engine instance is blocked; any running program stays on air."
 msgstr ""
 
-#: src/docs/registry.ts:570
+#: src/docs/registry.ts:575
 msgid "The LIVE / STALE / RECONNECTING / NO SIGNAL ladder, last-good frames, and why output never stalls."
 msgstr ""
 
@@ -6814,12 +7005,12 @@ msgstr ""
 msgid "The output canvas: geometry, cadence, working pixel format, background, and color space."
 msgstr ""
 
-#: src/docs/registry.ts:467
+#: src/docs/registry.ts:472
 #: src/pages/docs/concepts/TimingSyncPage.tsx:27
 msgid "The output clock"
 msgstr ""
 
-#: src/docs/registry.ts:455
+#: src/docs/registry.ts:460
 msgid "The output clock, genlock, PTP, and wall-clock time — how frames are paced and aligned."
 msgstr ""
 
@@ -6912,12 +7103,12 @@ msgstr ""
 msgid "The three services"
 msgstr ""
 
-#: src/docs/registry.ts:357
+#: src/docs/registry.ts:362
 #: src/pages/docs/SyncHelpPage.tsx:27
 msgid "The tier ladder"
 msgstr ""
 
-#: src/docs/registry.ts:575
+#: src/docs/registry.ts:580
 #: src/pages/docs/concepts/ResiliencePage.tsx:26
 msgid "The tile lifecycle"
 msgstr ""
@@ -7202,7 +7393,7 @@ msgstr ""
 #~ msgid "Timezone offset (minutes)"
 #~ msgstr ""
 
-#: src/docs/registry.ts:454
+#: src/docs/registry.ts:459
 #: src/pages/docs/concepts/TimingSyncPage.tsx:17
 msgid "Timing & sync"
 msgstr ""
@@ -7231,12 +7422,12 @@ msgstr ""
 msgid "Tracks must be a number with a unit: 1fr, 200px or 25%."
 msgstr ""
 
-#: src/docs/registry.ts:609
+#: src/docs/registry.ts:614
 #: src/pages/docs/concepts/LatencyPage.tsx:107
 msgid "Trade-offs"
 msgstr ""
 
-#: src/docs/registry.ts:753
+#: src/docs/registry.ts:758
 #: src/pages/docs/concepts/GlossaryPage.tsx:337
 msgid "Transcoding"
 msgstr ""
@@ -7256,6 +7447,7 @@ msgstr ""
 #: src/pages/DataPage.tsx:109
 #: src/pages/docs/concepts/TransportsPage.tsx:257
 #: src/pages/LicencePage.tsx:247
+#: src/pages/MediaPlayersPage.tsx:259
 #: src/pages/OutputsPage.tsx:658
 #: src/pages/OutputsPage.tsx:789
 msgid "Transport"
@@ -7265,7 +7457,7 @@ msgstr ""
 msgid "Transport comparison: latency class, network fit, robustness, and typical use."
 msgstr ""
 
-#: src/docs/registry.ts:375
+#: src/docs/registry.ts:380
 #: src/pages/docs/concepts/TransportsPage.tsx:44
 msgid "Transports compared"
 msgstr ""
@@ -7290,7 +7482,7 @@ msgstr ""
 msgid "Typical use"
 msgstr ""
 
-#: src/docs/registry.ts:758
+#: src/docs/registry.ts:763
 #: src/pages/docs/concepts/GlossaryPage.tsx:348
 msgid "UMD (Under-Monitor Display)"
 msgstr ""
@@ -7380,6 +7572,14 @@ msgstr ""
 msgid "Validation and import / export"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:260
+msgid "Vamp exit"
+msgstr ""
+
+#: src/pages/MediaPlayersPage.tsx:130
+msgid "Vamping"
+msgstr ""
+
 #: src/pages/docs/SyncHelpPage.tsx:49
 msgid "Vendor decoders (ZowieBox-class)"
 msgstr ""
@@ -7462,6 +7662,10 @@ msgstr ""
 msgid "VRAM: ours / device used / device total"
 msgstr ""
 
+#: src/pages/MediaPlayersPage.tsx:222
+msgid "VT transport for the configured media-player channels. Load an asset, cue, play, pause, stop, and — for a vamp/loop fill — arm, take, or cancel a clean exit at the next vamp boundary. Each command is accepted asynchronously; the player's live state and playhead arrive on the realtime stream."
+msgstr ""
+
 #: src/pages/MonitoringPage.tsx:76
 #: src/preview/PreviewSurface.tsx:41
 msgid "Waiting for a frame…"
@@ -7483,7 +7687,7 @@ msgstr ""
 msgid "Wall-clock handling"
 msgstr ""
 
-#: src/docs/registry.ts:490
+#: src/docs/registry.ts:495
 #: src/pages/docs/concepts/TimingSyncPage.tsx:116
 msgid "Wall-clock time"
 msgstr ""
@@ -7510,7 +7714,7 @@ msgstr ""
 msgid "WebRTC (WHIP / WHEP)"
 msgstr ""
 
-#: src/docs/registry.ts:426
+#: src/docs/registry.ts:431
 #: src/pages/docs/concepts/TransportsPage.tsx:197
 msgid "WebRTC (WHIP and WHEP)"
 msgstr ""
@@ -7536,17 +7740,17 @@ msgstr ""
 msgid "What \"in sync\" honestly means per device class, and how sync groups measure — never assume — their achieved tier."
 msgstr ""
 
-#: src/docs/registry.ts:333
+#: src/docs/registry.ts:338
 #: src/pages/docs/DisplayNodesHelpPage.tsx:26
 msgid "What a display node is"
 msgstr ""
 
-#: src/docs/registry.ts:275
+#: src/docs/registry.ts:280
 #: src/pages/docs/DevicesHelpPage.tsx:31
 msgid "What a managed device is"
 msgstr ""
 
-#: src/docs/registry.ts:604
+#: src/docs/registry.ts:609
 #: src/pages/docs/concepts/LatencyPage.tsx:50
 msgid "What each protocol adds"
 msgstr ""
@@ -7601,12 +7805,12 @@ msgstr ""
 msgid "What transcoding actually is, the common video codecs, hardware acceleration, and how Multiview encodes its output."
 msgstr ""
 
-#: src/docs/registry.ts:508
+#: src/docs/registry.ts:513
 #: src/pages/docs/concepts/CodecsPage.tsx:26
 msgid "What transcoding is"
 msgstr ""
 
-#: src/docs/registry.ts:503
+#: src/docs/registry.ts:508
 msgid "What transcoding is, the common video codecs, hardware acceleration, and the encode-once model."
 msgstr ""
 
@@ -7622,7 +7826,7 @@ msgstr ""
 msgid "When this machine has no internet path to the licence server, exchange a lease by hand: export a signed challenge here, obtain a lease from an online portal, then install the lease below."
 msgstr ""
 
-#: src/docs/registry.ts:763
+#: src/docs/registry.ts:768
 #: src/pages/docs/concepts/GlossaryPage.tsx:359
 msgid "WHEP (WebRTC-HTTP Egress Protocol)"
 msgstr ""
@@ -7648,7 +7852,7 @@ msgstr ""
 msgid "Which transports carry which codecs"
 msgstr ""
 
-#: src/docs/registry.ts:768
+#: src/docs/registry.ts:773
 #: src/pages/docs/concepts/GlossaryPage.tsx:371
 msgid "WHIP (WebRTC-HTTP Ingestion Protocol)"
 msgstr ""
