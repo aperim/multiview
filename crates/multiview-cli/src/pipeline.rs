@@ -1609,6 +1609,13 @@ pub struct Pipeline {
     /// thread per plan; the threads publish into [`Self::stores`] as frames
     /// arrive (never buffered ahead of the clock — the BUG-2 fix).
     ingest_plans: Vec<IngestPlan>,
+    /// Per-media-player transport mailboxes (ADR-0057 / ADR-0097), keyed by
+    /// player id: the bounded, conflated-latest seam the control-plane command
+    /// drain submits transport verbs to, drained by each player's ingest thread
+    /// between frames. Exposed to the run wiring via [`Self::player_mailboxes`]
+    /// so the command drain ([`crate::control::command_drain_with_seams`]) can
+    /// address every declared channel. Empty when no media players are configured.
+    player_mailboxes: std::collections::HashMap<String, Arc<crate::player::TransportMailbox>>,
     /// The shared WHIP publisher rendezvous (ADR-T014): the control plane's
     /// `WhipProvider` writes a negotiated publisher into it and each webrtc
     /// source's `drive_webrtc` loop reads. Exposed to the run wiring via
@@ -2038,6 +2045,19 @@ impl Pipeline {
             }
         }
 
+        // Boot-spawn the configured media-player channels (ADR-0057 / ADR-0097):
+        // each rolling player gets its own player `IngestPlan` (driven by the
+        // transport state machine) + last-good store; every declared player gets
+        // a registered transport mailbox the control-plane command drain submits
+        // verbs to. A player channel is a source like any other — the engine only
+        // samples its store per tick (inv #1/#10).
+        let media_player_boot = build_media_player_boot(config, &layout, cadence, canvas_color);
+        let player_mailboxes = media_player_boot.mailboxes;
+        for (id, store) in media_player_boot.stores {
+            stores.insert(id, store);
+        }
+        ingest_plans.extend(media_player_boot.plans);
+
         // WHIP ingest wiring (ADR-T014, `webrtc-native`): one shared publisher
         // rendezvous registry the control plane's WhipProvider writes to and each
         // webrtc source's `drive_webrtc` loop reads from. Stamp it (and, for an
@@ -2178,6 +2198,7 @@ impl Pipeline {
             #[cfg(feature = "gpu")]
             live_island: Arc::new(arc_swap::ArcSwapOption::empty()),
             ingest_plans,
+            player_mailboxes,
             #[cfg(feature = "webrtc-native")]
             webrtc_registry,
             #[cfg(feature = "webrtc-native")]
@@ -2333,6 +2354,19 @@ impl Pipeline {
     #[must_use]
     pub fn opens_encode_session(&self) -> bool {
         self.encoder.name.ends_with("_nvenc")
+    }
+
+    /// The per-media-player transport mailboxes (ADR-0057 / ADR-0097), keyed by
+    /// player id: hand this to the control-plane command drain
+    /// ([`crate::control::command_drain_with_seams`] /
+    /// [`crate::control::command_drain_with_live_sources`]) so a `MediaTransport`
+    /// or exit command reaches the addressed running player channel. Cloned
+    /// (the `Arc<TransportMailbox>` values are shared with the ingest threads).
+    #[must_use]
+    pub fn player_mailboxes(
+        &self,
+    ) -> std::collections::HashMap<String, Arc<crate::player::TransportMailbox>> {
+        self.player_mailboxes.clone()
     }
 
     /// The shared per-source producer stop registry (ADR-W018): hand this to
@@ -7349,6 +7383,176 @@ fn ingest_plan_for(
     })
 }
 
+/// Map the config-schema [`EofPolicy`](multiview_config::media::EofPolicy) onto
+/// the player transport core's [`EofPolicy`](crate::player::EofPolicy).
+fn map_eof_policy(policy: multiview_config::media::EofPolicy) -> crate::player::EofPolicy {
+    use crate::player::EofPolicy as P;
+    use multiview_config::media::EofPolicy as C;
+    match policy {
+        C::Loop => P::Loop,
+        C::Black => P::Black,
+        C::AutoOff => P::AutoOff,
+        // `HoldLastFrame` (the default) and any future `#[non_exhaustive]` variant
+        // this build does not know about both hold the last-good frame.
+        _ => P::HoldLastFrame,
+    }
+}
+
+/// The result of boot-spawning the configured media-player channels: the player
+/// [`IngestPlan`]s (each with a `player` handle) and the per-player
+/// [`TransportMailbox`](crate::player::TransportMailbox) the control-plane
+/// command drain submits transport verbs to, keyed by player id.
+struct MediaPlayerBoot {
+    plans: Vec<IngestPlan>,
+    stores: Vec<(String, Arc<TileStore<Nv12Image>>)>,
+    mailboxes: std::collections::HashMap<String, Arc<crate::player::TransportMailbox>>,
+}
+
+/// Build the boot-time media-player channels from `config.media_players`
+/// (ADR-0057 / ADR-0097).
+///
+/// Each player that has a `default` asset **with a declared `out_point_frames`**
+/// boot-spawns a player [`IngestPlan`] that plays (or vamps, per `loop_default`)
+/// the asset over its `[in_point, out_point)` window, looping the
+/// `[vamp_in, vamp_out)` sub-window (defaulting to the whole clip). A player with
+/// no default, or whose default asset has no declared out-point (the asset's
+/// frame count is not known without probing — probe-at-load is post-MVP), boots
+/// **idle**: its mailbox is still registered (so a later `load`/transport command
+/// is honoured once probe-at-load lands), but no plan rolls now — surfaced with a
+/// warning, never a silent skip.
+///
+/// All players' mailboxes are returned regardless, so the control-plane command
+/// drain can address every declared channel.
+// One per-player block that resolves the asset, validates the geometry, builds
+// the store + mailbox + handle, and constructs the (feature-gated) player
+// `IngestPlan` literal: inherently long and clearer kept whole than split across
+// helpers that would each take most of these locals.
+#[allow(clippy::too_many_lines)]
+fn build_media_player_boot(
+    config: &MultiviewConfig,
+    layout: &Layout,
+    cadence: Rational,
+    canvas_color: CanvasColor,
+) -> MediaPlayerBoot {
+    let mut boot = MediaPlayerBoot {
+        plans: Vec::new(),
+        stores: Vec::new(),
+        mailboxes: std::collections::HashMap::new(),
+    };
+    let library = config.media_library.as_ref();
+    let root = library.and_then(|l| l.root.as_deref());
+
+    for player in &config.media_players {
+        // Every declared channel gets a registered mailbox so the control plane
+        // can address it, even when it boots idle.
+        let mailbox = Arc::new(crate::player::TransportMailbox::new());
+        boot.mailboxes
+            .insert(player.id.clone(), Arc::clone(&mailbox));
+
+        // Resolve the default asset (if any) and require a declared out-point to
+        // boot a rolling channel.
+        let Some(asset_id) = player.default.as_deref() else {
+            tracing::info!(player = %player.id, "media player boots idle (no default asset)");
+            continue;
+        };
+        let asset = library.and_then(|l| l.assets.iter().find(|a| a.id == asset_id));
+        let Some(asset) = asset else {
+            tracing::warn!(
+                player = %player.id, asset = %asset_id,
+                "media player boots idle: default asset not found in the media library"
+            );
+            continue;
+        };
+        let Some(out_point) = asset.out_point_frames else {
+            tracing::warn!(
+                player = %player.id, asset = %asset_id,
+                "media player boots idle: default asset declares no out_point_frames \
+                 (probe-at-load is post-MVP)"
+            );
+            continue;
+        };
+        let in_point = asset.in_point_frames.unwrap_or(0);
+        // The vamp window defaults to the whole trimmed clip when unset.
+        let vamp_in = asset.vamp_in_frames.unwrap_or(in_point);
+        let vamp_out = asset.vamp_out_frames.unwrap_or(out_point);
+        let geometry = match crate::player::PlayoutGeometry::new(
+            in_point, out_point, vamp_in, vamp_out, cadence,
+        ) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(
+                    player = %player.id, asset = %asset_id, error = %e,
+                    "media player boots idle: invalid playout geometry"
+                );
+                continue;
+            }
+        };
+
+        // Resolve the asset path against the library root.
+        let path = match root {
+            Some(r) => std::path::Path::new(r).join(&asset.path),
+            None => std::path::PathBuf::from(&asset.path),
+        };
+
+        let (tile_w, tile_h) = cell_pixel_size(layout, &player.id)
+            .unwrap_or((config.canvas.width, config.canvas.height));
+        let store = Arc::new(TileStore::new(
+            player.id.clone(),
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let eof_policy = map_eof_policy(player.eof_policy);
+        let handle = crate::player::PlayerHandle::new(
+            player.id.clone(),
+            geometry,
+            eof_policy,
+            player.loop_default,
+            mailbox,
+        );
+
+        boot.stores.push((player.id.clone(), Arc::clone(&store)));
+        boot.plans.push(IngestPlan {
+            id: player.id.clone(),
+            location: SourceLocation::Path(path),
+            player: Some(handle),
+            tile_w,
+            tile_h,
+            store,
+            // A media player is a finite asset played under transport control;
+            // it is not a live (reconnect-forever) source — the player loop owns
+            // its own loop/hold lifecycle.
+            live: false,
+            #[cfg(feature = "overlay")]
+            incontainer_sub: None,
+            #[cfg(feature = "overlay")]
+            embedded_cc: None,
+            canvas_color,
+            cadence,
+            decode_placement: DecodePlacement::Default,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_registry: None,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_audio_store: None,
+            #[cfg(feature = "ndi")]
+            ndi_accept_license: false,
+            #[cfg(feature = "ndi")]
+            ndi_acceptance: multiview_input::ndi::license::LicenseAcceptance {
+                accepted_by: String::new(),
+                accepted_at: String::new(),
+            },
+            #[cfg(feature = "youtube")]
+            youtube_url_slot: None,
+        });
+        tracing::info!(
+            player = %player.id, asset = %asset_id,
+            in_point, out_point, vamp_in, vamp_out,
+            looping = player.loop_default,
+            "media player boot-spawned"
+        );
+    }
+    boot
+}
+
 /// Resolve a source's **audio** decode plan (AUD-2): the libav-openable location
 /// (file path or network URL) its audio is decoded from, plus its live flag.
 ///
@@ -12009,6 +12213,123 @@ mod media_player_loop_tests {
         assert!(
             matches!(read, TileRead::Fresh { .. } | TileRead::Held { .. }),
             "the player tile must hold a real decoded frame, got NoSignal"
+        );
+    }
+}
+
+/// Boot-spawn of media-player channels from `config.media_players` (ADR-0057 /
+/// ADR-0097): [`build_media_player_boot`] turns a configured player + its
+/// default library asset into a player [`IngestPlan`] (carrying a `player`
+/// handle) + a registered transport mailbox. Feature-independent (no libav).
+#[cfg(test)]
+mod media_player_boot_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use multiview_compositor::pipeline::CanvasColor;
+    use multiview_config::MultiviewConfig;
+    use multiview_core::time::Rational;
+
+    /// A canvas + one cell + a media library (one clip with a declared
+    /// out-point + vamp window) + a media player defaulting to it.
+    fn config_with_player() -> MultiviewConfig {
+        let doc = r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "vt-1"
+[media_library]
+root = "/srv/media"
+[[media_library.assets]]
+id = "opener"
+kind = "clip"
+path = "opener.ts"
+in_point_frames = 0
+out_point_frames = 100
+vamp_in_frames = 10
+vamp_out_frames = 90
+[[media_players]]
+id = "vt-1"
+default = "opener"
+loop_default = true
+"##;
+        MultiviewConfig::load_from_toml(doc).expect("parse media-player config")
+    }
+
+    #[test]
+    fn build_media_player_boot_spawns_a_rolling_player_with_geometry_and_mailbox() {
+        let config = config_with_player();
+        let layout = config.solve_layout().expect("layout solves");
+        let cadence = config.canvas.fps.rational();
+        let boot =
+            super::build_media_player_boot(&config, &layout, cadence, CanvasColor::default());
+
+        // One rolling player plan + one store + one mailbox.
+        assert_eq!(
+            boot.plans.len(),
+            1,
+            "the player with a declared-geometry asset rolls"
+        );
+        assert_eq!(boot.stores.len(), 1);
+        assert!(
+            boot.mailboxes.contains_key("vt-1"),
+            "the player's transport mailbox is registered for the control plane"
+        );
+
+        let plan = &boot.plans[0];
+        assert_eq!(plan.id, "vt-1");
+        assert!(
+            !plan.live,
+            "a media player is not a reconnect-forever live source"
+        );
+        let handle = plan
+            .player
+            .as_ref()
+            .expect("the plan carries a player handle");
+        // The geometry is the asset's declared window (the vamp sub-window loops).
+        assert_eq!(handle.geometry.in_point(), 0);
+        assert_eq!(handle.geometry.out_point(), 100);
+        assert_eq!(handle.geometry.vamp_in(), 10);
+        assert_eq!(handle.geometry.vamp_out(), 90);
+        assert_eq!(handle.geometry.cadence(), cadence);
+        assert!(
+            handle.loop_on_start,
+            "loop_default = true ⇒ the channel vamps on start"
+        );
+        // The asset path resolves against the library root.
+        let super::SourceLocation::Path(p) = &plan.location else {
+            panic!("expected a Path location for the player's asset");
+        };
+        assert_eq!(p.to_str().unwrap(), "/srv/media/opener.ts");
+    }
+
+    #[test]
+    fn a_player_without_a_default_asset_boots_idle_but_keeps_its_mailbox() {
+        let mut config = config_with_player();
+        // Drop the default asset binding: the channel boots idle (no plan) but
+        // its mailbox stays registered so a later load command is honoured.
+        config.media_players[0].default = None;
+        let layout = config.solve_layout().expect("layout solves");
+        let cadence = config.canvas.fps.rational();
+        let boot =
+            super::build_media_player_boot(&config, &layout, cadence, CanvasColor::default());
+        assert!(boot.plans.is_empty(), "no default asset ⇒ no rolling plan");
+        assert!(
+            boot.mailboxes.contains_key("vt-1"),
+            "an idle player still registers its mailbox"
         );
     }
 }

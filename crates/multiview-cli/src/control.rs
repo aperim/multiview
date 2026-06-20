@@ -864,7 +864,37 @@ pub fn command_drain_with_live_sources(
     publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     live: crate::live_sources::LiveSourceHandle,
 ) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
-    let mut drain = CommandDrain::new(commands, config, publisher).with_live_sources(live);
+    command_drain_with_live_sources_and_players(
+        commands,
+        config,
+        publisher,
+        live,
+        std::collections::HashMap::new(),
+    )
+}
+
+/// As [`command_drain_with_live_sources`], plus the media-player transport seam
+/// (ADR-0057 / ADR-0097): the per-player [`TransportMailbox`](crate::player::TransportMailbox)
+/// map the command drain submits a `MediaTransport`/exit verb to. The production
+/// **non-overlay** full-engine path wires this so player channels are drivable
+/// even without subtitle/overlay rendering; the existing 4-arg form (no players)
+/// is unchanged for callers that have none.
+// The map always originates from `Pipeline::player_mailboxes()` (the default
+// hasher); generalizing over the hasher buys no caller anything here.
+#[allow(clippy::implicit_hasher)]
+pub fn command_drain_with_live_sources_and_players(
+    commands: CommandReceiver,
+    config: MultiviewConfig,
+    publisher: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
+    live: crate::live_sources::LiveSourceHandle,
+    player_mailboxes: std::collections::HashMap<
+        String,
+        std::sync::Arc<crate::player::TransportMailbox>,
+    >,
+) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
+    let mut drain = CommandDrain::new(commands, config, publisher)
+        .with_live_sources(live)
+        .with_player_mailboxes(player_mailboxes);
     move |drive: &mut CompositorDrive<Nv12Image>| {
         let _applied = drain.apply(drive);
     }
@@ -912,6 +942,9 @@ pub fn command_drain_with_live_overlays(
 /// The binary wires this on the full libav\* path (`run_pipeline_until_ctrl_c`),
 /// where the pipeline has a subtitle router; the software-engine path (no subtitle
 /// rendering) wires the plain [`command_drain`].
+// The player-mailbox map always originates from `Pipeline::player_mailboxes()`
+// (the default hasher); generalizing over the hasher buys no caller anything.
+#[allow(clippy::implicit_hasher)]
 #[cfg(all(feature = "ffmpeg", feature = "overlay"))]
 pub fn command_drain_with_seams(
     commands: CommandReceiver,
@@ -920,11 +953,16 @@ pub fn command_drain_with_seams(
     subtitle_route: Arc<arc_swap::ArcSwapOption<crate::captions::SubtitleRouteHandle>>,
     overlays: crate::live_overlays::OverlayApplySlot,
     live: crate::live_sources::LiveSourceHandle,
+    player_mailboxes: std::collections::HashMap<
+        String,
+        std::sync::Arc<crate::player::TransportMailbox>,
+    >,
 ) -> impl FnMut(&mut CompositorDrive<Nv12Image>) {
     let mut drain = CommandDrain::new(commands, config, publisher)
         .with_subtitle_route(subtitle_route)
         .with_live_overlays(overlays)
-        .with_live_sources(live);
+        .with_live_sources(live)
+        .with_player_mailboxes(player_mailboxes);
     move |drive: &mut CompositorDrive<Nv12Image>| {
         let _applied = drain.apply(drive);
     }
@@ -946,6 +984,32 @@ pub const MAX_REPOINTS_PER_TICK: usize = 32;
 /// an old superseded one being shed is harmless). Bounded data-plane-adjacent
 /// memory (safety rule §5: queues drop, never grow).
 const MAX_REPOINT_BACKLOG: usize = 256;
+
+/// Map a control-plane [`MediaTransportVerb`](multiview_control::MediaTransportVerb)
+/// onto the CLI player's [`TransportVerb`](crate::player::TransportVerb) (the two
+/// are structurally identical but live in different crates — the control crate
+/// owns the wire/REST shape, the cli owns the ingest-thread transport core).
+fn map_transport_verb(
+    verb: &multiview_control::MediaTransportVerb,
+) -> crate::player::TransportVerb {
+    use crate::player::TransportVerb as V;
+    use multiview_control::MediaTransportVerb as W;
+    match verb {
+        W::Load { asset } => V::Load {
+            asset: asset.clone(),
+        },
+        W::Cue { frame } => V::Cue { frame: *frame },
+        W::Play => V::Play,
+        W::Pause => V::Pause,
+        W::Stop => V::Stop,
+        // A `Seek` with an explicit frame seeks there.
+        W::Seek { frame: Some(f) } => V::Seek { frame: *f },
+        // A `Seek { None }` (seek to the declared in-point) maps to the executor's
+        // in-point cue; likewise any future `#[non_exhaustive]` verb this build
+        // does not know about maps to a harmless re-cue rather than panicking.
+        _ => V::Cue { frame: None },
+    }
+}
 
 /// The per-tick command-drain machine: it owns the non-blocking command bus, the
 /// working config, the outbound publisher, and the across-tick state, and applies
@@ -998,6 +1062,16 @@ pub struct CommandDrain {
     /// state from. `None` ⇒ `UpsertOverlay`/`RemoveOverlay` are surfaced held
     /// actions (never a silent drop).
     live_overlays: Option<crate::live_overlays::OverlayApplySlot>,
+    /// The media-player transport seam (ADR-0057 / ADR-0097): the per-player
+    /// bounded, conflated-latest [`TransportMailbox`](crate::player::TransportMailbox)
+    /// the running player ingest thread drains between frames, keyed by player
+    /// id. A `MediaTransport`/`ArmMediaExit`/`TakeMediaExit`/`CancelMediaExit`
+    /// command submits its verb to the addressed player's mailbox (a wait-free
+    /// `try`-style push; the engine never awaits the player — inv #1/#10). An
+    /// empty map (no players configured) ⇒ those commands are surfaced held
+    /// (warned), never a silent drop.
+    player_mailboxes:
+        std::collections::HashMap<String, std::sync::Arc<crate::player::TransportMailbox>>,
     /// One-shot: the drive's cell-id → index map is established the first tick.
     cell_ids_set: bool,
     /// Test-only spy counting how many times this drain calls `solve_layout`.
@@ -1025,10 +1099,28 @@ impl CommandDrain {
             subtitle_route: None,
             live_sources: None,
             live_overlays: None,
+            player_mailboxes: std::collections::HashMap::new(),
             cell_ids_set: false,
             #[cfg(test)]
             resolve_spy: None,
         }
+    }
+
+    /// Thread in the media-player transport seam (ADR-0057 / ADR-0097): the map
+    /// of player-id → [`TransportMailbox`](crate::player::TransportMailbox) the
+    /// boot-spawned player ingest threads drain, so a `MediaTransport` / exit
+    /// command reaches the addressed running player. See
+    /// [`command_drain_with_seams`].
+    #[must_use]
+    fn with_player_mailboxes(
+        mut self,
+        mailboxes: std::collections::HashMap<
+            String,
+            std::sync::Arc<crate::player::TransportMailbox>,
+        >,
+    ) -> Self {
+        self.player_mailboxes = mailboxes;
+        self
     }
 
     /// Thread in the live-source producer seam (ADR-W018) so
@@ -1277,6 +1369,10 @@ struct DrainState {
 /// outcome event. Panic-free (no `unwrap`/`expect`/indexing); an unknown
 /// layout/salvo logs `tracing::warn!` and emits nothing (or a tally echo).
 impl CommandDrain {
+    // A flat one-arm-per-`Command`-variant dispatch (the canonical single apply
+    // path): inherently long and clearer kept whole than split — each arm is a
+    // thin delegate to a focused handler. The media-player arms tipped it over.
+    #[allow(clippy::too_many_lines)]
     fn route_command(&mut self, command: Command, drive: &mut CompositorDrive<Nv12Image>) {
         match command {
             Command::Start { .. } => {
@@ -1391,12 +1487,47 @@ impl CommandDrain {
             Command::SetTallyOverride { target, color, .. } => {
                 self.set_tally_override(target, color);
             }
+            // Media-player transport (ADR-0057 / ADR-0097): submit the verb to the
+            // addressed player's mailbox (wait-free, conflated-latest; the player
+            // thread drains it between frames — the engine never awaits it).
+            Command::MediaTransport {
+                ref player,
+                ref verb,
+                ..
+            } => {
+                self.submit_player_verb(player, map_transport_verb(verb));
+            }
+            Command::ArmMediaExit { ref player, .. } => {
+                self.submit_player_verb(player, crate::player::TransportVerb::ArmExit);
+            }
+            Command::TakeMediaExit { ref player, .. } => {
+                self.submit_player_verb(player, crate::player::TransportVerb::TakeExit);
+            }
+            Command::CancelMediaExit { ref player, .. } => {
+                self.submit_player_verb(player, crate::player::TransportVerb::CancelExit);
+            }
             // `Command` is `#[non_exhaustive]`: a future variant this build does not
             // know about is logged and skipped, never panicked on.
             ref other => {
                 tracing::warn!(kind = other.kind(), "unhandled control command; skipped");
             }
         }
+    }
+
+    /// Submit a transport verb to the addressed player's mailbox. A wait-free,
+    /// conflated-latest push the player ingest thread drains between frames — the
+    /// engine never awaits the player (inv #1/#10). An unknown player id (none
+    /// configured / a typo) is surfaced held (warned), never a silent drop.
+    fn submit_player_verb(&self, player: &str, verb: crate::player::TransportVerb) {
+        let Some(mailbox) = self.player_mailboxes.get(player) else {
+            tracing::warn!(
+                player,
+                ?verb,
+                "media transport held: no such player channel (none configured / unknown id)"
+            );
+            return;
+        };
+        mailbox.submit(verb);
     }
 
     /// Apply a `SetTallyOverride`. No tally arbiter is wired into the software

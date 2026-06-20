@@ -233,6 +233,12 @@ fn to_body(value: &impl serde::Serialize) -> ControlResult<serde_json::Value> {
 /// [`ControlError::Repository`] if a config value fails to serialize, and any
 /// [`ControlError`] a backing `create` surfaces (e.g. a duplicate id — not
 /// expected for a validated config).
+// A flat seed-each-registry function (one block per resource domain): inherently
+// long and clearer kept whole than split — the per-domain helpers (e.g.
+// `seed_media_players`) are already extracted; the residual length is the
+// one-line-per-registry construction + the `SeededResources` literal (W024's
+// boot-model registries + the media-players registry tipped it 2 over the bound).
+#[allow(clippy::too_many_lines)]
 pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources> {
     let sources = InMemorySourceStore::new();
     for source in &config.sources {
