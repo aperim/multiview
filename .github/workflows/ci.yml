@@ -313,10 +313,20 @@ jobs:
         # Hardware-gated tests carry #[ignore] and are excluded from shared CI
         # by default; they run on dedicated self-hosted runners with the real
         # devices attached.
+        #
+        # --skip tile_driven_meets_budget: the compositor per-tick perf BUDGET
+        # test asserts a wall-clock ceiling only meaningful on consistent
+        # hardware (ADR-E009/ADR-0022 — perf gates run on dedicated runners), so
+        # it is flaky on shared CI. The default `test` job skips it for the same
+        # reason; mirror that here for the `multiview-compositor`/`overlay` leg
+        # (it lives only in that crate, so the flag is a no-op for every other
+        # leg). The tile-driven SCALING correctness stays covered unconditionally
+        # by tile_driven_scales_with_coverage_not_tile_count.
         run: >
           cargo test
           -p ${{ matrix.crate }}
           --features ${{ matrix.feature }}
+          -- --skip tile_driven_meets_budget
 
   # ── multiview-overlay libass clippy (clippy-only; closes a #134 gap) ─────────
   # `multiview-overlay`'s off-by-default `libass` capability gate (the ASS/SSA

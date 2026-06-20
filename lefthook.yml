@@ -28,7 +28,11 @@ pre-push:
     clippy:
       run: cargo clippy --workspace --all-targets -- -D warnings
     test:
-      run: cargo test --workspace
+      # --skip tile_driven_meets_budget mirrors the CI `test` job: the compositor
+      # per-tick perf BUDGET test asserts a wall-clock ceiling only meaningful on
+      # consistent hardware (ADR-E009/ADR-0022), so it is flaky off dedicated
+      # runners. Scaling correctness stays covered by the tile-driven scaling test.
+      run: cargo test --workspace -- --skip tile_driven_meets_budget
     # ── feature-gated clippy mirrors (match the CI feature matrix) ──────────────
     # The default workspace clippy above builds default features only, so an
     # off-by-default feature can break silently (e.g. the cosmic-text 0.19 overlay
