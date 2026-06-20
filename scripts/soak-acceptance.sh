@@ -99,7 +99,7 @@ repo_root() { git rev-parse --show-toplevel; }
 # Render a capture document through the tested analyzer; returns its exit code.
 run_verdict() {
   local capture="$1"
-  ( cd "$(repo_root)" && cargo run --quiet -p xtask -- soak-report "$capture" )
+  ( cd "$(repo_root)" && cargo run --quiet --locked -p xtask -- soak-report "$capture" )
 }
 
 # ── dry-run: prove the harness→analyzer wiring with bundled fixtures ─────────
