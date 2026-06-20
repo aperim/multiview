@@ -18,7 +18,10 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::float_cmp
+    clippy::float_cmp,
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
 )]
 
 use std::sync::Arc;
@@ -171,9 +174,8 @@ fn apply_control(bus: &PlayerControlBus, deck: &mut LoopDeck, last_gen: &mut u64
                 deck.arm_exit_at(anchor_frame);
             }
         }
-        AudioTransport::Paused => deck.pause(),
         AudioTransport::Stopped => deck.stop(),
-        // `AudioTransport` is `#[non_exhaustive]`: a future variant rides silence.
+        // `Paused` and any future (`#[non_exhaustive]`) variant ride silence.
         _ => deck.pause(),
     }
 }
