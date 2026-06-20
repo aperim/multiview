@@ -9824,6 +9824,138 @@ fn publish_audio_control(
     handle.control_bus.publish(audio_state, anchor);
 }
 
+#[cfg(test)]
+mod publish_audio_control_tests {
+    //! MAJOR-5 (ADR-T019 §2): a CHANGED exit-arm anchor must always reach the audio
+    //! rail even when `(audio_state, exit_armed)` is unchanged — the round-2
+    //! suppression keyed only on `(audio_state, exit_armed)` and dropped a re-arm at
+    //! a different boundary. The fix suppresses only on the FULL `(state,
+    //! exit_armed, anchor)` triple. Also pins MAJOR-4: a re-cue (`Cued`) maps to
+    //! `AudioTransport::Stopped` (re-cue), not `Paused`.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use std::sync::Arc;
+
+    use multiview_core::time::{MediaTime, Rational};
+
+    use super::publish_audio_control;
+    use crate::player::{
+        AudioTransport, EofPolicy, MediaPlayerState, PlayerHandle, PlayoutGeometry, TransportMailbox,
+    };
+
+    fn handle(eof: EofPolicy) -> PlayerHandle {
+        // A 1 s vamp window at 48 fps (in=0,out=48,vamp 0..48) — geometry irrelevant
+        // to the suppression logic, only valid construction matters.
+        let geometry = PlayoutGeometry::new(0, 48, 0, 48, Rational::new(48, 1)).unwrap();
+        PlayerHandle::new(
+            "p".to_owned(),
+            geometry,
+            eof,
+            true,
+            Arc::new(TransportMailbox::new()),
+        )
+    }
+
+    /// A re-published armed-vamp-exit with a CHANGED anchor (a re-arm / move-exit at
+    /// a different boundary) must bump the bus generation — it is NOT suppressed by
+    /// the `(Vamping, exit_armed=true)` tuple repeating.
+    #[test]
+    fn a_changed_arm_anchor_propagates_even_when_state_is_unchanged() {
+        let handle = handle(EofPolicy::Loop);
+        let mut last = None;
+
+        // First arm at anchor A1.
+        let a1 = MediaTime::from_nanos(1_000_000_000);
+        publish_audio_control(
+            &handle,
+            MediaPlayerState::Vamping { exit_armed: true },
+            a1,
+            &mut last,
+        );
+        let after_first = handle.control_bus.load();
+        assert_eq!(after_first.state, AudioTransport::Vamping);
+        assert_eq!(
+            after_first.exit_arm_anchor,
+            Some(a1),
+            "the first arm publishes anchor A1"
+        );
+        let gen1 = after_first.generation;
+
+        // Re-arm at a DIFFERENT anchor A2, SAME (state, exit_armed). Must publish.
+        let a2 = MediaTime::from_nanos(3_000_000_000);
+        publish_audio_control(
+            &handle,
+            MediaPlayerState::Vamping { exit_armed: true },
+            a2,
+            &mut last,
+        );
+        let after_second = handle.control_bus.load();
+        assert!(
+            after_second.generation > gen1,
+            "a changed arm anchor must bump the generation (not be suppressed) — MAJOR-5"
+        );
+        assert_eq!(
+            after_second.exit_arm_anchor,
+            Some(a2),
+            "the changed anchor A2 must reach the bus"
+        );
+    }
+
+    /// An UNCHANGED control (same state, same anchor) is suppressed — no needless
+    /// per-frame generation churn (the other half of the MAJOR-5 contract).
+    #[test]
+    fn an_unchanged_control_is_suppressed() {
+        let handle = handle(EofPolicy::Loop);
+        let mut last = None;
+        let a = MediaTime::from_nanos(1_000_000_000);
+        publish_audio_control(
+            &handle,
+            MediaPlayerState::Vamping { exit_armed: true },
+            a,
+            &mut last,
+        );
+        let gen1 = handle.control_bus.load().generation;
+        // Same state + same anchor again: suppressed.
+        publish_audio_control(
+            &handle,
+            MediaPlayerState::Vamping { exit_armed: true },
+            a,
+            &mut last,
+        );
+        assert_eq!(
+            handle.control_bus.load().generation,
+            gen1,
+            "an unchanged control must be suppressed (no per-frame churn)"
+        );
+    }
+
+    /// MAJOR-4: the video's re-cue state (`Cued`, where `MediaPlayer::stop()` lands)
+    /// maps to `AudioTransport::Stopped` (re-cue), NOT `Paused` (hold-in-place).
+    #[test]
+    fn cued_maps_to_stopped_not_paused() {
+        let handle = handle(EofPolicy::Loop);
+        let mut last = None;
+        publish_audio_control(&handle, MediaPlayerState::Cued, MediaTime::ZERO, &mut last);
+        assert_eq!(
+            handle.control_bus.load().state,
+            AudioTransport::Stopped,
+            "the video re-cue (Cued) must route to an audio re-cue (Stopped), not pause (MAJOR-4)"
+        );
+        // Paused/Holding still map to Paused (hold).
+        let mut last2 = None;
+        publish_audio_control(
+            &handle,
+            MediaPlayerState::Paused,
+            MediaTime::ZERO,
+            &mut last2,
+        );
+        assert_eq!(
+            handle.control_bus.load().state,
+            AudioTransport::Paused,
+            "an actual pause still maps to Paused (hold position)"
+        );
+    }
+}
+
 /// Seek the open container to `frame` (in-point of a loop/vamp, a cue, or a user
 /// seek) and **flush the decoder** so no stale reordered frame from before the
 /// seek leaks past it (ADR-0097 rule 2, non-negotiable). Arms the **pending

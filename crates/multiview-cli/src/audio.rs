@@ -773,6 +773,208 @@ mod player_audio_tests {
         handle.join().expect("player audio loop thread panicked");
     }
 
+    /// CRITICAL-1 (the root defect), with a REAL lookahead: when an `ArmExit`
+    /// arrives AFTER the audio rail has already prepublished ~0.5 s of looped body
+    /// into the store, NO published/heard sample past the armed vamp-exit boundary
+    /// `B` may carry body energy. The round-2 append-only horizon let the
+    /// prepublished body play past `B`; the publish-horizon contract (ADR-T019
+    /// §2.3) re-derives + REPLACES the unplayed window from the deck's current
+    /// state every block, so the body past `B` is overwritten with fade→silence
+    /// before the bus reads it. This fails against the append-only `18039876`.
+    #[test]
+    fn arm_exit_during_a_real_lookahead_plays_no_body_past_the_boundary() {
+        if !ffmpeg_cli_available() {
+            eprintln!("ffmpeg CLI unavailable; skipping arm-exit boundary test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // 2 s of a steady 1 kHz tone. Vamp [0, 1 s) → loop L = 48_000 frames. A
+        // boundary at B = 48_000 (the lap-0→1 wrap). The lookahead is 0.5 s =
+        // 24_000 frames, so with the read cursor parked at 30_000 the lookahead
+        // window [30_000, 54_000) straddles B and (pre-fix) holds BODY at [B, 54_000).
+        let wav = encode_to_wav(dir.path(), &tone(0.5, 1000.0, 2.0));
+        let store = Arc::new(AudioStore::new(canonical_format(), 192_000));
+        let stop = Arc::new(AtomicBool::new(false));
+        // Boot vamping (no exit armed): the deck loops and the rail prepublishes body.
+        let control_bus = Arc::new(PlayerControlBus::new());
+        let plan = PlayerAudioPlan {
+            id: "armexit".to_owned(),
+            location: wav.to_string_lossy().into_owned(),
+            vamp_in_frames: 0,
+            vamp_out_frames: 48, // 48 frames @ 48 fps = 1 s = 48_000 samples → L
+            cadence: Rational::new(48, 1),
+            output_cadence: Rational::new(48, 1),
+            control_bus: Arc::clone(&control_bus),
+        };
+        let loop_store = Arc::clone(&store);
+        let loop_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            player_audio_loop(&plan, &loop_store, &loop_stop);
+        });
+
+        // Let it prime + publish the initial lookahead.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        // Park the read cursor at 30_000 (inside lap 0, past B − LOOKAHEAD = 24_000)
+        // so the next republish covers [30_000, 54_000) — straddling B = 48_000.
+        store.seek_to(30_000);
+        // Give the fill loop a few poll intervals to publish that BODY lookahead
+        // (the stale region [48_000, 54_000) is now body, pre-fix).
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // NOW arm the exit. The anchor is the video's media-time at ~frame 30_000;
+        // the next vamp wrap strictly after it is B = 48_000. (media-time 30_000/48k
+        // s → frame 30_000; next wrap after 30_000 with L=48_000 is 48_000.)
+        let anchor_ns = (30_000i64 * 1_000_000_000) / 48_000;
+        control_bus.publish(
+            AudioTransport::Vamping,
+            Some(multiview_core::time::MediaTime::from_nanos(anchor_ns)),
+        );
+        // Give the fill loop ample time to sample the arm, arm the deck, and
+        // REPUBLISH [30_000, 48_000 + xfade) = body→fade→silence — overwriting the
+        // stale body — all while the read cursor stays parked (so the republish is
+        // guaranteed to land before we read past B).
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        stop.store(true, Ordering::Release);
+        handle.join().expect("player audio loop thread panicked");
+
+        // Read the whole post-arm span from the parked cursor and inspect past B.
+        store.seek_to(30_000);
+        let span = store.read(40_000); // [30_000, 70_000): well past B + the fade
+        let s = span.interleaved();
+        // The seam fade window: allow [B, B + 1 s_xfade] some energy (the fade tail).
+        // The default crossfade is 480 frames; past B + 480 it MUST be silence —
+        // no looped body. Frame index within `span` of B = 48_000 − 30_000 = 18_000.
+        let xfade = 480usize;
+        let past = (18_000 + xfade) * 2; // sample offset past the fade tail
+        let tail = &s[past..];
+        let energy: f64 = tail.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+        assert!(
+            energy < 1e-3,
+            "looped body played PAST the armed exit boundary B=48_000 (tail energy {energy:.4}) — \
+             the append-only lookahead overshoot (CRITICAL-1) is not fixed"
+        );
+        // Sanity: BEFORE the boundary there IS body energy (the loop really ran up
+        // to B — the test is not vacuously silent).
+        let before = &s[..(18_000 * 2)];
+        let before_energy: f64 = before.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+        assert!(
+            before_energy > 1.0,
+            "expected real body energy BEFORE the boundary (energy {before_energy:.3}) — test sanity"
+        );
+    }
+
+    /// CRITICAL-1, the pause/stop half: a `pause` (or `stop`) arriving after the
+    /// lookahead was prepublished must NOT let stale body play past the transition.
+    /// The republish overwrites the unplayed tail with silence.
+    #[test]
+    fn pause_after_a_real_lookahead_plays_no_stale_body_past_the_transition() {
+        if !ffmpeg_cli_available() {
+            eprintln!("ffmpeg CLI unavailable; skipping pause-overshoot test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let wav = encode_to_wav(dir.path(), &tone(0.5, 1000.0, 2.0));
+        let store = Arc::new(AudioStore::new(canonical_format(), 192_000));
+        let stop = Arc::new(AtomicBool::new(false));
+        let control_bus = Arc::new(PlayerControlBus::new());
+        let plan = PlayerAudioPlan {
+            id: "pauseover".to_owned(),
+            location: wav.to_string_lossy().into_owned(),
+            vamp_in_frames: 0,
+            vamp_out_frames: 48,
+            cadence: Rational::new(48, 1),
+            output_cadence: Rational::new(48, 1),
+            control_bus: Arc::clone(&control_bus),
+        };
+        let loop_store = Arc::clone(&store);
+        let loop_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            player_audio_loop(&plan, &loop_store, &loop_stop);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        store.seek_to(20_000);
+        std::thread::sleep(std::time::Duration::from_millis(500)); // publish body lookahead
+                                                                   // Pause: the unplayed tail [20_000, …) must become silence on the next republish.
+        control_bus.publish(AudioTransport::Paused, None);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        stop.store(true, Ordering::Release);
+        handle.join().expect("player audio loop thread panicked");
+
+        store.seek_to(20_000);
+        let span = store.read(20_000); // the unplayed tail at pause time
+        let energy: f64 = span
+            .interleaved()
+            .iter()
+            .map(|&v| f64::from(v) * f64::from(v))
+            .sum();
+        assert!(
+            energy < 1e-3,
+            "stale looped body played PAST a pause (energy {energy:.4}) — the prepublished \
+             lookahead was not revised on the transition (CRITICAL-1)"
+        );
+    }
+
+    /// MAJOR-4 (end-to-end): the video rail publishing `Stopped` (its `Cued`
+    /// re-cue) RE-CUES the audio to head — after a stop, a fresh `Vamping` restarts
+    /// the loop from `body[0]` at the current bus position — distinct from a
+    /// `Paused` hold. (The pure-deck distinction is covered in the loopdeck tests;
+    /// this proves the rail routes `Stopped → deck.stop()` and `Vamping` re-cues.)
+    #[test]
+    fn the_rail_recues_on_stopped_then_restarts_from_head_on_vamp() {
+        if !ffmpeg_cli_available() {
+            eprintln!("ffmpeg CLI unavailable; skipping rail re-cue test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // A 1 s RAMP clip: sample value at frame f is f/48_000 (encodes lap position).
+        let mut ramp = vec![0.0f32; 48_000 * 2];
+        for f in 0..48_000usize {
+            let v = (f as f32) / 48_000.0;
+            ramp[f * 2] = v;
+            ramp[f * 2 + 1] = v;
+        }
+        let wav = encode_to_wav(dir.path(), &ramp);
+        let store = Arc::new(AudioStore::new(canonical_format(), 192_000));
+        let stop = Arc::new(AtomicBool::new(false));
+        let control_bus = Arc::new(PlayerControlBus::new());
+        let plan = PlayerAudioPlan {
+            id: "recue".to_owned(),
+            location: wav.to_string_lossy().into_owned(),
+            vamp_in_frames: 0,
+            vamp_out_frames: 48, // L = 48_000
+            cadence: Rational::new(48, 1),
+            output_cadence: Rational::new(48, 1),
+            control_bus: Arc::clone(&control_bus),
+        };
+        let loop_store = Arc::clone(&store);
+        let loop_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            player_audio_loop(&plan, &loop_store, &loop_stop);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        // Advance the bus deep into the loop (frame 36_000 → body value 0.75).
+        store.seek_to(36_000);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // STOP (the video re-cue): the rail must route this to deck.stop().
+        control_bus.publish(AudioTransport::Stopped, None);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Fresh VAMP: re-cue to head → the loop restarts from body[0]≈0.0 at the
+        // CURRENT bus position (frame 36_000), not body[36_000]≈0.75.
+        control_bus.publish(AudioTransport::Vamping, None);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        stop.store(true, Ordering::Release);
+        handle.join().expect("player audio loop thread panicked");
+
+        store.seek_to(36_000);
+        let head = store.read(1); // first sample after the re-cued vamp
+        let v = f64::from(head.interleaved()[0]);
+        assert!(
+            v.abs() < 0.05,
+            "a Stopped (re-cue) + fresh Vamping must restart the loop from body[0]≈0.0 at the \
+             current bus frame, got {v:.3} — the rail did not re-cue (MAJOR-4)"
+        );
+    }
+
     /// A non-looping player settles the audio to silence: the video rail publishes
     /// a one-shot play (Vamping + exit armed at media-time ZERO), so the audio
     /// plays one lap then goes silent — the bus contribution ends cleanly (the
@@ -832,6 +1034,67 @@ mod player_audio_tests {
         assert!(
             energy < 1e-3,
             "a non-looping player must settle its audio to silence after one lap (tail energy {energy:.5})"
+        );
+    }
+
+    /// CRITICAL-3: priming a LATE vamp window must NOT transiently buffer the whole
+    /// pre-`vamp_in` prefix — the peak resident decode buffer is the WINDOW size,
+    /// not the asset size. `retain_vamp_window` discards each decoded block that
+    /// lies entirely before `vamp_in_sample` and only retains
+    /// `[vamp_in_sample, want_end)`, so its returned buffer's capacity is bounded
+    /// by the window, NOT by `vamp_out_sample` from frame 0. (Pure: synthetic
+    /// blocks, no ffmpeg CLI — the round-2 accumulate-from-0-then-slice would show a
+    /// retained capacity ~= the whole pre-window prefix.)
+    #[test]
+    fn retain_vamp_window_does_not_buffer_the_pre_vamp_in_prefix() {
+        use super::retain_vamp_window;
+        let channels = canonical_format().channel_count();
+        // Simulate a 12 s asset (576_000 frames) decoded in 0.1 s blocks (4_800
+        // frames each), vamping a LATE 1 s window [10 s, 11 s) =
+        // samples [480_000, 528_000) plus a 480-frame lap-over (want_end 528_480).
+        let block_frames = 4_800usize;
+        let asset_frames = 576_000usize;
+        let in_sample = 480_000usize;
+        let want_end = 528_480usize; // 11 s + 480 lap-over
+        let window_len = want_end - in_sample; // 48_480 frames
+        let nblocks = asset_frames / block_frames;
+        // A block iterator: block k carries frames [k*block, (k+1)*block); each
+        // sample value = its absolute frame index (so we can verify WHICH samples
+        // were retained).
+        let blocks = (0..nblocks).map(|k| {
+            let base = k * block_frames;
+            let mut v = vec![0.0f32; block_frames * channels];
+            for f in 0..block_frames {
+                let val = (base + f) as f32;
+                v[f * channels] = val;
+                v[f * channels + 1] = val;
+            }
+            v
+        });
+
+        let window = retain_vamp_window(blocks, channels, in_sample, want_end);
+
+        // The retained buffer is exactly the window (in samples).
+        assert_eq!(
+            window.len(),
+            window_len * channels,
+            "retain_vamp_window must return exactly the [in_sample, want_end) window"
+        );
+        // The FIRST retained sample is the vamp_in SAMPLE (frame 480_000), proving
+        // the prefix was discarded, not retained-then-sliced.
+        assert!(
+            (window[0] - in_sample as f32).abs() < 0.5,
+            "the retained window must start at the vamp_in sample {in_sample} (got {})",
+            window[0]
+        );
+        // The KEY bound: the retained buffer's CAPACITY is the window size, NOT the
+        // pre-window prefix (~480_000 frames). The round-2 accumulate-from-0 would
+        // balloon capacity to ~want_end. Allow one block of slack for growth.
+        let cap_frames = window.capacity() / channels;
+        assert!(
+            cap_frames <= window_len + block_frames,
+            "peak retained buffer {cap_frames} frames ballooned past the window {window_len} \
+             (+1 block slack) — the pre-vamp_in prefix was buffered (CRITICAL-3)"
         );
     }
 }

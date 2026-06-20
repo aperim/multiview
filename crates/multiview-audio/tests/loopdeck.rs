@@ -561,6 +561,67 @@ fn pause_contributes_silence_and_stop_recues() {
 }
 
 // ----------------------------------------------------------------------------
+// MAJOR-4: pause HOLDS the loop phase (resume continues mid-loop); stop RE-CUES
+// to the head (a fresh vamp restarts the segment from body[0]). The two MUST be
+// observably distinct — the round-2 map sent the video re-cue to pause-in-place.
+// ----------------------------------------------------------------------------
+
+#[test]
+fn stop_then_vamp_recues_to_head_distinct_from_pause_resume() {
+    // A body that is a RAMP within the lap (sample value encodes the lap position)
+    // so we can read off WHICH lap position the deck resumes at. body[m] = m/L for
+    // frame m in [xfade, L) (clean middle); the first sample after a re-cue at the
+    // head must be ~0 (body[0]); a pause-resume must continue near where it left.
+    let loop_frames = 1000usize;
+    let xfade = 0usize; // no seam blend so body[m] is verbatim — clean ramp readout
+    let channels = 2usize;
+    let mut decoded = vec![0.0f32; loop_frames * channels];
+    for m in 0..loop_frames {
+        let v = (m as f32) / (loop_frames as f32);
+        decoded[m * channels] = v;
+        decoded[m * channels + 1] = v;
+    }
+    let mut deck = LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).unwrap();
+    deck.vamp();
+
+    // --- PAUSE then VAMP: resume HOLDS phase (continues at the same lap position).
+    // Play up to absolute frame 700 (lap position 700 → body value 0.700).
+    let _ = deck.read_at(0, 700);
+    deck.pause();
+    deck.vamp(); // resume
+                 // The next read at absolute frame 700 (a pause holds phase: position = 700%L=700).
+    let resumed = deck.read_at(700, 1);
+    assert!(
+        (f64::from(resumed.interleaved()[0]) - 0.700).abs() < 0.02,
+        "pause→vamp must HOLD the loop phase (resume near body[700]≈0.700, got {})",
+        resumed.interleaved()[0]
+    );
+
+    // --- STOP then VAMP: re-cue to HEAD (next read restarts at body[0]≈0.0),
+    // regardless of the absolute frame the bus is at.
+    let mut deck2 = LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).unwrap();
+    deck2.vamp();
+    let _ = deck2.read_at(0, 700); // advance to absolute frame 700
+    deck2.stop(); // re-cue (silence until a fresh vamp)
+    deck2.vamp(); // fresh vamp → restart from the head at the CURRENT absolute frame
+                  // The very next read (at absolute frame 700) must be body[0]≈0.0 — the loop
+                  // was re-phased so the head plays now, NOT body[700].
+    let recued = deck2.read_at(700, 1);
+    assert!(
+        f64::from(recued.interleaved()[0]).abs() < 0.02,
+        "stop→vamp must RE-CUE to the head (next sample ≈ body[0]≈0.0, got {}) — distinct from pause",
+        recued.interleaved()[0]
+    );
+    // And it then loops forward from the head: frame 700+250 reads body[250]≈0.250.
+    let later = deck2.read_at(700 + 250, 1);
+    assert!(
+        (f64::from(later.interleaved()[0]) - 0.250).abs() < 0.02,
+        "after a re-cue the loop runs forward from the head (body[250]≈0.250, got {})",
+        later.interleaved()[0]
+    );
+}
+
+// ----------------------------------------------------------------------------
 // 6. Property tests — period integrity + both seam-correlation regimes.
 // ----------------------------------------------------------------------------
 

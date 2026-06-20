@@ -365,3 +365,106 @@ fn publish_at_rejects_format_mismatch() {
         "a format mismatch must be rejected, never silently written"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `publish_window` — the sliding-window REPLACE write (ADR-T019 §2.2/§2.3, the
+// CRITICAL-1 + CRITICAL-2 fix). The media-player audio rail re-derives the whole
+// unplayed window `[cursor, H)` from the deck's CURRENT transport state every
+// block and REPLACES the store window with it (not append) — so a transport
+// transition (arm-exit / pause / stop) overwrites any stale pre-transition tail
+// before the bus reads it. Backed by a triple-buffered preallocated snapshot
+// pool, so the steady path does NO per-block heap allocation (rule 22).
+
+/// `publish_window(base, samples)` makes the live window EXACTLY `[base, base+n)`:
+/// a read seeking there gets the placed samples; the window is REPLACED, not
+/// merged — a smaller later window does not leave a stale tail of the larger one.
+#[test]
+fn publish_window_replaces_the_live_window() {
+    let store = AudioStore::new(stereo(), 96_000);
+    // First window: frames [1000, 1000+50) = a ramp.
+    let big: Vec<f32> = (0..(50 * 2)).map(|i| i as f32).collect();
+    store.publish_window(1000, &big).unwrap();
+    store.seek_to(1000);
+    let out = store.read(50);
+    for (i, &v) in out.interleaved().iter().enumerate() {
+        assert_eq!(v, i as f32, "window sample {i} not placed at base 1000");
+    }
+
+    // A SECOND, SMALLER window at a later base [1100, 1100+10): the store window
+    // is now exactly that — the [1000,1050) content is GONE (replaced, not
+    // appended). Reading from 1100 yields the new ramp; reading from 1000 (the
+    // replaced span) yields silence (it is no longer in the window).
+    let small: Vec<f32> = (0..(10 * 2)).map(|i| 1000.0 + i as f32).collect();
+    store.publish_window(1100, &small).unwrap();
+    store.seek_to(1100);
+    let out2 = store.read(10);
+    for (i, &v) in out2.interleaved().iter().enumerate() {
+        assert_eq!(v, 1000.0 + i as f32, "replaced window sample {i}");
+    }
+    // The earlier span is no longer present — replace, not merge/append.
+    store.seek_to(1000);
+    let gone = store.read(50);
+    assert!(
+        gone.interleaved().iter().all(|&v| v == 0.0),
+        "publish_window REPLACES the window — the prior span must not survive (no append/merge)"
+    );
+}
+
+/// `publish_window` is gap-free at the read edge: the bus reads forward from its
+/// cursor and the window always covers `[cursor, cursor+frames)` — so a read of
+/// the window's own base returns the placed samples, never a short block.
+#[test]
+fn publish_window_read_is_gap_free_and_full() {
+    let store = AudioStore::new(stereo(), 96_000);
+    let w: Vec<f32> = vec![0.5f32; 1600 * 2];
+    store.publish_window(0, &w).unwrap();
+    let out = store.read(1600);
+    assert_eq!(out.frame_count(), 1600, "read must be full, never short");
+    assert!(
+        out.interleaved().iter().all(|&v| v == 0.5),
+        "the placed window must read back verbatim"
+    );
+}
+
+/// A ragged length (not a whole number of frames) is a typed error, never a
+/// torn mid-frame window.
+#[test]
+fn publish_window_rejects_a_ragged_length() {
+    let store = AudioStore::new(stereo(), 48_000);
+    // 7 samples is not a whole number of stereo frames.
+    let ragged = vec![0.0f32; 7];
+    assert!(
+        store.publish_window(0, &ragged).is_err(),
+        "a ragged window length must be rejected, never torn mid-frame"
+    );
+}
+
+/// The CRITICAL-2 proof, in-process and allocator-free: across MANY
+/// `publish_window` calls the store reuses a BOUNDED set of backing buffers (the
+/// triple-buffer pool), so the number of DISTINCT backing-buffer pointers the
+/// reader ever observes is small and constant — NOT one fresh `Vec`/`Arc` per
+/// publish (which would show an unbounded, ever-growing set of pointers). This is
+/// the stable-pointer assertion the ADR's §2.2 triple-buffer promises (the
+/// counting-allocator proof lives in `store_alloc.rs`).
+#[test]
+fn publish_window_reuses_a_bounded_pool_of_backing_buffers() {
+    use std::collections::HashSet;
+    let store = AudioStore::new(stereo(), 96_000);
+    let w: Vec<f32> = vec![0.25f32; 4800 * 2];
+    let mut ptrs: HashSet<usize> = HashSet::new();
+    // Many publishes interleaved with reads (so the reader releases its snapshot
+    // and the writer can reuse a pool slot — the real SPSC handoff).
+    for lap in 0..200i64 {
+        let base = lap * 4800;
+        store.publish_window(base, &w).unwrap();
+        ptrs.insert(store.window_backing_ptr());
+        store.seek_to(base);
+        let _ = store.read(1600);
+    }
+    assert!(
+        ptrs.len() <= 4,
+        "publish_window must reuse a bounded triple-buffer pool, not allocate per block — \
+         saw {} distinct backing buffers across 200 publishes (a per-block alloc would show ~200)",
+        ptrs.len()
+    );
+}
