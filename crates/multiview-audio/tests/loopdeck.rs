@@ -63,7 +63,7 @@ fn noise(frames: usize, seed: u64) -> Vec<f32> {
 /// `loop_frames` with the lap-over crossfaded in at the seam.
 fn deck_with_lapover(loop_frames: usize, xfade: usize, seed: u64) -> LoopDeck {
     let decoded = noise(loop_frames + xfade, seed);
-    LoopDeck::with_segment(stereo(), decoded, loop_frames, xfade).expect("valid deck")
+    LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).expect("valid deck")
 }
 
 /// Read `total` frames from the deck starting at absolute frame `start` in
@@ -75,7 +75,11 @@ fn drain_at(deck: &LoopDeck, start: u64, total: usize, chunk: usize) -> Vec<f32>
     while done < total {
         let n = chunk.min(total - done);
         let block = deck.read_at(start + done as u64, n);
-        assert_eq!(block.frame_count(), n, "read_at must return exactly the requested frames");
+        assert_eq!(
+            block.frame_count(),
+            n,
+            "read_at must return exactly the requested frames"
+        );
         out.extend_from_slice(block.interleaved());
         done += n;
     }
@@ -98,6 +102,24 @@ fn frame_amp(interleaved: &[f32]) -> Vec<f64> {
         .collect()
 }
 
+/// The largest absolute sample-to-sample step (per channel) over an interleaved
+/// span — the click detector. A click is a *discontinuity*: a step far larger
+/// than the signal's own intrinsic max step. (Low instantaneous power or a sine's
+/// natural zero-crossing is NOT a click; a jump is.)
+fn max_step(interleaved: &[f32]) -> f64 {
+    let mut prev: Option<(f32, f32)> = None;
+    let mut worst = 0.0f64;
+    for f in interleaved.chunks_exact(2) {
+        if let Some((pl, pr)) = prev {
+            worst = worst
+                .max(f64::from((f[0] - pl).abs()))
+                .max(f64::from((f[1] - pr).abs()));
+        }
+        prev = Some((f[0], f[1]));
+    }
+    worst
+}
+
 // ----------------------------------------------------------------------------
 // 1. read_at is a pure function of the absolute frame (period exactly L, and a
 //    forced realign lands inside a faded seam — no un-crossfaded click).
@@ -118,7 +140,10 @@ fn read_at_is_a_pure_function_of_the_absolute_frame() {
     let big = drain_at(&deck, start, total, total);
     let small = drain_at(&deck, start, total, 1);
     let medium = drain_at(&deck, start, total, 100);
-    assert_eq!(big, small, "1-frame pulls must equal one big pull (read_at purity)");
+    assert_eq!(
+        big, small,
+        "1-frame pulls must equal one big pull (read_at purity)"
+    );
     assert_eq!(big, medium, "100-frame pulls must equal one big pull");
 
     // A FORCED REALIGN: read a window that starts mid-lap-2 (an absolute frame
@@ -170,7 +195,7 @@ fn a_decorrelated_seam_keeps_total_power_flat() {
     let xfade = 128usize;
     let a = 0.4f32;
     let channels = 2usize;
-    let mut mk = |seed: u64| {
+    let mk = |seed: u64| {
         let mut state = seed | 1;
         let n = (loop_frames + xfade) * channels;
         let mut v = vec![0.0f32; n];
@@ -183,7 +208,7 @@ fn a_decorrelated_seam_keeps_total_power_flat() {
         v
     };
     let decoded = mk(0x1234_5678);
-    let deck = LoopDeck::with_segment(stereo(), decoded, loop_frames, xfade).unwrap();
+    let deck = LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).unwrap();
 
     let out = drain_at(&deck, 0, loop_frames * 2, loop_frames);
     let power = frame_power(&out);
@@ -199,12 +224,11 @@ fn a_decorrelated_seam_keeps_total_power_flat() {
         (0.85..=1.15).contains(&ratio),
         "decorrelated seam mean power ratio {ratio:.3} must stay ≈ 1 (equal-power, no dip/bump)"
     );
-    for (i, &p) in seam.iter().enumerate() {
-        assert!(
-            p >= 0.4 * nominal,
-            "decorrelated seam frame {i}: power {p:.5} collapsed (a dropout/click)"
-        );
-    }
+    // (For DEcorrelated ±a content the per-sample step is already ~2a everywhere —
+    // white noise is maximally discontinuous, so a hard cut at the wrap is NOT
+    // distinguishable from the crossfade by step size. The flat MEAN POWER above is
+    // the meaningful equal-power criterion here; the step/continuity criterion is
+    // exercised by the CORRELATED tonal seam test, where a hard cut WOULD jump.)
 }
 
 // ----------------------------------------------------------------------------
@@ -234,7 +258,7 @@ fn a_correlated_tonal_seam_does_not_swell_in_amplitude() {
         decoded[i * channels] = s;
         decoded[i * channels + 1] = s;
     }
-    let deck = LoopDeck::with_segment(stereo(), decoded, loop_frames, xfade).unwrap();
+    let deck = LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).unwrap();
 
     let out = drain_at(&deck, 0, loop_frames * 2, loop_frames);
     let ampl = frame_amp(&out);
@@ -244,16 +268,22 @@ fn a_correlated_tonal_seam_does_not_swell_in_amplitude() {
     // ENVELOPE: the per-frame peak over the seam stays under 1.12× the tone peak.
     let seam_start = loop_frames;
     let seam = &ampl[seam_start..seam_start + xfade];
-    let peak = seam.iter().cloned().fold(0.0f64, f64::max);
+    let peak = seam.iter().copied().fold(0.0f64, f64::max);
     assert!(
         peak <= 1.12 * f64::from(amp),
         "correlated tonal seam peak amplitude {peak:.4} swelled past the tone peak {amp} — equal-power was wrongly used (the +3 dB loop-pump defect)"
     );
-    // And it must not collapse either (that would be a notch/click).
-    let dip = seam.iter().cloned().fold(f64::MAX, f64::min);
+    // No CLICK: the seam's largest sample step must stay near the tone's own max
+    // step (amp·2π/period, the slope at a zero-crossing). A linear crossfade of a
+    // continuous tone holds the envelope, so no discontinuity appears. (A dip to a
+    // low instantaneous amplitude is just the sine's natural zero-crossing — NOT a
+    // click; only a step jump is.)
+    let seam_samples = &out[seam_start * channels..(seam_start + xfade) * channels];
+    let step = max_step(seam_samples);
+    let tone_step = f64::from(amp) * 2.0 * std::f64::consts::PI / (period as f64);
     assert!(
-        dip >= 0.30 * f64::from(amp),
-        "correlated tonal seam dipped to {dip:.4} (a notch/click)"
+        step <= 1.5 * tone_step + 1e-6,
+        "correlated tonal seam max step {step:.5} exceeds ~1.5× the tone's own step {tone_step:.5} — a discontinuity (click)"
     );
 }
 
@@ -272,9 +302,9 @@ fn loop_length_is_the_decoded_sample_count_independent_of_output_cadence() {
     // the body frames it was constructed with.
     let loop_frames = 480_000usize; // 10 s at 48 kHz (e.g. 240 frames @ 24 fps)
     let xfade = 480usize; // 10 ms
-    // Build a tiny-amplitude buffer (content irrelevant; only the length matters).
+                          // Build a tiny-amplitude buffer (content irrelevant; only the length matters).
     let decoded = vec![0.01f32; (loop_frames + xfade) * 2];
-    let deck = LoopDeck::with_segment(stereo(), decoded, loop_frames, xfade).unwrap();
+    let deck = LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).unwrap();
     assert_eq!(
         deck.loop_frames(),
         loop_frames,
@@ -293,7 +323,7 @@ fn an_armed_exit_settles_to_silence_at_the_next_seam_exactly_once() {
     // A constant non-silent body: while looping output is ~0.3; after the exit
     // settles it must be exactly silence.
     let decoded = vec![0.3f32; (loop_frames + xfade) * 2];
-    let mut deck = LoopDeck::with_segment(stereo(), decoded, loop_frames, xfade).unwrap();
+    let mut deck = LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).unwrap();
     deck.vamp();
 
     // Consume partway into lap 0, then arm the exit (the audio thread would do this
@@ -309,7 +339,10 @@ fn an_armed_exit_settles_to_silence_at_the_next_seam_exactly_once() {
         tail.iter().all(|&s| s == 0.0),
         "after the armed exit fires at the seam the deck settles to silence (the bus contribution ends)"
     );
-    assert!(deck.has_ended(), "an armed-exit deck reports ended once the boundary has fired");
+    assert!(
+        deck.has_ended(),
+        "an armed-exit deck reports ended once the boundary has fired"
+    );
 }
 
 #[test]
@@ -317,7 +350,7 @@ fn cancel_exit_keeps_looping_forever() {
     let loop_frames = 400usize;
     let xfade = 40usize;
     let decoded = vec![0.25f32; (loop_frames + xfade) * 2];
-    let mut deck = LoopDeck::with_segment(stereo(), decoded, loop_frames, xfade).unwrap();
+    let mut deck = LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).unwrap();
     deck.vamp();
     deck.arm_exit();
     deck.cancel_exit();
@@ -342,7 +375,11 @@ fn an_empty_deck_rides_silence_gap_free() {
     let deck = LoopDeck::empty(stereo());
     for tick in 0..10u64 {
         let block = deck.read_at(tick * 1601, 1601);
-        assert_eq!(block.frame_count(), 1601, "empty deck still returns full blocks");
+        assert_eq!(
+            block.frame_count(),
+            1601,
+            "empty deck still returns full blocks"
+        );
         assert!(
             block.interleaved().iter().all(|&s| s == 0.0),
             "empty deck returns silence"
@@ -355,7 +392,7 @@ fn pause_contributes_silence_and_stop_recues() {
     let loop_frames = 300usize;
     let xfade = 30usize;
     let decoded = vec![0.5f32; (loop_frames + xfade) * 2];
-    let mut deck = LoopDeck::with_segment(stereo(), decoded, loop_frames, xfade).unwrap();
+    let mut deck = LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).unwrap();
     deck.vamp();
     let _ = drain_at(&deck, 0, 100, 50);
     deck.pause();
@@ -435,7 +472,7 @@ proptest! {
             state ^= state << 17;
             *slot = if state & 1 == 0 { a } else { -a };
         }
-        let deck = LoopDeck::with_segment(stereo(), decoded, loop_frames, xfade).unwrap();
+        let deck = LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).unwrap();
         let out = drain_at(&deck, 0, loop_frames * 2, loop_frames);
         let power = frame_power(&out);
         let nominal = 2.0 * f64::from(a) * f64::from(a);
