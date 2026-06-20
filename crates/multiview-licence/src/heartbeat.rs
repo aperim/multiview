@@ -1076,9 +1076,15 @@ impl HeartbeatResponse {
 /// the `Conspect-Device-PoP` header (a proof over the same nonce, bound to the
 /// server-assigned `instance_id`).
 ///
-/// Serialised camelCase; the byte-exact required set (Conspect v0.9.0 → v0.20.0).
-/// The deprecated `serverNonce` is **never** a field (do not send it; the device
-/// proves liveness via the PoP challenge nonce, not by supplying the lease nonce).
+/// Serialised camelCase; the byte-exact required set (Conspect v0.9.0 → v0.38.0).
+/// The whole device-facing wire — [`HeartbeatRequest`], [`HeartbeatResponse`],
+/// `ActivateRequest`, [`ActivateResponse`], and [`DeviceChallenge`] — is byte-stable
+/// across Conspect API v0.16.0 → v0.38.0 (the v0.16.0 `DeviceChallenge.instanceId`
+/// addition is the lone delta from the v0.9.0 baseline; this merged activate +
+/// heartbeat + device-PoP client stays field-for-field aligned through v0.38.0).
+/// Verified 2026-06-20 against the live Conspect reference (api.conspect.studio,
+/// v0.38.0). The deprecated `serverNonce` is **never** a field (do not send it; the
+/// device proves liveness via the PoP challenge nonce, not by supplying the lease nonce).
 /// `Deserialize` is derived too (mirroring [`HeartbeatRequest`]) so a server-side
 /// or test consumer can parse the exact serialised bytes back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
