@@ -61,6 +61,13 @@ pub struct WatchOptions {
     poll_interval: Duration,
     initial_observed: Option<String>,
     handle: Option<ConfigWatchHandle>,
+    /// A one-shot slot holding the loop-side end of a manual poll driver, when
+    /// a test installed one via [`WatchOptions::with_manual_poll`]. [`spawn`]
+    /// takes it out (it is `None` in production), so the loop is driven tick by
+    /// tick from the test instead of by the wall clock. Wrapped in
+    /// `Arc<Mutex<Option<…>>>` only so `WatchOptions` stays `Clone` — the
+    /// production path never constructs it and never pays for it.
+    manual_poll: Option<Arc<std::sync::Mutex<Option<PollGate>>>>,
 }
 
 impl Default for WatchOptions {
@@ -69,6 +76,7 @@ impl Default for WatchOptions {
             poll_interval: Duration::from_secs(1),
             initial_observed: None,
             handle: None,
+            manual_poll: None,
         }
     }
 }
@@ -106,6 +114,159 @@ impl WatchOptions {
     pub fn with_handle(mut self, handle: ConfigWatchHandle) -> Self {
         self.handle = Some(handle);
         self
+    }
+
+    /// Drive the poll loop by a **manual tick** instead of the wall clock —
+    /// the deterministic test seam (task #131). Returns a [`ManualPoll`] the
+    /// test fires: every [`ManualPoll::poll_once`] runs EXACTLY one poll
+    /// iteration and resolves only once that iteration has fully completed and
+    /// the loop is parked again, so a settled-change assertion never races the
+    /// debounce/poll cadence. A two-poll debounce is two `poll_once().await`s,
+    /// not a `sleep` — no real time elapses, nothing flakes under load.
+    ///
+    /// Production never calls this: [`spawn`] finds no manual driver and uses
+    /// the [`with_poll_interval`](Self::with_poll_interval) wall-clock timer,
+    /// byte-for-byte unchanged. When a manual driver IS installed the
+    /// `poll_interval` is ignored (the test owns the cadence).
+    #[must_use]
+    pub fn with_manual_poll(mut self) -> (Self, ManualPoll) {
+        let (manual, gate) = manual_poll_pair();
+        self.manual_poll = Some(Arc::new(std::sync::Mutex::new(Some(gate))));
+        (self, manual)
+    }
+}
+
+/// The test-side handle of the manual poll driver ([`WatchOptions::with_manual_poll`]):
+/// fire [`ManualPoll::poll_once`] to run exactly one watcher poll iteration and
+/// await its completion. Single-owner (held by the test); not `Clone`.
+#[derive(Debug)]
+pub struct ManualPoll {
+    /// Requests one poll iteration of the loop (capacity-1 rendezvous).
+    tick: tokio::sync::mpsc::Sender<()>,
+    /// Resolves when the loop has finished that iteration and re-parked.
+    ack: tokio::sync::mpsc::Receiver<()>,
+}
+
+impl ManualPoll {
+    /// Run **exactly one** poll iteration of the watcher and wait until it has
+    /// fully completed (the loop is parked waiting for the next tick). Drives
+    /// the debounce deterministically: write the file, then `poll_once().await`
+    /// to register the candidate fingerprint and `poll_once().await` again to
+    /// cross the two-poll settle gate and apply — no wall-clock `sleep`, no
+    /// poll/`SETTLE` race.
+    ///
+    /// Returns `true` when the iteration ran and acknowledged; `false` once the
+    /// watcher loop has exited (e.g. after [`ConfigWatchHandle::stop`] or run
+    /// teardown), so a test that polls past stop observes a clean end rather
+    /// than hanging.
+    pub async fn poll_once(&mut self) -> bool {
+        if self.tick.send(()).await.is_err() {
+            // The loop dropped its receiver — it has exited.
+            return false;
+        }
+        // The loop sends the ack at the TOP of its next `wait_for_tick`, i.e.
+        // only after the iteration body for this tick fully completed and it is
+        // parked again — so awaiting it is a true round-trip, never a race.
+        self.ack.recv().await.is_some()
+    }
+}
+
+/// The loop-side end of the manual poll driver: receive a tick, and ack the
+/// PREVIOUS iteration's completion. Held inside [`PollDriver::Manual`]; not
+/// `Clone` (a single loop owns it).
+#[derive(Debug)]
+struct PollGate {
+    /// Receives a poll request from [`ManualPoll::poll_once`].
+    tick: tokio::sync::mpsc::Receiver<()>,
+    /// Signals that the previous iteration completed and the loop is parked.
+    ack: tokio::sync::mpsc::Sender<()>,
+    /// Whether an iteration ran since the last ack (so the first park sends no
+    /// spurious ack — the bootstrap has nothing to acknowledge yet).
+    owe_ack: bool,
+}
+
+/// Build a connected [`ManualPoll`] (test side) + [`PollGate`] (loop side)
+/// rendezvous pair. Capacity-1 channels make every tick a strict hand-off.
+fn manual_poll_pair() -> (ManualPoll, PollGate) {
+    let (tick_tx, tick_rx) = tokio::sync::mpsc::channel(1);
+    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel(1);
+    (
+        ManualPoll {
+            tick: tick_tx,
+            ack: ack_rx,
+        },
+        PollGate {
+            tick: tick_rx,
+            ack: ack_tx,
+            owe_ack: false,
+        },
+    )
+}
+
+/// How the loop waits between polls: the wall-clock interval (production), or a
+/// manual tick fired by a test ([`WatchOptions::with_manual_poll`]). The ONLY
+/// behavioural difference is WHEN a poll iteration starts — every iteration's
+/// body is identical, so a manual-driven test exercises the exact production
+/// poll/debounce/apply path, just on a deterministic clock.
+enum PollDriver {
+    /// Sleep `poll_interval` before each poll (the production path).
+    Interval(Duration),
+    /// Wait for the test to fire the next poll tick (the deterministic seam).
+    Manual(PollGate),
+}
+
+impl PollDriver {
+    /// Derive the driver from the options: a manual driver if a test installed
+    /// one (taken out of its one-shot slot), else the wall-clock interval.
+    fn from_options(options: &WatchOptions) -> Self {
+        if let Some(slot) = options.manual_poll.as_ref() {
+            if let Some(gate) = lock_gate_slot(slot).take() {
+                return Self::Manual(gate);
+            }
+        }
+        Self::Interval(options.poll_interval)
+    }
+
+    /// Park until the next poll should run. Returns `true` to proceed with a
+    /// poll, or `false` when a manual driver's test side has been dropped (all
+    /// senders gone) — the loop then exits cleanly. The interval path always
+    /// proceeds.
+    async fn wait_for_tick(&mut self) -> bool {
+        match self {
+            Self::Interval(interval) => {
+                tokio::time::sleep(*interval).await;
+                true
+            }
+            Self::Manual(gate) => {
+                // Ack the iteration that just finished (the loop is now parked),
+                // so the test's matching `poll_once` resolves — but only if one
+                // actually ran (no spurious bootstrap ack). A dropped ack
+                // receiver (test gone) is ignored; the recv below then ends it.
+                if gate.owe_ack {
+                    let _ = gate.ack.send(()).await;
+                    gate.owe_ack = false;
+                }
+                match gate.tick.recv().await {
+                    Some(()) => {
+                        gate.owe_ack = true;
+                        true
+                    }
+                    // Every `ManualPoll` sender dropped — end the loop.
+                    None => false,
+                }
+            }
+        }
+    }
+}
+
+/// Lock the manual-poll one-shot slot, recovering from a poisoned lock (a
+/// panicked test thread must not wedge spawn).
+fn lock_gate_slot(
+    slot: &std::sync::Mutex<Option<PollGate>>,
+) -> std::sync::MutexGuard<'_, Option<PollGate>> {
+    match slot.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -409,8 +570,18 @@ async fn watch_loop(
     // clobbers the resumed Running state. An edit landing in the boot window
     // differs from the seed and still applies.
     let mut last_observed: Option<String> = options.initial_observed.clone();
+    // How the loop waits between polls: the wall-clock interval (production) or
+    // a test's manual tick (the deterministic seam, task #131). Either way the
+    // poll/debounce/apply body below is identical.
+    let mut driver = PollDriver::from_options(&options);
     loop {
-        tokio::time::sleep(options.poll_interval).await;
+        if !driver.wait_for_tick().await {
+            // A manual driver's test side was dropped — end the loop (the same
+            // clean exit as `stop`, so a `poll_once` past teardown sees `false`
+            // rather than hanging on a never-arriving ack).
+            tracing::debug!(path = %path.display(), "config-file watcher poll driver closed");
+            return;
+        }
         if handle.stop.load(Ordering::Acquire) {
             tracing::debug!(path = %path.display(), "config-file watcher stopped");
             return;
