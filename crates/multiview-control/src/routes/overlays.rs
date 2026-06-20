@@ -65,9 +65,20 @@ fn live_apply_upsert(
         .commands
         .try_submit(Command::UpsertOverlay {
             op: OperationId::new(),
-            overlay: Box::new(overlay),
+            overlay: Box::new(overlay.clone()),
         })
         .is_ok();
+    // MAJOR-B round 4: the engine ADOPTED this overlay iff its UpsertOverlay
+    // landed on the bus — only then does the adopted snapshot gain it (a shed
+    // keeps the store but the engine did not receive it). The `renders` flag
+    // only decides the `X-Multiview-Apply` header (a non-rendering overlay the
+    // engine holds is still adopted config). The caller holds the
+    // config-mutation lock, so this is ordered against the persister.
+    if submitted {
+        if let Some(model) = state.boot_model.as_ref() {
+            model.adopt_overlay(overlay);
+        }
+    }
     if renders && submitted {
         ApplyMode::Live
     } else {
@@ -95,6 +106,15 @@ fn live_apply_remove(
             id: id.to_owned(),
         })
         .is_ok();
+    // MAJOR-B round 4: when the RemoveOverlay LANDS the engine drops the
+    // overlay, so drop it from the adopted snapshot. A shed removal keeps the
+    // overlay on screen, so the snapshot keeps it (active.toml is never told the
+    // overlay is gone while the engine still renders it).
+    if submitted {
+        if let Some(model) = state.boot_model.as_ref() {
+            model.unadopt_overlay(id);
+        }
+    }
     if renders && submitted {
         ApplyMode::Live
     } else {
@@ -196,6 +216,9 @@ pub(crate) async fn create_overlay(
         name: input.name,
         body: validated_body(TypedCollection::Overlays, &id, &input.body)?,
     };
+    // ADR-W024 MAJOR-B round 4: hold the config-mutation lock across the whole
+    // store-write → submit → adopt-snapshot sequence.
+    let _mutation = state.lock_config_mutation().await;
     let versioned = state.overlays.create(&id, input)?;
     state.audit(
         &principal.key_id,
@@ -238,6 +261,9 @@ pub(crate) async fn update_overlay(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &id)?;
+    // ADR-W024 MAJOR-B round 4: hold the config-mutation lock across the whole
+    // precondition → store-write → submit → adopt-snapshot sequence.
+    let _mutation = state.lock_config_mutation().await;
     // Preconditions are evaluated before request content (RFC 9110 §13.2.2):
     // a stale `If-Match` (or a missing resource) is reported even when the
     // submitted body is itself invalid.
@@ -295,6 +321,9 @@ pub(crate) async fn delete_overlay(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Administer)?;
     crate::auth::authorize_object(&principal, &id)?;
+    // ADR-W024 MAJOR-B round 4: hold the config-mutation lock across the whole
+    // precondition → store-delete → submit → adopt-snapshot sequence.
+    let _mutation = state.lock_config_mutation().await;
     let current = state.overlays.get(&id)?;
     if_match.require(OVERLAY_KIND, &id, current.version)?;
     let previous = parse_stored_overlay(&current.resource.body);

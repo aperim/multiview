@@ -164,6 +164,19 @@ pub struct SeededResources {
     /// The audio-routing singleton store, seeded from the config's optional
     /// `[audio]` block (unconfigured when the config carries none).
     pub audio: Arc<AudioRoutingStore>,
+    /// The `salvos` store, one definition per `config.salvos` (ADR-W024 round
+    /// 6). A salvo DEFINITION is runtime-mutable through `PUT/DELETE
+    /// /api/v1/salvos/{id}` — a pure control-plane store edit with NO engine
+    /// command (arm/take/cancel submit recall commands, never the definition),
+    /// so the store IS the adopted state and `active.toml` is composed from it
+    /// (not verbatim from the boot base, which lost runtime edits on resume).
+    pub salvos: Arc<dyn SalvoRepository>,
+    /// The `tally_profiles` store, one profile per `config.tally_profiles`
+    /// (ADR-W024 round 6). A tally PROFILE is runtime-mutable through
+    /// `PUT/DELETE /api/v1/tally/profiles/{id}` — a pure control-plane store
+    /// edit (the override route submits a runtime command, never the profile),
+    /// so the store IS the adopted state and `active.toml` is composed from it.
+    pub tally_profiles: Arc<dyn TallyProfileRepository>,
     /// The layout store carrying the single working layout (canvas + cells).
     pub layouts: Arc<dyn Repository>,
     /// The id the working layout was seeded under (the solved layout's name,
@@ -301,6 +314,20 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         outputs.create(&id, ResourceInput { name: kind, body })?;
     }
 
+    // Salvo definitions + tally profiles (ADR-W024 round 6): seeded one per
+    // config entry so the runtime-mutable definition stores hold the boot
+    // state, and `active.toml` is composed FROM these stores (not verbatim from
+    // the boot base, which lost runtime REST edits on resume). Their CRUD is a
+    // pure store edit — no engine command, so the store IS the adopted state.
+    let salvos = InMemorySalvoStore::new();
+    for salvo in &config.salvos {
+        salvos.create(salvo.clone())?;
+    }
+    let tally_profiles = InMemoryProfileStore::new();
+    for profile in &config.tally_profiles {
+        tally_profiles.put(profile.clone())?;
+    }
+
     let layouts = InMemoryRepository::new();
     let working_layout_id = seed_working_layout(config, &layouts)?;
 
@@ -313,6 +340,8 @@ pub fn seed_resources(config: &MultiviewConfig) -> ControlResult<SeededResources
         sync_groups: Arc::new(sync_groups),
         device_status: Arc::new(device_status),
         audio: Arc::new(AudioRoutingStore::seeded(config.audio.clone())),
+        salvos: Arc::new(salvos),
+        tally_profiles: Arc::new(tally_profiles),
         layouts: Arc::new(layouts),
         working_layout_id,
         // Snapshot the pinned canvas from the LOADED CONFIG (the geometry +
@@ -739,6 +768,40 @@ pub struct AppState {
     /// `GET /api/v1/config/watch-status` reads it. Defaults to the honest
     /// "not watched" state. Control-plane-only (invariant #10).
     pub config_watch: Arc<crate::watch_status::ConfigWatchStatus>,
+    /// The Boot/Loaded/Running model (ADR-W024): the boot path, the immutable
+    /// Loaded snapshot, the cold-start policy, and the boot-model file-write
+    /// serial. `Some` only when the run serves a control plane from a config
+    /// file; `None` for store-only/`--ticks` deployments (the
+    /// `revert-to-start`/`promote`/`boot-model` routes then report `modeled:
+    /// false` and refuse the actions). Control-plane-only (invariant #10).
+    pub boot_model: Option<Arc<crate::boot_model::BootModel>>,
+    /// The installed config-file watch HANDLE (ADR-W024 §6): the
+    /// `POST /api/v1/config/promote` route announces its server-side boot-file
+    /// write through this handle's `expect_write`/`confirm`/`release`
+    /// suppression seam (ADR-W020 §7) so the watcher adopts the write as its
+    /// new baseline instead of re-applying it. Interior-mutable because the
+    /// watcher is spawned WITH this `AppState` and so can only be installed
+    /// after construction ([`AppState::install_watch_handle`]). `None` for
+    /// store-only deployments (no watcher) — promote then skips suppression
+    /// (nothing to suppress). Control-plane-only (invariant #10).
+    watch_handle: Arc<std::sync::RwLock<Option<crate::config_watch::ConfigWatchHandle>>>,
+    /// Serializes the whole-Running mutation critical sections of
+    /// `POST /config/promote` and `POST /config/revert-to-start` (ADR-W024
+    /// MAJOR-C2/C3): each holds it across compose → write/apply → commit so a
+    /// concurrent promote/revert can neither interleave the watcher
+    /// suppression token (C2) nor mutate Running between a promote's compose and
+    /// its commit (C3, a stale commit). Control-plane-only, async, never held
+    /// across the engine bus — it serializes two rare admin operations and can
+    /// never back-pressure the engine (invariant #10).
+    config_mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The coalescing **Running-changed** signal (ADR-W024 §3): a one-permit
+    /// [`tokio::sync::Notify`] fired by [`AppState::audit`] — the ONE choke
+    /// point every successful mutation passes through — that the debounced
+    /// `active.toml` persister (`boot_model::spawn_running_persist`) waits on.
+    /// One permit, never queues/grows/blocks, so it can never back-pressure the
+    /// engine (invariant #10). Always present (cheap); only the persister task
+    /// observes it, and only when a boot model is wired.
+    pub running_changed: Arc<tokio::sync::Notify>,
     /// What the **running** engine can take live, per stored collection
     /// (ADR-W022): injected by the binary at wiring time so mutation routes
     /// declare `X-Multiview-Apply` honestly per build + run path. The default
@@ -860,6 +923,18 @@ impl AppState {
             retention: Arc::new(RetentionStore::new()),
             // No watcher by default: the endpoint reports "not watched".
             config_watch: Arc::new(crate::watch_status::ConfigWatchStatus::new()),
+            // No boot model by default (store-only / --ticks): the
+            // boot-model routes report `modeled: false` (ADR-W024). The binary
+            // installs one via `with_boot_model` when it runs from a config
+            // file. The coalescing running-changed signal always exists (cheap).
+            boot_model: None,
+            running_changed: Arc::new(tokio::sync::Notify::new()),
+            // No watcher handle by default (store-only): promote skips
+            // self-write suppression (nothing to suppress). The binary installs
+            // the spawned watcher's handle via `install_watch_handle`.
+            watch_handle: Arc::new(std::sync::RwLock::new(None)),
+            // The promote/revert mutation serial (ADR-W024 MAJOR-C2/C3).
+            config_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             // Honest default: nothing applies live until the binary declares
             // what the running engine can take (ADR-W022).
             live_apply: crate::live_apply::LiveApplyCaps::default(),
@@ -918,6 +993,48 @@ impl AppState {
     ) -> Self {
         self.config_watch = config_watch;
         self
+    }
+
+    /// Install the Boot/Loaded/Running model (ADR-W024). The binary wires the
+    /// same `Arc<BootModel>` the debounced persister and the
+    /// `revert-to-start`/`promote`/`boot-model` routes share; the default
+    /// (`None`) reports `modeled: false` and refuses those actions.
+    #[must_use]
+    pub fn with_boot_model(mut self, boot_model: Arc<crate::boot_model::BootModel>) -> Self {
+        self.boot_model = Some(boot_model);
+        self
+    }
+
+    /// Install the spawned config-file watcher's handle (ADR-W024 §6) AFTER
+    /// construction: the watcher is spawned with this `AppState`, so the
+    /// handle it returns can only be wired back in via interior mutability.
+    /// The `promote` route then announces its boot-file write through this
+    /// handle's suppression seam. Idempotent last-writer-wins.
+    pub fn install_watch_handle(&self, handle: crate::config_watch::ConfigWatchHandle) {
+        let mut slot = match self.watch_handle.write() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = Some(handle);
+    }
+
+    /// The installed config-file watch handle, if a watcher was spawned.
+    #[must_use]
+    pub fn watch_handle(&self) -> Option<crate::config_watch::ConfigWatchHandle> {
+        let slot = match self.watch_handle.read() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        slot.clone()
+    }
+
+    /// Acquire the promote/revert mutation serial (ADR-W024 MAJOR-C2/C3): the
+    /// `promote` and `revert-to-start` handlers hold this across their whole
+    /// compose → write/apply → commit critical section so the two cannot
+    /// interleave. Held only by those two rare admin handlers; never across the
+    /// engine bus (invariant #10).
+    pub async fn lock_config_mutation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.config_mutation_lock).lock_owned().await
     }
 
     /// Declare what the **running** engine can take live (ADR-W022). The
@@ -1069,6 +1186,12 @@ impl AppState {
             self.ack_now(),
             detail,
         );
+        // ADR-W024 §3: this is the ONE choke point every successful control-
+        // plane mutation passes through, so fire the coalescing Running-changed
+        // signal here — the debounced `active.toml` persister waits on it. One
+        // permit, never queues/grows/blocks (invariant #10); a no-op when no
+        // persister is running.
+        self.running_changed.notify_one();
     }
 
     /// Replace the account-side append-only audit store (e.g. to share one with a
@@ -1374,6 +1497,8 @@ impl AppState {
         self.sync_groups = seeded.sync_groups;
         self.device_status = seeded.device_status;
         self.audio_routing = seeded.audio;
+        self.salvos = seeded.salvos;
+        self.tally_profiles = seeded.tally_profiles;
         self.repository = seeded.layouts;
         self.working_layout_id = Some(seeded.working_layout_id);
         self.running_canvas = Some(seeded.running_canvas);

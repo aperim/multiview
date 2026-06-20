@@ -161,6 +161,16 @@ reqwest = { version = "0.12", default-features = false, features = [
 # stay out of the scanned default graph (the `reqwest`/`ring` posture).
 prost = { version = "0.14", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
+# Atomic, secure boot-model state-file writes (ADR-W024 MAJOR-A / panel round 2):
+# `NamedTempFile::new_in` creates the temp with `O_EXCL` + an unpredictable name
+# + 0600 on Unix, defeating the pre-existing-inode and symlink-at-temp attacks a
+# deterministic temp name allows. Permissive (MIT/Apache-2.0), already on the
+# deny.toml allowlist; pure Rust, stays in the CI-green default build.
+tempfile = "3"
+# `rustix::process::geteuid` — a SAFE wrapper (this crate forbids `unsafe`) used
+# to fail-closed when the `.multiview` state dir is owned by another uid
+# (ADR-W024 MAJOR-A). Permissive (Apache-2.0/MIT/BSD), already in the lock.
+rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = [
