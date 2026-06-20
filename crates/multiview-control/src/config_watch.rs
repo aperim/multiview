@@ -818,14 +818,18 @@ pub fn apply_document_diff(
         ));
     }
 
-    // 3b. Overlays: mirror the REST overlay routes (ADR-W024 round 6 / F2). An
-    //     overlay is LIVE-SHEDDABLE — on an overlay-capable run the REST routes
-    //     submit `UpsertOverlay`/`RemoveOverlay` and adopt per landed delta, so
-    //     the watcher MUST do the same (the round-5 watcher treated overlays as
-    //     restart-only here, diverging from REST and leaking a live file-edit
-    //     out of `active.toml`). Handled explicitly, BEFORE the generic loop, so
-    //     `apply_overlay_changes` can read the pre-resync store to compute the
-    //     per-overlay delta; the loop below skips `"overlays"`.
+    // 3b. Overlays: mirror the REST overlay routes (ADR-W024 round 6 / F2,
+    //     baseline-derived round 7). An overlay is LIVE-SHEDDABLE — on an
+    //     overlay-capable run the REST routes submit `UpsertOverlay`/
+    //     `RemoveOverlay` and adopt per landed delta, so the watcher MUST do the
+    //     same (the round-5 watcher treated overlays as restart-only here,
+    //     diverging from REST and leaking a live file-edit out of `active.toml`).
+    //     `apply_overlay_changes` derives the per-overlay delta from
+    //     `diff.overlays` — the FILE-BASELINE `ConfigDiff` (the same shape and
+    //     stability `diff.sources` has), which is STABLE across shed retries;
+    //     it never reads the control store (a store-derived delta self-erases
+    //     once `resync_store` reseeds the store to `next`, dropping a shed edit
+    //     — the round-7 lost-update). The loop below skips `"overlays"`.
     if diff.changed_sections.contains("overlays") {
         parts.push(apply_overlay_changes(
             state,
