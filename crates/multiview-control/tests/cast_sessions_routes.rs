@@ -27,7 +27,7 @@ use multiview_control::devices::cast::session::{
 use multiview_control::devices::DevicePollerRegistry;
 use support::{
     body_json, delete_if_match, get, harness_with, post_json, send, ADMIN_TOKEN, OPERATOR_TOKEN,
-    VIEWER_TOKEN,
+    SCOPED_TOKEN, VIEWER_TOKEN,
 };
 
 /// The delivery map the routes resolve outputs against: two HLS renditions.
@@ -307,6 +307,75 @@ async fn save_promotes_the_session_to_a_cast_device() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+/// BOLA (OWASP API1, conventions §H / ADR-W005): the save-as-device promotion
+/// touches TWO objects — the target `device_id` it creates AND the path session
+/// `id` it reads + retires. A principal scoped to its own object allowlist that
+/// is authorized for the target device but NOT for the session id must be
+/// **denied** the promotion: otherwise a scoped operator can promote another
+/// tenant's running session into a device it controls.
+///
+/// `SCOPED_TOKEN` is an operator scoped to the object allowlist
+/// `["scoped-layout"]`. Saving with `device_id: "scoped-layout"` clears the
+/// device-id authorization (that id is in the allowlist), so the ONLY thing that
+/// can deny this request is authorizing the session path id — which is a
+/// `cast-session-…` id outside the allowlist. The request must be a `403`,
+/// exactly as `get`/`stop`/`volume` deny an unauthorized session id.
+#[tokio::test]
+async fn save_denies_a_session_outside_the_scoped_allowlist() {
+    let h = cast_harness();
+
+    // An operator starts an ad-hoc session (it owns a `cast-session-…` id the
+    // scoped principal is NOT authorized for).
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions",
+            OPERATOR_TOKEN,
+            &start_body(Some("out-b")),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let id = created["id"].as_str().expect("a session id").to_owned();
+
+    // The scoped operator is authorized for object "scoped-layout" but NOT for
+    // the session id. It targets a device id INSIDE its allowlist, so the
+    // device-id authorization passes; the session path id is the lone gate.
+    let resp = send(
+        &h.router,
+        post_json(
+            &format!("/api/v1/cast/sessions/{id}/save"),
+            SCOPED_TOKEN,
+            &serde_json::json!({ "device_id": "scoped-layout" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a scoped principal must not promote a session id outside its allowlist (BOLA)"
+    );
+    let problem = body_json(resp).await;
+    assert_eq!(problem["type"], "/problems/forbidden");
+
+    // The session was NOT promoted: it is still an ephemeral session (the
+    // denied request had no side effect), and no device was created.
+    let resp = send(&h.router, get("/api/v1/cast/sessions", ADMIN_TOKEN)).await;
+    let list = body_json(resp).await;
+    assert_eq!(
+        list.as_array().expect("an array").len(),
+        1,
+        "the denied save must not have retired the ephemeral session"
+    );
+    let resp = send(&h.router, get("/api/v1/devices/scoped-layout", ADMIN_TOKEN)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "the denied save must not have created the promoted device"
+    );
 }
 
 #[tokio::test]
