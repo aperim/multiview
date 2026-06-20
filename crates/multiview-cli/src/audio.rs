@@ -276,14 +276,82 @@ pub(crate) struct PlayerAudioPlan {
     pub(crate) control_bus: Arc<crate::player::PlayerControlBus>,
 }
 
-/// Decode a whole asset's audio to canonical 48 kHz stereo `f32`, accumulating up
-/// to `max_frames` frames (the [`LoopDeck`](multiview_audio::LoopDeck) cap — a
-/// truncated/over-cap asset is bounded here, never an unbounded read). Returns the
-/// interleaved buffer, or an empty `Vec` on open/decode failure or a no-audio
-/// source (the player then rides silence — never an error, never a stall).
+/// Retain **only** the vamp window `[in_sample, want_end)` from a forward stream of
+/// decoded interleaved blocks — discarding each block that lies entirely **before**
+/// `in_sample` (the pre-`vamp_in` head) and stopping once `want_end` is reached
+/// (ADR-T019 §5, the CRITICAL-3 fix).
+///
+/// `AudioFileDecoder` has no seek, so a late vamp window can only be reached by
+/// decoding forward through the head; but the head must NOT be **buffered**.
+/// Accumulating every decoded sample from frame 0 into one buffer (then slicing)
+/// transiently holds the whole pre-window prefix (peak ≈ asset size). Instead this
+/// discards pre-window blocks and appends only the in-window samples, so the **peak
+/// resident buffer is the window size** (`want_end − in_sample`), never the asset
+/// size — even for a late window in a long asset. The returned buffer starts at
+/// `in_sample` (so the caller builds the deck via `with_segment` directly: body =
+/// the first `vamp_len` frames, lap-over = the rest).
+///
+/// Pure (no libav) so it is unit-tested without the `ffmpeg` CLI; the ffmpeg driver
+/// [`decode_vamp_window_48k`] feeds it `AudioFileDecoder::next_block` output.
 #[cfg(feature = "ffmpeg")]
 #[must_use]
-fn decode_clip_to_48k(path: &std::path::Path, max_frames: usize) -> Vec<f32> {
+fn retain_vamp_window(
+    blocks: impl IntoIterator<Item = Vec<f32>>,
+    channels: usize,
+    in_sample: usize,
+    want_end: usize,
+) -> Vec<f32> {
+    if channels == 0 || want_end <= in_sample {
+        return Vec::new();
+    }
+    let window_frames = want_end - in_sample;
+    // Size the retained buffer to EXACTLY the window — it never grows past it, so the
+    // pre-`vamp_in` prefix is never resident (the CRITICAL-3 bound).
+    let mut out: Vec<f32> = Vec::with_capacity(window_frames.saturating_mul(channels));
+    // The absolute frame index of the NEXT decoded sample (advances by each block's
+    // frame count). Blocks entirely `< in_sample` are discarded without retention.
+    let mut decoded_frames: usize = 0;
+    for block in blocks {
+        let block_frames = block.len() / channels.max(1);
+        if block_frames == 0 {
+            continue;
+        }
+        let block_start = decoded_frames;
+        let block_end = block_start.saturating_add(block_frames);
+        decoded_frames = block_end;
+
+        // Entirely before the window: discard (do NOT retain the prefix).
+        if block_end <= in_sample {
+            continue;
+        }
+        // Entirely at/after the window end: nothing more to retain — stop.
+        if block_start >= want_end {
+            break;
+        }
+        // Overlap of [block_start, block_end) with [in_sample, want_end): retain it.
+        let from = in_sample.max(block_start);
+        let to = want_end.min(block_end);
+        let src_from = from.saturating_sub(block_start).saturating_mul(channels);
+        let src_to = to.saturating_sub(block_start).saturating_mul(channels);
+        if let Some(slice) = block.get(src_from..src_to) {
+            out.extend_from_slice(slice);
+        }
+        if to >= want_end {
+            break;
+        }
+    }
+    out
+}
+
+/// Decode the asset audio (resampled to canonical 48 kHz stereo `f32`) and return
+/// **only** the vamp window `[in_sample, want_end)` (ADR-T019 §5). Drives
+/// [`retain_vamp_window`] over `AudioFileDecoder::next_block`, so the pre-`vamp_in`
+/// head is decoded-and-discarded, never buffered (peak resident buffer ≈ the window
+/// size). Returns an empty `Vec` on open/decode failure or a no-audio source (the
+/// player then rides silence — never an error, never a stall).
+#[cfg(feature = "ffmpeg")]
+#[must_use]
+fn decode_vamp_window_48k(path: &std::path::Path, in_sample: usize, want_end: usize) -> Vec<f32> {
     use multiview_audio::AudioFileDecoder;
 
     let channels = canonical_format().channel_count();
@@ -295,30 +363,19 @@ fn decode_clip_to_48k(path: &std::path::Path, max_frames: usize) -> Vec<f32> {
             return Vec::new();
         }
     };
-    let cap_samples = max_frames.saturating_mul(channels);
-    let mut out: Vec<f32> = Vec::new();
-    loop {
-        match decoder.next_block() {
-            Ok(Some(block)) => {
-                out.extend_from_slice(block.interleaved());
-                if out.len() >= cap_samples {
-                    out.truncate(cap_samples);
-                    tracing::warn!(
-                        player_path = %path.display(),
-                        cap_seconds = multiview_audio::loopdeck::MAX_LOOP_SECONDS,
-                        "media-player audio: asset exceeds the loop cap; truncating the loop body"
-                    );
-                    break;
-                }
-            }
-            Ok(None) => break, // EOS — the whole clip is decoded.
-            Err(error) => {
-                tracing::warn!(%error, path = %path.display(), "media-player audio: decode error; using what decoded so far");
-                break;
-            }
+    // A block iterator over the decoder that logs+stops on a mid-stream decode error
+    // (the window retains what decoded so far; `from_clip_window`/the caller then
+    // refuses a materially-short window). `next_block` yields `Ok(Some)` per block,
+    // `Ok(None)` at EOS, `Err` on a decode fault.
+    let blocks = std::iter::from_fn(move || match decoder.next_block() {
+        Ok(Some(block)) => Some(block.interleaved().to_vec()),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "media-player audio: decode error; using what decoded so far");
+            None
         }
-    }
-    out
+    });
+    retain_vamp_window(blocks, channels, in_sample, want_end)
 }
 
 /// Drive a media-player channel's **looping embedded audio** (ADR-T019): prime a
@@ -343,101 +400,119 @@ fn decode_clip_to_48k(path: &std::path::Path, max_frames: usize) -> Vec<f32> {
 /// (ADR-T019), which a per-lap container seek (no audio IDR) could not be.
 #[cfg(feature = "ffmpeg")]
 pub(crate) fn player_audio_loop(plan: &PlayerAudioPlan, store: &AudioStore, stop: &AtomicBool) {
-    use multiview_audio::loopdeck::{LoopDeck, MAX_LOOP_SECONDS, SAMPLE_RATE};
+    use multiview_audio::loopdeck::{
+        LoopDeck, DEFAULT_CROSSFADE_FRAMES, MAX_LOOP_SECONDS, SAMPLE_RATE,
+    };
 
-    // Prime (ADR-T019 §3/§5 — Defect 3): decode ONLY up to the vamp window's END
-    // (`vamp_out` + a crossfade window of lap-over headroom), NOT a fixed
-    // 600 s-from-start — so a valid vamp window that begins late still loops (it is
-    // not silenced). REFUSE an over-cap BODY explicitly (a window longer than
+    let channels = canonical_format().channel_count();
+    // Prime (ADR-T019 §5 — CRITICAL-3): decode ONLY the vamp window
+    // `[vamp_in, vamp_out + W)` and retain ONLY that span — the pre-`vamp_in` head is
+    // decoded-and-discarded, NEVER buffered (peak resident buffer ≈ the window size,
+    // not the asset size). REFUSE an over-cap BODY explicitly (a window longer than
     // `MAX_LOOP_SECONDS` rides silence with a logged reason — never a silent clamp
     // that would shift the loop point). The frame→sample map is exact rationals
-    // (inv #3). `from_clip_window` re-checks the cap + a materially-short clip and
-    // builds an empty (silent) deck on either.
+    // (inv #3). `with_segment` re-checks raggedness; the materially-short / over-cap
+    // refusal yields an empty (silent) deck.
     let body_frames = plan.vamp_out_frames.saturating_sub(plan.vamp_in_frames);
     let body_samples = frames_to_samples(body_frames, plan.cadence);
-    let mut deck = if body_samples > MAX_LOOP_SECONDS.saturating_mul(SAMPLE_RATE) {
-        tracing::warn!(
-            player = %plan.id,
-            body_seconds = body_samples / SAMPLE_RATE,
-            cap_seconds = MAX_LOOP_SECONDS,
-            "media-player audio: vamp window exceeds the loop cap — riding silence (refused, not clamped)"
-        );
+    let xfade = DEFAULT_CROSSFADE_FRAMES;
+    let mut deck = if body_samples == 0
+        || body_samples > MAX_LOOP_SECONDS.saturating_mul(SAMPLE_RATE)
+    {
+        if body_samples > 0 {
+            tracing::warn!(
+                player = %plan.id,
+                body_seconds = body_samples / SAMPLE_RATE,
+                cap_seconds = MAX_LOOP_SECONDS,
+                "media-player audio: vamp window exceeds the loop cap — riding silence (refused, not clamped)"
+            );
+        }
         LoopDeck::empty(canonical_format())
     } else {
-        // Decode through the window end (`vamp_out + W`). The transient decode
-        // buffer is freed after `from_clip_window` slices the bounded body out.
-        let xfade = multiview_audio::loopdeck::DEFAULT_CROSSFADE_FRAMES;
-        let out_samples = frames_to_samples(plan.vamp_out_frames, plan.cadence);
-        let max_frames = usize::try_from(out_samples)
+        // The exact-rational sample bounds of the window `[vamp_in, vamp_out + W)`.
+        let in_sample = frames_to_samples(plan.vamp_in_frames, plan.cadence);
+        let out_sample = frames_to_samples(plan.vamp_out_frames, plan.cadence);
+        let in_idx = usize::try_from(in_sample).unwrap_or(usize::MAX);
+        let loop_len = usize::try_from(body_samples).unwrap_or(usize::MAX);
+        let want_end = usize::try_from(out_sample)
             .unwrap_or(usize::MAX)
             .saturating_add(xfade);
-        let clip = decode_clip_to_48k(std::path::Path::new(&plan.location), max_frames);
-        let deck = LoopDeck::from_clip_window(
-            canonical_format(),
-            &clip,
-            plan.vamp_in_frames,
-            plan.vamp_out_frames,
-            plan.cadence,
-            0,
-        )
-        .unwrap_or_else(|_| LoopDeck::empty(canonical_format()));
-        drop(clip); // the deck owns its bounded body+seam; release the decode buffer.
+        // Decode-and-discard the head; retain only `[in_sample, want_end)` (starting
+        // at `vamp_in`), so the buffer handed to the deck is the window, not the
+        // prefix (CRITICAL-3). `from_window` builds the loop over the pre-sliced
+        // window, REFUSING (empty/silent deck) a materially-short window rather than
+        // looping a shifted-length body, tolerating only a tiny resampler-edge
+        // shortfall (ADR-T019 §5). The transient window buffer is freed after.
+        let window = decode_vamp_window_48k(std::path::Path::new(&plan.location), in_idx, want_end);
+        let was_short = window.len() / channels < loop_len;
+        let deck = LoopDeck::from_window(canonical_format(), &window, loop_len, xfade);
+        if was_short && deck.loop_frames() == 0 {
+            tracing::warn!(
+                player = %plan.id,
+                "media-player audio: asset shorter than the declared vamp window — riding silence (refused, not clamped)"
+            );
+        }
         deck
     };
 
     // The audio rail FOLLOWS the video rail's published transport state (ADR-T019
-    // §1) — it never drains the mailbox itself. The video publishes the channel's
-    // initial state (vamp / play-once) on its first frame, which this rail samples
-    // below; the deck starts vamping by default so a boot-vamping player loops
-    // from the first block even before that first sample.
+    // §1/§2.3) — it never drains the mailbox itself. The video publishes the
+    // channel's initial state (vamp / play-once) on its first frame, which this rail
+    // samples below; the deck starts vamping by default so a boot-vamping player
+    // loops from the first block even before that first sample.
     let mut last_control_gen: u64 = 0;
 
-    // Defect 2 (rule 22): a SINGLE reusable scratch buffer for the read path,
-    // sized once to the maximum refill and filled IN PLACE every block — no
-    // per-refill heap allocation on the audio hot path. `read_into` reuses this
-    // `Vec`'s capacity; `publish_samples` copies the slice into the store's ring
-    // (the one unavoidable copy, on this sampled decode thread, never the clock).
-    let max_refill = usize::try_from(PLAYER_AUDIO_LEAD_FRAMES.max(0)).unwrap_or(0);
-    let mut scratch: Vec<f32> =
-        Vec::with_capacity(max_refill.saturating_mul(canonical_format().channel_count()));
+    // CRITICAL-2 (rule 22): a SINGLE reusable scratch buffer for the read path,
+    // sized once to the maximum window and filled IN PLACE every block — no
+    // per-block heap allocation. `read_into` reuses this `Vec`'s capacity, and
+    // `AudioStore::publish_window` swaps in a pooled snapshot (no alloc) — the one
+    // copy is `read_into`'s deck→scratch fill, on this sampled decode thread.
+    let max_window = usize::try_from(PLAYER_AUDIO_LEAD_FRAMES.max(0)).unwrap_or(0);
+    let mut scratch: Vec<f32> = Vec::with_capacity(max_window.saturating_mul(channels));
 
-    // The absolute write head (next frame to publish); the bus's `read_cursor`
-    // lives in the same absolute coordinate space.
-    let mut published: i64 = 0;
     let poll = refill_poll_interval(plan.output_cadence);
     while !stop.load(Ordering::Acquire) {
-        // Sample the video rail's authoritative control bus (wait-free) and, on a
-        // real transition, apply it to the deck — so vamp/arm-exit/stop land on the
-        // same boundary as the video by construction (one authority, ADR-T019 §1).
+        // Sample the video rail's authoritative control bus (wait-free) FIRST and, on
+        // a real transition, apply it to the deck — so the window we (re)publish this
+        // block reflects the CURRENT transport state (ADR-T019 §2.3). vamp/arm-exit/
+        // stop therefore land on the same boundary as the video by construction.
         follow_video_control(&plan.control_bus, &mut deck, &mut last_control_gen);
 
-        let read_cursor = store.read_cursor();
-        // If the bus's tick-driven cursor overran the write head (a DropOnOverload
-        // catch-up), realign the deck + write head to the cursor rather than
-        // back-filling the never-read span — keeps every top-up bounded and,
-        // because the deck is positioned by the ABSOLUTE frame, the realign still
-        // lands inside a correctly-faded seam (no un-crossfaded click — ADR-T019).
-        if read_cursor > published {
-            deck.seek_to(u64::try_from(read_cursor).unwrap_or(0));
-            published = read_cursor;
-        }
-        let lead = published.saturating_sub(read_cursor);
-        if lead < PLAYER_AUDIO_REFILL_THRESHOLD_FRAMES {
-            let want = PLAYER_AUDIO_LEAD_FRAMES.saturating_sub(lead).max(0);
-            let frames = usize::try_from(want).unwrap_or(0);
+        // The publish-horizon contract (ADR-T019 §2.3): REPLACE the unplayed window
+        // `[cursor, H)` re-derived from the deck's CURRENT state every block. Because
+        // every stale sample lives at ≥ the exit boundary B ≥ the read cursor (B is
+        // a FUTURE wrap, lip-synced to the video anchor), the replace overwrites any
+        // pre-transition body before the bus reads it — "no sample past the boundary
+        // is ever heard" is then true by construction, not by a short-enough
+        // lookahead.
+        let cursor = store.read_cursor().max(0);
+        let cursor_u = u64::try_from(cursor).unwrap_or(0);
+        // The horizon: a bounded lookahead, clamped to the deck's silence-settle
+        // frame once an exit has fired (so we publish body→fade→silence, nothing
+        // past the settle). The deck itself yields silence past the settle, so this
+        // clamp is for efficiency; correctness comes from re-deriving each block.
+        let lookahead_end = cursor_u.saturating_add(u64::try_from(max_window).unwrap_or(u64::MAX));
+        let horizon = match deck.settle_frame() {
+            Some(settle) => settle.min(lookahead_end),
+            None => lookahead_end,
+        };
+        if horizon > cursor_u {
+            let frames = usize::try_from(horizon - cursor_u)
+                .unwrap_or(0)
+                .min(max_window);
             if frames > 0 {
-                // Fill the reusable scratch IN PLACE (no alloc), then publish the
-                // slice into the store. The deck is positioned by the absolute
-                // write head.
-                let at = u64::try_from(published).unwrap_or(0);
-                deck.read_into(at, frames, &mut scratch);
-                if let Err(error) = store.publish_samples(&scratch) {
+                // Fill the reusable scratch from the deck at the absolute cursor (no
+                // alloc), then REPLACE the store window with exactly `[cursor, H)`.
+                deck.read_into(cursor_u, frames, &mut scratch);
+                if let Err(error) = store.publish_window(cursor, &scratch) {
                     tracing::error!(%error, player = %plan.id, "media-player audio publish rejected; stopping");
                     return;
                 }
-                published = published.saturating_add(want);
             }
         }
+        // Once the exit has fully settled to silence, the store silence-fills the
+        // unplayed tail on its own — nothing more to publish until a fresh transport
+        // verb (which `follow_video_control` will pick up next wakeup).
         sleep_interruptible(poll, stop);
     }
 }
@@ -468,8 +543,9 @@ fn follow_video_control(
                 deck.arm_exit_at(media_time_to_audio_frame(anchor));
             }
         }
-        // Paused / Stopped both stop the bus contribution (silence); `stop` also
-        // re-cues to the head so a fresh `vamp` restarts the loop from frame 0.
+        // Paused holds the loop phase (a later vamp resumes mid-loop); Stopped (the
+        // video re-cue) latches a re-phase so a fresh vamp restarts from body[0] at
+        // the current frame (MAJOR-4). Both contribute silence until the next vamp.
         AudioTransport::Paused => deck.pause(),
         AudioTransport::Stopped => deck.stop(),
     }
@@ -510,15 +586,16 @@ fn frames_to_samples(frames: u64, cadence: Rational) -> u64 {
     u64::try_from(rounded).unwrap_or(u64::MAX)
 }
 
-/// Target buffered lead (frames) the player audio keeps ahead of the bus's read
-/// cursor: half a second at 48 kHz (mirrors the tone loop's [`TONE_LEAD_FRAMES`]).
+/// The bounded lookahead window (frames) the player audio republishes each block —
+/// half a second at 48 kHz. Each wakeup the fill loop REPLACES the store window with
+/// `[read_cursor, min(read_cursor + this, settle))` re-derived from the deck's
+/// current state (ADR-T019 §2.3), so the unplayed tail is always at most this many
+/// frames and is corrected on the very next block after any transport transition —
+/// the boundary-tight exit is true by construction, not by a short lookahead. It is
+/// comfortably inside the store capacity and ≥ one output tick (so the bus's per-tick
+/// pull always lands inside the published window — gap-free).
 #[cfg(feature = "ffmpeg")]
 const PLAYER_AUDIO_LEAD_FRAMES: i64 = 24_000;
-
-/// Refill the player-audio store whenever the lead drops below this (half the
-/// target) — a hysteresis band so the thread does a few bounded reads then sleeps.
-#[cfg(feature = "ffmpeg")]
-const PLAYER_AUDIO_REFILL_THRESHOLD_FRAMES: i64 = PLAYER_AUDIO_LEAD_FRAMES / 2;
 
 #[cfg(all(test, feature = "ffmpeg"))]
 mod player_audio_tests {

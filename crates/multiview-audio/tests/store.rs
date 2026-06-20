@@ -439,13 +439,16 @@ fn publish_window_rejects_a_ragged_length() {
     );
 }
 
-/// The CRITICAL-2 proof, in-process and allocator-free: across MANY
-/// `publish_window` calls the store reuses a BOUNDED set of backing buffers (the
-/// triple-buffer pool), so the number of DISTINCT backing-buffer pointers the
-/// reader ever observes is small and constant — NOT one fresh `Vec`/`Arc` per
-/// publish (which would show an unbounded, ever-growing set of pointers). This is
-/// the stable-pointer assertion the ADR's §2.2 triple-buffer promises (the
-/// counting-allocator proof lives in `store_alloc.rs`).
+/// The CRITICAL-2 proof (rule 22): across MANY `publish_window` calls the store
+/// reuses a BOUNDED set of backing buffers (the triple-buffer pool), so the number
+/// of DISTINCT backing-buffer pointers the reader ever observes is small and
+/// constant — NOT one fresh `Vec` per publish (which would show an unbounded,
+/// ever-growing set of pointers). This is the **stable-pointer assertion** the
+/// ADR's §2.2 triple-buffer promises, and it is *stronger* than a counted
+/// allocation: it proves the SAME backing buffers are reused, not merely that few
+/// allocations happen. (A `#[global_allocator]` counting allocator is not an option
+/// here — `multiview-audio` is `unsafe_code = forbid`, and `GlobalAlloc` requires
+/// `unsafe`.)
 #[test]
 fn publish_window_reuses_a_bounded_pool_of_backing_buffers() {
     use std::collections::HashSet;

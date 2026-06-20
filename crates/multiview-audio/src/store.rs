@@ -36,11 +36,21 @@
 //! consumer advances the cursor, so it is never torn.
 
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 
 use crate::error::{AudioError, Result};
 use crate::format::{AudioBlock, AudioFormat};
+
+/// The number of preallocated snapshot buffers the [`AudioStore::publish_window`]
+/// **replace** path rotates through — the audio analogue of the video tile store's
+/// triple-buffer (invariant #2). Three is the classic count for a single-producer /
+/// single-consumer hand-off: at any instant the `ArcSwap` slot holds one and the
+/// reader may hold one in-flight clone, so a third is always free for the writer to
+/// fill in place (reused via `Arc::get_mut`, never reallocated on the steady path —
+/// rule 22 / ADR-T019 §2.2).
+const WINDOW_POOL_SIZE: usize = 3;
 
 /// An immutable snapshot of the bounded sample window.
 ///
@@ -103,6 +113,73 @@ pub struct AudioStore {
     /// The consumer's absolute read cursor (next frame to be read). Only the
     /// single consumer advances it.
     read_frame: AtomicI64,
+    /// The writer-side triple-buffer pool for the allocation-free
+    /// [`AudioStore::publish_window`] **replace** path (ADR-T019 §2.2). Guarded by
+    /// a `Mutex` that is **uncontended in normal use** — only the single producer
+    /// thread calls `publish_window`, and the wait-free reader never touches it (it
+    /// reads `window` via `ArcSwap`). The lock just makes the single-writer reuse
+    /// of the pooled `Arc`s sound without `unsafe`. `None` until first use (the
+    /// append-only `publish`/`publish_at` paths never allocate it).
+    window_pool: Mutex<WindowPool>,
+}
+
+/// The writer-side reusable snapshot pool for [`AudioStore::publish_window`].
+///
+/// Holds the snapshots **not currently live** in the store's `window`. On each
+/// `publish_window` the writer takes a free snapshot (`Arc` strong-count 1),
+/// overwrites its buffer in place, swaps it into `window`, and returns the
+/// displaced window here — so the steady path performs **zero** heap allocation.
+/// A fresh `Arc` is allocated only when no pooled snapshot is free (the
+/// never-observed-in-SPSC contention fallback); the buffers grow to the window
+/// size during the first few publishes (warm-up) and are stable thereafter.
+#[derive(Debug)]
+struct WindowPool {
+    buffers: Vec<Arc<RingSnapshot>>,
+}
+
+impl Default for WindowPool {
+    fn default() -> Self {
+        // Seed `WINDOW_POOL_SIZE − 1` empty buffers: together with the one the store
+        // holds live in `window`, that is `WINDOW_POOL_SIZE` snapshots in
+        // circulation — enough that a free buffer is always available even while the
+        // reader holds an in-flight clone (the classic triple-buffer count).
+        let mut buffers = Vec::with_capacity(WINDOW_POOL_SIZE);
+        for _ in 1..WINDOW_POOL_SIZE {
+            buffers.push(Arc::new(RingSnapshot {
+                base_frame: 0,
+                samples: Vec::new(),
+            }));
+        }
+        Self { buffers }
+    }
+}
+
+impl WindowPool {
+    /// Take a snapshot the writer can overwrite in place — one whose `Arc`
+    /// strong-count is 1 (neither the store nor the reader references it). Prefers a
+    /// free pooled buffer (reused, no allocation); allocates a fresh empty snapshot
+    /// only if every pooled buffer is still referenced (never observed under the
+    /// single-producer/single-consumer hand-off with three buffers).
+    fn take_reusable(&mut self) -> Arc<RingSnapshot> {
+        if let Some(pos) = self.buffers.iter().position(|b| Arc::strong_count(b) == 1) {
+            return self.buffers.swap_remove(pos);
+        }
+        Arc::new(RingSnapshot {
+            base_frame: 0,
+            samples: Vec::new(),
+        })
+    }
+
+    /// Return a displaced window to the pool for future reuse. Bounded: never holds
+    /// more than [`WINDOW_POOL_SIZE`] buffers (a surplus — only possible after a
+    /// fresh-allocation fallback — is dropped, keeping the resident set bounded).
+    fn return_buffer(&mut self, snapshot: Arc<RingSnapshot>) {
+        if self.buffers.len() < WINDOW_POOL_SIZE {
+            self.buffers.push(snapshot);
+        }
+        // else: drop it — the pool is already at its bound (the steady set is
+        // restored; this only happens transiently after a contention fallback).
+    }
 }
 
 impl AudioStore {
@@ -121,6 +198,7 @@ impl AudioStore {
                 samples: Vec::new(),
             }),
             read_frame: AtomicI64::new(0),
+            window_pool: Mutex::new(WindowPool::default()),
         }
     }
 
@@ -251,7 +329,7 @@ impl AudioStore {
             base_frame = base_frame.saturating_add(evicted_frames);
         }
 
-        self.window.store(std::sync::Arc::new(RingSnapshot {
+        self.window.store(Arc::new(RingSnapshot {
             base_frame,
             samples: next,
         }));
@@ -331,11 +409,94 @@ impl AudioStore {
             base_frame = base_frame.saturating_add(evicted_frames);
         }
 
-        self.window.store(std::sync::Arc::new(RingSnapshot {
+        self.window.store(Arc::new(RingSnapshot {
             base_frame,
             samples: merged,
         }));
         Ok(())
+    }
+
+    /// **Replace** the live window with exactly `[base_frame, base_frame + n)` —
+    /// the media-player audio rail's sliding-window write (ADR-T019 §2.2/§2.3).
+    ///
+    /// Unlike the append-only [`publish`](AudioStore::publish), this **does not
+    /// merge** with the prior window: the new window *is* `samples` placed at
+    /// `base_frame`, and any earlier content is dropped. That is exactly what the
+    /// loop deck's fill loop needs: each block it re-derives the whole unplayed
+    /// window `[cursor, H)` from the deck's *current* transport state and replaces
+    /// the store window with it, so a transport transition (arm-exit / pause / stop)
+    /// overwrites any stale pre-transition tail **before the bus reads it**
+    /// (boundary-tight exit, true by construction). The reader's silence-fill keeps
+    /// it gap-free: a `read` outside `[base_frame, base_frame + n)` reads silence,
+    /// and the fill loop always covers the bus's next pull because the window starts
+    /// at the live read cursor (`LOOKAHEAD ≥` one tick).
+    ///
+    /// **Allocation-free on the steady path** (rule 22): the snapshot comes from a
+    /// triple-buffered preallocated pool ([`WINDOW_POOL_SIZE`]); a buffer whose
+    /// `Arc` is no longer shared with the reader is reused in place, a fresh `Arc`
+    /// is allocated only in the never-observed SPSC-contention fallback. The
+    /// writer-side `Mutex` is uncontended (single producer); the wait-free reader
+    /// never touches the pool. The placed window is **bounded** to `n` frames — the
+    /// caller sizes it `≤ LOOKAHEAD`, never `capacity_frames`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioError::RaggedBlock`] if `samples.len()` is not a whole
+    /// multiple of the store's channel count (so the ring never tears mid-frame).
+    pub fn publish_window(&self, base_frame: i64, samples: &[f32]) -> Result<()> {
+        let channels = self.format.channel_count();
+        if channels == 0 {
+            return Ok(());
+        }
+        if samples.len() % channels != 0 {
+            return Err(AudioError::RaggedBlock {
+                samples: samples.len(),
+                channels,
+            });
+        }
+        // Take a reusable snapshot from the pool, overwrite it in place, swap it in,
+        // and return the displaced window to the pool. One take + one return per
+        // publish keeps a fixed set of buffers in circulation (pool + the one live
+        // in `window`); with three buffers (pool seeds two) a free one is always
+        // available even while the reader holds an in-flight clone — so the steady
+        // path never reallocates. The lock is uncontended (single producer); recover
+        // a poisoned guard so a prior panic elsewhere never wedges the audio path.
+        let mut pool = self
+            .window_pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut snapshot = pool.take_reusable();
+        // `take_reusable` returns an `Arc` whose strong-count is 1 (a free pool
+        // buffer or a fresh one), so `get_mut` succeeds and the fill is in place —
+        // no reallocation (the `Vec` keeps its capacity across reuse).
+        if let Some(inner) = Arc::get_mut(&mut snapshot) {
+            inner.base_frame = base_frame;
+            inner.samples.clear();
+            inner.samples.extend_from_slice(samples);
+        } else {
+            // Defensive (never reached in SPSC — `take_reusable` guarantees count 1):
+            // build a fresh snapshot rather than corrupt a shared one.
+            snapshot = Arc::new(RingSnapshot {
+                base_frame,
+                samples: samples.to_vec(),
+            });
+        }
+        // Publish the new window; the displaced window returns to the pool for reuse
+        // (the reader may still hold a clone of it — `take_reusable` only reuses a
+        // buffer once its strong-count has fallen back to 1).
+        let previous = self.window.swap(snapshot);
+        pool.return_buffer(previous);
+        Ok(())
+    }
+
+    /// The address of the current window's backing sample buffer (for tests:
+    /// proving the triple-buffer pool reuses a *bounded* set of buffers across many
+    /// `publish_window` calls rather than allocating per block — ADR-T019 §2.2).
+    #[must_use]
+    #[doc(hidden)]
+    #[allow(clippy::as_conversions)] // reason: a pointer→usize identity cast for a test-only buffer-reuse probe; `ptr::addr`/`expose_provenance` are unstable, and no arithmetic is done on the value.
+    pub fn window_backing_ptr(&self) -> usize {
+        self.window.load().samples.as_ptr() as usize
     }
 
     /// Sample exactly `frames` contiguous frames starting at the read cursor,

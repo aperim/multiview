@@ -131,6 +131,18 @@ pub struct LoopDeck {
     /// high-water without a `&mut` borrow (its sample OUTPUT stays a pure function
     /// of the absolute frame; only this bookkeeping mutates).
     cursor: Cell<u64>,
+    /// The **phase anchor**: the absolute frame that maps to lap position 0. The
+    /// in-lap position of absolute frame `f` is `(f − phase) mod L`. Defaults to 0
+    /// (the loop is phase-locked to the absolute timeline at boot). [`LoopDeck::stop`]
+    /// re-cues by latching a fresh phase so the next `vamp` restarts the segment from
+    /// `body[0]` at the then-current frame — distinct from [`LoopDeck::pause`], which
+    /// holds the phase (resume continues mid-loop). Interior-mutable so the
+    /// pure-function-of-`abs_frame` read path can apply a pending re-cue.
+    phase: Cell<u64>,
+    /// Whether a re-cue is pending: set by [`LoopDeck::stop`], consumed by the first
+    /// vamping read (or [`LoopDeck::arm_exit_at`]) which then latches `phase` to the
+    /// current absolute frame so the loop restarts from its head there.
+    needs_rephase: Cell<bool>,
 }
 
 impl LoopDeck {
@@ -148,6 +160,8 @@ impl LoopDeck {
             xfade: 0,
             state: DeckState::Idle,
             cursor: Cell::new(0),
+            phase: Cell::new(0),
+            needs_rephase: Cell::new(false),
         }
     }
 
@@ -208,6 +222,10 @@ impl LoopDeck {
             // the channel loops, matching the video player's `loop_on_start`).
             state: DeckState::Vamping { exit_armed: false },
             cursor: Cell::new(0),
+            // Phase-locked to the absolute timeline at boot (lap position == abs mod
+            // L); a `stop` re-cue latches a fresh phase later.
+            phase: Cell::new(0),
+            needs_rephase: Cell::new(false),
         })
     }
 
@@ -308,6 +326,49 @@ impl LoopDeck {
             window.resize(body_span, 0.0);
         }
         Self::with_segment(format, &window, loop_frames, xfade)
+    }
+
+    /// Build a loop deck over a **pre-sliced vamp window** that already starts at
+    /// `vamp_in` (the CLI driver's path after a windowed, prefix-discarding decode —
+    /// ADR-T019 §5 / CRITICAL-3). `window` is `loop_frames` body frames followed by
+    /// however many lap-over frames were decoded past the loop point; the loop is the
+    /// first `loop_frames`, crossfaded with the lap-over at the seam.
+    ///
+    /// Applies the same **refuse-don't-clamp** rule as [`LoopDeck::from_clip_window`]:
+    /// a window the decode under-delivers (a truncated asset / in-point past clip
+    /// end) by **more than** a few-sample resampler-edge shortfall
+    /// ([`SHORTFALL_TOLERANCE_FRAMES`]) yields an **empty (silent)** deck rather than
+    /// a shifted-length loop (which would break the sample-lock to the video wrap);
+    /// only a sub-tolerance shortfall is zero-padded and tolerated. A `loop_frames`
+    /// of 0 (or an over-cap body the caller already rejected) also yields an empty
+    /// deck. Never errors on a short window — it rides silence.
+    #[must_use]
+    pub fn from_window(
+        format: AudioFormat,
+        window: &[f32],
+        loop_frames: usize,
+        xfade_frames: usize,
+    ) -> Self {
+        let channels = format.channel_count();
+        if channels == 0 || loop_frames == 0 {
+            return Self::empty(format);
+        }
+        let have_frames = window.len() / channels;
+        // Materially short → refuse (ride silence), never a shifted-length loop.
+        if have_frames.saturating_add(SHORTFALL_TOLERANCE_FRAMES) < loop_frames {
+            return Self::empty(format);
+        }
+        // Pad a sub-tolerance shortfall so the body is exactly `loop_frames`
+        // (sample-locked); otherwise use the window as-is.
+        let body_span = loop_frames.saturating_mul(channels);
+        if window.len() < body_span {
+            let mut padded = window.to_vec();
+            padded.resize(body_span, 0.0);
+            return Self::with_segment(format, &padded, loop_frames, xfade_frames)
+                .unwrap_or_else(|_| Self::empty(format));
+        }
+        Self::with_segment(format, window, loop_frames, xfade_frames)
+            .unwrap_or_else(|_| Self::empty(format))
     }
 
     /// Precompute the `xfade`-frame seam region: for in-lap frame `m ∈ [0, xfade)`
@@ -421,11 +482,15 @@ impl LoopDeck {
         self.state = DeckState::Paused;
     }
 
-    /// Stop: re-cue to the head and contribute silence until a fresh `vamp`. The
-    /// cursor is reset so a subsequent `vamp` restarts the loop from frame 0.
+    /// Stop: **re-cue to the head** and contribute silence until a fresh `vamp`.
+    /// Latches a pending re-phase so the next `vamp` restarts the loop from `body[0]`
+    /// at the then-current absolute frame (distinct from [`LoopDeck::pause`], which
+    /// holds the loop phase so a resume continues mid-loop). The cursor is reset so a
+    /// fresh `vamp` re-anchors cleanly.
     pub fn stop(&mut self) {
         self.state = DeckState::Idle;
         self.cursor.set(0);
+        self.needs_rephase.set(true);
     }
 
     /// Arm the vamp exit: a cosine fade-out-to-silence fires at the **next loop
@@ -449,8 +514,20 @@ impl LoopDeck {
         if let DeckState::Vamping { .. } = self.state {
             self.state = DeckState::Vamping { exit_armed: true };
             if self.loop_frames > 0 {
+                // Consume any pending re-cue at the arm anchor so the seam math and
+                // the playout agree on the loop phase (a `stop`→`vamp`→`arm` sequence
+                // re-phases here rather than waiting for the first read).
+                if self.needs_rephase.get() {
+                    self.phase.set(anchor);
+                    self.needs_rephase.set(false);
+                }
+                // The next wrap strictly after `anchor`, measured from the phase
+                // origin: `phase + (⌊(anchor − phase)/L⌋ + 1)·L`.
                 let l = to_u64(self.loop_frames);
-                let next_wrap = anchor.saturating_div(l).saturating_add(1).saturating_mul(l);
+                let phase = self.phase.get();
+                let rel = anchor.saturating_sub(phase);
+                let next_wrap =
+                    phase.saturating_add(rel.saturating_div(l).saturating_add(1).saturating_mul(l));
                 self.state = DeckState::Exiting {
                     exit_seam: next_wrap,
                 };
@@ -486,6 +563,20 @@ impl LoopDeck {
                 self.cursor.get() >= exit_seam.saturating_add(to_u64(self.xfade))
             }
             _ => false,
+        }
+    }
+
+    /// The absolute frame at-and-after which an armed-and-fired exit contributes
+    /// **silence** — `exit_seam + xfade` (the end of the fade-out tail) when the deck
+    /// is exiting, else `None` (no settle: the deck loops forever). The CLI fill loop
+    /// uses this to clamp its publish horizon so it never publishes a long silent
+    /// tail past the boundary (ADR-T019 §2.3 — an efficiency clamp; correctness comes
+    /// from re-deriving the window each block).
+    #[must_use]
+    pub fn settle_frame(&self) -> Option<u64> {
+        match self.state {
+            DeckState::Exiting { exit_seam } => Some(exit_seam.saturating_add(to_u64(self.xfade))),
+            _ => None,
         }
     }
 
@@ -565,7 +656,16 @@ impl LoopDeck {
             return;
         }
 
+        // Consume a pending re-cue (latched by `stop`): a fresh `vamp` restarts the
+        // loop from its head at THIS absolute frame, so the loop phase is re-anchored
+        // to `abs_frame`. Vamping/Exiting only (an idle/paused deck is silent above).
+        if self.needs_rephase.get() && matches!(self.state, DeckState::Vamping { .. }) {
+            self.phase.set(abs_frame);
+            self.needs_rephase.set(false);
+        }
+
         let l = to_u64(self.loop_frames);
+        let phase = self.phase.get();
         let exit_seam = match self.state {
             DeckState::Exiting { exit_seam } => Some(exit_seam),
             _ => None,
@@ -581,15 +681,17 @@ impl LoopDeck {
                 }
                 if abs >= seam {
                     // The exit fade-out tail: the loop's head sample at the lap
-                    // position, cosine-faded to silence over `xfade`.
+                    // position, cosine-faded to silence over `xfade`. The seam is a
+                    // lap boundary (`(seam − phase) mod L == 0`), so this fades body[0].
                     let j = to_usize(abs - seam);
                     let g = exit_gain(j, self.xfade);
-                    self.write_loop_frame(out, f, lap_pos(seam, l), channels, Some(g));
+                    self.write_loop_frame(out, f, lap_pos_at(seam, phase, l), channels, Some(g));
                     continue;
                 }
             }
 
-            let m = to_usize(abs % l);
+            // Phase-relative in-lap position: `(abs − phase) mod L`.
+            let m = to_usize(abs.saturating_sub(phase) % l);
             self.write_loop_frame(out, f, m, channels, None);
         }
     }
@@ -627,13 +729,16 @@ impl LoopDeck {
     }
 }
 
-/// The lap position of the loop's head at absolute frame `seam` — i.e. the in-lap
-/// index the exit tail fades from. The exit seam is a lap boundary (`seam % L ==
-/// 0`), so the head it fades is the segment head; this returns `0` there and is
-/// kept as a function so the exit tail reads the right body frames even if a future
-/// caller anchors the exit off a non-boundary.
-const fn lap_pos(_seam: u64, _l: u64) -> usize {
-    0
+/// The phase-relative in-lap position of the loop's head at absolute frame `seam` —
+/// i.e. the in-lap index the exit tail fades from — `(seam − phase) mod L`. The exit
+/// seam is a lap boundary (`(seam − phase) mod L == 0`), so the head it fades is the
+/// segment head (returns `0`); kept as a function so the exit tail reads the right
+/// body frames even if a future caller anchors the exit off a non-boundary.
+fn lap_pos_at(seam: u64, phase: u64, l: u64) -> usize {
+    if l == 0 {
+        return 0;
+    }
+    to_usize(seam.saturating_sub(phase) % l)
 }
 
 /// The cosine exit-tail gain at fade frame `j ∈ [0, xfade)`: `1 → 0` so the bus

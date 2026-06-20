@@ -9498,14 +9498,21 @@ fn stream_player(
     // the start frame and is reset by a wrap seek; advances 1:1 with decoded
     // frames otherwise.
     let mut source_frame = start_frame;
-    // ADR-T019 §1 (single-authority transport coupling): the video rail is the
+    // ADR-T019 §1/§2 (single-authority transport coupling): the video rail is the
     // SOLE mailbox consumer and PUBLISHES its applied transport state to the
-    // wait-free `control_bus` the audio rail samples. `last_published_at` tracks
-    // the video's most recent output media-time (the exit anchor — the audio arms
-    // at the SAME boundary); `last_audio_control` is the last `(AudioTransport,
-    // exit_armed)` published, so the bus is bumped only on a real state change.
+    // wait-free `control_bus` the audio rail samples. `last_published_at` tracks the
+    // video's most recent output media-time; `armed_anchor` LATCHES that time at the
+    // edge the exit is armed (stable while armed — the audio arms at the SAME
+    // boundary, with no per-frame churn — MAJOR-5); `last_audio_control` is the last
+    // `(AudioTransport, exit_armed, anchor)` published, so the bus is bumped only on
+    // a real change (including a CHANGED anchor — a re-arm).
     let mut last_published_at = multiview_core::time::MediaTime::ZERO;
-    let mut last_audio_control: Option<(crate::player::AudioTransport, bool)> = None;
+    let mut armed_anchor: Option<multiview_core::time::MediaTime> = None;
+    let mut last_audio_control: Option<(
+        crate::player::AudioTransport,
+        bool,
+        Option<multiview_core::time::MediaTime>,
+    )> = None;
     // A pending **frame-accurate seek target**: when `Some(t)`, the decoder has
     // just been seeked to a keyframe at-or-before `t` (libav seeks land on a
     // keyframe ≤ target), so the loop **decodes-and-discards** every frame whose
@@ -9594,16 +9601,23 @@ fn stream_player(
             }
         }
 
-        // ADR-T019 §1: after applying the drained verbs, publish the player's
+        // ADR-T019 §1/§2: after applying the drained verbs, publish the player's
         // authoritative transport state to the audio rail's control bus — but only
         // when it actually changed (the bus is wait-free and cheap, but bumping the
-        // generation needlessly would make the audio re-apply each block). The exit
-        // anchor is the video's most recent output media-time, so the audio arms at
-        // the SAME next-vamp boundary.
+        // generation needlessly would make the audio re-apply each block). LATCH the
+        // exit anchor at the edge the exit is armed (the video's then-current output
+        // media-time), so it is stable while armed (no per-frame churn) yet a re-arm
+        // at a different boundary updates it and re-reaches the deck (MAJOR-5).
+        armed_anchor = if player.exit_armed() {
+            // Latch on the false→true edge; hold the latched value while it stays armed.
+            Some(armed_anchor.unwrap_or(last_published_at))
+        } else {
+            None
+        };
         publish_audio_control(
             handle,
             player.state(),
-            last_published_at,
+            armed_anchor.unwrap_or(last_published_at),
             &mut last_audio_control,
         );
 
@@ -9791,36 +9805,50 @@ fn stream_player(
 fn publish_audio_control(
     handle: &crate::player::PlayerHandle,
     state: crate::player::MediaPlayerState,
-    last_published_at: multiview_core::time::MediaTime,
-    last: &mut Option<(crate::player::AudioTransport, bool)>,
+    armed_anchor: multiview_core::time::MediaTime,
+    last: &mut Option<(
+        crate::player::AudioTransport,
+        bool,
+        Option<multiview_core::time::MediaTime>,
+    )>,
 ) {
     use crate::player::{AudioTransport, EofPolicy, MediaPlayerState};
     use multiview_core::time::MediaTime;
     // (audio_state, exit_armed, exit_anchor). For a forever-loop the audio vamps
-    // with no exit; for an armed vamp exit the audio arms at the video's current
-    // media-time (the SAME next boundary); for a one-shot `Playing` (non-`Loop`
-    // policy) the audio arms at ZERO so it settles to silence after the first lap
-    // (mirroring the video playing `[in,out)` once then holding its terminal frame).
+    // with no exit; for an armed vamp exit the audio arms at the video's LATCHED
+    // arm anchor (`armed_anchor`, stable while armed — the SAME next boundary); for a
+    // one-shot `Playing` (non-`Loop` policy) the audio arms at ZERO so it settles to
+    // silence after the first lap (mirroring the video playing `[in,out)` once then
+    // holding its terminal frame). The video's re-cue state (`Cued`, where
+    // `MediaPlayer::stop()` lands) maps to `Stopped` (an audio RE-CUE), distinct from
+    // a genuine `Paused` (hold-in-place) — MAJOR-4.
     let loops_forever = matches!(handle.eof_policy, EofPolicy::Loop);
     let (audio_state, exit_armed, anchor) = match state {
         MediaPlayerState::Playing if loops_forever => (AudioTransport::Vamping, false, None),
         MediaPlayerState::Playing => (AudioTransport::Vamping, true, Some(MediaTime::ZERO)),
         MediaPlayerState::Vamping { exit_armed: true } => {
-            (AudioTransport::Vamping, true, Some(last_published_at))
+            (AudioTransport::Vamping, true, Some(armed_anchor))
         }
         MediaPlayerState::Vamping { exit_armed: false } => (AudioTransport::Vamping, false, None),
-        MediaPlayerState::Cued
-        | MediaPlayerState::Paused
+        // The video re-cue (Cued) → an audio re-cue (Stopped), not pause.
+        MediaPlayerState::Cued => (AudioTransport::Stopped, false, None),
+        MediaPlayerState::Paused
         | MediaPlayerState::Holding
         | MediaPlayerState::Black
         | MediaPlayerState::Idle
         | MediaPlayerState::Loading
         | MediaPlayerState::Ended => (AudioTransport::Paused, false, None),
     };
-    if *last == Some((audio_state, exit_armed)) {
+    // Suppress on the FULL (state, exit_armed, anchor) triple so a CHANGED arm anchor
+    // (a re-arm / move-exit at a different boundary) always reaches the deck even
+    // when (state, exit_armed) is unchanged (MAJOR-5) — while an unchanged control is
+    // still suppressed (no per-frame generation churn, because `armed_anchor` is
+    // latched at the arm edge by the caller, not re-sampled every frame).
+    let key = (audio_state, exit_armed, anchor);
+    if *last == Some(key) {
         return;
     }
-    *last = Some((audio_state, exit_armed));
+    *last = Some(key);
     handle.control_bus.publish(audio_state, anchor);
 }
 
@@ -9839,7 +9867,8 @@ mod publish_audio_control_tests {
 
     use super::publish_audio_control;
     use crate::player::{
-        AudioTransport, EofPolicy, MediaPlayerState, PlayerHandle, PlayoutGeometry, TransportMailbox,
+        AudioTransport, EofPolicy, MediaPlayerState, PlayerHandle, PlayoutGeometry,
+        TransportMailbox,
     };
 
     fn handle(eof: EofPolicy) -> PlayerHandle {
