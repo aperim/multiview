@@ -312,6 +312,45 @@ fn loop_length_is_the_decoded_sample_count_independent_of_output_cadence() {
     );
 }
 
+#[test]
+fn from_clip_window_slices_the_vamp_segment_at_the_asset_cadence() {
+    use multiview_core::time::Rational;
+
+    // A whole decoded clip of 2 s @ 48 kHz = 96_000 frames. The vamp window is
+    // asset frames [vamp_in, vamp_out) at the ASSET cadence; the deck must slice
+    // the correct SAMPLE range = the audio duration of those frames, and the loop
+    // length must be (vamp_out - vamp_in) frames in seconds × 48_000 — the same
+    // sample count at EVERY cadence (no frame-vs-tick conflation).
+    let channels = 2usize;
+    let clip_frames = 96_000usize; // 2 s
+                                   // A ramp so we can verify WHICH samples were sliced (sample i has value i/clip).
+    let mut clip = vec![0.0f32; clip_frames * channels];
+    for i in 0..clip_frames {
+        let v = (i as f32) / (clip_frames as f32);
+        clip[i * channels] = v;
+        clip[i * channels + 1] = v;
+    }
+
+    // 24 fps asset: frames 12..36 = [0.5 s, 1.5 s) = samples 24_000..72_000 (1 s).
+    let cad24 = Rational::new(24, 1);
+    let deck24 = LoopDeck::from_clip_window(stereo(), &clip, 12, 36, cad24, 0).unwrap();
+    assert_eq!(deck24.loop_frames(), 48_000, "24 frames @ 24 fps = 1 s = 48_000 samples");
+    // The first looped sample is clip sample 24_000 → value 24000/96000 = 0.25.
+    let first = deck24.read_at(0, 1);
+    assert!(
+        (f64::from(first.interleaved()[0]) - 0.25).abs() < 1e-3,
+        "the deck must slice from the vamp_in SAMPLE (asset-frame 12 @ 24 fps = sample 24_000), got {}",
+        first.interleaved()[0]
+    );
+
+    // 25 fps asset: frames 0..50 = [0 s, 2 s) = samples 0..96_000 — DIFFERENT
+    // frame indices, but the SAME total_at-free sample math. 50 frames @ 25 fps =
+    // 2 s = 96_000 samples (the whole clip).
+    let cad25 = Rational::new(25, 1);
+    let deck25 = LoopDeck::from_clip_window(stereo(), &clip, 0, 50, cad25, 0).unwrap();
+    assert_eq!(deck25.loop_frames(), 96_000, "50 frames @ 25 fps = 2 s = 96_000 samples");
+}
+
 // ----------------------------------------------------------------------------
 // 4. Armed exit: settles to silence at the next seam, exactly once.
 // ----------------------------------------------------------------------------
