@@ -33,7 +33,7 @@ use multiview_control::boot_model::{
     finish_running_persist, load_resume_config, persist_loaded, persist_running_now,
     spawn_running_persist, write_active_serialized, write_atomic, BootModel,
 };
-use multiview_control::config_watch::{spawn as spawn_watch, WatchOptions};
+use multiview_control::config_watch::{spawn as spawn_watch, ManualPoll, WatchOptions};
 use multiview_control::{
     command_bus, run_warning_ingest, AppState, Command, CommandReceiver, EngineStateSnapshot,
     InMemoryRepository, InMemoryWarningStore, WarningFilter, WarningRepository,
@@ -419,20 +419,25 @@ async fn revert_with_no_divergence_is_an_honest_noop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revert_after_a_file_watch_apply_returns_to_loaded() {
     let mut r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
+    settle_initial(&mut poll, &r.state).await;
 
     // External boot-file edit: in_a goes near-white; the watcher applies it.
+    // Driven by manual ticks (no wall-clock race): one poll registers the
+    // candidate, the second crosses the debounce and applies.
     std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#f0f0f0")).expect("edit boot file");
-    assert!(
-        wait_until(SETTLE, || {
-            r.state.config_watch.snapshot().applied_count >= 1
-        })
-        .await,
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
         "the watcher must apply the external edit"
     );
     assert_eq!(stored_color(&r.state).as_deref(), Some("#f0f0f0"));
@@ -591,12 +596,16 @@ async fn promote_idempotency_replay_does_not_rewrite() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn promote_does_not_retrigger_a_file_watch_apply() {
     let mut r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
+    settle_initial(&mut poll, &r.state).await;
 
     recolor_in_a(&r, "#c0c0c0").await;
     let _ = r.commands.try_drain();
@@ -607,9 +616,12 @@ async fn promote_does_not_retrigger_a_file_watch_apply() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Several poll cycles elapse: the watcher must adopt (not apply) the
-    // promote's own write.
-    tokio::time::sleep(TEST_POLL * 10).await;
+    // Several DETERMINISTIC poll iterations: the watcher must adopt (not apply)
+    // the promote's own write via the `expect_write` suppression seam. Two
+    // ticks cross the debounce and consume the banked token; the extra ticks
+    // prove the adoption is stable (the apply count never moves), with no
+    // wall-clock window to race.
+    drive_polls(&mut poll, 4).await;
     assert_eq!(
         r.state.config_watch.snapshot().applied_count,
         0,
@@ -626,14 +638,13 @@ async fn promote_does_not_retrigger_a_file_watch_apply() {
     );
 
     // Watching resumes against the ADOPTED baseline: a real external edit
-    // still applies.
+    // still applies (candidate on the first poll, applied on the second).
     let text = std::fs::read_to_string(&r.boot_path).expect("read promoted file");
     std::fs::write(&r.boot_path, text.replace("#c0c0c0", "#101418")).expect("external edit");
-    assert!(
-        wait_until(SETTLE, || {
-            r.state.config_watch.snapshot().applied_count >= 1
-        })
-        .await,
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
         "an external edit after a promote must still hot-apply"
     );
     watch.stop();
@@ -675,25 +686,24 @@ async fn an_external_boot_edit_during_a_resumed_run_still_hot_applies() {
         None,
     )));
     // The watcher's baseline is the RESUMED Running document.
-    let watch = spawn_watch(
-        boot_path.clone(),
-        active_config,
-        state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
-    );
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
+    let watch = spawn_watch(boot_path.clone(), active_config, state.clone(), options);
 
     // External edit to the BOOT file: add a new source (in_a stays at the
-    // boot colour, which DIFFERS from the resumed baseline's).
+    // boot colour, which DIFFERS from the resumed baseline's). The edit is in
+    // place before any poll, so two deterministic ticks (candidate then apply)
+    // diff it against the RESUMED baseline and apply it — no wall-clock race.
     std::fs::write(
         &boot_path,
         format!("{BOOT_DOC}[[sources]]\nid = \"live9\"\nkind = \"bars\"\n"),
     )
     .expect("edit boot file");
-    assert!(
-        wait_until(SETTLE, || {
-            state.config_watch.snapshot().applied_count >= 1
-        })
-        .await,
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        state.config_watch.snapshot().applied_count,
+        1,
         "the boot-file edit must hot-apply during a resumed run"
     );
     let drained = commands.try_drain();
@@ -751,18 +761,17 @@ async fn a_resumed_run_does_not_reapply_the_unchanged_boot_file() {
     )));
     // The watcher starts exactly as a resumed run wires it: the baseline is
     // the RESUMED document, and the boot-load observed the boot file's text.
-    let watch = spawn_watch(
-        boot_path.clone(),
-        active_config,
-        state.clone(),
-        WatchOptions::default()
-            .with_poll_interval(TEST_POLL)
-            .with_initial_observed(BOOT_DOC.to_owned()),
-    );
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_initial_observed(BOOT_DOC.to_owned())
+        .with_manual_poll();
+    let watch = spawn_watch(boot_path.clone(), active_config, state.clone(), options);
 
-    // Many settle windows: the UNCHANGED boot file must never be applied
-    // over the resumed state.
-    tokio::time::sleep(TEST_POLL * 10).await;
+    // Several DETERMINISTIC poll iterations against the UNCHANGED boot file:
+    // its content equals the seeded last-observed text, so the watcher adopts
+    // it as the baseline fingerprint WITHOUT applying — and stays there across
+    // further ticks (no wall-clock window to race a spurious apply).
+    drive_polls(&mut poll, 4).await;
     assert_eq!(
         state.config_watch.snapshot().applied_count,
         0,
@@ -778,13 +787,13 @@ async fn a_resumed_run_does_not_reapply_the_unchanged_boot_file() {
         "the stores keep the resumed values"
     );
 
-    // A REAL edit still hot-applies, diffed against the RESUMED baseline.
+    // A REAL edit still hot-applies, diffed against the RESUMED baseline
+    // (candidate on the first poll, applied on the second).
     std::fs::write(&boot_path, BOOT_DOC.replace("#101418", "#123456")).expect("edit boot file");
-    assert!(
-        wait_until(SETTLE, || {
-            state.config_watch.snapshot().applied_count >= 1
-        })
-        .await,
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        state.config_watch.snapshot().applied_count,
+        1,
         "a real boot-file edit during a resumed run must still hot-apply"
     );
     let drained = commands.try_drain();
@@ -1067,13 +1076,17 @@ async fn a_shed_file_watch_apply_is_not_persisted_as_adopted() {
     let model = r.state.boot_model.clone().expect("rig wires a boot model");
     let active_path = model.active_path();
 
-    // Spawn the file-watcher (baseline = the boot config) at a fast poll, and
-    // the debounced persister, sharing the one AppState.
+    // Spawn the file-watcher (baseline = the boot config) driven by MANUAL
+    // ticks (deterministic), and the debounced persister, sharing the one
+    // AppState.
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
     let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
 
@@ -1096,7 +1109,12 @@ async fn a_shed_file_watch_apply_is_not_persisted_as_adopted() {
     let edited = BOOT_DOC.replace("#101418", "#5e5e5e");
     std::fs::write(&r.boot_path, &edited).expect("edit boot file");
 
-    // The shed apply raises the incomplete warning (proves the shed happened).
+    // Two deterministic ticks settle + apply the edit; the SHED happens within
+    // the apply (no poll/debounce race). The incomplete WARNING then surfaces
+    // through the async event-ingest pipeline (publish → `run_warning_ingest` →
+    // store), a separate hop from the watcher poll, so it is awaited (briefly —
+    // the apply already ran) rather than asserted synchronously.
+    drive_polls(&mut poll, 2).await;
     assert!(
         wait_until(SETTLE, || has_active_warning(
             &r.warnings,
@@ -1107,7 +1125,7 @@ async fn a_shed_file_watch_apply_is_not_persisted_as_adopted() {
     );
 
     // Give the persister several debounce windows to (wrongly) write the
-    // unadopted state.
+    // unadopted state (the persister runs on its own timer, not the watcher's).
     tokio::time::sleep(TEST_POLL * 12).await;
 
     // active.toml must NOT carry the shed (unadopted) #5e5e5e — the engine
@@ -1134,15 +1152,19 @@ async fn the_persist_gate_clears_when_a_shed_edit_reverts_to_adopted() {
     let r = rig_with(BOOT_DOC, 1);
     let model = r.state.boot_model.clone().expect("rig wires a boot model");
     let active_path = model.active_path();
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
     let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
 
-    // Let A (the boot config) persist first.
+    // Let A (the boot config) persist first (the persister's startup write,
+    // independent of the watcher).
     assert!(
         wait_until(SETTLE, || std::fs::read_to_string(&active_path)
             .ok()
@@ -1162,8 +1184,12 @@ async fn the_persist_gate_clears_when_a_shed_edit_reverts_to_adopted() {
             .is_ok(),
         "fill the bus"
     );
-    // Edit to B: the watcher's UpsertSource sheds → the gate freezes.
+    // Edit to B: the watcher's UpsertSource sheds → the gate freezes. Two
+    // deterministic ticks settle + apply (shedding); the incomplete warning
+    // then surfaces through the async event-ingest pipeline (a separate hop
+    // from the watcher poll), so it is awaited briefly.
     std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#7b7b7b")).expect("edit to B");
+    drive_polls(&mut poll, 2).await;
     assert!(
         wait_until(SETTLE, || has_active_warning(
             &r.warnings,
@@ -1172,7 +1198,8 @@ async fn the_persist_gate_clears_when_a_shed_edit_reverts_to_adopted() {
         .await,
         "the shed edit to B raises the incomplete warning (B is not adopted)"
     );
-    // While B is shed-pending, active.toml must never carry the unadopted B.
+    // While B is shed-pending, active.toml must never carry the unadopted B
+    // (the persister runs on its own timer; give it windows to (wrongly) act).
     tokio::time::sleep(TEST_POLL * 6).await;
     if let Ok(text) = std::fs::read_to_string(&active_path) {
         assert!(
@@ -1182,11 +1209,13 @@ async fn the_persist_gate_clears_when_a_shed_edit_reverts_to_adopted() {
     }
 
     // Now edit the file BACK to A. The watcher reaches the already-applied
-    // content; the snapshot re-adopts A and a later adopted edit still persists
-    // (the snapshot never sticks).
+    // content; the snapshot re-adopts A (clearing the incomplete gate) and a
+    // later adopted edit still persists (the snapshot never sticks). Two ticks
+    // settle + re-adopt; re-adopting A is the EMPTY-diff path (no engine
+    // command, so the still-full bus is irrelevant) and it fires
+    // `running_changed`, so the persister re-converges active.toml to A.
     std::fs::write(&r.boot_path, BOOT_DOC).expect("edit back to A");
-    // Drain the bus so a follow-up live edit lands and proves persistence is not
-    // frozen.
+    drive_polls(&mut poll, 2).await;
     assert!(
         wait_until(SETTLE, || {
             std::fs::read_to_string(&active_path)
@@ -1514,11 +1543,14 @@ async fn persist_refuses_a_group_or_world_writable_state_dir() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_promote_racing_an_external_edit_applies_the_edit() {
     let mut r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
 
     recolor_in_a(&r, "#c0c0c0").await;
@@ -1530,17 +1562,18 @@ async fn a_promote_racing_an_external_edit_applies_the_edit() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // The external edit lands immediately after the promote's write — well
-    // inside the watcher's two-poll settle window, so the first SETTLED
-    // observation is E, not the promote's W.
+    // The external edit lands after the promote's write but BEFORE the watcher
+    // polls at all — so the first SETTLED observation is E, not the promote's
+    // W (the deterministic expression of "E supersedes W inside the settle
+    // window"). Two ticks (candidate then apply) apply E through the one
+    // machinery; the banked W-content token never matches E.
     std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#123456"))
-        .expect("external edit inside the settle window");
+        .expect("external edit superseding the promote write before any poll");
 
-    assert!(
-        wait_until(SETTLE, || {
-            r.state.config_watch.snapshot().applied_count >= 1
-        })
-        .await,
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
         "the racing external edit must be APPLIED, not adopted against the promote token"
     );
     assert_eq!(
@@ -1573,11 +1606,14 @@ async fn a_promote_racing_an_external_edit_applies_the_edit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_promote_write_releases_the_banked_expect_token() {
     let mut r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
     recolor_in_a(&r, "#e0e0e0").await;
     let _ = r.commands.try_drain();
@@ -1616,13 +1652,13 @@ async fn a_failed_promote_write_releases_the_banked_expect_token() {
 
     // A REAL external edit now lands with exactly the content the failed
     // promote announced. The promote never wrote it, so it must be APPLIED
-    // (UpsertSource for in_a's new colour) — a leaked token would eat it.
+    // (UpsertSource for in_a's new colour) — a leaked token would eat it. No
+    // poll has run yet; two ticks (candidate then apply) settle and apply it.
     std::fs::write(&r.boot_path, &running_toml).expect("external edit matching the failed write");
-    assert!(
-        wait_until(SETTLE, || {
-            r.state.config_watch.snapshot().applied_count >= 1
-        })
-        .await,
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
         "the external edit must be APPLIED — the failed promote's token must not eat it"
     );
     let drained = r.commands.try_drain();
@@ -1645,11 +1681,14 @@ async fn a_failed_promote_write_releases_the_banked_expect_token() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_superseded_promote_token_does_not_eat_a_later_real_edit() {
     let mut r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
     recolor_in_a(&r, "#c0c0c0").await;
     let _ = r.commands.try_drain();
@@ -1663,27 +1702,27 @@ async fn a_superseded_promote_token_does_not_eat_a_later_real_edit() {
     assert_eq!(resp.status(), StatusCode::OK);
     let w_text = std::fs::read_to_string(&r.boot_path).expect("read the promoted W");
 
-    // E supersedes W inside the settle window; the watcher's first settled
-    // observation is E and it applies (interleaving (1), pinned elsewhere).
+    // E supersedes W before the watcher polls; the watcher's first settled
+    // observation is E and it applies (interleaving (1), pinned elsewhere) —
+    // and, not matching the banked W token, draining the stale LANDED token.
     std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#123456"))
         .expect("external edit superseding the promote");
-    assert!(
-        wait_until(SETTLE, || {
-            r.state.config_watch.snapshot().applied_count >= 1
-        })
-        .await,
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
         "the superseding edit must apply"
     );
     let _ = r.commands.try_drain();
 
     // A later REAL edit restores exactly the promoted bytes. The stale token
-    // (whose write was superseded without ever settling) must not eat it.
+    // (whose write was superseded without ever settling) must not eat it —
+    // two more ticks settle and APPLY the restore.
     std::fs::write(&r.boot_path, &w_text).expect("real edit restoring the promoted bytes");
-    assert!(
-        wait_until(SETTLE, || {
-            r.state.config_watch.snapshot().applied_count >= 2
-        })
-        .await,
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        2,
         "the byte-identical REAL edit must be APPLIED, not eaten by the stale token"
     );
     let drained = r.commands.try_drain();
@@ -1881,11 +1920,14 @@ async fn a_failed_compose_releases_the_idempotency_reservation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_promotes_do_not_lose_a_suppression_token() {
     let mut r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
 
     // A live edit moves Running away from the boot file. Drain its own
@@ -1909,10 +1951,11 @@ async fn concurrent_promotes_do_not_lose_a_suppression_token() {
     assert_eq!(resp_a.status(), StatusCode::OK, "promote A succeeds");
     assert_eq!(resp_b.status(), StatusCode::OK, "promote B succeeds");
 
-    // Several poll cycles: the watcher must ADOPT both promote writes (never
-    // apply either as an external edit). A lost token would let the watcher
-    // re-apply the promoted file, bumping applied_count.
-    tokio::time::sleep(TEST_POLL * 12).await;
+    // Several DETERMINISTIC poll iterations: the watcher must ADOPT both promote
+    // writes (never apply either as an external edit). A lost token would let
+    // the watcher re-apply the promoted file, bumping applied_count — the extra
+    // ticks prove the count stays pinned at 0 with no wall-clock window to race.
+    drive_polls(&mut poll, 4).await;
     assert_eq!(
         r.state.config_watch.snapshot().applied_count,
         0,
@@ -2257,15 +2300,18 @@ async fn a_restart_only_file_watch_change_is_not_persisted_as_adopted() {
     let r = rig(BOOT_DOC);
     let model = r.state.boot_model.clone().expect("rig wires a boot model");
     let active_path = model.active_path();
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
     let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
 
-    // The initial adopted state persists.
+    // The initial adopted state persists (the persister's startup write).
     assert!(
         wait_until(SETTLE, || std::fs::read_to_string(&active_path)
             .ok()
@@ -2287,16 +2333,19 @@ async fn a_restart_only_file_watch_change_is_not_persisted_as_adopted() {
     assert!(edited.contains("net1"), "the edit must insert net1 once");
     std::fs::write(&r.boot_path, &edited).expect("edit boot file: add a network source");
 
-    // Wait for the watcher to APPLY the edit — it reseeds the (restart-only)
-    // network source into the sources store. Proven by the store carrying net1.
+    // Two deterministic ticks settle + APPLY the edit. The store reseed
+    // (`resync_store`) is a SYNCHRONOUS store write inside the apply, so the
+    // restart-only network source is present in the store the instant the apply
+    // tick completes — asserted directly (no wall-clock poll race).
+    drive_polls(&mut poll, 2).await;
     assert!(
-        wait_until(SETTLE, || r.state.sources.get("net1").is_ok()).await,
+        r.state.sources.get("net1").is_ok(),
         "the watcher must reseed the restart-only source into the store"
     );
 
     // Several persist windows: active.toml must NOT carry the unadopted network
     // source (the engine never ingests it live on a synthetic-only run, so it is
-    // not in the adopted snapshot).
+    // not in the adopted snapshot). The persister runs on its own timer.
     tokio::time::sleep(TEST_POLL * 8).await;
     let text = std::fs::read_to_string(&active_path).expect("active.toml exists");
     assert!(
@@ -2570,15 +2619,18 @@ async fn a_file_watch_overlay_add_is_adopted_on_an_overlay_capable_run() {
     let r = rig_with_overlay_live(BOOT_DOC);
     let model = r.state.boot_model.clone().expect("rig wires a boot model");
     let active_path = model.active_path();
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
     let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
 
-    // The initial adopted state persists.
+    // The initial adopted state persists (the persister's startup write).
     assert!(
         wait_until(SETTLE, || std::fs::read_to_string(&active_path)
             .ok()
@@ -2596,14 +2648,18 @@ async fn a_file_watch_overlay_add_is_adopted_on_an_overlay_capable_run() {
     assert!(edited.contains("ov_clock"), "the edit must add the overlay");
     std::fs::write(&r.boot_path, &edited).expect("edit boot file: add an overlay");
 
-    // The watcher reseeds the overlay store (proof the apply ran).
+    // Two deterministic ticks settle + APPLY the edit. The overlay store reseed
+    // is a SYNCHRONOUS store write inside the apply, so the overlay is present
+    // the instant the apply tick completes — asserted directly.
+    drive_polls(&mut poll, 2).await;
     assert!(
-        wait_until(SETTLE, || r.state.overlays.get("ov_clock").is_ok()).await,
+        r.state.overlays.get("ov_clock").is_ok(),
         "the watcher must reseed the overlay into the store"
     );
 
     // The live overlay edit must be ADOPTED and persisted to active.toml — the
-    // engine drew it (UpsertOverlay landed), so it is part of the running state.
+    // engine drew it (UpsertOverlay landed, firing `running_changed`), so the
+    // persister writes it. The persist itself runs on its own debounce timer.
     assert!(
         wait_until(SETTLE, || std::fs::read_to_string(&active_path)
             .ok()
@@ -2634,15 +2690,19 @@ async fn a_shed_file_watch_overlay_add_is_redelivered_and_adopted_on_retry() {
     let mut r = rig_with_overlay_live_capacity(BOOT_DOC, 1);
     let model = r.state.boot_model.clone().expect("rig wires a boot model");
     let active_path = model.active_path();
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
     let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
 
-    // Initial adopted state persists (no overlay yet).
+    // Initial adopted state persists (no overlay yet — the persister's startup
+    // write).
     assert!(
         wait_until(SETTLE, || std::fs::read_to_string(&active_path)
             .ok()
@@ -2664,21 +2724,25 @@ async fn a_shed_file_watch_overlay_add_is_redelivered_and_adopted_on_retry() {
     );
 
     // Edit the BOOT file to ADD a clock overlay. The watcher applies it, but the
-    // UpsertOverlay SHEDS on the full bus → Retry (baseline NOT advanced).
+    // UpsertOverlay SHEDS on the full bus → Retry (baseline NOT advanced). Two
+    // deterministic ticks drive the (shed) first apply.
     let edited = format!(
         "{BOOT_DOC}[[overlays]]\nid = \"ov_clock\"\nkind = \"clock\"\ntarget = \"canvas\"\n"
     );
     std::fs::write(&r.boot_path, &edited).expect("edit boot file: add an overlay");
+    drive_polls(&mut poll, 2).await;
 
     // The watcher reseeds the overlay store even on a shed (the UI mirror follows
-    // the file) — proof the apply attempt ran at least once against the full bus.
+    // the file) — the reseed is a SYNCHRONOUS store write in the apply, so it is
+    // present the instant the (shed) apply tick completes (proof the attempt ran).
     assert!(
-        wait_until(SETTLE, || r.state.overlays.get("ov_clock").is_ok()).await,
+        r.state.overlays.get("ov_clock").is_ok(),
         "the watcher reseeds the overlay store on the (shed) first attempt"
     );
 
     // While the UpsertOverlay is shed-pending, active.toml must NOT yet carry the
     // overlay — the engine has not adopted it (a shed is not a false success).
+    // The persister runs on its own timer; give it windows to (wrongly) act.
     tokio::time::sleep(TEST_POLL * 3).await;
     if let Ok(text) = std::fs::read_to_string(&active_path) {
         assert!(
@@ -2687,10 +2751,12 @@ async fn a_shed_file_watch_overlay_add_is_redelivered_and_adopted_on_retry() {
         );
     }
 
-    // Drain the bus: the next retry must RE-DERIVE the delta from the file
-    // baseline (stable), re-submit UpsertOverlay (now it lands), adopt it, and
-    // persist it. The round-6 bug saw the store already == next and dropped it.
+    // Drain the bus, then drive the RETRY (two more ticks): it must RE-DERIVE the
+    // delta from the file baseline (stable), re-submit UpsertOverlay (now it
+    // lands), adopt it, and fire `running_changed` so the persister writes it.
+    // The round-6 bug saw the store already == next and dropped it.
     let _ = r.commands.try_drain();
+    drive_polls(&mut poll, 2).await;
     assert!(
         wait_until(SETTLE, || std::fs::read_to_string(&active_path)
             .ok()
@@ -2718,15 +2784,19 @@ async fn a_shed_file_watch_overlay_remove_is_redelivered_and_adopted_on_retry() 
     let mut r = rig_with_overlay_live_capacity(&boot_with_overlay, 1);
     let model = r.state.boot_model.clone().expect("rig wires a boot model");
     let active_path = model.active_path();
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
     let watch = spawn_watch(
         r.boot_path.clone(),
         r.config.clone(),
         r.state.clone(),
-        WatchOptions::default().with_poll_interval(TEST_POLL),
+        options,
     );
     let persist = spawn_running_persist(r.state.clone(), Duration::from_millis(40));
 
-    // The boot overlay is adopted at start (seeded into the store, composed).
+    // The boot overlay is adopted at start (seeded into the store, composed by
+    // the persister's startup write).
     assert!(
         wait_until(SETTLE, || std::fs::read_to_string(&active_path)
             .ok()
@@ -2748,16 +2818,20 @@ async fn a_shed_file_watch_overlay_remove_is_redelivered_and_adopted_on_retry() 
     );
 
     // Edit the BOOT file to REMOVE the overlay (drop the [[overlays]] block).
+    // Two deterministic ticks drive the (shed) first apply → RemoveOverlay sheds.
     std::fs::write(&r.boot_path, BOOT_DOC).expect("edit boot file: remove the overlay");
+    drive_polls(&mut poll, 2).await;
 
-    // The watcher reseeds the store (removes ov_clock) even on a shed.
+    // The watcher reseeds the store (removes ov_clock) even on a shed — a
+    // SYNCHRONOUS store write in the apply, present the instant the tick completes.
     assert!(
-        wait_until(SETTLE, || r.state.overlays.get("ov_clock").is_err()).await,
+        r.state.overlays.get("ov_clock").is_err(),
         "the watcher reseeds the overlay store (removes it) on the (shed) first attempt"
     );
 
     // While the RemoveOverlay is shed-pending, active.toml must STILL carry the
-    // overlay — the engine still renders it (the removal was not adopted).
+    // overlay — the engine still renders it (the removal was not adopted). The
+    // persister runs on its own timer; give it windows to (wrongly) act.
     tokio::time::sleep(TEST_POLL * 3).await;
     if let Ok(text) = std::fs::read_to_string(&active_path) {
         assert!(
@@ -2766,10 +2840,12 @@ async fn a_shed_file_watch_overlay_remove_is_redelivered_and_adopted_on_retry() 
         );
     }
 
-    // Drain the bus: the retry must re-derive the removal from the file baseline,
-    // re-submit RemoveOverlay (now it lands), unadopt it, and drop it from
+    // Drain the bus, then drive the RETRY (two more ticks): it must re-derive the
+    // removal from the file baseline, re-submit RemoveOverlay (now it lands),
+    // unadopt it, and fire `running_changed` so the persister drops it from
     // active.toml.
     let _ = r.commands.try_drain();
+    drive_polls(&mut poll, 2).await;
     assert!(
         wait_until(SETTLE, || std::fs::read_to_string(&active_path)
             .ok()
@@ -2781,4 +2857,110 @@ async fn a_shed_file_watch_overlay_remove_is_redelivered_and_adopted_on_retry() 
 
     watch.stop();
     persist.abort();
+}
+
+// ===========================================================================
+// Deterministic watcher harness (task #131).
+//
+// The watcher's poll loop is driven by a MANUAL TICK
+// (`WatchOptions::with_manual_poll`) instead of the wall clock. Every
+// `ManualPoll::poll_once().await` runs EXACTLY one poll iteration and resolves
+// only once that iteration has fully completed and the loop is parked again, so
+// these tests assert the SAME retry/settle behaviour as their `wait_until(SETTLE)`
+// counterparts WITHOUT any `tokio::time::sleep` — no poll/debounce wall-clock
+// race, deterministic under arbitrary host contention. The watcher's debounce
+// (a new fingerprint must be seen on TWO consecutive polls before it acts) is
+// driven by firing two ticks, not by sleeping two poll intervals.
+// ===========================================================================
+
+/// Fire `n` deterministic watcher poll iterations, awaiting each to completion.
+/// Panics if the loop has exited early (a `poll_once` that returns `false`
+/// before `n` is reached is a real defect, not a flake).
+async fn drive_polls(poll: &mut ManualPoll, n: usize) {
+    for i in 0..n {
+        assert!(
+            poll.poll_once().await,
+            "the watcher loop exited before poll {} of {n} — it must stay alive across the drive",
+            i + 1
+        );
+    }
+}
+
+/// Settle the watcher's initial pass deterministically: the first settled poll
+/// re-reads the file and diffs it against the boot baseline (review M2 in
+/// `config_watch.rs`). Two ticks cross the two-poll debounce; for an UNCHANGED
+/// boot file the diff is empty and is adopted with no commands and no apply
+/// count. Returns once the loop is parked again. Asserts the unchanged settle
+/// applied nothing (the deterministic equivalent of the `applied_count == 0`
+/// boot-window invariant).
+async fn settle_initial(poll: &mut ManualPoll, state: &AppState) {
+    drive_polls(poll, 2).await;
+    assert_eq!(
+        state.config_watch.snapshot().applied_count,
+        0,
+        "the unchanged boot file must settle to an empty diff (no apply)"
+    );
+}
+
+/// DETERMINISTIC equivalent of `revert_after_a_file_watch_apply_returns_to_loaded`'s
+/// apply gate: an external boot-file edit hot-applies through the watcher, driven
+/// by manual ticks with ZERO wall-clock waits. Proves the manual-poll seam
+/// exercises the real settle → diff → apply path (task #131). The previous
+/// version slept `TEST_POLL` and polled `wait_until(SETTLE=10s)` for
+/// `applied_count >= 1`; this one fires exactly the ticks the debounce needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_poll_drives_an_external_edit_apply_deterministically() {
+    let mut r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        options,
+    );
+
+    // Settle the boot baseline (unchanged file ⇒ empty diff ⇒ no apply).
+    settle_initial(&mut poll, &r.state).await;
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#101418"),
+        "the store still holds the boot colour after the initial settle"
+    );
+
+    // External edit: in_a goes near-white. One tick registers the new
+    // fingerprint as a candidate; the second crosses the debounce and applies.
+    std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#f0f0f0")).expect("edit boot file");
+    assert!(poll.poll_once().await, "first poll: candidate registered");
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        0,
+        "one poll only registers the candidate; the debounce has not settled yet"
+    );
+    assert!(
+        poll.poll_once().await,
+        "second poll: the settled edit applies"
+    );
+
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
+        "the settled external edit applies exactly once — deterministically"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#f0f0f0"),
+        "the store mirrors the applied edit"
+    );
+    let drained = r.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| matches!(
+            c,
+            Command::UpsertSource { source, .. } if source.id == "in_a"
+        )),
+        "the edit rides the live machinery (UpsertSource), got {drained:?}"
+    );
+
+    watch.stop();
 }
