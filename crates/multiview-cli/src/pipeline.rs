@@ -9286,6 +9286,13 @@ fn frame_to_seek_us(frame: u64, cadence: Rational) -> i64 {
     i64::try_from(us).unwrap_or(i64::MAX)
 }
 
+/// The media-player fail-safe: after this many consecutive open→decode→EOF laps
+/// that publish ZERO frames, the asset cannot be played at its declared geometry
+/// (truncated / zero-frame / corrupt, or an in-point/target past the real clip
+/// end) — `stream_player` gives up re-seeking and holds last-good, so the ingest
+/// thread can never spin seek→EOF→seek (rule 26 / inv #1).
+const MAX_UNPRODUCTIVE_LAPS: u32 = 3;
+
 /// The **media-player** decode loop (ADR-0057 / ADR-0097): drives a
 /// pre-declared player channel's transport over the open container.
 ///
@@ -9381,8 +9388,30 @@ fn stream_player(
     // bump), never a pixel-plane copy — no per-frame heap allocation on the hold
     // path (bounded-memory data plane, inv #5 / rule 22).
     let mut last_image: Option<Arc<Nv12Image>> = None;
-    // Whether the decoder has been fully drained (EOF reached with no loop).
+    // Whether the decoder has been fully drained (EOF reached with no loop, or a
+    // fail-safe gave up): the loop falls through to `heartbeat_player_hold`, which
+    // holds last-good forever — the tile rides the framestore state machine and
+    // the output clock keeps ticking undisturbed (inv #1).
     let mut drained = false;
+    // FAIL-SAFE bounds against a bad/truncated/corrupt asset spinning the ingest
+    // thread (rule 26 — bad inputs are the purpose; inv #1 — never stall output):
+    // `discarded` counts frames dropped since the last seek while aligning to a
+    // frame-accurate target; `unproductive_laps` counts consecutive open→decode→
+    // EOF cycles that published ZERO frames. Either exceeding its bound is a clear
+    // "this asset cannot satisfy this geometry" signal → stop seeking and HOLD
+    // last-good, never busy-re-arm seek→EOF→seek.
+    let mut discarded: u64 = 0;
+    let mut produced_this_lap: u64 = 0;
+    let mut unproductive_laps: u32 = 0;
+    // The discard budget: a generous multiple of the declared clip length plus a
+    // floor, so a legitimate keyframe-bracketed seek (discarding back to the prior
+    // keyframe) always succeeds, but an unreachable target (past clip end) or a
+    // PTS/index mismatch cannot discard forever.
+    let max_discard = handle
+        .geometry
+        .out_point()
+        .saturating_mul(2)
+        .saturating_add(256);
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -9431,10 +9460,26 @@ fn stream_player(
             if let Some(target) = pending_target {
                 let idx = frame_index_of(&decoded, origin, frame_period_ns);
                 if idx < target {
+                    // FAIL-SAFE: bound the decode-discard so an unreachable target
+                    // (past clip end) or a PTS/index mismatch cannot discard
+                    // forever. Give up → drain + hold last-good (inv #1/#2).
+                    discarded = discarded.saturating_add(1);
+                    if discarded > max_discard {
+                        tracing::warn!(
+                            player = %plan.id, target, discarded,
+                            "media player: seek target unreachable (discard budget exhausted) — \
+                             holding last-good"
+                        );
+                        drained = true;
+                        break;
+                    }
                     continue;
                 }
+                // Target reached: aligned. Reset the discard budget for the next
+                // seek.
                 pending_target = None;
                 source_frame = idx;
+                discarded = 0;
             }
             match player.on_decoded(source_frame) {
                 PlayerAction::Publish { at } => {
@@ -9452,14 +9497,19 @@ fn stream_player(
                     last_image = Some(Arc::clone(&image));
                     plan.store.publish_arc(image, at);
                     source_frame = source_frame.saturating_add(1);
+                    produced_this_lap = produced_this_lap.saturating_add(1);
                 }
                 PlayerAction::SeekFlushTo { frame } => {
                     // The in-place loop/vamp wrap: discard this boundary frame,
                     // seek to the in-point, flush the decoder (ADR-0097 rule 2),
                     // and keep decoding (the decode-discard above lands the first
-                    // published frame exactly on the in-point). Break to re-read
-                    // packets from the new position.
+                    // published frame exactly on the in-point). A wrap that
+                    // published frames is a healthy lap → reset the unproductive
+                    // counter; break to re-read packets from the new position.
                     apply_player_seek(input, decoder, frame, cadence, &mut pending_target);
+                    discarded = 0;
+                    unproductive_laps = 0;
+                    produced_this_lap = 0;
                     break;
                 }
                 PlayerAction::Hold { at } => {
@@ -9505,13 +9555,36 @@ fn stream_player(
                 // thread, ADR-0057 Decision 6).
             }
             Err(ffmpeg::Error::Eof) => {
-                // End of the container. If the player is in a publishing state
-                // it will wrap (loop) — but a wrap is driven by `on_decoded`
-                // reaching the out-point, not by EOF; reaching real EOF before
-                // the out-point means the asset is shorter than declared, so we
-                // drain and hold. Flush + seek-to-in-point if looping so the
-                // next iteration re-reads from the top.
+                // End of the container. If the player is in a publishing state it
+                // loops by re-seeking to the in-point and re-reading (a wrap is
+                // normally driven by `on_decoded` reaching the out-point; hitting
+                // real EOF first means the asset is shorter than declared).
+                //
+                // FAIL-SAFE: a cycle that published ZERO frames is an unplayable
+                // asset for this geometry (truncated / zero-frame / corrupt, or a
+                // target past the real clip end). Re-seeking forever would spin
+                // the ingest thread (rule 26 / inv #1). After
+                // `MAX_UNPRODUCTIVE_LAPS` such cycles, give up → drain + hold
+                // last-good, never busy-re-arm seek→EOF→seek.
                 if player.is_playing_state() {
+                    if produced_this_lap == 0 {
+                        unproductive_laps = unproductive_laps.saturating_add(1);
+                        if unproductive_laps >= MAX_UNPRODUCTIVE_LAPS {
+                            tracing::warn!(
+                                player = %plan.id, laps = unproductive_laps,
+                                "media player: asset produced no frames for this geometry — \
+                                 holding last-good (no further re-seek)"
+                            );
+                            decoder.send_eof().map_err(|e| e.to_string())?;
+                            drained = true;
+                            continue;
+                        }
+                    } else {
+                        // A productive lap: reset the unproductive counter and
+                        // re-arm the next loop from the in-point.
+                        unproductive_laps = 0;
+                    }
+                    produced_this_lap = 0;
                     let in_point = handle.geometry.in_point();
                     apply_player_seek(input, decoder, in_point, cadence, &mut pending_target);
                 } else {
@@ -12433,6 +12506,107 @@ mod media_player_loop_tests {
             "the published timeline must advance past one window (got {max_stamp} ns ≤ \
              {one_window_ns} ns — the seam froze/clamped)"
         );
+    }
+
+    #[test]
+    fn an_unplayable_asset_holds_last_good_without_spinning_the_ingest_thread() {
+        // FAIL-SAFE (rule 26 / inv #1): a vamp window whose frames DO NOT EXIST in
+        // the asset (here a 4-frame clip but a declared out-point of 12 + vamp
+        // [8, 12)) must NOT cycle seek→EOF→seek forever on the ingest thread — the
+        // decode-discard can never reach frame 8, and every open→decode→EOF lap
+        // publishes zero frames. The player must bound the discard / unproductive
+        // laps, give up, and HOLD last-good — the ingest thread TERMINATES ON ITS
+        // OWN (no `stop` set), leaving the output clock undisturbed. Against the
+        // pre-fix code this loops forever and the assertion below times out.
+        const REAL_FRAMES: u32 = 4;
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("short.ts");
+        generate_loop_clip(&clip, REAL_FRAMES);
+
+        let cadence = Rational::new(25, 1);
+        // Declared geometry far exceeds the real 4-frame clip: BOTH the in-point
+        // (8) and the vamp window [8, 12) are entirely past the real end, so every
+        // open→decode→EOF lap (which re-seeks to the in-point) decodes only frames
+        // 0..3, discards them all (idx < 8), and publishes NOTHING — a genuine
+        // unproductive spin the fail-safe must break.
+        let geometry = PlayoutGeometry::new(8, 12, 8, 12, cadence).unwrap();
+        let mailbox = Arc::new(TransportMailbox::new());
+        let handle = crate::player::PlayerHandle::new(
+            "vt-bad".to_owned(),
+            geometry,
+            EofPolicy::Loop,
+            true,
+            Arc::clone(&mailbox),
+        );
+        let store = Arc::new(TileStore::new(
+            "vt-bad",
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+        let plan = super::IngestPlan {
+            id: "vt-bad".to_owned(),
+            location: super::SourceLocation::Path(clip.clone()),
+            player: Some(handle),
+            tile_w: 160,
+            tile_h: 120,
+            store: Arc::clone(&store),
+            live: false,
+            #[cfg(feature = "overlay")]
+            incontainer_sub: None,
+            #[cfg(feature = "overlay")]
+            embedded_cc: None,
+            canvas_color: super::CanvasColor::default(),
+            cadence,
+            decode_placement: super::DecodePlacement::Default,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_registry: None,
+            #[cfg(feature = "webrtc-native")]
+            webrtc_audio_store: None,
+            #[cfg(feature = "ndi")]
+            ndi_accept_license: false,
+            #[cfg(feature = "ndi")]
+            ndi_acceptance: multiview_input::ndi::license::LicenseAcceptance {
+                accepted_by: String::new(),
+                accepted_at: String::new(),
+            },
+            #[cfg(feature = "youtube")]
+            youtube_url_slot: None,
+        };
+
+        // Drive the player WITHOUT ever setting `stop`: the fail-safe must end the
+        // thread on its own when the asset cannot satisfy the geometry.
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let player_thread = std::thread::Builder::new()
+            .name("media-player-failsafe-test".to_owned())
+            .spawn(move || super::ingest_loop(&plan, &stop_thread))
+            .unwrap();
+
+        // Poll for self-termination for up to ~5 s. A correct fail-safe bounds the
+        // discard + unproductive laps and returns well within this; a spin never
+        // finishes (the pre-fix RED).
+        let mut finished = false;
+        for _ in 0..500 {
+            if player_thread.is_finished() {
+                finished = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            finished,
+            "the player ingest thread did NOT terminate on an unplayable asset — \
+             it is spinning seek→EOF→seek (the fail-safe is missing)"
+        );
+        // Stop is a no-op (already finished); join to reap.
+        stop.store(true, Ordering::Release);
+        player_thread.join().unwrap();
+
+        // The output path is undisturbed: the tile rides the framestore state
+        // machine (last-good / NO_SIGNAL). A reader never blocks — confirm the
+        // store responds (here: no real frame was ever decodable, so it holds
+        // NO_SIGNAL under the Slate-vs-HoldForever read, never a hang).
+        let _ = store.read_at(MediaTime::from_nanos(1_000_000_000));
     }
 }
 

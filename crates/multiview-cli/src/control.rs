@@ -1063,13 +1063,14 @@ pub struct CommandDrain {
     /// actions (never a silent drop).
     live_overlays: Option<crate::live_overlays::OverlayApplySlot>,
     /// The media-player transport seam (ADR-0057 / ADR-0097): the per-player
-    /// bounded, conflated-latest [`TransportMailbox`](crate::player::TransportMailbox)
-    /// the running player ingest thread drains between frames, keyed by player
-    /// id. A `MediaTransport`/`ArmMediaExit`/`TakeMediaExit`/`CancelMediaExit`
-    /// command submits its verb to the addressed player's mailbox (a wait-free
-    /// `try`-style push; the engine never awaits the player — inv #1/#10). An
-    /// empty map (no players configured) ⇒ those commands are surfaced held
-    /// (warned), never a silent drop.
+    /// bounded [`TransportMailbox`](crate::player::TransportMailbox) the running
+    /// player ingest thread drains between frames, keyed by player id. A
+    /// `MediaTransport`/`ArmMediaExit`/`TakeMediaExit`/`CancelMediaExit` command
+    /// submits its verb to the addressed player's mailbox (a short mutex-guarded
+    /// push into a bounded two-class queue — state verbs conflated latest-wins,
+    /// targeted verbs a bounded drop-oldest FIFO; the engine never awaits the
+    /// player — inv #1/#10). An empty map (no players configured) ⇒ those
+    /// commands are surfaced held (warned), never a silent drop.
     player_mailboxes:
         std::collections::HashMap<String, std::sync::Arc<crate::player::TransportMailbox>>,
     /// One-shot: the drive's cell-id → index map is established the first tick.
@@ -1488,8 +1489,8 @@ impl CommandDrain {
                 self.set_tally_override(target, color);
             }
             // Media-player transport (ADR-0057 / ADR-0097): submit the verb to the
-            // addressed player's mailbox (wait-free, conflated-latest; the player
-            // thread drains it between frames — the engine never awaits it).
+            // addressed player's bounded mailbox (a short mutex-guarded push; the
+            // player thread drains it between frames — the engine never awaits it).
             Command::MediaTransport {
                 ref player,
                 ref verb,
@@ -1514,10 +1515,11 @@ impl CommandDrain {
         }
     }
 
-    /// Submit a transport verb to the addressed player's mailbox. A wait-free,
-    /// conflated-latest push the player ingest thread drains between frames — the
-    /// engine never awaits the player (inv #1/#10). An unknown player id (none
-    /// configured / a typo) is surfaced held (warned), never a silent drop.
+    /// Submit a transport verb to the addressed player's bounded mailbox (a short
+    /// mutex-guarded push into the two-class queue) the player ingest thread
+    /// drains between frames — the engine never awaits the player (inv #1/#10).
+    /// An unknown player id (none configured / a typo) is surfaced held (warned),
+    /// never a silent drop.
     fn submit_player_verb(&self, player: &str, verb: crate::player::TransportVerb) {
         let Some(mailbox) = self.player_mailboxes.get(player) else {
             tracing::warn!(

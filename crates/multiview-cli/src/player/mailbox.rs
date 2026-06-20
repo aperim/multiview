@@ -1,21 +1,34 @@
-//! The transport command mailbox: a bounded, **conflated latest-wins** seam
-//! from the control plane (the CLI frame-boundary command drain) to a media
-//! player's ingest thread.
+//! The transport command mailbox: a **bounded** seam from the control plane (the
+//! CLI frame-boundary command drain) to a media player's ingest thread.
 //!
-//! # Why conflated-latest, not a queue
+//! # The two-class bounded model
 //!
-//! Transport verbs are operator-rate, idempotent state transitions; the only
-//! thing the ingest thread needs is the *most recent* intent per logical slot,
-//! sampled between frames. A growable queue would violate the bounded-memory
-//! data-plane rule (safety §5) and could let a burst of verbs lag playout. So
-//! the mailbox holds **one slot of pending verbs**, drained wholesale by the
-//! thread between frames; the writer never blocks and the reader never awaits
-//! (invariants #1/#10). Play/pause/stop/vamp/exit collapse to the latest;
-//! load/cue/seek carry a target so they are applied in submission order within
-//! a single drain.
+//! Transport verbs are operator-rate, idempotent intents the ingest thread
+//! samples between frames. The mailbox is **always bounded** (it can never grow
+//! without limit — inv #10, safety §5), in two classes:
+//!
+//! - **State-collapsing** verbs (play/vamp/pause/stop/arm/take/cancel-exit) are
+//!   **conflated latest-wins**: a new one supersedes any earlier pending state
+//!   verb, so at most one is ever held.
+//! - **Targeted** verbs (load/cue/seek) carry distinct targets, so they are held
+//!   in a **bounded FIFO** (cap [`MAX_TARGETED_PENDING`], **drop-oldest** on
+//!   overflow with a warning), **order-preserving** — each distinct seek is
+//!   honoured in submission order; they are *not* collapsed latest-wins (that
+//!   would lose intended intermediate seeks).
+//!
+//! # Locking
+//!
+//! The pending verbs live behind a [`std::sync::Mutex`], so `submit`/`drain`
+//! take a short **mutex-guarded critical section** — this is **not** a wait-free
+//! seam. The inv-#10 property that holds is that the writer is never blocked by a
+//! slow *consumer*: the ingest thread's drain is a quick `mem::take` (it never
+//! holds the lock across a decode, a publish, or an `.await`), so the lock is
+//! contended only for O(pending) pushes/takes and is released immediately. A
+//! producer therefore never stalls on the engine, and the engine never awaits a
+//! producer.
 //!
 //! The mailbox is the *only* shared mutable seam; the [`super::MediaPlayer`]
-//! itself lives wholly on the ingest thread (no lock on the hot path).
+//! itself lives wholly on the ingest thread (no lock on its per-frame path).
 
 use std::sync::Mutex;
 
@@ -78,9 +91,11 @@ const MAX_TARGETED_PENDING: usize = 16;
 ///
 /// Drained wholesale between frames. Cloneable handle semantics: both the
 /// control-plane writer and the ingest thread hold an [`std::sync::Arc`] to the
-/// same `TransportMailbox`. The lock is held only for the O(1) push/drain of a
-/// tiny `Vec` — never across a decode, a publish, or an `.await` (inv #1/#10);
-/// the writer never blocks and the reader never awaits.
+/// same `TransportMailbox`. Access is a short **mutex-guarded** critical section
+/// (NOT wait-free): the lock is held only for an O(pending) push/conflate or a
+/// `mem::take` drain over a tiny `Vec` — never across a decode, a publish, or an
+/// `.await`. So the writer is never blocked by a slow *consumer* and the engine
+/// never awaits a producer (inv #10), and the reader never awaits.
 #[derive(Debug, Default)]
 pub struct TransportMailbox {
     pending: Mutex<Vec<TransportVerb>>,
@@ -95,7 +110,9 @@ impl TransportMailbox {
 
     /// Submit a verb (control-plane side). Bounded by construction (see the type
     /// docs): a state-collapsing verb conflates latest-wins; a targeted verb
-    /// joins a bounded drop-oldest FIFO. Never blocks; never grows unbounded.
+    /// joins a bounded drop-oldest FIFO. Takes a short mutex-guarded critical
+    /// section (not wait-free) but never grows unbounded and never blocks on a
+    /// slow consumer (the drain holds the lock only for a `mem::take`).
     pub fn submit(&self, verb: TransportVerb) {
         // Poisoned lock: the data plane must not panic — fall back to a no-op
         // (the thread keeps playing last-good; the operator can re-submit).
@@ -126,8 +143,9 @@ impl TransportMailbox {
     }
 
     /// Drain all pending verbs (ingest-thread side), in submission order.
-    /// Returns an empty `Vec` when nothing is pending. Never blocks beyond the
-    /// O(1) swap.
+    /// Returns an empty `Vec` when nothing is pending. Holds the mutex only for a
+    /// single `mem::take` (it never holds the lock across decode/publish), so a
+    /// producer's `submit` is never blocked for more than that swap.
     #[must_use]
     pub fn drain(&self) -> Vec<TransportVerb> {
         match self.pending.lock() {
