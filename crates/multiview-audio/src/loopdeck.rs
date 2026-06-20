@@ -66,6 +66,13 @@ pub const MAX_LOOP_SECONDS: u64 = 600;
 /// sees it, ADR-R005).
 pub const SAMPLE_RATE: u64 = 48_000;
 
+/// How many frames a decoded vamp window may fall short of its frame-derived
+/// target before the deck **refuses** it (rather than looping a shifted-length
+/// body — Defect 3). A few samples of resampler-edge shortfall (≈ 1 ms at 48 kHz)
+/// is zero-padded and tolerated; anything more is a truncated asset → ride
+/// silence. 64 frames ≈ 1.3 ms — inaudible at the loop point.
+const SHORTFALL_TOLERANCE_FRAMES: usize = 64;
+
 /// The correlation threshold above which the seam is treated as **correlated**
 /// (a sustained tone/pad continuing across the loop) and a **linear**
 /// constant-amplitude crossfade is used instead of equal-power. Below it the seam
@@ -269,32 +276,38 @@ impl LoopDeck {
         let loop_frames = usize::try_from(loop_samples).unwrap_or(usize::MAX);
         let in_idx = usize::try_from(in_sample).unwrap_or(usize::MAX);
 
-        // The window we need is [in_sample, out_sample + W). The decoded sample
-        // count for a time range can fall a few samples short of the frame-derived
-        // target (resampler edge effects), so **clamp the loop body to the content
-        // that actually decoded** rather than refusing on a tiny shortfall — the
-        // loop is sample-locked to the decoded duration, which is what plays.
+        // The window we need is [in_sample, out_sample + W). The loop length is the
+        // **declared** body (`loop_frames`) so the audio stays sample-locked to the
+        // video's `vamp_len` — it is NEVER silently clamped to a shorter decoded
+        // span (that would shift the loop point off the video, Defect 3). A decoded
+        // time range can fall a *few* samples short of the frame-derived target
+        // (resampler edge), so a small tolerance is allowed; a **materially** short
+        // clip (a truncated asset) is **refused** → the channel rides silence.
         let total_frames = clip.len() / channels;
         if in_idx >= total_frames {
             return Ok(Self::empty(format));
         }
         let available = total_frames - in_idx;
-        // Body = the requested vamp length, clamped to what decoded. A real
-        // truncation (the clip is materially shorter than the declared window) still
-        // loops the available content, sample-locked to it; only a near-empty body
-        // (≤ one crossfade window) rides silence (nothing meaningful to loop).
-        let loop_frames = loop_frames.min(available);
-        if loop_frames <= xfade {
+        if available + SHORTFALL_TOLERANCE_FRAMES < loop_frames {
+            // Materially shorter than the declared window — refuse rather than loop
+            // a shifted-length body (a tiny resampler-edge shortfall is tolerated).
             return Ok(Self::empty(format));
         }
-        let want_end = in_idx
-            .saturating_add(loop_frames)
-            .saturating_add(xfade)
-            .min(total_frames);
+        // The body is the full declared length, zero-padded if a tiny resampler
+        // shortfall left the last few samples missing (inaudible, keeps the loop
+        // sample-locked). The lap-over is whatever real content follows, up to W.
+        let body_end = in_idx.saturating_add(loop_frames);
+        let want_end = body_end.saturating_add(xfade).min(total_frames);
         let start_off = in_idx.saturating_mul(channels);
         let end_off = want_end.saturating_mul(channels);
-        let window: &[f32] = clip.get(start_off..end_off).unwrap_or(&[]);
-        Self::with_segment(format, window, loop_frames, xfade)
+        let mut window: Vec<f32> = clip.get(start_off..end_off).unwrap_or(&[]).to_vec();
+        // Pad to at least the body length (covers a sub-tolerance shortfall) so the
+        // body is exactly `loop_frames` frames — sample-locked, never shifted.
+        let body_span = loop_frames.saturating_mul(channels);
+        if window.len() < body_span {
+            window.resize(body_span, 0.0);
+        }
+        Self::with_segment(format, &window, loop_frames, xfade)
     }
 
     /// Precompute the `xfade`-frame seam region: for in-lap frame `m ∈ [0, xfade)`
@@ -420,15 +433,24 @@ impl LoopDeck {
     /// after which the deck contributes silence. No-op if not vamping or already
     /// exiting. Reversible by [`LoopDeck::cancel_exit`] until the seam fires.
     pub fn arm_exit(&mut self) {
+        let here = self.cursor.get();
+        self.arm_exit_at(here);
+    }
+
+    /// Arm the vamp exit anchored at an explicit absolute frame `anchor` (the
+    /// video rail's arm position, in this deck's 48 kHz frame space) rather than
+    /// the deck's own cursor — so the audio exit fires at the **same** next-vamp
+    /// boundary the video rail computes (ADR-T019: the two rails share the
+    /// `[vamp_in, vamp_out)` geometry anchored at output media-time ZERO, so the
+    /// next wrap at-or-after `anchor` is one instant for both). The exit fires at
+    /// the next wrap **strictly after** `anchor` so the current lap completes.
+    /// No-op if not vamping or already exiting.
+    pub fn arm_exit_at(&mut self, anchor: u64) {
         if let DeckState::Vamping { .. } = self.state {
             self.state = DeckState::Vamping { exit_armed: true };
-            // Latch the exit at the next wrap strictly after the high-water frame,
-            // so the current lap completes before the exit fires (the boundary is
-            // computed against the publish position, not the decode position).
             if self.loop_frames > 0 {
-                let here = self.cursor.get();
                 let l = to_u64(self.loop_frames);
-                let next_wrap = here.saturating_div(l).saturating_add(1).saturating_mul(l);
+                let next_wrap = anchor.saturating_div(l).saturating_add(1).saturating_mul(l);
                 self.state = DeckState::Exiting {
                     exit_seam: next_wrap,
                 };
@@ -493,8 +515,40 @@ impl LoopDeck {
     /// segment otherwise). Advances the deck's high-water mark (so a later
     /// [`LoopDeck::arm_exit`] anchors to the right seam) without affecting the
     /// returned samples.
+    ///
+    /// Allocates a fresh `AudioBlock` — convenient for tests and one-off reads. The
+    /// **hot path** (the fill loop) uses [`LoopDeck::read_into`] with a reused
+    /// buffer to avoid per-block allocation (rule 22).
     #[must_use]
     pub fn read_at(&self, abs_frame: u64, frames: usize) -> AudioBlock {
+        let channels = self.format.channel_count();
+        let mut out = vec![0.0f32; frames.saturating_mul(channels)];
+        self.fill(abs_frame, frames, &mut out);
+        AudioBlock::from_interleaved(self.format, out)
+            .unwrap_or_else(|_| AudioBlock::silence(self.format, frames))
+    }
+
+    /// Pull `frames` frames of the looped stream into a **caller-provided reusable
+    /// buffer** `out`, filled IN PLACE — the **zero-per-block-allocation** hot path
+    /// (rule 22 / ADR-T019 §1). `out` is resized to `frames × channels` (reusing
+    /// its existing capacity when sufficient — the caller sizes it once at prime),
+    /// then overwritten; the deck holds no scratch of its own. Same realign-safe
+    /// pure-function-of-`abs_frame` semantics as [`LoopDeck::read_at`].
+    pub fn read_into(&self, abs_frame: u64, frames: usize, out: &mut Vec<f32>) {
+        let channels = self.format.channel_count();
+        let needed = frames.saturating_mul(channels);
+        // `resize` reuses the existing allocation when `capacity >= needed`, so no
+        // realloc on the steady path (the caller pre-sizes to the max refill).
+        out.clear();
+        out.resize(needed, 0.0);
+        self.fill(abs_frame, frames, out);
+    }
+
+    /// Fill `out` (already sized to `frames × channels`, zeroed) with the looped
+    /// stream starting at `abs_frame`. The shared core of [`LoopDeck::read_at`] and
+    /// [`LoopDeck::read_into`]. Advances the deck's high-water mark (exit-seam
+    /// anchoring) without affecting the samples.
+    fn fill(&self, abs_frame: u64, frames: usize, out: &mut [f32]) {
         let channels = self.format.channel_count();
         // Track how far we have been read (for exit-seam anchoring); the output is
         // unaffected by this bookkeeping.
@@ -503,11 +557,12 @@ impl LoopDeck {
             self.cursor.set(end);
         }
 
-        // States that contribute silence: empty deck, idle, or paused.
+        // States that contribute silence: empty deck, idle, or paused. `out` is
+        // already zeroed (silence) by the caller — nothing to write.
         let silent =
             self.loop_frames == 0 || matches!(self.state, DeckState::Idle | DeckState::Paused);
         if silent {
-            return AudioBlock::silence(self.format, frames);
+            return;
         }
 
         let l = to_u64(self.loop_frames);
@@ -516,31 +571,27 @@ impl LoopDeck {
             _ => None,
         };
 
-        let mut out = vec![0.0f32; frames.saturating_mul(channels)];
         for f in 0..frames {
             let abs = abs_frame.saturating_add(to_u64(f));
 
-            // Past the exit: silence.
+            // Past the exit: silence (`out` is already zeroed).
             if let Some(seam) = exit_seam {
                 if abs >= seam.saturating_add(to_u64(self.xfade)) {
-                    continue; // leaves this frame silent
+                    continue;
                 }
                 if abs >= seam {
                     // The exit fade-out tail: the loop's head sample at the lap
                     // position, cosine-faded to silence over `xfade`.
                     let j = to_usize(abs - seam);
                     let g = exit_gain(j, self.xfade);
-                    self.write_loop_frame(&mut out, f, lap_pos(seam, l), channels, Some(g));
+                    self.write_loop_frame(out, f, lap_pos(seam, l), channels, Some(g));
                     continue;
                 }
             }
 
             let m = to_usize(abs % l);
-            self.write_loop_frame(&mut out, f, m, channels, None);
+            self.write_loop_frame(out, f, m, channels, None);
         }
-
-        AudioBlock::from_interleaved(self.format, out)
-            .unwrap_or_else(|_| AudioBlock::silence(self.format, frames))
     }
 
     /// Write one looped frame `m ∈ [0, L)` into output frame slot `f`, optionally

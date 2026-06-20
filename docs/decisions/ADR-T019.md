@@ -176,34 +176,50 @@ The audio twin of `stream_player`, on a **dedicated OS decode thread** ([ADR-000
 never a Tokio worker):
 
 1. **Prime once.** Open the asset with `AudioFileDecoder` (48 kHz / bus layout /
-   `f32`), decode forward, and capture **only** the `[vamp_in, vamp_out + W)`
-   frames into the `LoopDeck` (the `[vamp_in, vamp_out)` loop body + the `W`
-   lap-over frames; the pre-vamp head and post-tail are *not* buffered — the MVP
-   loops the vamp segment). Decoding is bounded by the asset's declared
-   `out_point_frames` **and** a hard cap `MAX_LOOP_SECONDS` (§5); the buffer is
-   allocated once, never per-sample (inv #5 / rule 22). A decode that yields
-   nothing (no audio stream, truncated, in-point past clip end) leaves the deck
-   **empty** → the source rides **silence** (the store silence-fills), never an
-   error, never a stall.
-2. **Replay — the deck position is the bus's absolute read cursor.** Keep the
-   `AudioStore` filled a bounded lead **ahead of the bus's read cursor** (the
-   `tone_publish_loop` pattern, `audio.rs:190`): each wakeup, read
+   `f32`), decode forward **up to the vamp window's end** (`vamp_out + W`,
+   discarding the pre-`vamp_in` head), and slice the `[vamp_in, vamp_out)` body +
+   the `W` lap-over frames into the `LoopDeck` (§5 — *not* a fixed-from-start cap,
+   so a late window is not silenced; the body is **refused, never silent-clamped**,
+   if over-cap or under-delivered). The deck's body buffer is allocated once, never
+   per-sample (inv #5 / rule 22). A decode that yields nothing (no audio stream,
+   truncated, in-point past clip end, over-cap window) leaves the deck **empty** →
+   the source rides **silence** (the store silence-fills), never an error, never a
+   stall.
+2. **Replay — the deck position is the bus's absolute read cursor, filled with no
+   per-block allocation.** Keep the `AudioStore` filled a bounded lead **ahead of
+   the bus's read cursor** (the `tone_publish_loop` pattern): each wakeup, read
    `store.read_cursor()` (the absolute frame the bus will pull next); the next
    frame to publish is `published` (the absolute write head). If a catch-up moved
    the read cursor past the write head, set `published = read_cursor` (never
-   back-fill an evicted span). Then publish `deck.read_at(published, n)` for a
-   bounded `n` and advance `published`. Because the published samples are
-   `deck.read_at(abs_frame, …)` — a **pure function of the absolute frame** — a
-   forced realign across a seam still emits the correctly faded seam for that
-   absolute position (no skipped/un-crossfaded seam under load; the defect a
-   stateful "deck cursor" would have, rule 26). Bounded bursts, mostly asleep, off
-   the hot path.
-3. **Transport.** Drain the **same shared `Arc<TransportMailbox>`** the video
-   thread drains, applying each `TransportVerb` to the `LoopDeck` (`Vamp`,
-   `ArmExit`, `TakeExit`, `CancelExit`, `Pause`, `Stop`, …). Because both threads
-   read the same mailbox and both wrap on the same `PlayoutGeometry` window, the
-   armed exit and every transport change land on the **same boundary** for audio
-   and video.
+   back-fill an evicted span). Then fill a **single reusable scratch `Vec`** (sized
+   once at prime to the max refill) **in place** via `LoopDeck::read_into(published,
+   n, &mut scratch)` and publish the slice with `AudioStore::publish_samples(&scratch)`
+   — **no per-block heap allocation on the audio hot path** (rule 22; the one
+   unavoidable copy is the store's copy-on-write append, on this sampled decode
+   thread, never the clock). Because `read_into` is a **pure function of the
+   absolute frame**, a forced realign across a seam still emits the correctly faded
+   seam for that absolute position (no skipped/un-crossfaded seam under load,
+   rule 26). Bounded bursts, mostly asleep, off the hot path. (`read_at` — the
+   allocating `AudioBlock` sibling — is retained for tests/one-off reads.)
+3. **Transport — the audio rail FOLLOWS the video rail (single authority).** The
+   audio rail does **not** drain the transport mailbox itself: `TransportMailbox::drain()`
+   is a destructive `mem::take` (single-consumer), so two rails draining the same
+   mailbox would each consume different verbs and **desync** (the cross-vendor
+   review's Defect 1). Instead the **video `stream_player` is the sole mailbox
+   consumer**; after it applies a verb it **publishes** its authoritative transport
+   decision to a wait-free `PlayerControlBus` (an `ArcSwap<PlayerControl>` with a
+   monotonic `generation` + the `AudioTransport` state + the exit-arm media-time
+   anchor, `crates/multiview-cli/src/player/control.rs`). The audio rail **samples**
+   the bus each block and, on a generation change, follows it: `Vamping` →
+   `deck.vamp()` (and `deck.arm_exit_at(anchor)` when an exit is armed), `Paused` →
+   `deck.pause()`, `Stopped` → `deck.stop()`. Same-boundary alignment is then true
+   **by construction** — one authority, one `PlayoutGeometry`. The exit anchor is
+   the video's current output media-time, which the audio maps to its 48 kHz frame
+   space; because both rails share the geometry anchored at output media-time ZERO,
+   the next vamp boundary at-or-after that anchor is **one instant** for both
+   (`deck.arm_exit_at` computes the next wrap strictly after the anchor). The audio
+   is *sampled* by the authority and follows it — it never paces (inv #1); the bus
+   is wait-free, so neither rail blocks the other (inv #10).
 
 ### 3. Sample-lock to the video wrap — the alignment guarantee
 
@@ -241,27 +257,42 @@ declares an out-point, additionally:
 - builds an `Arc<AudioStore>` at the canonical format and registers it in
   `audio_stores` (so the existing bus-routing at `pipeline.rs:2988` picks it up at
   unity gain — the same path every source's audio takes), and
-- queues a **player audio plan** carrying the asset path, the `PlayoutGeometry`
-  (so the deck's loop window matches the video's), the EOF policy, and the shared
-  mailbox `Arc`. The plan spawns a `player_audio_loop` thread alongside the
-  existing audio/tone threads (`pipeline.rs:5497`), under the same per-`{id}`
-  stop-flag registration so a live remove stops it too.
+- queues a **player audio plan** carrying the asset path, the vamp window +
+  cadence (so the deck's loop window matches the video's), and **the same
+  `Arc<PlayerControlBus>` the video `PlayerHandle` publishes to** (§2.3 — the
+  single authority). The plan spawns a `player_audio_loop` thread alongside the
+  existing audio/tone threads, under the same per-`{id}` stop-flag registration so
+  a live remove stops it too.
 
 A player whose asset is **silent** (no audio stream) contributes silence exactly
 as a silent tile does — *not* a half-built feature.
 
-### 5. Bounded memory — the `MAX_LOOP_SECONDS` cap
+### 5. Prime range + bounded memory — decode the window, refuse over-cap (no silent clamp)
 
-The loop body is held in RAM for the channel's life, so it is **bounded by an
-explicit cap**, not by operator restraint (safety §5). At the canonical 48 kHz
-stereo `f32` the segment costs `48000 × 2 × 4 = 384_000 B/s ≈ 0.366 MiB/s`. The
-prime decode stops at `MAX_LOOP_SECONDS` (default 600 s ≈ 220 MiB/channel); a
-declared vamp window longer than the cap is **refused for audio** — the player
-loops video normally and its audio rides silence with a one-line warning (never an
-OOM, never a silent truncation that would shift the loop point). The cap is a
-`const` in `multiview-audio` consulted at prime, surfaced in config validation so
-the operator sees the limit ([ADR-0057](ADR-0057.md) §8 player-count bounding is
-the sibling memory bound).
+The prime decodes **only up to the vamp window's end** (`vamp_out + W` samples,
+the exact-rational frame→sample image), discarding the pre-`vamp_in` head as it
+goes — **not** a fixed `MAX_LOOP_SECONDS`-from-the-asset-start. This is the
+cross-vendor review's Defect 3: capping the decode at 600 s *from the start* would
+**silence** a perfectly valid vamp window that merely begins late (e.g. an ident
+at `[590 s, 595 s]`). `AudioFileDecoder` has no seek, so reaching a late window
+costs decoding through the head once at prime (a bounded one-shot, off the output
+path; the transient decode buffer is freed after the bounded body is sliced out) —
+acceptable for the MVP's near-start vamps.
+
+The loop **body** is held in RAM for the channel's life, so it is **bounded by an
+explicit cap**, not operator restraint (safety §5). At 48 kHz stereo `f32` the
+segment costs `48000 × 2 × 4 = 384_000 B/s ≈ 0.366 MiB/s`; a declared vamp window
+whose **body** exceeds `MAX_LOOP_SECONDS` (default 600 s ≈ 220 MiB/channel) is
+**refused explicitly** — the player loops video normally and its audio rides
+silence with a one-line warning. Critically, a window the decode under-delivers
+(a truncated asset) is likewise **refused** (rides silence) rather than **silently
+clamped** to the shorter decoded span: clamping the body to "whatever decoded"
+would **shift the loop length** off the video's `vamp_len` and break the sample
+lock (the other half of Defect 3). Only a *few-sample* resampler-edge shortfall
+(`SHORTFALL_TOLERANCE_FRAMES`, ≈ 1 ms) is zero-padded and tolerated, keeping the
+body exactly `loop_frames` (sample-locked). The cap is a `const` in
+`multiview-audio` consulted at prime ([ADR-0057](ADR-0057.md) §8 player-count
+bounding is the sibling memory bound).
 
 ### 6. Invariant posture (explicit)
 

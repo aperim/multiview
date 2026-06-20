@@ -249,8 +249,11 @@ fn refill_poll_interval(cadence: Rational) -> Duration {
 /// own thread (ADR-T019 / ADR-0097 §8): where the asset audio lives, the
 /// integer-frame vamp window + cadence that defines the loop body (the same
 /// [`PlayoutGeometry`](crate::player::PlayoutGeometry) the video uses, so the
-/// audio wraps on the same instant), and the shared transport
-/// [`mailbox`](crate::player::TransportMailbox) the video thread also drains.
+/// audio wraps on the same instant), and the wait-free
+/// [`PlayerControlBus`](crate::player::PlayerControlBus) the audio rail **samples
+/// and follows** (ADR-T019 §1 — the video rail is the sole mailbox consumer and
+/// publishes its authoritative transport state here; the audio never drains the
+/// mailbox itself, so the rails can never desync).
 pub(crate) struct PlayerAudioPlan {
     /// The player channel id (for diagnostics + the program-bus route key).
     pub(crate) id: String,
@@ -264,15 +267,13 @@ pub(crate) struct PlayerAudioPlan {
     /// (so the loop length is the audio duration of `vamp_len` asset frames, the
     /// same sample count at any output cadence — ADR-T019 §3).
     pub(crate) cadence: Rational,
-    /// Whether the channel loops (vamps) on its first play, mirroring the video
-    /// [`PlayerHandle::loop_on_start`](crate::player::PlayerHandle). A non-looping
-    /// player plays its audio once then rides silence (the deck settles).
-    pub(crate) loop_on_start: bool,
     /// The output cadence (the bus tick rate) the fill loop paces its top-ups to.
     pub(crate) output_cadence: Rational,
-    /// The shared transport mailbox (the SAME `Arc` the video player thread
-    /// drains): transport verbs reach the audio loop on the same boundary.
-    pub(crate) mailbox: Arc<crate::player::TransportMailbox>,
+    /// The wait-free control bus (the SAME `Arc` on the video rail's
+    /// [`PlayerHandle`](crate::player::PlayerHandle)): the audio loop SAMPLES this
+    /// each block and follows the video's published transport state, so
+    /// vamp/arm-exit/stop land on the same boundary as the video by construction.
+    pub(crate) control_bus: Arc<crate::player::PlayerControlBus>,
 }
 
 /// Decode a whole asset's audio to canonical 48 kHz stereo `f32`, accumulating up
@@ -323,14 +324,19 @@ fn decode_clip_to_48k(path: &std::path::Path, max_frames: usize) -> Vec<f32> {
 /// Drive a media-player channel's **looping embedded audio** (ADR-T019): prime a
 /// [`LoopDeck`](multiview_audio::LoopDeck) once from the asset's `[vamp_in,
 /// vamp_out + W)` window, then keep `store` filled a bounded lead **ahead of the
-/// bus's read cursor** with the looped (crossfaded-at-the-seam) stream, draining
-/// the shared transport [`mailbox`](crate::player::TransportMailbox) between
-/// top-ups so `vamp`/`arm-exit`/`stop` land on the same boundary as the video.
+/// bus's read cursor** with the looped (crossfaded-at-the-seam) stream. Each
+/// top-up first **samples the video rail's authoritative
+/// [`PlayerControlBus`](crate::player::PlayerControlBus)** (ADR-T019 §1) and
+/// follows it — the audio never drains the transport mailbox itself (the video is
+/// the sole consumer), so the rails can never desync; `vamp`/`arm-exit`/`stop`
+/// land on the same boundary as the video by construction.
 ///
 /// It only ever **writes** the lock-free `store`, so it can neither pace nor stall
 /// the output clock (inv #1) nor back-pressure the engine (inv #10) — exactly like
-/// the tone loop it mirrors. A no-audio / failed / over-cap prime yields an empty
-/// deck → the channel rides **silence** (the store silence-fills), never an error.
+/// the tone loop it mirrors. The fill path uses a **reusable scratch buffer**
+/// (`read_into` + `publish_samples`) — no per-block heap allocation (rule 22). A
+/// no-audio / failed / over-cap prime yields an empty deck → the channel rides
+/// **silence** (the store silence-fills), never an error.
 ///
 /// Unlike [`audio_ingest_loop`], a player channel's audio is **buffer-and-replay**,
 /// not a streamed decode: the loop seam is sample-exact and click-free
@@ -339,45 +345,71 @@ fn decode_clip_to_48k(path: &std::path::Path, max_frames: usize) -> Vec<f32> {
 pub(crate) fn player_audio_loop(plan: &PlayerAudioPlan, store: &AudioStore, stop: &AtomicBool) {
     use multiview_audio::loopdeck::{LoopDeck, MAX_LOOP_SECONDS, SAMPLE_RATE};
 
-    // Prime: decode the whole asset (bounded by the cap + a crossfade window of
-    // lap-over headroom), then slice the vamp window into a deck. Any failure → an
-    // empty (silent) deck.
-    let cap_frames = MAX_LOOP_SECONDS.saturating_mul(SAMPLE_RATE);
-    let max_frames = usize::try_from(cap_frames)
-        .unwrap_or(usize::MAX)
-        .saturating_add(multiview_audio::loopdeck::DEFAULT_CROSSFADE_FRAMES);
-    let clip = decode_clip_to_48k(std::path::Path::new(&plan.location), max_frames);
-    let mut deck = LoopDeck::from_clip_window(
-        canonical_format(),
-        &clip,
-        plan.vamp_in_frames,
-        plan.vamp_out_frames,
-        plan.cadence,
-        0,
-    )
-    .unwrap_or_else(|_| LoopDeck::empty(canonical_format()));
-    drop(clip); // the deck owns its bounded body+seam; release the full clip.
+    // Prime (ADR-T019 §3/§5 — Defect 3): decode ONLY up to the vamp window's END
+    // (`vamp_out` + a crossfade window of lap-over headroom), NOT a fixed
+    // 600 s-from-start — so a valid vamp window that begins late still loops (it is
+    // not silenced). REFUSE an over-cap BODY explicitly (a window longer than
+    // `MAX_LOOP_SECONDS` rides silence with a logged reason — never a silent clamp
+    // that would shift the loop point). The frame→sample map is exact rationals
+    // (inv #3). `from_clip_window` re-checks the cap + a materially-short clip and
+    // builds an empty (silent) deck on either.
+    let body_frames = plan.vamp_out_frames.saturating_sub(plan.vamp_in_frames);
+    let body_samples = frames_to_samples(body_frames, plan.cadence);
+    let mut deck = if body_samples > MAX_LOOP_SECONDS.saturating_mul(SAMPLE_RATE) {
+        tracing::warn!(
+            player = %plan.id,
+            body_seconds = body_samples / SAMPLE_RATE,
+            cap_seconds = MAX_LOOP_SECONDS,
+            "media-player audio: vamp window exceeds the loop cap — riding silence (refused, not clamped)"
+        );
+        LoopDeck::empty(canonical_format())
+    } else {
+        // Decode through the window end (`vamp_out + W`). The transient decode
+        // buffer is freed after `from_clip_window` slices the bounded body out.
+        let xfade = multiview_audio::loopdeck::DEFAULT_CROSSFADE_FRAMES;
+        let out_samples = frames_to_samples(plan.vamp_out_frames, plan.cadence);
+        let max_frames = usize::try_from(out_samples)
+            .unwrap_or(usize::MAX)
+            .saturating_add(xfade);
+        let clip = decode_clip_to_48k(std::path::Path::new(&plan.location), max_frames);
+        let deck = LoopDeck::from_clip_window(
+            canonical_format(),
+            &clip,
+            plan.vamp_in_frames,
+            plan.vamp_out_frames,
+            plan.cadence,
+            0,
+        )
+        .unwrap_or_else(|_| LoopDeck::empty(canonical_format()));
+        drop(clip); // the deck owns its bounded body+seam; release the decode buffer.
+        deck
+    };
 
-    // A non-looping player plays its audio once then settles; a looping/vamping
-    // player vamps. (Mirrors the video `loop_on_start`.)
-    if !plan.loop_on_start {
-        // One-shot: arm the exit immediately so the deck plays one lap then
-        // settles to silence (a non-looping play-through; the video tile holds its
-        // last frame separately).
-        deck.arm_exit();
-    }
+    // The audio rail FOLLOWS the video rail's published transport state (ADR-T019
+    // §1) — it never drains the mailbox itself. The video publishes the channel's
+    // initial state (vamp / play-once) on its first frame, which this rail samples
+    // below; the deck starts vamping by default so a boot-vamping player loops
+    // from the first block even before that first sample.
+    let mut last_control_gen: u64 = 0;
+
+    // Defect 2 (rule 22): a SINGLE reusable scratch buffer for the read path,
+    // sized once to the maximum refill and filled IN PLACE every block — no
+    // per-refill heap allocation on the audio hot path. `read_into` reuses this
+    // `Vec`'s capacity; `publish_samples` copies the slice into the store's ring
+    // (the one unavoidable copy, on this sampled decode thread, never the clock).
+    let max_refill = usize::try_from(PLAYER_AUDIO_LEAD_FRAMES.max(0)).unwrap_or(0);
+    let mut scratch: Vec<f32> =
+        Vec::with_capacity(max_refill.saturating_mul(canonical_format().channel_count()));
 
     // The absolute write head (next frame to publish); the bus's `read_cursor`
     // lives in the same absolute coordinate space.
     let mut published: i64 = 0;
     let poll = refill_poll_interval(plan.output_cadence);
     while !stop.load(Ordering::Acquire) {
-        // Drain transport verbs (the SAME mailbox the video thread drains) and
-        // apply them to the deck — so vamp/arm-exit/stop land on the same boundary
-        // as the video. O(pending), a quick mutex `mem::take`, never blocking.
-        for verb in plan.mailbox.drain() {
-            apply_audio_verb(&mut deck, &verb);
-        }
+        // Sample the video rail's authoritative control bus (wait-free) and, on a
+        // real transition, apply it to the deck — so vamp/arm-exit/stop land on the
+        // same boundary as the video by construction (one authority, ADR-T019 §1).
+        follow_video_control(&plan.control_bus, &mut deck, &mut last_control_gen);
 
         let read_cursor = store.read_cursor();
         // If the bus's tick-driven cursor overran the write head (a DropOnOverload
@@ -394,8 +426,12 @@ pub(crate) fn player_audio_loop(plan: &PlayerAudioPlan, store: &AudioStore, stop
             let want = PLAYER_AUDIO_LEAD_FRAMES.saturating_sub(lead).max(0);
             let frames = usize::try_from(want).unwrap_or(0);
             if frames > 0 {
-                let block = deck.read(frames);
-                if let Err(error) = store.publish(&block) {
+                // Fill the reusable scratch IN PLACE (no alloc), then publish the
+                // slice into the store. The deck is positioned by the absolute
+                // write head.
+                let at = u64::try_from(published).unwrap_or(0);
+                deck.read_into(at, frames, &mut scratch);
+                if let Err(error) = store.publish_samples(&scratch) {
                     tracing::error!(%error, player = %plan.id, "media-player audio publish rejected; stopping");
                     return;
                 }
@@ -406,26 +442,72 @@ pub(crate) fn player_audio_loop(plan: &PlayerAudioPlan, store: &AudioStore, stop
     }
 }
 
-/// Map a transport verb onto the [`LoopDeck`](multiview_audio::LoopDeck) (the
-/// audio half of the video player's verb handling). Targeted verbs (load/cue/seek)
-/// re-cue the video; for the MVP single-asset audio deck they are treated as a
-/// fresh `vamp` (re-cue to the head) — the deck plays one bound asset, exactly as
-/// the video executor honours them by re-seeking.
+/// Sample the video rail's authoritative [`PlayerControlBus`] and, on a real
+/// transition (a higher generation than last applied), apply the published state
+/// to the audio [`LoopDeck`] (ADR-T019 §1). The audio rail FOLLOWS the video — it
+/// never independently consumes transport verbs, so the two rails can never
+/// desync. An armed-exit publish carries the video's media-time anchor, so the
+/// audio arms its exit at the **same** next-vamp boundary the video reaches.
 #[cfg(feature = "ffmpeg")]
-fn apply_audio_verb(deck: &mut multiview_audio::LoopDeck, verb: &crate::player::TransportVerb) {
-    use crate::player::TransportVerb;
-    match verb {
-        TransportVerb::Vamp | TransportVerb::Play => deck.vamp(),
-        TransportVerb::Pause => deck.pause(),
-        TransportVerb::Stop => deck.stop(),
-        TransportVerb::ArmExit | TransportVerb::TakeExit => deck.arm_exit(),
-        TransportVerb::CancelExit => deck.cancel_exit(),
-        // load/cue/seek: the MVP plays one bound asset; re-cue to the head.
-        TransportVerb::Load { .. } | TransportVerb::Cue { .. } | TransportVerb::Seek { .. } => {
-            deck.stop();
-            deck.vamp();
-        }
+fn follow_video_control(
+    bus: &crate::player::PlayerControlBus,
+    deck: &mut multiview_audio::LoopDeck,
+    last_gen: &mut u64,
+) {
+    use crate::player::AudioTransport;
+    let ctrl = bus.load();
+    if ctrl.generation == *last_gen {
+        return;
     }
+    *last_gen = ctrl.generation;
+    match ctrl.state {
+        AudioTransport::Vamping => {
+            deck.vamp();
+            if let Some(anchor) = ctrl.exit_arm_anchor {
+                // Arm at the video's anchor → the same next-vamp boundary.
+                deck.arm_exit_at(media_time_to_audio_frame(anchor));
+            }
+        }
+        // Paused / Stopped both stop the bus contribution (silence); `stop` also
+        // re-cues to the head so a fresh `vamp` restarts the loop from frame 0.
+        AudioTransport::Paused => deck.pause(),
+        AudioTransport::Stopped => deck.stop(),
+    }
+}
+
+/// Convert an output media-time to the audio rail's absolute 48 kHz frame index
+/// (exact integer rationals, no float — inv #3): `frame = ns × 48000 / 1e9`.
+#[cfg(feature = "ffmpeg")]
+fn media_time_to_audio_frame(t: multiview_core::time::MediaTime) -> u64 {
+    let ns = t.as_nanos().max(0);
+    let frame =
+        (i128::from(ns) * i128::from(multiview_audio::loopdeck::SAMPLE_RATE)) / 1_000_000_000;
+    u64::try_from(frame).unwrap_or(0)
+}
+
+/// The exact 48 kHz sample index of asset `frames` at `cadence` = `num/den` fps:
+/// `round(frames × 48000 × den / num)`, in `u128` with no float (inv #3 — the
+/// audio loop point lands on an exact sample, never a drifting average). Mirrors
+/// the deck's internal `frame_to_sample`; used to bound the prime decode and the
+/// cap check. A non-positive cadence yields 0 (the player then rides silence).
+#[cfg(feature = "ffmpeg")]
+fn frames_to_samples(frames: u64, cadence: Rational) -> u64 {
+    let Ok(num) = u64::try_from(cadence.num) else {
+        return 0;
+    };
+    let Ok(den) = u64::try_from(cadence.den) else {
+        return 0;
+    };
+    if num == 0 || den == 0 {
+        return 0;
+    }
+    let rate = multiview_audio::loopdeck::SAMPLE_RATE;
+    let numer = u128::from(frames)
+        .saturating_mul(u128::from(rate))
+        .saturating_mul(u128::from(den));
+    let denom = u128::from(num);
+    let rounded = numer.saturating_add(denom / 2) / denom;
+    u64::try_from(rounded).unwrap_or(u64::MAX)
 }
 
 /// Target buffered lead (frames) the player audio keeps ahead of the bus's read
@@ -464,7 +546,7 @@ mod player_audio_tests {
     use multiview_core::time::Rational;
 
     use super::{canonical_format, player_audio_loop, PlayerAudioPlan};
-    use crate::player::{TransportMailbox, TransportVerb};
+    use crate::player::{AudioTransport, PlayerControlBus};
 
     const FS: u32 = 48_000;
 
@@ -538,16 +620,17 @@ mod player_audio_tests {
 
         let store = Arc::new(AudioStore::new(canonical_format(), 96_000));
         let stop = Arc::new(AtomicBool::new(false));
-        let mailbox = Arc::new(TransportMailbox::new());
+        // The control bus defaults to Vamping, so the audio loops from block 0
+        // (the video rail would publish the same initial state). No verbs needed.
+        let control_bus = Arc::new(PlayerControlBus::new());
         let plan = PlayerAudioPlan {
             id: "vt1".to_owned(),
             location: wav.to_string_lossy().into_owned(),
             vamp_in_frames: 0,
             vamp_out_frames: 48, // 48 frames @ 48 fps = 1 s = 48_000 samples
             cadence: Rational::new(48, 1),
-            loop_on_start: true,
             output_cadence: Rational::new(48, 1),
-            mailbox: Arc::clone(&mailbox),
+            control_bus: Arc::clone(&control_bus),
         };
 
         // Run the driver on its own thread (the data-plane peer of the video
@@ -595,6 +678,61 @@ mod player_audio_tests {
         );
     }
 
+    /// Defect 3: a vamp window that does NOT start at the asset head loops
+    /// correctly. The window is `[vamp_in=24, vamp_out=48]` (the SECOND half of a
+    /// 1 s clip) — the prime must decode through `vamp_out` (not cap from start at
+    /// frame 0) and slice the `[0.5 s, 1.0 s)` body. Proves the windowed prime
+    /// reaches an offset window (the bug silenced anything past the from-start cap).
+    #[test]
+    fn a_vamp_window_not_at_the_asset_head_loops_correctly() {
+        if !ffmpeg_cli_available() {
+            eprintln!("ffmpeg CLI unavailable; skipping offset-window test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // 1.0 s tone (48_000 frames). Vamp the SECOND half: frames 24..48 @ 48 fps
+        // = [0.5 s, 1.0 s) = samples 24_000..48_000 (a 24_000-frame loop).
+        let wav = encode_to_wav(dir.path(), &tone(0.5, 1000.0, 1.0));
+        let store = Arc::new(AudioStore::new(canonical_format(), 96_000));
+        let stop = Arc::new(AtomicBool::new(false));
+        let control_bus = Arc::new(PlayerControlBus::new());
+        let plan = PlayerAudioPlan {
+            id: "offset".to_owned(),
+            location: wav.to_string_lossy().into_owned(),
+            vamp_in_frames: 24,  // 0.5 s
+            vamp_out_frames: 48, // 1.0 s → a 0.5 s = 24_000-sample loop body
+            cadence: Rational::new(48, 1),
+            output_cadence: Rational::new(48, 1),
+            control_bus,
+        };
+        let loop_store = Arc::clone(&store);
+        let loop_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            player_audio_loop(&plan, &loop_store, &loop_stop);
+        });
+        // Advance past TWO loop bodies (2 × 24_000 = 48_000) — past where a
+        // one-shot decode of the offset window would silence-fill.
+        let mut blocks: Vec<Vec<f32>> = Vec::new();
+        let mut advanced = 0usize;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        while advanced < 48_000 && std::time::Instant::now() < deadline {
+            blocks.push(store.read(1600).interleaved().to_vec());
+            advanced += 1600;
+            std::thread::sleep(std::time::Duration::from_millis(33));
+        }
+        stop.store(true, Ordering::Release);
+        handle.join().expect("player audio loop thread panicked");
+        // A block past one loop body (frame ~36_000, deep in lap 2 of the offset
+        // window) carries the tone — the offset window looped (not silence).
+        let late = blocks.get(36_000 / 1600).cloned().unwrap_or_default();
+        let energy: f64 = late.iter().map(|&v| f64::from(v) * f64::from(v)).sum();
+        assert!(
+            energy > 1.0,
+            "an offset vamp window [0.5 s, 1.0 s) did not loop (energy {energy:.3}) — the prime did not decode through vamp_out"
+        );
+    }
+
     /// A player with NO audio stream (a silent asset) rides silence: the driver
     /// primes an empty deck and the store reads silence forever — never a stall,
     /// never a panic. (Here: a non-existent path → open fails → empty deck.)
@@ -602,16 +740,15 @@ mod player_audio_tests {
     fn a_missing_or_silent_asset_rides_silence() {
         let store = Arc::new(AudioStore::new(canonical_format(), 96_000));
         let stop = Arc::new(AtomicBool::new(false));
-        let mailbox = Arc::new(TransportMailbox::new());
+        let control_bus = Arc::new(PlayerControlBus::new());
         let plan = PlayerAudioPlan {
             id: "silent".to_owned(),
             location: "/nonexistent/no-such-asset.wav".to_owned(),
             vamp_in_frames: 0,
             vamp_out_frames: 48,
             cadence: Rational::new(48, 1),
-            loop_on_start: true,
             output_cadence: Rational::new(48, 1),
-            mailbox,
+            control_bus,
         };
         let loop_store = Arc::clone(&store);
         let loop_stop = Arc::clone(&stop);
@@ -636,9 +773,10 @@ mod player_audio_tests {
         handle.join().expect("player audio loop thread panicked");
     }
 
-    /// An armed exit (or a non-looping player) settles the audio to silence:
-    /// `loop_on_start = false` plays one lap then the deck goes silent — the bus
-    /// contribution ends cleanly (the video tile holds its last frame separately).
+    /// A non-looping player settles the audio to silence: the video rail publishes
+    /// a one-shot play (Vamping + exit armed at media-time ZERO), so the audio
+    /// plays one lap then goes silent — the bus contribution ends cleanly (the
+    /// video tile holds its last frame separately).
     #[test]
     fn a_non_looping_player_settles_audio_to_silence_after_one_lap() {
         if !ffmpeg_cli_available() {
@@ -649,16 +787,21 @@ mod player_audio_tests {
         let wav = encode_to_wav(dir.path(), &tone(0.5, 1000.0, 0.25)); // 0.25 s = 12_000 frames
         let store = Arc::new(AudioStore::new(canonical_format(), 96_000));
         let stop = Arc::new(AtomicBool::new(false));
-        let mailbox = Arc::new(TransportMailbox::new());
+        // Simulate the VIDEO rail publishing a one-shot play (Vamping + exit
+        // armed at media-time ZERO) — the audio plays one lap then settles silent.
+        let control_bus = Arc::new(PlayerControlBus::new());
+        control_bus.publish(
+            AudioTransport::Vamping,
+            Some(multiview_core::time::MediaTime::ZERO),
+        );
         let plan = PlayerAudioPlan {
             id: "oneshot".to_owned(),
             location: wav.to_string_lossy().into_owned(),
             vamp_in_frames: 0,
             vamp_out_frames: 12, // 12 frames @ 48 fps = 0.25 s = 12_000 samples
             cadence: Rational::new(48, 1),
-            loop_on_start: false, // one-shot
             output_cadence: Rational::new(48, 1),
-            mailbox,
+            control_bus,
         };
         let loop_store = Arc::clone(&store);
         let loop_stop = Arc::clone(&stop);
@@ -690,6 +833,5 @@ mod player_audio_tests {
             energy < 1e-3,
             "a non-looping player must settle its audio to silence after one lap (tail energy {energy:.5})"
         );
-        let _ = TransportVerb::Vamp; // keep the import meaningful across cfgs
     }
 }

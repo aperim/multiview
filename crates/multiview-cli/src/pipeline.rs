@@ -7612,10 +7612,6 @@ fn build_media_player_boot(
             NoSignalPolicy::HoldForever,
         ));
         let eof_policy = map_eof_policy(player.eof_policy);
-        // Clone the mailbox for the audio loop BEFORE it is moved into the video
-        // handle: the audio loop drains the SAME mailbox the video thread drains, so
-        // vamp/arm-exit/stop land on the same boundary for both rails (ADR-T019).
-        let audio_mailbox = Arc::clone(&mailbox);
         let handle = crate::player::PlayerHandle::new(
             player.id.clone(),
             geometry,
@@ -7624,10 +7620,13 @@ fn build_media_player_boot(
             mailbox,
         );
 
-        // ADR-T019: this rolling player gets an `AudioStore` (routed onto the bus
-        // like any source) + an audio loop plan carrying the SAME vamp geometry, so
-        // its embedded audio loops on the same wrap instant as the video. A silent
-        // asset simply rides silence (the deck primes empty).
+        // ADR-T019 §1: this rolling player gets an `AudioStore` (routed onto the
+        // bus like any source) + an audio loop plan carrying the SAME vamp geometry
+        // AND the SAME `PlayerControlBus` the video handle publishes to — so the
+        // audio rail samples the video's authoritative transport state and wraps/
+        // exits on the same instant by construction. A silent asset rides silence
+        // (the deck primes empty).
+        let audio_control_bus = Arc::clone(&handle.control_bus);
         let audio_store = crate::audio::new_store();
         boot.audio_stores
             .push((player.id.clone(), Arc::clone(&audio_store)));
@@ -7637,9 +7636,8 @@ fn build_media_player_boot(
             vamp_in_frames: geometry.vamp_in(),
             vamp_out_frames: geometry.vamp_out(),
             cadence: geometry.cadence(),
-            loop_on_start: player.loop_default,
             output_cadence: cadence,
-            mailbox: audio_mailbox,
+            control_bus: audio_control_bus,
         });
 
         boot.stores.push((player.id.clone(), Arc::clone(&store)));
@@ -9500,6 +9498,14 @@ fn stream_player(
     // the start frame and is reset by a wrap seek; advances 1:1 with decoded
     // frames otherwise.
     let mut source_frame = start_frame;
+    // ADR-T019 §1 (single-authority transport coupling): the video rail is the
+    // SOLE mailbox consumer and PUBLISHES its applied transport state to the
+    // wait-free `control_bus` the audio rail samples. `last_published_at` tracks
+    // the video's most recent output media-time (the exit anchor — the audio arms
+    // at the SAME boundary); `last_audio_control` is the last `(AudioTransport,
+    // exit_armed)` published, so the bus is bumped only on a real state change.
+    let mut last_published_at = multiview_core::time::MediaTime::ZERO;
+    let mut last_audio_control: Option<(crate::player::AudioTransport, bool)> = None;
     // A pending **frame-accurate seek target**: when `Some(t)`, the decoder has
     // just been seeked to a keyframe at-or-before `t` (libav seeks land on a
     // keyframe ≤ target), so the loop **decodes-and-discards** every frame whose
@@ -9588,6 +9594,19 @@ fn stream_player(
             }
         }
 
+        // ADR-T019 §1: after applying the drained verbs, publish the player's
+        // authoritative transport state to the audio rail's control bus — but only
+        // when it actually changed (the bus is wait-free and cheap, but bumping the
+        // generation needlessly would make the audio re-apply each block). The exit
+        // anchor is the video's most recent output media-time, so the audio arms at
+        // the SAME next-vamp boundary.
+        publish_audio_control(
+            handle,
+            player.state(),
+            last_published_at,
+            &mut last_audio_control,
+        );
+
         // Pull every frame the decoder currently has, deciding per frame.
         while let Some(decoded) = decoder.receive_frame().map_err(|e| e.to_string())? {
             // Establish the asset's PTS origin from the very first decoded frame
@@ -9637,6 +9656,10 @@ fn stream_player(
                     let image = Arc::new(image);
                     last_image = Some(Arc::clone(&image));
                     plan.store.publish_arc(image, at);
+                    // Track the video's output media-time for the audio exit anchor
+                    // (ADR-T019 §1): the audio arms its exit at the next vamp
+                    // boundary at-or-after this same media-time.
+                    last_published_at = at;
                     source_frame = source_frame.saturating_add(1);
                     produced_this_lap = produced_this_lap.saturating_add(1);
                 }
@@ -9753,6 +9776,52 @@ fn stream_player(
             Err(other) => return Err(other.to_string()),
         }
     }
+}
+
+/// Publish the video player's authoritative transport state to the audio rail's
+/// wait-free control bus (ADR-T019 §1), but only when it changed since the last
+/// publish (so the audio re-applies on a real transition, not every frame). Maps
+/// the video [`MediaPlayerState`] onto the audio-rail subset
+/// ([`AudioTransport`](crate::player::AudioTransport)): publishing/vamping →
+/// `Vamping` (carrying the exit anchor when an exit is armed); paused/held/cued/
+/// loading → `Paused`; stopped (re-cued) → `Stopped`; the EOF terminals settle to
+/// `Paused` (the audio bus contributes silence while the video tile holds its
+/// terminal frame). The exit anchor is the video's most recent output media-time,
+/// so the audio arms at the SAME next-vamp boundary the video reaches.
+fn publish_audio_control(
+    handle: &crate::player::PlayerHandle,
+    state: crate::player::MediaPlayerState,
+    last_published_at: multiview_core::time::MediaTime,
+    last: &mut Option<(crate::player::AudioTransport, bool)>,
+) {
+    use crate::player::{AudioTransport, EofPolicy, MediaPlayerState};
+    use multiview_core::time::MediaTime;
+    // (audio_state, exit_armed, exit_anchor). For a forever-loop the audio vamps
+    // with no exit; for an armed vamp exit the audio arms at the video's current
+    // media-time (the SAME next boundary); for a one-shot `Playing` (non-`Loop`
+    // policy) the audio arms at ZERO so it settles to silence after the first lap
+    // (mirroring the video playing `[in,out)` once then holding its terminal frame).
+    let loops_forever = matches!(handle.eof_policy, EofPolicy::Loop);
+    let (audio_state, exit_armed, anchor) = match state {
+        MediaPlayerState::Playing if loops_forever => (AudioTransport::Vamping, false, None),
+        MediaPlayerState::Playing => (AudioTransport::Vamping, true, Some(MediaTime::ZERO)),
+        MediaPlayerState::Vamping { exit_armed: true } => {
+            (AudioTransport::Vamping, true, Some(last_published_at))
+        }
+        MediaPlayerState::Vamping { exit_armed: false } => (AudioTransport::Vamping, false, None),
+        MediaPlayerState::Cued
+        | MediaPlayerState::Paused
+        | MediaPlayerState::Holding
+        | MediaPlayerState::Black
+        | MediaPlayerState::Idle
+        | MediaPlayerState::Loading
+        | MediaPlayerState::Ended => (AudioTransport::Paused, false, None),
+    };
+    if *last == Some((audio_state, exit_armed)) {
+        return;
+    }
+    *last = Some((audio_state, exit_armed));
+    handle.control_bus.publish(audio_state, anchor);
 }
 
 /// Seek the open container to `frame` (in-point of a loop/vamp, a cue, or a user
@@ -13039,9 +13108,12 @@ loop_default = true
             ap.cadence, cadence,
             "audio uses the asset cadence for the frame→sample map"
         );
+        // ADR-T019 §1: the audio plan shares the SAME `PlayerControlBus` Arc as the
+        // video handle — the single authority that makes the rails wrap/exit on the
+        // same instant by construction (not a second destructive mailbox drain).
         assert!(
-            ap.loop_on_start,
-            "loop_default = true ⇒ the audio vamps on start too"
+            std::sync::Arc::ptr_eq(&ap.control_bus, &handle.control_bus),
+            "the audio rail follows the video handle's control bus (same Arc)"
         );
     }
 

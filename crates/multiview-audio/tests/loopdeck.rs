@@ -363,6 +363,110 @@ fn from_clip_window_slices_the_vamp_segment_at_the_asset_cadence() {
     );
 }
 
+#[test]
+fn read_into_reuses_the_caller_buffer_no_per_block_allocation() {
+    // Defect 2 (rule 22): the hot read path must not allocate per block. `read_into`
+    // fills a caller-provided buffer in place; once sized to the max refill, its
+    // capacity (and backing allocation) is STABLE across reads — no realloc.
+    let loop_frames = 1000usize;
+    let xfade = 64usize;
+    let deck = deck_with_lapover(loop_frames, xfade, 0xF00D);
+    let mut buf: Vec<f32> = Vec::with_capacity(1600 * 2);
+    let cap0 = buf.capacity();
+    let ptr0 = buf.as_ptr();
+
+    // Many reads of the same (and smaller) size: the buffer is reused, never grown.
+    for lap in 0..50u64 {
+        deck.read_into(lap * 1600, 1600, &mut buf);
+        assert_eq!(
+            buf.len(),
+            1600 * 2,
+            "read_into fills exactly frames×channels"
+        );
+        assert_eq!(
+            buf.capacity(),
+            cap0,
+            "capacity is stable — no realloc on the read path"
+        );
+        assert_eq!(
+            buf.as_ptr(),
+            ptr0,
+            "the backing allocation is reused (no per-block alloc)"
+        );
+    }
+
+    // A smaller read reuses the same (larger) allocation too — never shrinks/reallocs.
+    deck.read_into(0, 800, &mut buf);
+    assert_eq!(buf.len(), 800 * 2);
+    assert_eq!(
+        buf.capacity(),
+        cap0,
+        "a smaller read keeps the larger reused allocation"
+    );
+    assert_eq!(buf.as_ptr(), ptr0);
+
+    // And read_into produces the SAME samples as read_at (the allocating sibling).
+    let viaalloc = deck.read_at(12_345, 500);
+    let mut viabuf: Vec<f32> = Vec::with_capacity(500 * 2);
+    deck.read_into(12_345, 500, &mut viabuf);
+    assert_eq!(
+        viabuf,
+        viaalloc.interleaved(),
+        "read_into == read_at samples"
+    );
+}
+
+#[test]
+fn from_clip_window_refuses_a_materially_short_clip_rather_than_silently_clamping() {
+    use multiview_core::time::Rational;
+    // The declared vamp window is 1 s (48_000 samples) but the decoded clip is
+    // only 0.5 s (24_000 samples). Silently clamping the loop body to the
+    // available 24_000 frames would SHIFT the loop length (the audio would wrap at
+    // 0.5 s while the video wraps at 1 s — a desync). The deck must REFUSE (build
+    // an empty/silent deck), not loop a shifted-length body (ADR-T019 §3 / Defect 3).
+    let channels = 2usize;
+    let clip = vec![0.4f32; 24_000 * channels]; // 0.5 s
+    let cad = Rational::new(48, 1);
+    let deck = LoopDeck::from_clip_window(stereo(), &clip, 0, 48, cad, 480).unwrap();
+    assert_eq!(
+        deck.loop_frames(),
+        0,
+        "a clip materially shorter than the declared vamp window must ride silence (empty deck), NOT loop a shifted-length body"
+    );
+    // A tiny shortfall (resampler edge — a few samples) is still tolerated: a
+    // 48_000-frame window with 47_990 decoded loops the full declared length.
+    let near = vec![0.4f32; 47_990 * channels];
+    let deck_near = LoopDeck::from_clip_window(stereo(), &near, 0, 48, cad, 480).unwrap();
+    assert_eq!(
+        deck_near.loop_frames(),
+        48_000,
+        "a few-sample resampler-edge shortfall is tolerated (loops the full declared length, sample-locked to the video)"
+    );
+}
+
+#[test]
+fn from_clip_window_refuses_an_over_cap_window_explicitly() {
+    use multiview_audio::loopdeck::{MAX_LOOP_SECONDS, SAMPLE_RATE};
+    use multiview_core::time::Rational;
+    // A vamp window whose BODY exceeds MAX_LOOP_SECONDS must be REFUSED explicitly
+    // (empty deck → ride silence), never silently clamped to a shifted shorter
+    // loop (ADR-T019 §5 / Defect 3). At 30 fps, MAX_LOOP_SECONDS*30 + 30 frames is
+    // just over the cap.
+    let cad = Rational::new(30, 1);
+    let over = MAX_LOOP_SECONDS.saturating_mul(30).saturating_add(30);
+    // The clip buffer is irrelevant (the cap is checked before slicing) — a small
+    // stub suffices; the cap refusal must fire regardless.
+    let clip = vec![0.1f32; 1000 * 2];
+    let deck = LoopDeck::from_clip_window(stereo(), &clip, 0, over, cad, 0).unwrap();
+    assert_eq!(
+        deck.loop_frames(),
+        0,
+        "an over-cap vamp window must be refused (empty/silent), not clamped to a shifted loop"
+    );
+    // Sanity: the cap is ~MAX_LOOP_SECONDS of audio.
+    assert!(MAX_LOOP_SECONDS.saturating_mul(SAMPLE_RATE) > 0);
+}
+
 // ----------------------------------------------------------------------------
 // 4. Armed exit: settles to silence at the next seam, exactly once.
 // ----------------------------------------------------------------------------

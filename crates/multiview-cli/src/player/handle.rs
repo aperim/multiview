@@ -7,11 +7,13 @@
 
 use std::sync::Arc;
 
-use super::{EofPolicy, MediaPlayer, PlayoutGeometry, TransportMailbox};
+use super::{EofPolicy, MediaPlayer, PlayerControlBus, PlayoutGeometry, TransportMailbox};
 
 /// What an `IngestPlan` carries when the source is a media-player channel:
 /// the initial transport geometry/policy used to build the channel's
-/// [`MediaPlayer`], and the shared command mailbox.
+/// [`MediaPlayer`], the shared command mailbox, and the wait-free control bus the
+/// video rail publishes its authoritative transport state onto for the audio rail
+/// to follow (ADR-T019 §1).
 #[derive(Debug, Clone)]
 pub struct PlayerHandle {
     /// The player channel id (matches the config `media_players[].id`).
@@ -25,12 +27,19 @@ pub struct PlayerHandle {
     pub loop_on_start: bool,
     /// The shared, bounded two-class command seam (state verbs conflated
     /// latest-wins; targeted load/cue/seek a bounded drop-oldest FIFO) the ingest
-    /// thread drains between frames.
+    /// thread drains between frames. **The video rail is the sole consumer**
+    /// (ADR-T019 §1): it drains this and publishes the result on [`Self::control_bus`].
     pub mailbox: Arc<TransportMailbox>,
+    /// The wait-free single-authority control bus: the video `stream_player`
+    /// publishes its applied transport state here (after draining `mailbox`), and
+    /// the audio `player_audio_loop` SAMPLES it and follows — so both rails wrap/
+    /// exit on the same instant by construction (ADR-T019 §1).
+    pub control_bus: Arc<PlayerControlBus>,
 }
 
 impl PlayerHandle {
-    /// Construct a handle.
+    /// Construct a handle (with a fresh [`PlayerControlBus`] the boot path shares
+    /// with the channel's audio rail via [`Self::control_bus`]).
     #[must_use]
     pub fn new(
         id: String,
@@ -45,6 +54,7 @@ impl PlayerHandle {
             eof_policy,
             loop_on_start,
             mailbox,
+            control_bus: Arc::new(PlayerControlBus::new()),
         }
     }
 

@@ -198,11 +198,37 @@ impl AudioStore {
                 actual_channels: block.format().channel_count(),
             });
         }
+        self.publish_samples(block.interleaved())
+    }
+
+    /// Append raw interleaved samples to the live edge — the **allocation-free
+    /// hot-path** sibling of [`publish`](AudioStore::publish): the caller fills a
+    /// reusable buffer (e.g. via
+    /// [`LoopDeck::read_into`](multiview_audio::LoopDeck::read_into)) and publishes
+    /// the slice directly, with no intermediate `AudioBlock` allocation (rule 22).
+    /// `samples` must be in the store's working format (interleaved `f32`, the
+    /// store's channel count); a length that is not a whole number of frames is
+    /// rejected so the ring never tears mid-frame.
+    ///
+    /// O(window) copy-on-write like [`publish`](AudioStore::publish), on the
+    /// sampled decode thread — never the output clock; the reader sees a stable
+    /// snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioError::RaggedBlock`] if `samples.len()` is not a whole
+    /// multiple of the store's channel count.
+    pub fn publish_samples(&self, samples: &[f32]) -> Result<()> {
         let channels = self.format.channel_count();
         if channels == 0 {
             return Ok(());
         }
-        let incoming = block.interleaved();
+        if samples.len() % channels != 0 {
+            return Err(AudioError::RaggedBlock {
+                samples: samples.len(),
+                channels,
+            });
+        }
         let cap_samples = self.capacity_frames.saturating_mul(channels);
 
         // Build the next immutable window from the current one: append the new
@@ -211,10 +237,9 @@ impl AudioStore {
         // by design — it runs on the *sampled decode thread*, never the output
         // clock — and gives the wait-free reader a stable snapshot.
         let current = self.window.load();
-        let mut next =
-            Vec::with_capacity((current.samples.len() + incoming.len()).min(cap_samples));
+        let mut next = Vec::with_capacity((current.samples.len() + samples.len()).min(cap_samples));
         next.extend_from_slice(&current.samples);
-        next.extend_from_slice(incoming);
+        next.extend_from_slice(samples);
 
         let mut base_frame = current.base_frame;
         let overflow_samples = next.len().saturating_sub(cap_samples);

@@ -41,7 +41,11 @@ fn deck(loop_frames: usize, xfade: usize) -> LoopDeck {
 }
 
 fn block_energy(block: &multiview_audio::AudioBlock) -> f64 {
-    block.interleaved().iter().map(|&v| f64::from(v) * f64::from(v)).sum()
+    block
+        .interleaved()
+        .iter()
+        .map(|&v| f64::from(v) * f64::from(v))
+        .sum()
 }
 
 // ----------------------------------------------------------------------------
@@ -63,7 +67,10 @@ fn the_control_bus_publishes_transport_state_for_the_audio_rail_to_sample() {
     bus.publish(AudioTransport::Paused, None);
     let after = bus.load();
     assert_eq!(after.state, AudioTransport::Paused);
-    assert!(after.generation > g0, "each publish bumps the monotonic generation");
+    assert!(
+        after.generation > g0,
+        "each publish bumps the monotonic generation"
+    );
 
     // The video drains `Stop`, then `Vamp` — latest-wins.
     bus.publish(AudioTransport::Stopped, None);
@@ -91,13 +98,20 @@ fn the_audio_rail_follows_the_published_pause_and_resume() {
     bus.publish(AudioTransport::Paused, None);
     apply_control(&bus, &mut deck, &mut last_gen);
     let b1 = deck.read(200);
-    assert_eq!(block_energy(&b1), 0.0, "paused audio (following the video) is silent");
+    assert_eq!(
+        block_energy(&b1),
+        0.0,
+        "paused audio (following the video) is silent"
+    );
 
     // Resume.
     bus.publish(AudioTransport::Vamping, None);
     apply_control(&bus, &mut deck, &mut last_gen);
     let b2 = deck.read(200);
-    assert!(block_energy(&b2) > 1.0, "resumed audio plays the tone again");
+    assert!(
+        block_energy(&b2) > 1.0,
+        "resumed audio plays the tone again"
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -126,7 +140,10 @@ fn one_arm_exit_fires_audio_at_the_same_wrap_boundary_as_the_video() {
     // boundary the video uses — not at the audio's own cursor position.
     // Read up to just before the boundary: still playing.
     let before = deck.read_at(95_000, 480);
-    assert!(block_energy(&before) > 1.0, "before the shared 2.0 s boundary, audio still plays");
+    assert!(
+        block_energy(&before) > 1.0,
+        "before the shared 2.0 s boundary, audio still plays"
+    );
     // Read well past the boundary + the fade tail: silent.
     let after = deck.read_at(96_000 + xfade as u64 + 1_000, 480);
     assert_eq!(
@@ -147,17 +164,17 @@ fn apply_control(bus: &PlayerControlBus, deck: &mut LoopDeck, last_gen: &mut u64
     *last_gen = ctrl.generation;
     match ctrl.state {
         AudioTransport::Vamping => {
+            deck.vamp();
             if let Some(anchor) = ctrl.exit_arm_anchor {
-                deck.vamp();
                 // Arm at the video's anchor so both fire at the SAME boundary.
                 let anchor_frame = media_time_to_frame(anchor);
                 deck.arm_exit_at(anchor_frame);
-            } else {
-                deck.vamp();
             }
         }
         AudioTransport::Paused => deck.pause(),
         AudioTransport::Stopped => deck.stop(),
+        // `AudioTransport` is `#[non_exhaustive]`: a future variant rides silence.
+        _ => deck.pause(),
     }
 }
 
