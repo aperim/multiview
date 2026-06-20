@@ -26,13 +26,15 @@ pre-push:
   parallel: true
   commands:
     clippy:
-      run: cargo clippy --workspace --all-targets -- -D warnings
+      # --locked mirrors CI (rule 33): enforce the committed Cargo.lock.
+      run: cargo clippy --locked --workspace --all-targets -- -D warnings
     test:
-      # --skip tile_driven_meets_budget mirrors the CI `test` job: the compositor
-      # per-tick perf BUDGET test asserts a wall-clock ceiling only meaningful on
-      # consistent hardware (ADR-E009/ADR-0022), so it is flaky off dedicated
-      # runners. Scaling correctness stays covered by the tile-driven scaling test.
-      run: cargo test --workspace -- --skip tile_driven_meets_budget
+      # --locked mirrors CI (rule 33). --skip tile_driven_meets_budget mirrors the
+      # CI `test` job: the compositor per-tick perf BUDGET test asserts a wall-clock
+      # ceiling only meaningful on consistent hardware (ADR-E009/ADR-0022), so it is
+      # flaky off dedicated runners. Scaling correctness stays covered by the
+      # tile-driven scaling test.
+      run: cargo test --locked --workspace -- --skip tile_driven_meets_budget
     # ── feature-gated clippy mirrors (match the CI feature matrix) ──────────────
     # The default workspace clippy above builds default features only, so an
     # off-by-default feature can break silently (e.g. the cosmic-text 0.19 overlay
@@ -41,13 +43,13 @@ pre-push:
     # All are pure Rust (no ffmpeg) and run on any dev host.
     clippy-overlay-compositor:
       # The cosmic-text text rasterizer + GPU overlay sub-pass.
-      run: cargo clippy -p multiview-compositor --features overlay --all-targets -- -D warnings
+      run: cargo clippy --locked -p multiview-compositor --features overlay --all-targets -- -D warnings
     clippy-overlay-cli:
       # The cli umbrella `overlay` feature (GPU-free; no ffmpeg) + its wiring/tests.
-      run: cargo clippy -p multiview-cli --features overlay --all-targets -- -D warnings
+      run: cargo clippy --locked -p multiview-cli --features overlay --all-targets -- -D warnings
     clippy-overlay-libass:
       # The off-by-default libass subtitle marker feature on multiview-overlay.
-      run: cargo clippy -p multiview-overlay --features libass --all-targets -- -D warnings
+      run: cargo clippy --locked -p multiview-overlay --features libass --all-targets -- -D warnings
     # The overlay×webrtc-native pair (#137) + the webrtc-native cli/preview surface
     # both link ffmpeg (webrtc-native implies the cli `ffmpeg` feature), so these
     # only run when libav is discoverable locally — CI's `feature-clippy-ffmpeg-
@@ -55,9 +57,9 @@ pre-push:
     clippy-webrtc-native-ffmpeg:
       run: |
         if pkg-config --exists libavcodec 2>/dev/null; then
-          cargo clippy -p multiview-cli --features webrtc-native --all-targets -- -D warnings
-          cargo clippy -p multiview-cli --features overlay,webrtc-native --all-targets -- -D warnings
-          cargo clippy -p multiview-preview --features webrtc --all-targets -- -D warnings
+          cargo clippy --locked -p multiview-cli --features webrtc-native --all-targets -- -D warnings
+          cargo clippy --locked -p multiview-cli --features overlay,webrtc-native --all-targets -- -D warnings
+          cargo clippy --locked -p multiview-preview --features webrtc --all-targets -- -D warnings
         else
           echo "libav (libavcodec) not found via pkg-config; skipping webrtc-native/overlay+webrtc-native clippy (CI feature-clippy-ffmpeg-webrtc is authoritative)"
         fi

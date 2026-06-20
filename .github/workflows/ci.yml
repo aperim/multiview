@@ -136,7 +136,9 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # --locked enforces the committed Cargo.lock (cargo ignores it otherwise),
+        # so the lint build is deterministic (rule 33).
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   test:
     name: check + test (${{ matrix.os }})
@@ -157,15 +159,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Default features are pure-Rust (no FFmpeg/GPU), so CI needs no native libs.
+      # --locked enforces the committed Cargo.lock (cargo ignores it otherwise),
+      # so check + test are deterministic (rule 33).
       - name: cargo check
-        run: cargo check --workspace
+        run: cargo check --locked --workspace
       - name: cargo test
         # Skip the compositor per-tick perf BUDGET test on shared CI runners: it
         # asserts a wall-clock ceiling only meaningful on consistent hardware
         # (ADR-E009 — perf gates run on dedicated runners). The tile-driven
         # SCALING correctness is covered unconditionally by
         # tile_driven_scales_with_coverage_not_tile_count.
-        run: cargo test --workspace -- --skip tile_driven_meets_budget
+        run: cargo test --locked --workspace -- --skip tile_driven_meets_budget
 
   # ── feature-gated clippy + test matrix (IN-7) ────────────────────────────────
   # The default `lint` and `test` jobs run with default features only (pure-Rust,
@@ -297,13 +301,15 @@ jobs:
           # Scope the cache per feature so entries don't collide across matrix legs.
           key: feature-${{ matrix.crate }}-${{ matrix.feature }}
       - name: clippy (${{ matrix.feature }})
-        # --all-targets: also lints integration-test binaries under the feature.
-        # -D warnings: matches the default `lint` job gate.
+        # --locked: enforce the committed Cargo.lock for a deterministic build
+        # (rule 33). --all-targets: also lints integration-test binaries under
+        # the feature. -D warnings: matches the default `lint` job gate.
         # Hardware/network live paths are gated in the tests themselves via
         # #[ignore] or cfg_attr(not(feature=...), ignore), so this never needs
         # a real NIC, PTP device, MQTT broker, or NDI sender.
         run: >
           cargo clippy
+          --locked
           -p ${{ matrix.crate }}
           --features ${{ matrix.feature }}
           --all-targets
@@ -324,6 +330,7 @@ jobs:
         # by tile_driven_scales_with_coverage_not_tile_count.
         run: >
           cargo test
+          --locked
           -p ${{ matrix.crate }}
           --features ${{ matrix.feature }}
           -- --skip tile_driven_meets_budget
@@ -356,10 +363,12 @@ jobs:
         with:
           key: feature-multiview-overlay-libass
       - name: clippy (libass)
-        # --all-targets also lints the test binaries under the feature; -D warnings
-        # matches the default `lint` gate. (No `test` step — see the job comment.)
+        # --locked enforces the committed Cargo.lock (rule 33). --all-targets also
+        # lints the test binaries under the feature; -D warnings matches the
+        # default `lint` gate. (No `test` step — see the job comment.)
         run: >
           cargo clippy
+          --locked
           -p multiview-overlay
           --features libass
           --all-targets
@@ -468,10 +477,12 @@ jobs:
             echo "LD_LIBRARY_PATH=${FFMPEG_PREFIX}/lib"
           } >> "$GITHUB_ENV"
       - name: clippy multiview-cli --features webrtc-native
-        # The ffmpeg-linked target the libav-free matrix cannot build. -D warnings
-        # matches the default `lint` gate; --all-targets also lints test binaries.
+        # The ffmpeg-linked target the libav-free matrix cannot build. --locked
+        # enforces the committed Cargo.lock (rule 33); -D warnings matches the
+        # default `lint` gate; --all-targets also lints test binaries.
         run: >
           cargo clippy
+          --locked
           -p multiview-cli
           --features webrtc-native
           --all-targets
@@ -484,9 +495,11 @@ jobs:
         # clippy lints, and no leg built the pair, so a non-exhaustive `match` over
         # `SourceLocation` (the overlay-gated `resolve_incontainer_sub_route`
         # missing the webrtc-native `Webrtc` arm) slipped through (fixed in PR #202).
-        # This step gates the pair going forward.
+        # This step gates the pair going forward. --locked enforces the committed
+        # Cargo.lock (rule 33).
         run: >
           cargo clippy
+          --locked
           -p multiview-cli
           --features overlay,webrtc-native
           --all-targets
@@ -494,8 +507,10 @@ jobs:
       - name: clippy multiview-preview --features webrtc
         # The paired preview WHEP seam. Built here alongside the cli target so the
         # whole webrtc-native surface is clippy-gated in one ffmpeg-equipped leg.
+        # --locked enforces the committed Cargo.lock (rule 33).
         run: >
           cargo clippy
+          --locked
           -p multiview-preview
           --features webrtc
           --all-targets
