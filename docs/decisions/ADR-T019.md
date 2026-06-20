@@ -161,13 +161,15 @@ Both laws are C0-continuous (click-free); the correlation choice removes the
   whatever the EOF policy: the *video* tile applies hold/black/auto-off; the audio
   bus simply stops contributing), `play()` (one-shot forward play then settle),
   `pause()` (contribute silence — not a frozen DC sample, which would click on
-  resume), `stop()` (re-cue to the head). The exit latch is **consumed exactly
-  once** at the first seam at-or-after the arm — the same exactly-once boundary
-  contract the video player proves ([ADR-0097](ADR-0097.md) adversarial
-  self-review).
+  resume), `stop()` (**re-cue to the head**, distinct from `pause()`: it latches a
+  re-phase so the next `vamp` restarts the segment from `body[0]` at the
+  then-current absolute frame — the deck loops by `(abs − phase) mod L` and `stop()`
+  arms a fresh `phase`). The exit latch is **consumed exactly once** at the first
+  seam at-or-after the arm — the same exactly-once boundary contract the video
+  player proves ([ADR-0097](ADR-0097.md) adversarial self-review).
 - It never blocks and never reads a wall clock; it returns samples, it does not
-  pace (inv #1). All loop/seam math is integer frame counts; the only floats are
-  the fade gains and the one-time `ρ` (genuinely continuous quantities), never
+  pace (inv #1). All loop/seam/phase math is integer frame counts; the only floats
+  are the fade gains and the one-time `ρ` (genuinely continuous quantities), never
   time (inv #3).
 
 ### 2. The `ffmpeg`-gated CLI driver (`crate::audio::player_audio_loop`)
@@ -185,22 +187,35 @@ never a Tokio worker):
    truncated, in-point past clip end, over-cap window) leaves the deck **empty** →
    the source rides **silence** (the store silence-fills), never an error, never a
    stall.
-2. **Replay — the deck position is the bus's absolute read cursor, filled with no
-   per-block allocation.** Keep the `AudioStore` filled a bounded lead **ahead of
-   the bus's read cursor** (the `tone_publish_loop` pattern): each wakeup, read
-   `store.read_cursor()` (the absolute frame the bus will pull next); the next
-   frame to publish is `published` (the absolute write head). If a catch-up moved
-   the read cursor past the write head, set `published = read_cursor` (never
-   back-fill an evicted span). Then fill a **single reusable scratch `Vec`** (sized
-   once at prime to the max refill) **in place** via `LoopDeck::read_into(published,
-   n, &mut scratch)` and publish the slice with `AudioStore::publish_samples(&scratch)`
-   — **no per-block heap allocation on the audio hot path** (rule 22; the one
-   unavoidable copy is the store's copy-on-write append, on this sampled decode
-   thread, never the clock). Because `read_into` is a **pure function of the
-   absolute frame**, a forced realign across a seam still emits the correctly faded
-   seam for that absolute position (no skipped/un-crossfaded seam under load,
-   rule 26). Bounded bursts, mostly asleep, off the hot path. (`read_at` — the
-   allocating `AudioBlock` sibling — is retained for tests/one-off reads.)
+2. **Replay — a bounded sliding-window *republish* clamped to the publish horizon,
+   allocation-free.** The audio rail keeps the `AudioStore` filled a bounded
+   lookahead **ahead of the bus's read cursor**, but — unlike the append-only
+   `tone_publish_loop` pattern, which *cannot revise already-published samples* — it
+   **re-derives and replaces the entire unplayed window from the deck's *current*
+   transport state every block** (§2.3, the publish-horizon contract). Each wakeup,
+   after sampling the control bus (step 3, which may transition the deck this
+   block): read `cursor = store.read_cursor()` (the absolute frame the bus will pull
+   next); compute the **publish horizon** `H = min(cursor + LOOKAHEAD, settle)` where
+   `settle` is the deck's silence-settle frame when an exit has fired
+   (`exit_seam + W`) and `cursor + LOOKAHEAD` otherwise; fill a **single reusable
+   scratch `Vec`** (sized once at prime to `LOOKAHEAD`) **in place** via
+   `LoopDeck::read_into(cursor, H − cursor, &mut scratch)`; and **replace** the store
+   window with exactly `[cursor, H)` via the allocation-free
+   `AudioStore::publish_window(cursor, &scratch)`. `publish_window` swaps in a
+   snapshot from a **triple-buffered preallocated pool** (the audio analogue of the
+   video tile store's triple-buffer, inv #2 — a `RingSnapshot` whose `Arc`
+   strong-count is 1 is reused in place; a fresh `Arc` is allocated only in the
+   never-observed SPSC-contention fallback), so the steady path does **no per-block
+   heap allocation** (rule 22). The one copy is the deck→scratch fill, on this
+   sampled decode thread, never the clock. Because `read_into` is a **pure function
+   of the absolute frame** *and* the window is re-derived from `cursor` every block,
+   (a) a forced realign across a seam still emits the correctly faded seam (no
+   skipped/un-crossfaded seam under load, rule 26) **and** (b) the moment the deck
+   transitions (arm-exit / pause / stop, step 3) the next block's republish
+   overwrites the whole unplayed tail with the corrected content — the boundary-tight
+   exit is **true by construction** (§2.3). Bounded bursts, mostly asleep, off the
+   hot path. (`read_at` — the allocating `AudioBlock` sibling — is retained for
+   tests/one-off reads.)
 3. **Transport — the audio rail FOLLOWS the video rail (single authority).** The
    audio rail does **not** drain the transport mailbox itself: `TransportMailbox::drain()`
    is a destructive `mem::take` (single-consumer), so two rails draining the same
@@ -211,15 +226,84 @@ never a Tokio worker):
    monotonic `generation` + the `AudioTransport` state + the exit-arm media-time
    anchor, `crates/multiview-cli/src/player/control.rs`). The audio rail **samples**
    the bus each block and, on a generation change, follows it: `Vamping` →
-   `deck.vamp()` (and `deck.arm_exit_at(anchor)` when an exit is armed), `Paused` →
-   `deck.pause()`, `Stopped` → `deck.stop()`. Same-boundary alignment is then true
-   **by construction** — one authority, one `PlayoutGeometry`. The exit anchor is
-   the video's current output media-time, which the audio maps to its 48 kHz frame
-   space; because both rails share the geometry anchored at output media-time ZERO,
-   the next vamp boundary at-or-after that anchor is **one instant** for both
-   (`deck.arm_exit_at` computes the next wrap strictly after the anchor). The audio
-   is *sampled* by the authority and follows it — it never paces (inv #1); the bus
-   is wait-free, so neither rail blocks the other (inv #10).
+   `deck.vamp()` (and `deck.arm_exit_at(anchor)` when an exit is armed), `Paused`
+   (the video is paused / held — **hold position**) → `deck.pause()`, `Stopped`
+   (the video **re-cued to head** — `MediaPlayer::stop()` lands the video in `Cued`)
+   → `deck.stop()`. The **pause/cue distinction is load-bearing** (MAJOR-4):
+   `deck.pause()` holds the loop phase (a later `vamp` resumes mid-loop), whereas
+   `deck.stop()` **re-cues the loop to its head** — it latches a re-phase so the
+   next `vamp` restarts the segment from `body[0]` at the then-current absolute
+   frame (the deck loops by `(abs − phase) mod L`; `stop()` arms `phase ← next
+   vamp's abs frame`). So the video's `Cued` (re-cue) routes to an audio **re-cue**,
+   not a pause-in-place. Same-boundary alignment is then true **by construction** —
+   one authority, one `PlayoutGeometry`. The exit anchor is the video's current
+   output media-time, which the audio maps to its 48 kHz frame space; because both
+   rails share the geometry anchored at output media-time ZERO, the next vamp
+   boundary at-or-after that anchor is **one instant** for both
+   (`deck.arm_exit_at` computes the next wrap strictly after the anchor, phase-aware).
+   The video rail **latches the exit anchor at the arming edge** (it is stable while
+   armed, not re-sampled every frame) and the bus publish is suppressed only when
+   the **full** `(state, exit_armed, anchor)` triple is unchanged — so a *changed*
+   anchor (a re-arm / move-exit) always reaches the deck even when `(state,
+   exit_armed)` is unchanged (MAJOR-5), with no per-frame generation churn. The
+   audio is *sampled* by the authority and follows it — it never paces (inv #1); the
+   bus is wait-free, so neither rail blocks the other (inv #10).
+
+### 2.3 The publish-horizon contract — no sample past the boundary is ever heard (the boundary-tight exit, true by construction)
+
+The audio rail prepublishes a lookahead into the per-source `AudioStore` so the
+bus never underruns. The hazard the round-2 review missed (CRITICAL-1): the
+store's `publish`/`publish_samples` is **append-only** — already-published
+samples cannot be revised — so a `LOOKAHEAD` of looped body published *before* an
+`ArmExit`/`pause`/`stop` is sampled would **play past the armed vamp-exit boundary
+`B`** (and past a pause/stop). The exit would not be same-boundary; stale audio
+would be heard after the transport transition. That is the root defect, and it is
+a design problem (an append-only horizon), not a patch.
+
+**The contract.** The audio rail must **never let a sample past the boundary be
+heard.** It is made true *by construction* — not by hoping the lookahead is short
+enough — as follows:
+
+- **The store window is the deck, re-derived every block.** The fill loop does not
+  *append* a new tail; each block it **replaces** the store's entire live window
+  with `[cursor, H)` (`cursor = store.read_cursor()`, the live read position),
+  filled from the deck's **current** transport state via `read_into(cursor, …)`.
+  `read_into` is a pure function of the absolute frame *reflecting the deck's
+  current state*, so the window always holds exactly what the deck would emit *now*
+  for every unplayed frame.
+- **The horizon is re-evaluated each block against the current state.**
+  `H = min(cursor + LOOKAHEAD, settle)`, where `settle = exit_seam + W` once an
+  exit has fired (the deck's silence-settle frame) and `cursor + LOOKAHEAD`
+  otherwise. So when `ArmExit` arms at media-time `B`, the very next block clamps
+  the horizon to `B`'s settle and publishes the body→fade→silence the deck now
+  emits — **nothing of the old looped body survives past `B`**.
+- **Why it closes (the key invariant).** Every stale sample lives at an absolute
+  frame **≥ `B`**, and `B` is the **next vamp wrap strictly after the video's
+  arm-anchor**, which is lip-synced to (and therefore **≥**) the audio read cursor
+  (both rails ride the one output clock anchored at media-time ZERO, §3). So every
+  stale sample is in the **unplayed** region `[cursor, …)` — exactly the region the
+  next block **replaces** before the bus consumes it. The bus is at `cursor` and
+  advances forward; the replace happens between sampling the transition and the bus
+  reading past `cursor` (one fill-loop iteration, no `await`, no lock). A small
+  bounded lookahead is therefore safe **because** it is re-derived, not because it
+  is short: there is no construction in which a frame derived from a *pre-transition*
+  deck state is read for an unplayed position.
+- **Pause / stop fall out of the same rule.** On `pause` the deck emits silence for
+  `≥ cursor`; the next replace overwrites any pending body with silence — no stale
+  body past the pause. On `stop` the deck re-cues (silence until a fresh `vamp`);
+  the replace overwrites the unplayed tail likewise. No already-published-unplayed
+  sample plays past the transition.
+
+**Underrun safety is preserved.** The replaced window `[cursor, H)` always covers
+the bus's next pull `[cursor, cursor + frames)` because `LOOKAHEAD ≥` one tick's
+frames (and the deck/store silence-fill any genuinely un-published span under a
+`DropOnOverload` catch-up — gap-free, never a short block). The lookahead is a
+by-construction-never-past-the-boundary safety margin, not a source of overshoot.
+
+This unifies the CRITICAL-1 (boundary-tight exit) and CRITICAL-2 (no per-block
+allocation) fixes: the replace is served by the triple-buffered preallocated
+snapshot pool (§2.2), so revising the unplayed tail every block is both *correct*
+and *allocation-free*.
 
 ### 3. Sample-lock to the video wrap — the alignment guarantee
 
@@ -270,14 +354,22 @@ as a silent tile does — *not* a half-built feature.
 ### 5. Prime range + bounded memory — decode the window, refuse over-cap (no silent clamp)
 
 The prime decodes **only up to the vamp window's end** (`vamp_out + W` samples,
-the exact-rational frame→sample image), discarding the pre-`vamp_in` head as it
-goes — **not** a fixed `MAX_LOOP_SECONDS`-from-the-asset-start. This is the
-cross-vendor review's Defect 3: capping the decode at 600 s *from the start* would
-**silence** a perfectly valid vamp window that merely begins late (e.g. an ident
-at `[590 s, 595 s]`). `AudioFileDecoder` has no seek, so reaching a late window
-costs decoding through the head once at prime (a bounded one-shot, off the output
-path; the transient decode buffer is freed after the bounded body is sliced out) —
-acceptable for the MVP's near-start vamps.
+the exact-rational frame→sample image) and **retains only the window**
+`[vamp_in_sample, vamp_out_sample + W)` — **not** a fixed
+`MAX_LOOP_SECONDS`-from-the-asset-start, and **not** the whole pre-`vamp_in`
+prefix. This is the cross-vendor review's Defect 3 (both halves): capping the
+decode at 600 s *from the start* would **silence** a perfectly valid vamp window
+that merely begins late (e.g. an ident at `[590 s, 595 s]`); and accumulating
+every decoded sample from frame 0 into one buffer before slicing — even when the
+window is short — would **transiently buffer the entire pre-`vamp_in` prefix**
+(peak ≈ asset size, not window size). `AudioFileDecoder` has no seek, so reaching a
+late window costs decoding through the head once at prime — but the driver
+**discards each decoded block that lies entirely before `vamp_in_sample`** and only
+appends the in-window samples to the retained buffer, so the **peak resident decode
+buffer is the window size** (`≈ vamp_len` seconds of audio + `W`), never the asset
+size. A bounded one-shot, off the output path; the transient retained window is
+freed after the bounded body is sliced into the deck — acceptable for the MVP's
+near-start vamps and bounded even for a late window in a long asset.
 
 The loop **body** is held in RAM for the channel's life, so it is **bounded by an
 explicit cap**, not operator restraint (safety §5). At 48 kHz stereo `f32` the
@@ -308,6 +400,13 @@ bounding is the sibling memory bound).
 - **inv #10 (isolation):** the transport mailbox is the existing bounded
   drop-oldest seam the engine never awaits; the audio thread adds no channel into
   the engine.
+- **inv #5 / rule 22 (bounded memory, no per-block alloc):** the deck body + seam
+  are allocated once at prime; the prime's retained decode buffer is the window
+  size, not the asset size (§5); the fill loop's scratch is one reused `Vec`; and
+  `AudioStore::publish_window` swaps in a snapshot from a triple-buffered
+  preallocated pool — so the steady fill path performs **zero** heap allocation per
+  block. The store window is itself bounded (`≤ LOOKAHEAD` frames) and replaced, not
+  grown.
 - **Hold-last-good / never off-air:** an empty deck (no audio stream, decode
   failure, or over-cap window) rides silence; the bus's `read` always returns a
   full block. No `unwrap`/`expect`/`panic` on the loop path — a fault logs and the
@@ -353,6 +452,9 @@ bounding is the sibling memory bound).
 | **`L = SampleClock::total_at(vamp_out) − total_at(vamp_in)`.** | `total_at`'s argument is an output-**tick** index; `vamp_in`/`vamp_out` are asset source-**frame** indices (§3 Note). Equal only when asset cadence ≡ output cadence and the player emits one frame per tick — a latent drift otherwise. The decoded sample count of the time range is correct for every cadence. |
 | **Resample/stretch the segment to a whole number of ticks.** | Retiming the audio detunes it and adds a resampler on the loop path for no benefit — the decoded sample count of the `[vamp_in, vamp_out)` time range is already an exact integer at the bus rate; the segment loops at its native pitch sample-exactly. |
 | **Mix the loop on the engine/output thread.** | Puts decode/mix on the output-clock loop — inv #1/#10 violation. The bus mix already lives on the bake-consumer thread; the deck/loop is a *producer* into the same `AudioStore` the bus samples. |
+| **Append-only lookahead (the round-2 shape): prepublish `LOOKAHEAD` of looped body, then `arm_exit` the deck.** | The store's `publish`/`publish_samples` is **append-only**; the body already published before the exit is sampled **plays past the boundary `B`** (and past a pause/stop) — the exit is not same-boundary (CRITICAL-1, the root defect). Shrinking the lookahead only shrinks the overshoot; it never reaches zero. The fix must let the unplayed tail be *revised*, not just bounded. |
+| **Bounded-tiny-lookahead only (shrink the overshoot, no revise).** | Still leaves a (smaller) stale tail past `B`, and trades correctness for a tighter underrun margin — a glitchy/contended host (the whole point, rule 26) can then underrun. Rejected: bounding is not the same as *true-by-construction*. The sliding-window **replace** (§2.3) is by-construction-correct *and* keeps a comfortable lookahead. |
+| **Store `truncate_unplayed_tail(cursor)` op, then re-append from the deck on a transition.** | A workable variant (and the store could expose it), but it is **two ops** (truncate + append) reacting to a transition *edge*, leaving a window where the edge-detection logic itself must be exactly right. Re-deriving-and-**replacing** the whole `[cursor, H)` window **every** block (§2.2/§2.3) needs no edge detection at all — the deck's current state is reflected unconditionally — and is served allocation-free by the same triple-buffer, so it is the simpler *and* more robust construction. |
 
 ## Consequences
 
@@ -422,3 +524,42 @@ RED tests must gate:
    the output path; the store silence-fills until the first publish — the RED test
    asserts the bus reads silence (never a short block / wedge) before the deck is
    primed.
+
+A **round-3 design-first revision** (2026-06-20) resolved a further two-lens
+BLOCK/CRITICAL panel: the round-2 implementation patched symptoms but left the
+substance unfixed. The substantive fixes (now in the Decision above) and the RED
+tests that gate them:
+
+6. **Boundary-tight exit under a real lookahead (CRITICAL-1, the root).** The
+   append-only store let prepublished body play **past** the armed exit boundary
+   `B` (and past pause/stop). Resolved by the publish-horizon contract (§2.3): the
+   fill loop **replaces** the unplayed window `[cursor, H)` from the deck's current
+   state every block, so no pre-transition body survives past `B` — true by
+   construction. The RED test runs `player_audio_loop` with a **non-trivial
+   lookahead**, arms the exit at `B`, and asserts **no published/heard sample past
+   `B`** carries body energy (and likewise nothing stale past a `pause`/`stop`); it
+   fails against the append-only `18039876` and passes after.
+7. **No per-block allocation in the store publish (CRITICAL-2).** The round-2
+   `publish_samples` allocated a fresh `Vec` + `Arc` **every** block (the
+   `read_into` reuse fixed only the deck side). Resolved by
+   `AudioStore::publish_window` over a triple-buffered preallocated snapshot pool.
+   The RED test publishes many windows and asserts the backing buffers are **reused**
+   (stable pointers / no fresh allocation) — fails against the COW append, passes
+   after.
+8. **Prime retains the window, not the prefix (CRITICAL-3).** The round-2
+   `decode_clip_to_48k` accumulated from frame 0 to a cap then sliced — transiently
+   buffering the whole pre-`vamp_in` prefix. Resolved by discarding each
+   entirely-pre-`vamp_in` block at decode (§5). The RED test primes a **late** vamp
+   window in a longer asset and asserts the **peak resident decode buffer ≈ the
+   window size, not the asset size**, while the loop still plays — fails against the
+   accumulate-then-slice, passes after.
+9. **Cue re-cues, not pauses (MAJOR-4); a changed arm-anchor always propagates
+   (MAJOR-5).** The round-2 map sent the video's re-cue (`Cued`) to `deck.pause()`
+   (hold-in-place) and never produced `Stopped` (dead code); and the bus-publish
+   suppression dropped a changed exit anchor when `(state, exit_armed)` was
+   unchanged. Resolved by routing `Cued → Stopped → deck.stop()` (phase re-cue,
+   §1/§2.3) and suppressing only on the full `(state, exit_armed, anchor)` triple
+   (§2). The RED tests assert (a) a video stop/cue **re-cues the audio to head** (a
+   fresh `vamp` restarts at `body[0]`), distinct from `pause` (holds position), and
+   (b) an `ArmExit` anchor that arrives while `audio_state` is unchanged still
+   reaches the deck.
