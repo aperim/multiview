@@ -269,12 +269,22 @@ impl LoopDeck {
         let loop_frames = usize::try_from(loop_samples).unwrap_or(usize::MAX);
         let in_idx = usize::try_from(in_sample).unwrap_or(usize::MAX);
 
-        // The window we need is [in_sample, out_sample + W); clamp the lap-over to
-        // whatever real content the clip actually has past the loop point (when the
-        // loop point is the clip end there may be fewer than W — `with_segment`
-        // then wraps the head).
+        // The window we need is [in_sample, out_sample + W). The decoded sample
+        // count for a time range can fall a few samples short of the frame-derived
+        // target (resampler edge effects), so **clamp the loop body to the content
+        // that actually decoded** rather than refusing on a tiny shortfall — the
+        // loop is sample-locked to the decoded duration, which is what plays.
         let total_frames = clip.len() / channels;
         if in_idx >= total_frames {
+            return Ok(Self::empty(format));
+        }
+        let available = total_frames - in_idx;
+        // Body = the requested vamp length, clamped to what decoded. A real
+        // truncation (the clip is materially shorter than the declared window) still
+        // loops the available content, sample-locked to it; only a near-empty body
+        // (≤ one crossfade window) rides silence (nothing meaningful to loop).
+        let loop_frames = loop_frames.min(available);
+        if loop_frames <= xfade {
             return Ok(Self::empty(format));
         }
         let want_end = in_idx
@@ -284,11 +294,6 @@ impl LoopDeck {
         let start_off = in_idx.saturating_mul(channels);
         let end_off = want_end.saturating_mul(channels);
         let window: &[f32] = clip.get(start_off..end_off).unwrap_or(&[]);
-        if window.len() < loop_frames.saturating_mul(channels) {
-            // The decoded clip is shorter than the declared vamp window (truncated
-            // asset) — ride silence rather than loop a partial body.
-            return Ok(Self::empty(format));
-        }
         Self::with_segment(format, window, loop_frames, xfade)
     }
 

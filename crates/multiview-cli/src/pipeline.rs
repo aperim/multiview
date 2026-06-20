@@ -1655,6 +1655,13 @@ pub struct Pipeline {
     /// Built only for `bars` synthetic sources; empty when this run did not opt
     /// into program audio.
     tone_ingest_plans: Vec<crate::audio::ToneIngestPlan>,
+    /// Media-player channel **audio loop** plans (ADR-T019): how to prime + loop
+    /// each player's embedded audio onto the program bus on the same wrap instant
+    /// as the video. The drive starts one player-audio loop thread per plan,
+    /// writing into that player's [`Self::audio_stores`] entry (routed onto the bus
+    /// like any source's audio). Built only for media players whose default asset
+    /// declares a vamp window; empty when this run did not opt into program audio.
+    player_audio_ingest_plans: Vec<crate::audio::PlayerAudioPlan>,
     /// The fixed canvas color (ADR-C001 SDR BT.709 limited).
     canvas_color: CanvasColor,
     /// The "no signal" slate composited for tiles with no usable frame.
@@ -2059,6 +2066,15 @@ impl Pipeline {
             stores.insert(id, store);
         }
         ingest_plans.extend(media_player_boot.plans);
+        // ADR-T019: register each rolling player's `AudioStore` (so the program-bus
+        // routing below picks it up at unity gain, like any source's audio) and
+        // collect its audio loop plan (spawned in `drive_streaming`). A player with
+        // a silent asset still gets a store; its deck primes empty → it rides
+        // silence (no special-casing — exactly as a silent source does).
+        let player_audio_ingest_plans = media_player_boot.audio_plans;
+        for (id, audio_store) in media_player_boot.audio_stores {
+            audio_stores.insert(id, audio_store);
+        }
 
         // WHIP ingest wiring (ADR-T014, `webrtc-native`): one shared publisher
         // rendezvous registry the control plane's WhipProvider writes to and each
@@ -2208,6 +2224,7 @@ impl Pipeline {
             audio_stores,
             audio_ingest_plans,
             tone_ingest_plans,
+            player_audio_ingest_plans,
             inventories,
             #[cfg(feature = "overlay")]
             caption_stores,
@@ -2936,6 +2953,26 @@ impl Pipeline {
         } else {
             Vec::new()
         };
+        // Media-player channels with embedded audio (ADR-T019): each loops its
+        // asset's vamp-segment audio onto the program bus on the same wrap instant
+        // as the video. Spawned ONLY when this run opted into program audio (else no
+        // `ProgramBus` consumes the store). Each pairs the player's audio plan with
+        // its `AudioStore` (already routed onto the bus below).
+        let player_audio_plans: Vec<(
+            crate::audio::PlayerAudioPlan,
+            Arc<multiview_audio::store::AudioStore>,
+        )> = if self.encode_cfg.audio.is_some() {
+            std::mem::take(&mut self.player_audio_ingest_plans)
+                .into_iter()
+                .filter_map(|plan| {
+                    self.audio_stores
+                        .get(&plan.id)
+                        .map(|store| (plan, Arc::clone(store)))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         // The supervisor registers every producer's per-thread stop flag in the
         // run's shared registry (ADR-W018) — the video decode thread under `{id}`,
         // its audio/tone/caption companions under `{id}/<role>` — so a live
@@ -2944,6 +2981,7 @@ impl Pipeline {
             plans,
             audio_plans,
             tone_plans,
+            player_audio_plans,
             caption_plans,
             &self.stop_registry,
         );
@@ -5421,6 +5459,11 @@ impl IngestSupervisor {
     /// #10). The audio thread is the peer of the video decode thread: it decodes
     /// the SAME source's audio (its own libav context) into the source's
     /// `AudioStore`, which the program bus samples.
+    // A sequence of near-identical per-role spawn loops (video / audio / tone /
+    // player-audio / captions), each registering a stop flag + ExitGuard and
+    // pushing a producer handle: clearer kept whole than split across five helpers
+    // that would each take the registry + the producers vec.
+    #[allow(clippy::too_many_lines)]
     fn start(
         plans: Vec<IngestPlan>,
         audio_plans: Vec<(
@@ -5431,6 +5474,13 @@ impl IngestSupervisor {
             crate::audio::ToneIngestPlan,
             Arc<multiview_audio::store::AudioStore>,
         )>,
+        // Media-player channels whose loaded asset has audio (ADR-T019): each
+        // loops its embedded audio on its own thread onto the program bus, on the
+        // same wrap instant as the video. Empty when no player carries audio.
+        player_audio_plans: Vec<(
+            crate::audio::PlayerAudioPlan,
+            Arc<multiview_audio::store::AudioStore>,
+        )>,
         caption_plans: Vec<crate::captions::CaptionPlan>,
         registry: &crate::live_sources::StopRegistry,
     ) -> Self {
@@ -5439,6 +5489,7 @@ impl IngestSupervisor {
                 .len()
                 .saturating_add(audio_plans.len())
                 .saturating_add(tone_plans.len())
+                .saturating_add(player_audio_plans.len())
                 .saturating_add(caption_plans.len()),
         );
         for plan in plans {
@@ -5546,6 +5597,45 @@ impl IngestSupervisor {
                     // is best-effort and never gates the output clock (invariant #1).
                     tracing::error!(error = %e, source = %id, "could not spawn tone publish thread");
                 }
+            }
+        }
+        // Media-player channels with embedded audio (ADR-T019): each loops its
+        // asset's `[vamp_in, vamp_out)` audio onto the program bus on the same wrap
+        // instant as the video. Spawned exactly like the per-source audio decode
+        // threads, registered under the derived `{id}/player-audio` key (ADR-W018).
+        // The driver is `ffmpeg`-gated (it decodes the asset); without `ffmpeg` a
+        // player carries no audio and rides silence (consistent with every other
+        // decode path), so the plan is consumed (`stop`/store dropped) but no thread
+        // spawns.
+        for (plan, store) in player_audio_plans {
+            let stop = Arc::new(AtomicBool::new(false));
+            let id = plan.id.clone();
+            let exited =
+                crate::live_sources::register_stop(registry, &format!("{id}/player-audio"), &stop);
+            let exit_guard = crate::live_sources::ExitGuard::new(&exited);
+            let thread_stop = Arc::clone(&stop);
+            #[cfg(feature = "ffmpeg")]
+            {
+                let builder =
+                    std::thread::Builder::new().name(format!("multiview-player-audio-{id}"));
+                match builder.spawn(move || {
+                    let _exit = exit_guard;
+                    crate::audio::player_audio_loop(&plan, &store, &thread_stop);
+                }) {
+                    Ok(handle) => producers.push((stop, handle)),
+                    Err(e) => {
+                        // A player-audio thread that cannot spawn is logged and
+                        // skipped: its channel loops video normally and rides audio
+                        // silence (best-effort — invariant #1; never gates output).
+                        tracing::error!(error = %e, player = %id, "could not spawn media-player audio loop thread");
+                    }
+                }
+            }
+            #[cfg(not(feature = "ffmpeg"))]
+            {
+                // No decode without `ffmpeg`: drop the guard (flips `exited`) and the
+                // store; the player rides audio silence.
+                let _ = (exit_guard, thread_stop, store);
             }
         }
         for plan in caption_plans {
@@ -7413,6 +7503,14 @@ struct MediaPlayerBoot {
     plans: Vec<IngestPlan>,
     stores: Vec<(String, Arc<TileStore<Nv12Image>>)>,
     mailboxes: std::collections::HashMap<String, Arc<crate::player::TransportMailbox>>,
+    /// Per-player **audio** stores (ADR-T019): a player with a rolling asset gets
+    /// an `AudioStore` the program bus routes (so its looped audio joins the mix);
+    /// the `player_audio_loop` thread fills it. Empty for an idle player.
+    audio_stores: Vec<(String, Arc<multiview_audio::store::AudioStore>)>,
+    /// Per-player audio loop plans (ADR-T019): how to prime + loop each rolling
+    /// player's embedded audio, carrying the SAME vamp geometry + mailbox the video
+    /// uses so audio wraps on the same instant. One per rolling player.
+    audio_plans: Vec<crate::audio::PlayerAudioPlan>,
 }
 
 /// Build the boot-time media-player channels from `config.media_players`
@@ -7445,6 +7543,8 @@ fn build_media_player_boot(
         plans: Vec::new(),
         stores: Vec::new(),
         mailboxes: std::collections::HashMap::new(),
+        audio_stores: Vec::new(),
+        audio_plans: Vec::new(),
     };
     let library = config.media_library.as_ref();
     let root = library.and_then(|l| l.root.as_deref());
@@ -7500,6 +7600,9 @@ fn build_media_player_boot(
             Some(r) => std::path::Path::new(r).join(&asset.path),
             None => std::path::PathBuf::from(&asset.path),
         };
+        // The libav-openable audio location (the SAME media as the video; the audio
+        // peer opens its own `!Send` libav context) for the player audio loop.
+        let audio_location = path.to_string_lossy().into_owned();
 
         let (tile_w, tile_h) = cell_pixel_size(layout, &player.id)
             .unwrap_or((config.canvas.width, config.canvas.height));
@@ -7509,6 +7612,10 @@ fn build_media_player_boot(
             NoSignalPolicy::HoldForever,
         ));
         let eof_policy = map_eof_policy(player.eof_policy);
+        // Clone the mailbox for the audio loop BEFORE it is moved into the video
+        // handle: the audio loop drains the SAME mailbox the video thread drains, so
+        // vamp/arm-exit/stop land on the same boundary for both rails (ADR-T019).
+        let audio_mailbox = Arc::clone(&mailbox);
         let handle = crate::player::PlayerHandle::new(
             player.id.clone(),
             geometry,
@@ -7516,6 +7623,24 @@ fn build_media_player_boot(
             player.loop_default,
             mailbox,
         );
+
+        // ADR-T019: this rolling player gets an `AudioStore` (routed onto the bus
+        // like any source) + an audio loop plan carrying the SAME vamp geometry, so
+        // its embedded audio loops on the same wrap instant as the video. A silent
+        // asset simply rides silence (the deck primes empty).
+        let audio_store = crate::audio::new_store();
+        boot.audio_stores
+            .push((player.id.clone(), Arc::clone(&audio_store)));
+        boot.audio_plans.push(crate::audio::PlayerAudioPlan {
+            id: player.id.clone(),
+            location: audio_location,
+            vamp_in_frames: geometry.vamp_in(),
+            vamp_out_frames: geometry.vamp_out(),
+            cadence: geometry.cadence(),
+            loop_on_start: player.loop_default,
+            output_cadence: cadence,
+            mailbox: audio_mailbox,
+        });
 
         boot.stores.push((player.id.clone(), Arc::clone(&store)));
         boot.plans.push(IngestPlan {
@@ -11749,8 +11874,14 @@ segment_ms = 1000
         .expect("rtsp ingest plan");
 
         let registry = stop_registry();
-        let supervisor =
-            IngestSupervisor::start(vec![plan], Vec::new(), Vec::new(), Vec::new(), &registry);
+        let supervisor = IngestSupervisor::start(
+            vec![plan],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            &registry,
+        );
         let flag = registry
             .lock()
             .expect("registry")
@@ -11776,8 +11907,14 @@ segment_ms = 1000
             live: true,
         };
         let registry = stop_registry();
-        let supervisor =
-            IngestSupervisor::start(Vec::new(), Vec::new(), Vec::new(), vec![plan], &registry);
+        let supervisor = IngestSupervisor::start(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![plan],
+            &registry,
+        );
         let flag = registry
             .lock()
             .expect("registry")
@@ -12872,6 +13009,40 @@ loop_default = true
             panic!("expected a Path location for the player's asset");
         };
         assert_eq!(p.to_str().unwrap(), "/srv/media/opener.ts");
+
+        // ADR-T019: the rolling player ALSO gets an audio store + audio loop plan
+        // (so its embedded audio joins the program bus on the same wrap instant),
+        // carrying the SAME vamp geometry as the video and the SAME asset path.
+        assert_eq!(
+            boot.audio_stores.len(),
+            1,
+            "the rolling player gets an audio store"
+        );
+        assert_eq!(boot.audio_stores[0].0, "vt-1");
+        assert_eq!(
+            boot.audio_plans.len(),
+            1,
+            "the rolling player gets an audio loop plan"
+        );
+        let ap = &boot.audio_plans[0];
+        assert_eq!(ap.id, "vt-1");
+        assert_eq!(
+            ap.location, "/srv/media/opener.ts",
+            "audio decodes the SAME asset as the video"
+        );
+        assert_eq!(
+            ap.vamp_in_frames, 10,
+            "audio loops the SAME vamp window as the video"
+        );
+        assert_eq!(ap.vamp_out_frames, 90);
+        assert_eq!(
+            ap.cadence, cadence,
+            "audio uses the asset cadence for the frame→sample map"
+        );
+        assert!(
+            ap.loop_on_start,
+            "loop_default = true ⇒ the audio vamps on start too"
+        );
     }
 
     #[test]
@@ -12888,6 +13059,16 @@ loop_default = true
         assert!(
             boot.mailboxes.contains_key("vt-1"),
             "an idle player still registers its mailbox"
+        );
+        // An idle player contributes no audio store/plan either (ADR-T019): nothing
+        // to loop until a load command binds an asset (probe-at-load is post-MVP).
+        assert!(
+            boot.audio_stores.is_empty(),
+            "an idle player has no audio store"
+        );
+        assert!(
+            boot.audio_plans.is_empty(),
+            "an idle player has no audio loop plan"
         );
     }
 }
