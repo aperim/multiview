@@ -475,6 +475,11 @@ pub(crate) async fn save_cast_session(
     Json(request): Json<SaveCastSessionRequest>,
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
+    // A promotion touches TWO objects — authorize BOTH (BOLA, ADR-W005): the
+    // path session `id` being read + retired (matching get/stop/volume), and
+    // the target `device_id` being created. Authorizing only the device would
+    // let a scoped principal promote another tenant's session into its device.
+    crate::auth::authorize_object(&principal, &id)?;
     crate::auth::authorize_object(&principal, &request.device_id)?;
     let record = state
         .cast_sessions
