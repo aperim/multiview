@@ -241,6 +241,31 @@ jobs:
           # default `software` feature.
           - crate: multiview-cli
             feature: heartbeat
+          # Overlay text engine (cosmic-text + swash + etagere atlas + bundled OFL
+          # fonts; ADR-R007/ADR-E002). Pure Rust — GPU-free and links NO ffmpeg —
+          # so it lints + tests on the bare runner. The default `lint`/`test` jobs
+          # build NONE of this: a cosmic-text 0.19 `set_text` signature break
+          # reached main (the text.rs render path lives in `multiview-compositor`
+          # under `--features overlay`) because no gate built the overlay feature
+          # (PR #203). These legs gate that surface going forward.
+          #
+          # The text rasterizer + the GPU overlay sub-pass live in
+          # `multiview-compositor`'s `overlay` feature — this is the leg that
+          # actually compiles the cosmic-text `Buffer`/`FontSystem` call sites.
+          - crate: multiview-compositor
+            feature: overlay
+          # The `multiview-cli` umbrella `overlay` feature gates
+          # `multiview-compositor/overlay` (it does NOT imply `ffmpeg` — it is the
+          # GPU-free, LGPL-clean overlay tier the `nvidia`/`apple`/`linux-vaapi`/
+          # `full` presets all pull in), plus the cli's own overlay wiring + tests.
+          - crate: multiview-cli
+            feature: overlay
+          # NOTE: `multiview-overlay --features libass` is gated by a SEPARATE
+          # clippy-only job (`feature-clippy-overlay-libass`) below, NOT this
+          # clippy+test matrix: the crate's `subtitle` test suite asserts the
+          # libass-OFF fallback (`AssCapability::detect() == Unavailable`)
+          # unconditionally, so `cargo test --features libass` is red by design —
+          # the clippy lint is the coverage that closes the gap.
           # WebRTC native egress/ingest (str0m + aws-lc-rs). The default `lint`
           # and `test` jobs build none of these, so the wave-1 union (#141↔#147)
           # broke `webrtc-native` silently on main; this leg gates it going
@@ -292,6 +317,43 @@ jobs:
           cargo test
           -p ${{ matrix.crate }}
           --features ${{ matrix.feature }}
+
+  # ── multiview-overlay libass clippy (clippy-only; closes a #134 gap) ─────────
+  # `multiview-overlay`'s off-by-default `libass` capability gate (the ASS/SSA
+  # subtitle burn-in seam, ADR-R007/R008) has zero coverage in the default
+  # `lint`/`test` jobs. It gets its OWN clippy-only job rather than a slot in the
+  # `feature-clippy` clippy+test matrix because the crate's `subtitle` integration
+  # test asserts the libass-OFF fallback (`AssCapability::detect() == Unavailable`)
+  # UNCONDITIONALLY — so `cargo test -p multiview-overlay --features libass` is red
+  # by design (the capability flips to `Available` once the feature is on). The
+  # clippy lint is the gap-closing coverage: it proves the libass-gated code
+  # type-checks + lints. The crate is pure Rust here (the native libass/HarfBuzz/
+  # FriBidi toolchain is wired downstream), so it runs on the bare runner.
+  feature-clippy-overlay-libass:
+    name: feature-gated clippy (multiview-overlay, libass)
+    runs-on: ubuntu-latest
+    # A single crate clippy under one feature (~1min warm); a cold per-feature
+    # cargo cache can take a few minutes. 20min matches the `feature-clippy` legs.
+    timeout-minutes: 20
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-multiview-overlay-libass
+      - name: clippy (libass)
+        # --all-targets also lints the test binaries under the feature; -D warnings
+        # matches the default `lint` gate. (No `test` step — see the job comment.)
+        run: >
+          cargo clippy
+          -p multiview-overlay
+          --features libass
+          --all-targets
+          -- -D warnings
 
   # ── ffmpeg-linked webrtc-native clippy (closes the #154 follow-up gap) ───────
   # The `feature-clippy` matrix above runs on a libav-FREE runner, so it cannot
@@ -402,6 +464,21 @@ jobs:
           cargo clippy
           -p multiview-cli
           --features webrtc-native
+          --all-targets
+          -- -D warnings
+      - name: clippy multiview-cli --features overlay,webrtc-native
+        # The overlay × webrtc-native cross-feature pair (#137): both gate code in
+        # `multiview-cli`, and `webrtc-native` implies `ffmpeg`, so this combo can
+        # only build on this ffmpeg-equipped leg — not on the libav-free
+        # `feature-clippy` matrix. A `cargo build` of the binary never runs these
+        # clippy lints, and no leg built the pair, so a non-exhaustive `match` over
+        # `SourceLocation` (the overlay-gated `resolve_incontainer_sub_route`
+        # missing the webrtc-native `Webrtc` arm) slipped through (fixed in PR #202).
+        # This step gates the pair going forward.
+        run: >
+          cargo clippy
+          -p multiview-cli
+          --features overlay,webrtc-native
           --all-targets
           -- -D warnings
       - name: clippy multiview-preview --features webrtc
@@ -591,3 +668,55 @@ jobs:
         # The webServer block builds the SPA and serves it; the specs mock the API.
         working-directory: web
         run: npm run test:e2e
+
+  # ── i18n catalog freshness (lingui extract + compile must be committed) ──────
+  # The production `vite build` lingui macro STRIPS the source-string fallback, so
+  # any `<Trans>`/`t` string NOT present in the compiled catalog renders as a
+  # content-hash ID *in production only* (dev/test keep the fallback, so vitest +
+  # build stay green). The other web gates (eslint/tsc/vitest/build) never run
+  # `lingui extract`, so a catalog that drifts behind the source strings ships
+  # broken hash IDs with a green CI. This job makes that drift a hard failure: it
+  # runs the SAME canonical scripts the app uses (web/package.json `i18n:extract` /
+  # `i18n:compile` → lingui.config.ts), with `--clean` so obsolete entries are
+  # pruned too, then `git diff --exit-code` on web/src/locales/** — failing if the
+  # committed catalogs differ from a fresh extract+compile of the current sources.
+  i18n-catalogs:
+    name: i18n catalog freshness (lingui)
+    runs-on: ubuntu-latest
+    # npm ci + a lingui extract + compile over the source tree (~1-2min). 15min
+    # absorbs a cold npm cache while still failing a wedge far under 6h.
+    timeout-minutes: 15
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install
+        working-directory: web
+        run: npm ci
+      - name: extract message catalogs (lingui extract --clean)
+        # The canonical `i18n:extract` script (`lingui extract`) plus `--clean` to
+        # also drop obsolete entries — re-scans every `t`/`<Trans>` macro in src/
+        # into the per-locale PO catalogs. Any new/changed string surfaces here.
+        working-directory: web
+        run: npm run i18n:extract -- --clean
+      - name: compile message catalogs (lingui compile)
+        # The canonical `i18n:compile` script — regenerates the compiled `.ts`
+        # catalogs the production build imports (the prod macro strips the source
+        # fallback, so these MUST match the `.po` sources).
+        working-directory: web
+        run: npm run i18n:compile
+      - name: catalogs are fresh (no uncommitted drift)
+        # Fail if the committed catalogs differ from the fresh extract+compile.
+        # The fix is local: run `npm --prefix web run i18n:extract -- --clean &&
+        # npm --prefix web run i18n:compile` and commit web/src/locales/**.
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code -- web/src/locales/; then
+            echo "::error::i18n catalogs are stale. Run 'npm --prefix web run i18n:extract -- --clean && npm --prefix web run i18n:compile' and commit web/src/locales/**."
+            exit 1
+          fi
