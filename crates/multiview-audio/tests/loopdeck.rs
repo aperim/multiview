@@ -334,13 +334,21 @@ fn from_clip_window_slices_the_vamp_segment_at_the_asset_cadence() {
     // 24 fps asset: frames 12..36 = [0.5 s, 1.5 s) = samples 24_000..72_000 (1 s).
     let cad24 = Rational::new(24, 1);
     let deck24 = LoopDeck::from_clip_window(stereo(), &clip, 12, 36, cad24, 0).unwrap();
-    assert_eq!(deck24.loop_frames(), 48_000, "24 frames @ 24 fps = 1 s = 48_000 samples");
-    // The first looped sample is clip sample 24_000 → value 24000/96000 = 0.25.
-    let first = deck24.read_at(0, 1);
+    assert_eq!(
+        deck24.loop_frames(),
+        48_000,
+        "24 frames @ 24 fps = 1 s = 48_000 samples"
+    );
+    // Read a CLEAN-MIDDLE frame (past the default crossfade window, so it is
+    // body[m] verbatim, not a seam blend): body frame 1000 = clip sample
+    // 24_000 + 1000 = 25_000 → value 25000/96000 ≈ 0.2604, proving the body was
+    // sliced from the vamp_in SAMPLE (asset-frame 12 @ 24 fps = sample 24_000).
+    let mid = deck24.read_at(1000, 1);
+    let expect = 25_000.0 / 96_000.0;
     assert!(
-        (f64::from(first.interleaved()[0]) - 0.25).abs() < 1e-3,
-        "the deck must slice from the vamp_in SAMPLE (asset-frame 12 @ 24 fps = sample 24_000), got {}",
-        first.interleaved()[0]
+        (f64::from(mid.interleaved()[0]) - expect).abs() < 1e-3,
+        "the deck must slice the body from the vamp_in SAMPLE 24_000 (got body[1000]={}, expected {expect:.4})",
+        mid.interleaved()[0]
     );
 
     // 25 fps asset: frames 0..50 = [0 s, 2 s) = samples 0..96_000 — DIFFERENT
@@ -348,7 +356,11 @@ fn from_clip_window_slices_the_vamp_segment_at_the_asset_cadence() {
     // 2 s = 96_000 samples (the whole clip).
     let cad25 = Rational::new(25, 1);
     let deck25 = LoopDeck::from_clip_window(stereo(), &clip, 0, 50, cad25, 0).unwrap();
-    assert_eq!(deck25.loop_frames(), 96_000, "50 frames @ 25 fps = 2 s = 96_000 samples");
+    assert_eq!(
+        deck25.loop_frames(),
+        96_000,
+        "50 frames @ 25 fps = 2 s = 96_000 samples"
+    );
 }
 
 // ----------------------------------------------------------------------------

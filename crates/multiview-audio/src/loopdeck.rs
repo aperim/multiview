@@ -43,6 +43,8 @@
 use std::cell::Cell;
 use std::f64::consts::FRAC_PI_2;
 
+use multiview_core::time::Rational;
+
 use crate::format::{AudioBlock, AudioFormat};
 
 /// The default seam crossfade window, in frames at 48 kHz (~10 ms — the
@@ -50,6 +52,19 @@ use crate::format::{AudioBlock, AudioFormat};
 /// [ADR-0059](../../../../docs/decisions/ADR-0059.md) §4). Clamped to `L/2` for a
 /// short segment so the fade-in and fade-out windows never overlap each other.
 pub const DEFAULT_CROSSFADE_FRAMES: usize = 480;
+
+/// The hard cap on a player audio loop body, in **seconds** (ADR-T019 §5): the
+/// segment is held in RAM for the channel's life, so it is bounded by an explicit
+/// ceiling, not operator restraint (safety §5). At 48 kHz stereo `f32`
+/// (`0.366 MiB/s`) this is ~220 MiB. A declared vamp window longer than this is
+/// refused for audio — the player loops video normally and rides audio silence.
+pub const MAX_LOOP_SECONDS: u64 = 600;
+
+/// The canonical audio sample rate the loop deck and bus operate at (48 kHz). The
+/// frame→sample window math ([`LoopDeck::from_clip_window`]) assumes the decoded
+/// clip is at this rate (every per-source decode resamples to it before the bus
+/// sees it, ADR-R005).
+pub const SAMPLE_RATE: u64 = 48_000;
 
 /// The correlation threshold above which the seam is treated as **correlated**
 /// (a sustained tone/pad continuing across the loop) and a **linear**
@@ -187,6 +202,94 @@ impl LoopDeck {
             state: DeckState::Vamping { exit_armed: false },
             cursor: Cell::new(0),
         })
+    }
+
+    /// Build a loop deck by **slicing the vamp segment from a whole decoded clip**
+    /// at the asset's cadence — the CLI driver's path (ADR-T019 §1/§3).
+    ///
+    /// `clip` is the whole `[in_point, out_point)` (or longer) clip decoded to
+    /// 48 kHz / `format` / interleaved `f32`. The vamp window `[vamp_in_frames,
+    /// vamp_out_frames)` is in **asset source frames** at `cadence`; this maps each
+    /// frame to its exact 48 kHz **sample** position
+    /// (`sample(f) = round(f × 48000 × den / num)`, exact integer rationals — never
+    /// a `SampleClock::total_at` *tick* delta, which would conflate source-frame
+    /// and output-tick indices) and slices `[sample(vamp_in), sample(vamp_out) + W)`
+    /// as the loop body + lap-over. The resulting loop length is the audio duration
+    /// of `vamp_len` asset frames — the **same sample count at any output cadence**,
+    /// so the audio lap and the video lap stay the same media-time length
+    /// (sample-lock). `xfade_frames == 0` selects [`DEFAULT_CROSSFADE_FRAMES`].
+    ///
+    /// A window that exceeds [`MAX_LOOP_SECONDS`], or resolves to an empty/degenerate
+    /// range, or lies outside the decoded `clip`, yields an **empty** (silent) deck
+    /// (the player loops video normally and rides audio silence — never an OOM,
+    /// never a panic).
+    ///
+    /// # Errors
+    ///
+    /// [`LoopDeckError::Ragged`] only if `clip.len()` is not a whole multiple of the
+    /// channel count (a programming error in the decode path). A geometry that
+    /// cannot be satisfied returns `Ok` with an empty deck, not an error.
+    pub fn from_clip_window(
+        format: AudioFormat,
+        clip: &[f32],
+        vamp_in_frames: u64,
+        vamp_out_frames: u64,
+        cadence: Rational,
+        xfade_frames: usize,
+    ) -> Result<Self, LoopDeckError> {
+        let channels = format.channel_count();
+        if channels == 0 || clip.len() % channels != 0 {
+            return Err(LoopDeckError::Ragged {
+                samples: clip.len(),
+                channels,
+            });
+        }
+        let xfade = if xfade_frames == 0 {
+            DEFAULT_CROSSFADE_FRAMES
+        } else {
+            xfade_frames
+        };
+
+        // Map asset frames → exact 48 kHz sample indices. Bail to a silent deck on
+        // any degenerate / unsatisfiable geometry (never an error, never an OOM).
+        let Some(in_sample) = frame_to_sample(vamp_in_frames, cadence) else {
+            return Ok(Self::empty(format));
+        };
+        let Some(out_sample) = frame_to_sample(vamp_out_frames, cadence) else {
+            return Ok(Self::empty(format));
+        };
+        if out_sample <= in_sample {
+            return Ok(Self::empty(format));
+        }
+        let loop_samples = out_sample - in_sample;
+        // Bounded-memory cap (ADR-T019 §5): refuse an over-long window for audio.
+        if loop_samples > MAX_LOOP_SECONDS.saturating_mul(SAMPLE_RATE) {
+            return Ok(Self::empty(format));
+        }
+        let loop_frames = usize::try_from(loop_samples).unwrap_or(usize::MAX);
+        let in_idx = usize::try_from(in_sample).unwrap_or(usize::MAX);
+
+        // The window we need is [in_sample, out_sample + W); clamp the lap-over to
+        // whatever real content the clip actually has past the loop point (when the
+        // loop point is the clip end there may be fewer than W — `with_segment`
+        // then wraps the head).
+        let total_frames = clip.len() / channels;
+        if in_idx >= total_frames {
+            return Ok(Self::empty(format));
+        }
+        let want_end = in_idx
+            .saturating_add(loop_frames)
+            .saturating_add(xfade)
+            .min(total_frames);
+        let start_off = in_idx.saturating_mul(channels);
+        let end_off = want_end.saturating_mul(channels);
+        let window: &[f32] = clip.get(start_off..end_off).unwrap_or(&[]);
+        if window.len() < loop_frames.saturating_mul(channels) {
+            // The decoded clip is shorter than the declared vamp window (truncated
+            // asset) — ride silence rather than loop a partial body.
+            return Ok(Self::empty(format));
+        }
+        Self::with_segment(format, window, loop_frames, xfade)
     }
 
     /// Precompute the `xfade`-frame seam region: for in-lap frame `m ∈ [0, xfade)`
@@ -507,6 +610,22 @@ fn frame_to_f64(v: usize) -> f64 {
 #[allow(clippy::as_conversions, clippy::cast_possible_truncation)] // reason: value is clamped to [-1,1]; f64->f32 narrowing is exact-enough and bounded.
 fn clamp_sample(v: f64) -> f32 {
     v.clamp(-1.0, 1.0) as f32
+}
+
+/// The exact 48 kHz **sample** index of asset frame `f` at `cadence` = `num/den`
+/// fps: `round(f × 48000 × den / num)`, computed in `u128` with no float and no
+/// `as` (inv #3 — the audio loop point lands on an exact sample, never a drifting
+/// average). Returns `None` for a non-positive cadence (caller rides silence).
+fn frame_to_sample(frame: u64, cadence: Rational) -> Option<u64> {
+    let num = u64::try_from(cadence.num).ok().filter(|n| *n > 0)?;
+    let den = u64::try_from(cadence.den).ok().filter(|d| *d > 0)?;
+    // sample = frame * SAMPLE_RATE * den / num, rounded to nearest.
+    let numer = u128::from(frame)
+        .saturating_mul(u128::from(SAMPLE_RATE))
+        .saturating_mul(u128::from(den));
+    let denom = u128::from(num);
+    let rounded = numer.saturating_add(denom / 2) / denom;
+    u64::try_from(rounded).ok()
 }
 
 /// `usize → u64` for frame counts/indices, saturating (no `as`). Widening on
