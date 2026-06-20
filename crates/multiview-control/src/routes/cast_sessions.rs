@@ -243,6 +243,12 @@ pub(crate) async fn start_cast_session(
             )
         })?;
     let (output, target) = resolve_target(delivery, request.output.as_deref())?;
+    // Per-output BOLA (ADR-W005 / OWASP API1): the cast target is a program
+    // rendition/head, so an output-scoped principal may only cast a rendition
+    // inside its allowlist — mirroring how `salvos` gates a head. Checked on the
+    // RESOLVED output and BEFORE any side effect (no record, no actor, no event),
+    // so a cross-output start casts nothing.
+    crate::auth::authorize_output(&principal, &output)?;
 
     let id = format!("cast-session-{}", uuid::Uuid::new_v4());
     // The runtime device document the factory resolves (driver gating + the
