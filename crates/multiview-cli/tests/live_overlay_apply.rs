@@ -193,6 +193,281 @@ async fn upsert_overlay_publishes_the_new_set_at_the_frame_boundary() {
     );
 }
 
+/// Task #130 (live re-blend): a pure equal-`z` REORDER must re-sequence the
+/// engine's live overlay working set at the frame boundary so the composite
+/// draw order actually changes — WITHOUT a restart. Two equal-z overlays blend
+/// in working-set order (the bake consumer's `analog_clocks_from_config` keeps
+/// input order, fed to the compositor's STABLE `sort_by_key(|l| l.z)`), so the
+/// published `OverlaySet.overlays()` order IS the equal-z draw-order tie-break.
+/// Before the fix, `UpsertOverlay` edited the mirror IN PLACE by id, so
+/// re-submitting upserts was a no-op for order; `ReorderOverlays` re-sequences
+/// it. This is Class-1 (a generation bump, one lock-free publish, no restart).
+#[tokio::test]
+async fn reorder_overlays_reblends_the_live_draw_order_at_the_frame_boundary() {
+    let config = two_cell_config();
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+    let (sender, command_rx) = command_bus(16);
+    let slot = overlay_apply_slot(config.overlays.clone());
+    let mut drain = command_drain_with_live_overlays(
+        command_rx,
+        config.clone(),
+        Arc::clone(&publisher),
+        Arc::clone(&slot),
+    );
+    let mut drive = test_drive(&config);
+    let mut sub = publisher.subscribe();
+
+    // Two analog clocks, both default z=0 → equal-z, so working-set order is the
+    // ONLY thing deciding which blends on top. Upsert clk_a then clk_b.
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_a", 10, 10)),
+        })
+        .expect("submit clk_a");
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_b", 50, 50)),
+        })
+        .expect("submit clk_b");
+    drain(&mut drive);
+
+    let set = slot.load();
+    assert_eq!(
+        set.generation(),
+        2,
+        "two upserts bumped the generation twice"
+    );
+    let ids_before: Vec<&str> = set.overlays().iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(
+        ids_before,
+        vec!["clk_a", "clk_b"],
+        "declaration/insertion order before the reorder"
+    );
+    let _ = job_phases(&mut sub); // drain the two apply_overlay phases
+
+    // REORDER: ask for [clk_b, clk_a] — same ids, same documents, only the
+    // draw order swapped. Against the pre-fix engine this is an unhandled
+    // command (skipped), so the order would NOT change.
+    sender
+        .try_submit(Command::ReorderOverlays {
+            op: OperationId::new(),
+            order: vec!["clk_b".to_owned(), "clk_a".to_owned()],
+        })
+        .expect("submit reorder");
+    drain(&mut drive);
+
+    let set = slot.load();
+    let ids_after: Vec<&str> = set.overlays().iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(
+        ids_after,
+        vec!["clk_b", "clk_a"],
+        "the reorder re-sequenced the live working set (the top overlay flipped) \
+         — the equal-z draw order actually changed live"
+    );
+    assert_eq!(
+        set.generation(),
+        3,
+        "the reorder is a frame-boundary apply (a generation bump), not a restart"
+    );
+    // The set still carries BOTH documents, unchanged — a pure permutation, not
+    // an add/remove/edit.
+    assert_eq!(set.overlays().len(), 2, "no overlay added or removed");
+    assert!(
+        set.overlays().iter().any(|o| o.id == "clk_a")
+            && set.overlays().iter().any(|o| o.id == "clk_b"),
+        "both overlays survive the reorder"
+    );
+    assert_eq!(
+        job_phases(&mut sub),
+        vec!["apply_overlay".to_owned()],
+        "the reorder is observable as a job.progress outcome (Class-1, no restart)"
+    );
+}
+
+/// A reorder request whose id sequence already matches the working set is a
+/// no-op: no generation bump, no spurious re-derivation (idempotent — a shed
+/// retry re-submitting the same order cannot thrash the bake consumer).
+#[tokio::test]
+async fn an_already_ordered_reorder_is_a_noop() {
+    let config = two_cell_config();
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+    let (sender, command_rx) = command_bus(16);
+    let slot = overlay_apply_slot(config.overlays.clone());
+    let mut drain = command_drain_with_live_overlays(
+        command_rx,
+        config.clone(),
+        Arc::clone(&publisher),
+        Arc::clone(&slot),
+    );
+    let mut drive = test_drive(&config);
+    let mut sub = publisher.subscribe();
+
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_a", 10, 10)),
+        })
+        .expect("submit clk_a");
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_b", 50, 50)),
+        })
+        .expect("submit clk_b");
+    drain(&mut drive);
+    let gen_before = slot.load().generation();
+    let _ = job_phases(&mut sub);
+
+    // Same order as the working set → nothing to do.
+    sender
+        .try_submit(Command::ReorderOverlays {
+            op: OperationId::new(),
+            order: vec!["clk_a".to_owned(), "clk_b".to_owned()],
+        })
+        .expect("submit no-op reorder");
+    drain(&mut drive);
+
+    assert_eq!(
+        slot.load().generation(),
+        gen_before,
+        "an already-ordered reorder publishes nothing (no generation bump)"
+    );
+    assert!(
+        job_phases(&mut sub).is_empty(),
+        "a no-op reorder emits no apply outcome"
+    );
+}
+
+/// Task #130 (GENUINE render-level proof): a pure equal-`z` overlay reorder
+/// changes the **rendered** draw order — not merely the published slot.
+///
+/// This drives the EXACT bake-consumer derivation `StreamBaker::refresh_overlays`
+/// uses (`crate::pipeline::analog_clocks_from_config(set.overlays(), w, h)` →
+/// `OverlayBaker::set_analog_clocks` → `OverlayBaker::draw_list`) and asserts the
+/// order of the rendered clock-face **`Ring` primitives** (back-to-front draw
+/// order) flips with the reorder. Two analog clocks at distinct centres make each
+/// face identifiable by its `Ring` centre. Pre-fix (`UpsertOverlay` edits the
+/// mirror in place by id) the published set order — and therefore the rendered
+/// order — does NOT change; post-fix `ReorderOverlays` re-sequences it. Requires
+/// `ffmpeg` (the bake module home) + `overlay` (the renderer) — the real
+/// deployment posture; run with `--features ffmpeg,overlay`.
+#[cfg(all(feature = "ffmpeg", feature = "overlay"))]
+#[tokio::test]
+async fn reorder_overlays_changes_the_rendered_draw_order() {
+    use multiview_cli::overlays::OverlayBaker;
+    use multiview_cli::pipeline::analog_clocks_from_config;
+    use multiview_compositor::overlay::OverlayPrimitive;
+    use multiview_core::time::MediaTime;
+    use multiview_overlay::geometry::PixelRect;
+
+    // The canvas of `two_cell_config()` (64×64) as f32 literals — avoids a
+    // u32→f32 `as` cast in this integration test (where `as_conversions` is not
+    // relaxed). The faces are placed at whole-pixel centres, so `Ring.cx/cy` are
+    // exact integer-valued f32 (the config placement rounds to i32 then widens).
+    const CANVAS_W: u32 = 64;
+    const CANVAS_H: u32 = 64;
+    const CANVAS_WF: f32 = 64.0;
+    const CANVAS_HF: f32 = 64.0;
+
+    // The rendered draw order of the analog faces, identified by `Ring` centre,
+    // derived through the REAL bake path from the live slot's published set.
+    fn rendered_ring_centres(
+        slot: &multiview_cli::live_overlays::OverlayApplySlot,
+    ) -> Vec<(f32, f32)> {
+        let set = slot.load();
+        // EXACTLY what `refresh_overlays` does: derive the ordered face specs
+        // from the published set, in slot order.
+        let specs = analog_clocks_from_config(set.overlays(), CANVAS_W, CANVAS_H);
+        let tile = multiview_cli::overlays::TileSpec::new(
+            "t",
+            "T",
+            PixelRect {
+                x: 0.0,
+                y: 0.0,
+                width: CANVAS_WF,
+                height: CANVAS_HF,
+            },
+        );
+        let mut baker = OverlayBaker::new(
+            vec![tile],
+            multiview_cli::wallclock::WallClockSource::system(),
+        )
+        .expect("build baker");
+        baker.set_analog_clocks(specs);
+        let list = baker
+            .draw_list(
+                MediaTime::ZERO,
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+            )
+            .expect("draw list");
+        // The clock-face bezel `Ring`s, in back-to-front draw order, by centre.
+        list.primitives
+            .iter()
+            .filter_map(|p| match p {
+                OverlayPrimitive::Ring { cx, cy, .. } => Some((*cx, *cy)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let config = two_cell_config();
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+    let (sender, command_rx) = command_bus(16);
+    let slot = overlay_apply_slot(config.overlays.clone());
+    let mut drain = command_drain_with_live_overlays(
+        command_rx,
+        config.clone(),
+        Arc::clone(&publisher),
+        Arc::clone(&slot),
+    );
+    let mut drive = test_drive(&config);
+
+    // Two analog clocks at distinct centres, both equal z=0. (Radius 16 fits the
+    // 64×64 canvas so the placement is not clamped.)
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_a", 10, 10)),
+        })
+        .expect("submit clk_a");
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_b", 50, 50)),
+        })
+        .expect("submit clk_b");
+    drain(&mut drive);
+
+    let before = rendered_ring_centres(&slot);
+    assert_eq!(
+        before,
+        vec![(10.0, 10.0), (50.0, 50.0)],
+        "the RENDERED face draw order before the reorder follows insertion order"
+    );
+
+    // The reorder must flip the RENDERED order, not just the slot Vec.
+    sender
+        .try_submit(Command::ReorderOverlays {
+            op: OperationId::new(),
+            order: vec!["clk_b".to_owned(), "clk_a".to_owned()],
+        })
+        .expect("submit reorder");
+    drain(&mut drive);
+
+    let after = rendered_ring_centres(&slot);
+    assert_eq!(
+        after,
+        vec![(50.0, 50.0), (10.0, 10.0)],
+        "the reorder changed the RENDERED clock-face draw order (clk_b now draws \
+         first/under, clk_a last/on-top) — proven through the real bake path, not \
+         just the published slot"
+    );
+}
+
 #[tokio::test]
 async fn remove_overlay_drops_the_entry_from_the_published_set() {
     let config = two_cell_config();

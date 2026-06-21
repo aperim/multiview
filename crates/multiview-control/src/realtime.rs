@@ -208,6 +208,10 @@ impl CorrKey {
             // left uncorrelated rather than mis-correlated, like ApplyLayout.
             | Command::UpsertOverlay { .. }
             | Command::RemoveOverlay { .. }
+            // Overlay reorder (task #130): like the overlay upsert/remove above,
+            // the drain emits a `job.progress` outcome with no per-operation key,
+            // so it is left uncorrelated rather than mis-correlated.
+            | Command::ReorderOverlays { .. }
             | Command::SetTallyOverride { .. } => None,
         }
     }

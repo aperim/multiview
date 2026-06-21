@@ -1489,6 +1489,9 @@ impl CommandDrain {
             Command::RemoveOverlay { ref id, .. } => {
                 self.remove_overlay(id);
             }
+            Command::ReorderOverlays { ref order, .. } => {
+                self.reorder_overlays(order);
+            }
             Command::SetTallyOverride { target, color, .. } => {
                 self.set_tally_override(target, color);
             }
@@ -1878,6 +1881,66 @@ impl CommandDrain {
                 phase: "apply_overlay".to_owned(),
                 pct: 100,
                 message: Some(format!("overlay {id} removed at the frame boundary")),
+            }));
+    }
+
+    /// Apply a `ReorderOverlays` (task #130) at the frame boundary: re-sequence
+    /// the working-overlay mirror to the requested draw order and republish the
+    /// set, so the bake consumer re-derives the new equal-`z` draw order on its
+    /// next frame. A pure permutation — no document is added, removed, or edited
+    /// — and a generation bump only when the order actually changes (idempotent:
+    /// a shed retry re-submitting the same order is a no-op that cannot thrash
+    /// the consumer). Pure data mutation, no rasterization, no I/O (inv #1/#10).
+    ///
+    /// `order` is the full desired id sequence. The mirror is sorted by each
+    /// entry's index in `order`; an entry whose id is absent from `order` (which
+    /// a well-formed reorder never produces — the watcher derives `order` from
+    /// the same document the set mirrors) is kept, after the listed ones, in its
+    /// prior relative order — never dropped. A reorder with no live seam is a
+    /// held action, symmetric with a held upsert/remove.
+    fn reorder_overlays(&mut self, order: &[String]) {
+        let Some(slot) = self.live_overlays.as_ref() else {
+            tracing::warn!(
+                "reorder_overlays held: no live overlay seam on this run path \
+                 (the stored order applies on restart)"
+            );
+            self.publish_overlay_held("(set)", "no live overlay seam on this run path");
+            return;
+        };
+        // Stable key: an id listed in `order` sorts by its position there; an
+        // unlisted id sorts after all listed ones (usize::MAX) and — because the
+        // sort is STABLE — keeps its prior relative order. A pure permutation of
+        // the existing entries: nothing is added or removed.
+        let rank = |overlay: &multiview_config::Overlay| -> usize {
+            order
+                .iter()
+                .position(|id| *id == overlay.id)
+                .unwrap_or(usize::MAX)
+        };
+        let before: Vec<String> = self.config.overlays.iter().map(|o| o.id.clone()).collect();
+        self.config.overlays.sort_by_key(rank);
+        let after: Vec<String> = self.config.overlays.iter().map(|o| o.id.clone()).collect();
+        if before == after {
+            // Already in the requested order — publish nothing (no spurious
+            // generation bump / re-derivation), but surface the no-op so a
+            // submitted command is never silently swallowed.
+            tracing::debug!("reorder_overlays: working set already in the requested order; no-op");
+            return;
+        }
+        let generation = crate::live_overlays::publish_set(slot, self.config.overlays.clone());
+        tracing::info!(
+            generation,
+            order = ?after,
+            "reorder_overlays: overlay draw order re-sequenced live at the frame boundary"
+        );
+        self.publisher
+            .publish_event(Event::JobProgress(JobProgress {
+                phase: "apply_overlay".to_owned(),
+                pct: 100,
+                message: Some(format!(
+                    "overlay draw order re-sequenced at the frame boundary: {}",
+                    after.join(", ")
+                )),
             }));
     }
 

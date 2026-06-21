@@ -28,12 +28,14 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
-use multiview_config::{MultiviewConfig, StartMode};
+use multiview_config::{ConfigDiff, MultiviewConfig, StartMode};
 use multiview_control::boot_model::{
     finish_running_persist, load_resume_config, persist_loaded, persist_running_now,
     spawn_running_persist, write_active_serialized, write_atomic, BootModel,
 };
-use multiview_control::config_watch::{spawn as spawn_watch, ManualPoll, WatchOptions};
+use multiview_control::config_watch::{
+    apply_document_diff, spawn as spawn_watch, ManualPoll, WatchOptions,
+};
 use multiview_control::{
     command_bus, run_warning_ingest, AppState, Command, CommandReceiver, EngineStateSnapshot,
     InMemoryRepository, InMemoryWarningStore, WarningFilter, WarningRepository,
@@ -2963,4 +2965,167 @@ async fn manual_poll_drives_an_external_edit_apply_deterministically() {
     );
 
     watch.stop();
+}
+
+/// A boot document carrying two equal-`z` overlays (the reorder fixture).
+const BOOT_DOC_TWO_OVERLAYS: &str = r##"schema_version = 1
+[canvas]
+width = 64
+height = 64
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr"]
+areas = ["a b"]
+[[sources]]
+id = "in_a"
+kind = "solid"
+color = "#103050"
+[[sources]]
+id = "in_b"
+kind = "bars"
+[[cells]]
+id = "cell_a"
+area = "a"
+[cells.source]
+input_id = "in_a"
+[[cells]]
+id = "cell_b"
+area = "b"
+[cells.source]
+input_id = "in_b"
+[[overlays]]
+id = "ov1"
+kind = "clock"
+target = "canvas"
+z = 0
+[[overlays]]
+id = "ov2"
+kind = "clock"
+target = "canvas"
+z = 0
+[[outputs]]
+kind = "hls"
+path = "/tmp/reorder.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##;
+
+/// Task #130 (watcher path): on an overlay-capable run, a file-watch document
+/// whose only change is a pure equal-`z` overlay REORDER (`[ov1, ov2]` →
+/// `[ov2, ov1]`, identical documents) must ride the live machinery as a
+/// `ReorderOverlays` command carrying the new order — so the engine actually
+/// re-blends the draw order live. The id-keyed per-overlay delta is EMPTY for a
+/// reorder, so without this the change would never reach the engine (the
+/// `UpsertOverlay` no-op the live re-blend RED proves). Class-1: it rides the
+/// same bounded bus, nothing restart-pending on a capable run.
+#[tokio::test]
+async fn a_file_watch_overlay_reorder_rides_reorder_overlays_command() {
+    let mut r = rig_with_overlay_live(BOOT_DOC_TWO_OVERLAYS);
+    let _ = r.commands.try_drain(); // ignore any seeding traffic
+
+    // The running baseline is the boot doc; `next` swaps the two equal-z
+    // overlays' declaration order, identical documents otherwise.
+    let running = MultiviewConfig::load_from_toml(BOOT_DOC_TWO_OVERLAYS).expect("parse running");
+    let reordered_doc = BOOT_DOC_TWO_OVERLAYS.replace(
+        "[[overlays]]\nid = \"ov1\"\nkind = \"clock\"\ntarget = \"canvas\"\nz = 0\n[[overlays]]\nid = \"ov2\"\nkind = \"clock\"\ntarget = \"canvas\"\nz = 0\n",
+        "[[overlays]]\nid = \"ov2\"\nkind = \"clock\"\ntarget = \"canvas\"\nz = 0\n[[overlays]]\nid = \"ov1\"\nkind = \"clock\"\ntarget = \"canvas\"\nz = 0\n",
+    );
+    let next = MultiviewConfig::load_from_toml(&reordered_doc).expect("parse reordered");
+
+    let diff = ConfigDiff::between(&running, &next);
+    assert!(
+        diff.overlays_reordered,
+        "precondition: the diff sees the reorder"
+    );
+    assert!(
+        diff.overlays.is_empty(),
+        "precondition: a pure reorder has no per-id overlay delta"
+    );
+
+    let outcome = apply_document_diff(&r.state, "config-file", &diff, &next);
+
+    let drained = r.commands.try_drain();
+    let reorder = drained.iter().find_map(|c| match c {
+        Command::ReorderOverlays { order, .. } => Some(order.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        reorder,
+        Some(vec!["ov2".to_owned(), "ov1".to_owned()]),
+        "the watcher must enqueue ReorderOverlays carrying the new draw order, \
+         got {drained:?}"
+    );
+    assert!(
+        !outcome.restart.contains("overlays"),
+        "a landed reorder on a capable run is Class-1, not restart-pending; \
+         restart = {:?}",
+        outcome.restart
+    );
+    assert_eq!(outcome.shed, 0, "nothing shed on a capacity-64 bus");
+}
+
+/// Task #130 (source-leg honesty): a pure SOURCE reorder has NO live engine
+/// seam — source declaration order affects only the cold-start test-pattern
+/// palette index (`run.rs`), never a live render path (cells bind by `input_id`;
+/// the live source stores are id-keyed and `list()` is id-sorted, so order is
+/// not even representable in the store/`active.toml`). So it must be reported as
+/// a real, RESTART-pending (Class-2) delta — NOT silently dropped, and NOT a
+/// live `Command::ReorderSources` (there is no such command — that would be
+/// theater). Before the fix `apply_document_diff` ignored a pure source reorder
+/// entirely (block 1 only fires on `!diff.sources.is_empty()`) — an unapplied,
+/// unreported no-op.
+#[tokio::test]
+async fn a_file_watch_source_reorder_is_reported_restart_pending() {
+    let mut r = rig(BOOT_DOC_TWO_OVERLAYS);
+    let _ = r.commands.try_drain();
+
+    // Swap the two sources' declaration order; identical documents otherwise.
+    let running = MultiviewConfig::load_from_toml(BOOT_DOC_TWO_OVERLAYS).expect("parse running");
+    let reordered_doc = BOOT_DOC_TWO_OVERLAYS.replace(
+        "[[sources]]\nid = \"in_a\"\nkind = \"solid\"\ncolor = \"#103050\"\n[[sources]]\nid = \"in_b\"\nkind = \"bars\"\n",
+        "[[sources]]\nid = \"in_b\"\nkind = \"bars\"\n[[sources]]\nid = \"in_a\"\nkind = \"solid\"\ncolor = \"#103050\"\n",
+    );
+    let next = MultiviewConfig::load_from_toml(&reordered_doc).expect("parse reordered");
+    assert_eq!(
+        next.sources
+            .iter()
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>(),
+        vec!["in_b".to_owned(), "in_a".to_owned()],
+        "the perturbed doc actually swapped the source order"
+    );
+
+    let diff = ConfigDiff::between(&running, &next);
+    assert!(
+        diff.sources_reordered,
+        "precondition: the diff sees the source reorder"
+    );
+    assert!(
+        diff.sources.is_empty(),
+        "precondition: a pure source reorder has no per-id source delta"
+    );
+
+    let outcome = apply_document_diff(&r.state, "config-file", &diff, &next);
+
+    // Reported as a real, restart-pending delta — never silently dropped.
+    assert!(
+        outcome.restart.contains("sources"),
+        "a pure source reorder is restart-pending (Class-2; no live seam); \
+         restart = {:?}",
+        outcome.restart
+    );
+    // NO engine command: there is no live source-order seam (a ReorderSources
+    // command would be theater — the engine consumes source order only at
+    // cold-start for the test-pattern palette).
+    let drained = r.commands.try_drain();
+    assert!(
+        drained.is_empty(),
+        "a source reorder submits NO engine command, got {drained:?}"
+    );
 }
