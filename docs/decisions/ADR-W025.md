@@ -58,23 +58,37 @@ the allowlist:
    `authorize_object(&principal, &record.id)` succeeds. An unscoped principal
    (`scoped_object_ids: None`, e.g. admin/unrestricted operator) sees every row,
    exactly as before.
-2. **`list_devices`, `list_sources`, `list_outputs`, `list_sync_groups`**
-   ([`routes/{devices,sources,outputs,sync_groups}.rs`](../../crates/multiview-control/src/routes/))
+2. **`list_devices`, `list_sources`, `list_outputs`, `list_sync_groups`,
+   `list_layouts`, `list_players`, `list_overlays`, `list_probes`, `list_salvos`**
+   ([`routes/{devices,sources,outputs,sync_groups,media_players,overlays,probes,salvos}.rs`](../../crates/multiview-control/src/routes/)
+   and `list_layouts` in [`routes/mod.rs`](../../crates/multiview-control/src/routes/mod.rs))
    — the same per-**row** filter on the resource's own id. Each resource is gated
-   by its own id on the single `GET` (`get_source`/`get_output`/`get_sync_group`
-   all `authorize_object(&id)`), so the *list* must drop out-of-scope rows, not
-   merely redact embedded fields (a redacted-but-present row would still leak the
-   row's own id). Sources/outputs/sync-groups additionally redact an embedded
-   out-of-scope device ref on the *surviving* in-scope rows (item 5).
+   by its own id on the single `GET` (`get_source`/`get_output`/`get_sync_group`/
+   `get_layout`/`get_player`/`get_overlay`/`get_probe`/`get_salvo` all
+   `authorize_object(&id)`), so the *list* must drop out-of-scope rows, not merely
+   redact embedded fields (a redacted-but-present row would still leak the row's
+   own id). Sources/outputs/sync-groups additionally redact an embedded
+   out-of-scope device ref on the *surviving* in-scope rows (item 5); the other
+   five resources carry no embedded device ref, so the row filter alone is the
+   complete fix (parity with `list_devices`/`list_cast_sessions`). The
+   **definitive sweep**: every collection whose single `GET /{id}` calls
+   `authorize_object` on its own id is row-filtered; collections that authorize no
+   caller object id (`list_alarms`, `list_tally`/`list_profiles`, `list_logs`,
+   `list_health`, `list_discovered` untrusted hints, the licence/telemetry/mesh
+   singletons) are role-only by design and need no filter.
 3. **Realtime WS/SSE** ([`realtime.rs`](../../crates/multiview-control/src/realtime.rs))
    — [`SessionStream`](../../crates/multiview-control/src/realtime.rs) carries an
    optional object-scope allowlist set from the connecting principal. A delta
-   whose event scopes to a Devices-domain **object** id outside the allowlist is
-   dropped (returns `None`, exactly like the resume/conflated skips); the
-   connect-time `device.status` snapshot frames skip out-of-scope device ids. An
-   unscoped principal's stream is unchanged. The filter is a per-client read
-   decision on the already-delivered event — the engine's publish path
-   (`broadcast::send`) is untouched (invariant #10).
+   whose event scopes to an `authorize_object`-axis id outside the allowlist is
+   dropped (returns `None`, exactly like the resume/conflated skips):
+   `device.*`/`cast.session.*` by their device/session id, `media.player_state`
+   by its player id, and `tile.state` by its bound input id (`object_authz_scope_id`).
+   The connect-time `device.status` snapshot frames skip out-of-scope device ids,
+   and the connect-time **tiles** snapshot drops tiles bound to an out-of-scope
+   input (placeholder tiles with no input are kept). An unscoped principal's
+   stream is unchanged. The filter is a per-client read decision on the
+   already-delivered event — the engine's publish path (`broadcast::send`) is
+   untouched (invariant #10).
 4. **AMWA NMOS Node API** ([`nmos/mod.rs`](../../crates/multiview-control/src/nmos/mod.rs))
    — the IS-04 LIST routes filter to the allowlist: `list_devices` by the
    device's own id; `list_senders` / `list_receivers` by the resource's own id
@@ -144,20 +158,28 @@ it gates the cast-target rendition on `start_cast_session`, a write, and is not 
 read-visibility concern here.
 
 On the realtime path, scope is matched against the event's object id as the
-**dedicated, narrower** helper
-[`device_object_scope_id`](../../crates/multiview-control/src/realtime.rs)
-derives it — the device id for `device.*` and the session id for
-`cast.session.*`. This is **intentionally narrower** than the existing
+**dedicated authz** helper
+[`object_authz_scope_id`](../../crates/multiview-control/src/realtime.rs)
+derives it — the device id for `device.*`, the session id for `cast.session.*`,
+the **player id** for `media.player_state`, and the **bound input id** for
+`tile.state` (when one is bound). These are exactly the ids an `authorize_object`
+read handler gates: `get_device`, `get_cast_session`, `get_player` (and the
+player transport verbs), and `get_input_streams` respectively. The connect-time
+device-status **and tiles** snapshots filter on the same axis
+([`id_in_object_scope`](../../crates/multiview-control/src/realtime.rs)), so the
+baseline cannot leak an object the deltas then hide.
+
+The helper is **intentionally narrower** than
 [`event_scope_id`](../../crates/multiview-control/src/realtime.rs) (used to set
-the envelope `id` for the `ids` filter): `event_scope_id` also returns an id for
-`tile.state` (an input/tile id), `timing.status` (a program/output stream id),
-and `media.player_state` (a switcher player id), none of which are
-`authorize_object`-gated device/cast objects. Filtering those by
-`scoped_object_ids` would be a wrong-axis check that could over-restrict, so the
-object-scope filter uses `device_object_scope_id` and leaves every other event —
-the `$control`/tiles/alerts/audio firehose, and `device.discovered` rows which
-have no registry id yet — gated only by the connect-time role (`Action::Read`),
-never by object scope.
+the envelope `id` for the `ids` topic filter): `event_scope_id` also returns an
+id for `timing.status` (a program/output stream id) — which **no** REST read
+`authorize_object`-gates — so filtering it by `scoped_object_ids` would be a
+wrong-axis check that could over-restrict. `object_authz_scope_id` therefore
+returns `None` for `timing.status`, for a `tile.state` carrying **no** bound
+input (a placeholder/no-signal tile has no object to authorize), for
+`device.discovered` rows (no registry id yet), and for the
+`$control`/alerts/audio firehose — all gated only by the connect-time role
+(`Action::Read`), never by object scope.
 
 ## Rationale
 
@@ -191,12 +213,14 @@ never by object scope.
 - **Easier:** the BOLA posture is now uniform — single-object, collection, and
   realtime reads all honour the same allowlist; a future scoped role
   (config-declared API keys) gets correct visibility for free.
-- **Committed to maintain:** any **new** collection read (REST or NMOS) or any
-  new Devices-domain realtime event must apply the same per-row / per-event
-  object filter; any new device/cast **object** event must be added to
-  [`device_object_scope_id`](../../crates/multiview-control/src/realtime.rs) (the
-  narrow authz helper, not the broader `event_scope_id`) so the realtime filter
-  can gate its id; and any new config field that **embeds a managed device id**
+- **Committed to maintain:** any **new** collection read (REST or NMOS) whose
+  single `GET /{id}` calls an `authorize_object` axis must apply the same per-row
+  object filter; any new realtime event whose id is an `authorize_object` axis
+  must be added to
+  [`object_authz_scope_id`](../../crates/multiview-control/src/realtime.rs) (the
+  authz helper, not the broader `event_scope_id`) so the realtime filter and any
+  connect-time snapshot can gate its id; and any new config field that **embeds a
+  managed device id**
   must be added to
   [`redact_out_of_scope_device_refs`](../../crates/multiview-control/src/routes/mod.rs)
   (the sweep is for device-id *references*, not only device-typed collections). A
