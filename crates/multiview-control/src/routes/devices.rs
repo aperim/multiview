@@ -90,10 +90,17 @@ pub(crate) async fn list_devices(
     principal: Principal,
 ) -> ControlResult<Json<Vec<Resource>>> {
     principal.role.require(Action::Read)?;
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): a scoped principal sees
+    // ONLY its allowlisted devices — by parity with `GET /devices/{id}` 403'ing
+    // an out-of-scope id, an unfiltered collection would let it enumerate (and
+    // read the address/config of) devices it cannot fetch. The same
+    // `authorize_object` predicate the per-object handlers use; an unscoped
+    // principal (admin/unrestricted operator) keeps every row.
     let devices = state
         .devices
         .list()?
         .into_iter()
+        .filter(|v| crate::auth::authorize_object(&principal, &v.resource.id).is_ok())
         .map(|v| v.resource)
         .collect();
     Ok(Json(devices))

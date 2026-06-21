@@ -652,7 +652,13 @@ impl SessionStream {
         registry: &DeviceStatusRegistry,
         snapshot_seq: u64,
     ) -> Option<RealtimeFrame> {
-        let status = registry.snapshot_all().into_iter().next()?;
+        // The first IN-SCOPE device (BOLA visibility, ADR-W005/ADR-W025): a
+        // scoped principal must not learn an out-of-scope device exists from the
+        // connect snapshot, exactly as the deltas filter it.
+        let status = registry
+            .snapshot_all()
+            .into_iter()
+            .find(|status| self.device_id_in_object_scope(&status.device_id))?;
         Some(self.device_status_frame(status, snapshot_seq))
     }
 
@@ -671,8 +677,19 @@ impl SessionStream {
         registry: &DeviceStatusRegistry,
         snapshot_seq: u64,
     ) -> Vec<RealtimeFrame> {
-        registry
+        // Filter to the principal's in-scope devices (BOLA visibility,
+        // ADR-W005/ADR-W025): the connect snapshot must not leak an out-of-scope
+        // device that the deltas then hide. An unscoped principal keeps every
+        // device (the filter is a no-op for `object_scope == None`). The in-scope
+        // statuses are collected first (ending the immutable `self` borrow the
+        // filter needs) before mapping through `device_status_frame`, which takes
+        // `&mut self` to issue per-connection seqs.
+        let in_scope: Vec<DeviceStatus> = registry
             .snapshot_all()
+            .into_iter()
+            .filter(|status| self.device_id_in_object_scope(&status.device_id))
+            .collect();
+        in_scope
             .into_iter()
             .map(|status| self.device_status_frame(status, snapshot_seq))
             .collect()
@@ -782,6 +799,18 @@ impl SessionStream {
                 return None;
             }
         }
+        // Per-object visibility (BOLA, ADR-W005/ADR-W025): a scoped principal
+        // receives a Devices-domain OBJECT delta (device.* / cast.session.*)
+        // only when its scope id is in the allowlist — by parity with
+        // `GET /{id}` 403'ing an out-of-scope id. Checked BEFORE `issue_seq` so a
+        // dropped out-of-scope delta leaves no gap in the per-connection seq
+        // sequence (exactly like the resume/conflated skips above). The firehose
+        // (no object scope: tiles/alerts/audio, and `device.discovered` /
+        // `timing.status`, which are not `authorize_object`-gated objects) is
+        // gated only by the connect-time role, never by object scope.
+        if !self.event_in_object_scope(&seq_event.event) {
+            return None;
+        }
         let seq = self.issue_seq();
         let event = (*seq_event.event).clone();
         let topic = topic_for_event(&event);
@@ -815,6 +844,36 @@ impl SessionStream {
             kind: FrameKind::Delta,
             envelope,
         })
+    }
+
+    /// Whether the connecting principal's object scope permits delivering this
+    /// event (BOLA visibility, ADR-W005/ADR-W025).
+    ///
+    /// `true` (deliver) when the session is unscoped, when the event is not a
+    /// Devices-domain **object** event ([`device_object_scope_id`] is [`None`] —
+    /// the role-gated firehose), or when the event's object id is in the
+    /// allowlist. `false` (drop) only for a scoped session and an out-of-scope
+    /// device/cast object id. A pure read predicate — no lock, no await, never
+    /// touches the engine publish path (invariant #10).
+    fn event_in_object_scope(&self, event: &Event) -> bool {
+        let Some(allowed) = self.object_scope.as_ref() else {
+            return true;
+        };
+        match device_object_scope_id(event) {
+            None => true,
+            Some(id) => allowed.iter().any(|a| a == id),
+        }
+    }
+
+    /// Whether a device/cast object `id` is visible to this session's principal
+    /// (BOLA visibility, ADR-W005/ADR-W025): `true` when unscoped or when `id` is
+    /// in the allowlist. Used to filter the connect-time device snapshot frames,
+    /// mirroring the per-delta [`event_in_object_scope`](Self::event_in_object_scope).
+    fn device_id_in_object_scope(&self, id: &str) -> bool {
+        match self.object_scope.as_ref() {
+            None => true,
+            Some(allowed) => allowed.iter().any(|a| a == id),
+        }
     }
 }
 
@@ -860,6 +919,38 @@ pub fn event_scope_id(event: &Event) -> Option<String> {
         Event::MediaPlayerState(e) => Some(e.player.clone()),
         // A discovery row has no registry id yet (untrusted inventory): it is
         // correlated to its scan operation via `corr`, never a fabricated id.
+        _ => None,
+    }
+}
+
+/// The **object id** a Devices-domain event addresses for per-object
+/// authorization (BOLA visibility, ADR-W005/ADR-W025), or [`None`] when the
+/// event is not a scoped device/cast object event.
+///
+/// This is the realtime mirror of the REST `authorize_object` axis: it returns
+/// `Some(id)` for exactly the events whose id a scoped principal is checked
+/// against on the per-object handlers — the `device.*` lifecycle/status events
+/// (the device resource id) and the `cast.session.*` membership events (the
+/// session id). It is intentionally NARROWER than [`event_scope_id`]:
+///
+/// * `TileState` (an input/tile id), `TimingStatus` (a program/output stream
+///   id), and `MediaPlayerState` (a switcher player id) scope by a NON-object
+///   axis that `authorize_object` does not gate — filtering them by
+///   `scoped_object_ids` would be wrong-axis and could over-restrict, so they
+///   return [`None`] (delivered, gated only by the connect-time role).
+/// * `DeviceDiscovered` has no registry id yet (untrusted inventory), so there
+///   is no object to authorize — [`None`].
+#[must_use]
+fn device_object_scope_id(event: &Event) -> Option<&str> {
+    match event {
+        Event::DeviceStatus(status) => Some(status.device_id.as_str()),
+        Event::DeviceAdopted(adopted) => Some(adopted.device_id.as_str()),
+        Event::DeviceRemoved(removed) => Some(removed.device_id.as_str()),
+        Event::DeviceMode(mode) => Some(mode.device_id.as_str()),
+        Event::DeviceError(error) => Some(error.device_id.as_str()),
+        Event::DeviceSync(sync) => Some(sync.device_id.as_str()),
+        Event::CastSessionStarted(started) => Some(started.session_id.as_str()),
+        Event::CastSessionRemoved(removed) => Some(removed.session_id.as_str()),
         _ => None,
     }
 }
@@ -966,11 +1057,15 @@ pub async fn ws_handler(
     // axum's `WebSocketUpgrade` extractor runs — an unauthenticated request is a
     // `401`/`403` `problem+json`, never pre-empted by the upgrade extractor's
     // `426` on a request without the upgrade handshake.
-    RealtimeViewer(_principal): RealtimeViewer,
+    RealtimeViewer(principal): RealtimeViewer,
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| run_ws_session(socket, state))
+    // Carry the authenticated principal's object scope into the session so the
+    // stream is a read-side projection of only its in-scope device/cast objects
+    // (BOLA visibility, ADR-W005/ADR-W025). An unscoped principal sees all.
+    let object_scope = principal.scoped_object_ids;
+    ws.on_upgrade(move |socket| run_ws_session(socket, state, object_scope))
 }
 
 /// A pre-upgrade auth gate for the realtime transports.
@@ -1073,11 +1168,16 @@ pub async fn auth_status_handler(
 }
 
 /// Run one upgraded WebSocket session to completion.
-async fn run_ws_session(mut socket: WebSocket, state: AppState) {
+///
+/// `object_scope` is the connecting principal's object-id allowlist (or [`None`]
+/// for an unscoped principal): the session delivers only its in-scope
+/// device/cast objects (BOLA visibility, ADR-W005/ADR-W025).
+async fn run_ws_session(mut socket: WebSocket, state: AppState, object_scope: Option<Vec<String>>) {
     let sub = state.engine.subscribe();
     let session_id = uuid_session_id();
-    let mut session =
-        SessionStream::new(sub, session_id, None).with_corr_registry(Arc::clone(&state.corr));
+    let mut session = SessionStream::new(sub, session_id, None)
+        .with_corr_registry(Arc::clone(&state.corr))
+        .with_object_scope(object_scope);
 
     let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
     let hello = session.snapshot_frame(snapshot_seq);
@@ -1154,8 +1254,12 @@ pub async fn sse_handler(
 
     let sub = state.engine.subscribe();
     let session_id = uuid_session_id();
-    let mut session =
-        SessionStream::new(sub, session_id, None).with_corr_registry(Arc::clone(&state.corr));
+    // The authenticated principal's object scope confines the SSE stream to its
+    // in-scope device/cast objects (BOLA visibility, ADR-W005/ADR-W025), exactly
+    // as the WebSocket transport; an unscoped principal sees all.
+    let mut session = SessionStream::new(sub, session_id, None)
+        .with_corr_registry(Arc::clone(&state.corr))
+        .with_object_scope(principal.scoped_object_ids);
     let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
 
     let stream = async_stream::stream! {
