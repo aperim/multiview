@@ -265,11 +265,10 @@ jobs:
           - crate: multiview-cli
             feature: overlay
           # NOTE: `multiview-overlay --features libass` is gated by a SEPARATE
-          # clippy-only job (`feature-clippy-overlay-libass`) below, NOT this
-          # clippy+test matrix: the crate's `subtitle` test suite asserts the
-          # libass-OFF fallback (`AssCapability::detect() == Unavailable`)
-          # unconditionally, so `cargo test --features libass` is red by design —
-          # the clippy lint is the coverage that closes the gap.
+          # job (`feature-clippy-overlay-libass`) below — its own cargo cache
+          # graph — but that job now runs BOTH clippy AND `cargo test`, the same
+          # as this matrix's legs (the `subtitle` capability test is cfg-gated by
+          # feature, #141, so the suite is green under `--features libass`).
           # WebRTC native egress/ingest (str0m + aws-lc-rs). The default `lint`
           # and `test` jobs build none of these, so the wave-1 union (#141↔#147)
           # broke `webrtc-native` silently on main; this leg gates it going
@@ -335,22 +334,27 @@ jobs:
           --features ${{ matrix.feature }}
           -- --skip tile_driven_meets_budget
 
-  # ── multiview-overlay libass clippy (clippy-only; closes a #134 gap) ─────────
+  # ── multiview-overlay libass clippy + test (closes a #134/#141 gap) ──────────
   # `multiview-overlay`'s off-by-default `libass` capability gate (the ASS/SSA
   # subtitle burn-in seam, ADR-R007/R008) has zero coverage in the default
-  # `lint`/`test` jobs. It gets its OWN clippy-only job rather than a slot in the
-  # `feature-clippy` clippy+test matrix because the crate's `subtitle` integration
-  # test asserts the libass-OFF fallback (`AssCapability::detect() == Unavailable`)
-  # UNCONDITIONALLY — so `cargo test -p multiview-overlay --features libass` is red
-  # by design (the capability flips to `Available` once the feature is on). The
-  # clippy lint is the gap-closing coverage: it proves the libass-gated code
-  # type-checks + lints. The crate is pure Rust here (the native libass/HarfBuzz/
-  # FriBidi toolchain is wired downstream), so it runs on the bare runner.
+  # `lint`/`test` jobs. It gets its OWN job (rather than a slot in the shared
+  # `feature-clippy` clippy+test matrix) only because its cargo-cache graph is
+  # scoped separately; it now runs BOTH clippy AND `cargo test` like every
+  # matrix leg. Previously this was clippy-only because the crate's `subtitle`
+  # test asserted the libass-OFF fallback (`AssCapability::detect() ==
+  # Unavailable`) UNCONDITIONALLY, so `cargo test --features libass` was red by
+  # design. That test is now cfg-gated by feature (#141) — the libass-OFF
+  # assertion runs only without the feature and the libass-ON dual asserts
+  # `Available` — so the test suite is green under `--features libass` and we
+  # gain real run-time coverage of the libass-gated path. The crate is pure Rust
+  # here (the native libass/HarfBuzz/FriBidi toolchain is wired downstream), so
+  # both steps run on the bare runner.
   feature-clippy-overlay-libass:
-    name: feature-gated clippy (multiview-overlay, libass)
+    name: feature-gated clippy + test (multiview-overlay, libass)
     runs-on: ubuntu-latest
-    # A single crate clippy under one feature (~1min warm); a cold per-feature
-    # cargo cache can take a few minutes. 20min matches the `feature-clippy` legs.
+    # A single crate clippy + test under one feature (~1min warm); a cold
+    # per-feature cargo cache can take a few minutes. 20min matches the
+    # `feature-clippy` legs.
     timeout-minutes: 20
     needs: changes
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
@@ -365,7 +369,7 @@ jobs:
       - name: clippy (libass)
         # --locked enforces the committed Cargo.lock (rule 33). --all-targets also
         # lints the test binaries under the feature; -D warnings matches the
-        # default `lint` gate. (No `test` step — see the job comment.)
+        # default `lint` gate.
         run: >
           cargo clippy
           --locked
@@ -373,6 +377,17 @@ jobs:
           --features libass
           --all-targets
           -- -D warnings
+      - name: test (libass)
+        # Now that the `subtitle` capability test is cfg-gated by feature (#141),
+        # the suite is green under `--features libass`, so run it for real run-time
+        # coverage of the libass-gated path. --locked mirrors CI determinism
+        # (rule 33). The crate has no compositor perf-budget test, so no
+        # `--skip tile_driven_meets_budget` is needed here.
+        run: >
+          cargo test
+          --locked
+          -p multiview-overlay
+          --features libass
 
   # ── ffmpeg-linked webrtc-native clippy (closes the #154 follow-up gap) ───────
   # The `feature-clippy` matrix above runs on a libav-FREE runner, so it cannot
@@ -520,9 +535,10 @@ jobs:
   # Validates docs/api/asyncapi.json against the AsyncAPI 3.0 JSON Schema using
   # the official @asyncapi/cli. The spec is generated by `cargo xtask gen-asyncapi`
   # and committed; this job fails if the committed file is not valid AsyncAPI 3.0.
-  # The job does NOT re-generate the spec (that would require the full Rust build
-  # here); it validates the already-committed artifact. Regeneration + diff-check
-  # is deferred until SUR-6 (the gen-asyncapi xtask) lands.
+  # The job does NOT re-generate the spec (that needs the full Rust build); it
+  # validates the already-committed artifact (schema-conformance). The companion
+  # `spec-freshness` job below regenerates BOTH specs and fails on any git diff, so
+  # the committed artifact validated here is also guaranteed up to date.
   asyncapi-validate:
     name: AsyncAPI 3.0 spec validation
     runs-on: ubuntu-latest
@@ -543,6 +559,60 @@ jobs:
         run: npm install --global @asyncapi/cli@2.17.0
       - name: validate asyncapi.json
         run: asyncapi validate docs/api/asyncapi.json
+
+  # ── OpenAPI/AsyncAPI spec freshness (drift gate, ADR-RT006) ──────────────────
+  # The committed specs `docs/api/{openapi,asyncapi}.json` are generated from the
+  # Rust source of truth: openapi.json from `multiview-control`'s utoipa
+  # annotations, asyncapi.json from `multiview-events::asyncapi` — both via
+  # `cargo xtask gen-{openapi,asyncapi}`. Nothing forced a regen when those
+  # annotations changed, so the specs drifted behind the served document (e.g. the
+  # ADR-W024 boot-model endpoints `/config/{boot-model,promote,revert-to-start}`
+  # landed in the utoipa surface without a spec regen). ADR-RT006's Decision is
+  # explicit: "CI regenerates OpenAPI/AsyncAPI ... and fails on any git diff."
+  #
+  # This job regenerates both specs and `git diff --exit-code docs/api/` — failing
+  # if the committed artifacts differ from a fresh generation of the current Rust
+  # sources. It mirrors the `i18n-catalogs` freshness pattern (regenerate → diff).
+  # The generators are deterministic (re-running is byte-identical), so a green
+  # main stays green. Pure-Rust default features (no FFmpeg/GPU) — xtask depends on
+  # `multiview-control` + `multiview-events`, both of which build on the bare
+  # runner, so no native libs are needed.
+  spec-freshness:
+    name: OpenAPI/AsyncAPI spec freshness
+    runs-on: ubuntu-latest
+    # Toolchain + an xtask build (multiview-control's utoipa graph from cold is the
+    # long pole) + two quick gen runs + a diff. 30min covers a cold cargo cache
+    # while still failing a wedged runner far under the 6h default.
+    timeout-minutes: 30
+    needs: changes
+    # A docs/api/** spec change keeps `code == 'true'` (the specs are NOT in the
+    # prose allowlist), and any Rust change to the annotations is code too, so this
+    # freshness check runs whenever either side could move.
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct cache key — this leg builds xtask + the control/events spec
+          # graph, not the default workspace check/test graph.
+          key: spec-freshness
+      - name: regenerate OpenAPI spec
+        # --locked enforces the committed Cargo.lock for a deterministic build
+        # (rule 33), matching the discipline of every other cargo invocation here.
+        run: cargo run --locked -p xtask -- gen-openapi
+      - name: regenerate AsyncAPI spec
+        run: cargo run --locked -p xtask -- gen-asyncapi
+      - name: specs are fresh (no uncommitted drift)
+        # Fail if either committed spec differs from a fresh regeneration of the
+        # current Rust sources. The fix is local: run `cargo xtask gen-openapi &&
+        # cargo xtask gen-asyncapi` and commit docs/api/{openapi,asyncapi}.json.
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code -- docs/api/; then
+            echo "::error::API specs are stale. Run 'cargo run -p xtask -- gen-openapi && cargo run -p xtask -- gen-asyncapi' and commit docs/api/{openapi,asyncapi}.json."
+            exit 1
+          fi
 
   deny:
     name: cargo-deny (licenses + advisories)
