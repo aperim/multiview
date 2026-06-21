@@ -221,6 +221,80 @@ async fn pins_do_not_cross_replay_between_verbs() {
     );
 }
 
+/// AUTO-SLOT VERB GATE (ADR-I009 r3): an ACTIVATE pin must NOT be replayed/posted by a
+/// subsequent RENEW. Renew and Activate are both auto-path verbs; if binding state
+/// changes between cycles (an unbound device's ambiguous ACTIVATE pin persists, then a
+/// lease arrives via an install surface so the next cycle RENEWS), the renew must NOT
+/// post the stale activate body to /heartbeat — it must mint a FRESH renew attempt.
+///
+/// Must FAIL against the blind-auto-slot-return src (it returns the activate pin to the
+/// renew path → posts an ActivateRequest body to /heartbeat → the fake /heartbeat parse
+/// fails → the renew errors) and PASS after the auto-slot is verb-gated.
+#[tokio::test]
+async fn an_activate_pin_is_not_replayed_by_a_subsequent_renew() {
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    // An UNBOUND device with activate ENABLED — the first cycle takes the ACTIVATE path.
+    let pinned = server.pinned_root();
+    let client = HeartbeatClient::with_device_signer(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        pinned,
+        HeartbeatConfig {
+            org_id: "org_test".to_owned(),
+            enable_activate: true,
+            ..HeartbeatConfig::default()
+        },
+        multiview_licence::heartbeat::DeviceIdentity {
+            binding_id: None, // unbound → activate path
+            ..bound_identity()
+        },
+        Arc::new(pop_test_signer()),
+    );
+
+    // 1. An ambiguous ACTIVATE (lost response) → the activate attempt is pinned in the
+    //    shared `auto` slot.
+    server.set_fail_after_recording_idempotency(1);
+    let act = client.run_once().await;
+    assert!(act.is_err(), "the lost-response activate fails closed");
+    assert!(
+        server.recorded_idempotency_keys().len() >= 1,
+        "the activate reached the server"
+    );
+
+    // 2. A binding arrives via an install surface (the store now resolves a binding), so
+    //    the NEXT cycle takes the RENEW path. Seed a verified lease into the store.
+    let (binding, install_pinned) = fake::upload_binding_for(server.kit(), server.binding_id());
+    store
+        .install_binding(
+            &binding,
+            &install_pinned,
+            multiview_licence::store::system_now(),
+        )
+        .expect("seed a binding so run_once renews");
+
+    // 3. The RENEW cycle must NOT replay the pinned ACTIVATE body to /activate (or post an
+    //    activate body to /heartbeat). It mints a FRESH renew attempt and renews cleanly.
+    server.set_fail_after_recording_idempotency(0);
+    let renew = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("no hang")
+        .expect("the renew must mint its OWN heartbeat attempt, not replay the activate pin");
+    assert!(
+        matches!(renew, HeartbeatOutcome::Installed { .. }),
+        "the renew installs via /heartbeat, got {renew:?}"
+    );
+    assert_eq!(
+        server.activates(),
+        0,
+        "the renew must NOT post the pinned activate attempt to /activate"
+    );
+    assert!(
+        server.heartbeats.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "the renew posted a heartbeat (its own body, parsed OK)"
+    );
+}
+
 /// A renew rejection must NOT clear a pending rebind pin (verb-scoped reset). An
 /// ambiguous rebind leaves a pin; a renew that is DEFINITIVELY rejected (401 pop-invalid)
 /// calls reset_on_rejection for the RENEW verb only — the rebind pin survives, so the
