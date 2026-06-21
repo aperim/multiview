@@ -185,6 +185,20 @@ pub(crate) async fn export_config(
     use axum::response::IntoResponse;
 
     principal.role.require(Action::Read)?;
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): the export is a
+    // whole-system desired-state document — every device, every `device_ref`,
+    // every sync-group member id. An OBJECT-scoped principal must not obtain it:
+    // it would disclose the ids of every object outside its allowlist in one
+    // call, bypassing the per-object checks wholesale. A partial (scope-filtered)
+    // export would not be a valid runnable config, so the export is confined to a
+    // principal that can see the whole system (unscoped). Unscoped
+    // admin/operator/viewer are unaffected.
+    if principal.is_scoped() {
+        return Err(crate::error::ControlError::Forbidden(format!(
+            "principal {:?} is object-scoped and may not export the whole-system configuration",
+            principal.key_id
+        )));
+    }
 
     let document = compose_export_document(&state)?;
     let config: multiview_config::MultiviewConfig = serde_path_to_error::deserialize(document)

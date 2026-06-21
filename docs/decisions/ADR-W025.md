@@ -29,11 +29,14 @@ API: the IS-04 LIST routes (`/x-nmos/.../devices|senders|receivers`) were
 role-gated only, and the IS-05 single-receiver connection **read**
 (`GET .../receivers/{id}/active`) was not per-object authorized even though its
 sibling stage `PATCH` was. A subsequent round (corrected sweep methodology: grep
-for device-id *references*, not just device collections) found a further class —
-config objects that **embed** a managed device id in a field rather than being a
-device collection: device-projected sources/outputs (`body.device_ref`,
-ADR-M009) and sync-group members (`body.members[].device`, ADR-M010) disclosed
-out-of-scope device ids to a scoped principal. All folded into this decision.
+for device-id *references*, not just device collections) found two further
+classes: (a) config objects that **embed** a managed device id in a field rather
+than being a device collection — device-projected sources/outputs
+(`body.device_ref`, ADR-M009) and sync-group members (`body.members[].device`,
+ADR-M010); and (b) the **whole-system config export** (`GET /config/export`),
+gated only by `Action::Read`, which composes every device + ref + member id into
+one document a scoped principal could read wholesale. All folded into this
+decision.
 
 The decision is bounded by invariant #10 (isolation): the realtime path is
 best-effort, bounded, and **physically incapable of back-pressuring the engine**
@@ -93,6 +96,15 @@ the allowlist:
      stay). The resource itself is still gated by its own id (so an in-scope
      principal sees the row); only the embedded out-of-scope device id is hidden,
      by parity with a single-device `GET` `403`. No-op for an unscoped principal.
+6. **Whole-system config export** (`GET /api/v1/config/export`,
+   [`routes/config.rs`](../../crates/multiview-control/src/routes/config.rs)) — a
+   single document composing **every** device, `device_ref`, and sync-group
+   member id. Per-field redaction cannot apply (a partial config is not a valid
+   runnable document), so an **object-scoped principal is denied** (`403`): the
+   export is confined to a principal that can see the whole system. Unscoped
+   admin/operator/viewer keep export. The whole-system config *writes*
+   (`revert-to-start`, `promote`) return only status (no device ids) — not a
+   read-leak, so unchanged by this decision.
 
 The scope axis filtered is the **object** axis (`scoped_object_ids`,
 [`authorize_object`](../../crates/multiview-control/src/auth.rs)), matching the
