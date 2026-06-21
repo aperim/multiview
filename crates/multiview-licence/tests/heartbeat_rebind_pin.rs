@@ -392,3 +392,134 @@ async fn rebind_uses_the_store_learned_binding_not_the_instance_id() {
         "rebind must NOT fall back to the device's instance_id as the bindingId"
     );
 }
+
+/// PRECEDENCE — a genuinely-learned/store binding beats a PRESENT-but-stale configured id
+/// (ADR-I009). The resolution order is genuinely-learned → store → configured; a stale
+/// CONFIGURED `identity.binding_id` must NOT short-circuit a fresher learned/store binding.
+/// This was a REAL bug (not a false positive): `learned_binding_id` used to be SEEDED from
+/// `identity.binding_id`, so a stale configured id won — and even broke the renew path with
+/// a `BindingMismatch`. The fix stops the pre-seed (learned holds only real server ids) and
+/// shares `resolve_binding_id()` across renew/rebind/deactivate.
+///
+/// (a) A device with a PRESENT-but-stale configured `identity.binding_id` AND a fresher
+/// store binding (`ib_fab_0001`): a renew RESOLVES the store binding (not the stale
+/// configured — pre-fix this was a `BindingMismatch`) and LEARNS it; the subsequent rebind
+/// then uses the learned binding, never the stale configured one.
+#[tokio::test]
+async fn rebind_prefers_the_learned_binding_over_a_present_stale_configured_id() {
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let store_binding = server.binding_id().to_owned(); // ib_fab_0001
+    let stale_configured = "ib_stale_configured_0000".to_owned();
+    assert_ne!(
+        stale_configured, store_binding,
+        "the configured id must be DIFFERENT"
+    );
+
+    // The device has a PRESENT-but-stale configured binding id; the real binding is in
+    // the store (seeded), and a renew will LEARN it.
+    let (binding, install_pinned) = fake::upload_binding_for(server.kit(), &store_binding);
+    store
+        .install_binding(
+            &binding,
+            &install_pinned,
+            multiview_licence::store::system_now(),
+        )
+        .expect("seed the store binding");
+    let pinned = server.pinned_root();
+    let client = HeartbeatClient::with_device_signer(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        pinned,
+        config(),
+        multiview_licence::heartbeat::DeviceIdentity {
+            binding_id: Some(stale_configured.clone()), // PRESENT but stale
+            instance_id: "inst_prod_a".to_owned(),
+            ..bound_identity()
+        },
+        Arc::new(pop_test_signer()),
+    );
+
+    // A renew resolves the store binding (the stale configured does NOT win) and LEARNS it.
+    let renew = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("no hang")
+        .expect("renew");
+    assert!(matches!(renew, HeartbeatOutcome::Installed { .. }));
+    assert_eq!(
+        server.last_binding_id().as_deref(),
+        Some(store_binding.as_str()),
+        "the renew addressed the store binding, not the stale configured id"
+    );
+
+    // Now learned is set. A rebind must use the LEARNED binding, NOT the stale configured.
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.rebind_once("lic_test"))
+        .await
+        .expect("no hang")
+        .expect("rebind");
+    assert_eq!(
+        server.last_rebind_binding_id().as_deref(),
+        Some(store_binding.as_str()),
+        "rebind must use the learned binding"
+    );
+    assert_ne!(
+        server.last_rebind_binding_id().as_deref(),
+        Some(stale_configured.as_str()),
+        "a PRESENT-but-stale configured id must NOT short-circuit the learned/store binding"
+    );
+}
+
+/// PRECEDENCE — (b) learned None + store present + a DIFFERENT present-configured id →
+/// the STORE binding wins (configured is last in the chain). Pins store > configured.
+#[tokio::test]
+async fn rebind_prefers_the_store_binding_over_a_present_stale_configured_id() {
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let store_binding = server.binding_id().to_owned(); // ib_fab_0001
+    let stale_configured = "ib_stale_configured_0000".to_owned();
+    assert_ne!(stale_configured, store_binding);
+
+    // Seed ONLY the store (the client never activates/renews, so learned stays None).
+    let (binding, install_pinned) = fake::upload_binding_for(server.kit(), &store_binding);
+    store
+        .install_binding(
+            &binding,
+            &install_pinned,
+            multiview_licence::store::system_now(),
+        )
+        .expect("seed the store binding");
+    assert_eq!(
+        store.current_binding_id().as_deref(),
+        Some(store_binding.as_str()),
+        "precondition: the store has the binding anchor"
+    );
+    let pinned = server.pinned_root();
+    let client = HeartbeatClient::with_device_signer(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        pinned,
+        config(),
+        multiview_licence::heartbeat::DeviceIdentity {
+            binding_id: Some(stale_configured.clone()), // PRESENT but stale
+            instance_id: "inst_prod_a".to_owned(),
+            ..bound_identity()
+        },
+        Arc::new(pop_test_signer()),
+    );
+
+    // A rebind WITHOUT any prior learn must resolve via the store (NOT the configured id).
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.rebind_once("lic_test"))
+        .await
+        .expect("no hang")
+        .expect("rebind");
+    assert_eq!(
+        server.last_rebind_binding_id().as_deref(),
+        Some(store_binding.as_str()),
+        "rebind must use the STORE binding (store > configured)"
+    );
+    assert_ne!(
+        server.last_rebind_binding_id().as_deref(),
+        Some(stale_configured.as_str()),
+        "a PRESENT-but-stale configured id must NOT short-circuit the store binding"
+    );
+}
