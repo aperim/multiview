@@ -216,9 +216,7 @@ fn display_locked_clock_is_rejected_for_a_local_multiview() {
         "display-locked clock must be rejected when the host also serves other outputs"
     );
     assert!(
-        ClockMode::DisplayLocked
-            .validate_for_node(true)
-            .is_ok(),
+        ClockMode::DisplayLocked.validate_for_node(true).is_ok(),
         "display-locked clock is permitted on a dedicated display node"
     );
 }
