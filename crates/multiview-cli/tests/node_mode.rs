@@ -15,11 +15,11 @@
     clippy::float_cmp
 )]
 
+use base64::Engine as _;
 use multiview_cli::node::{
     pairing_code, ClockMode, EnrollmentRequest, NodeRuntimeConfig, PresentChoice,
     PresentationChooser, VblankPrediction,
 };
-use base64::Engine as _;
 use multiview_core::time::Rational;
 use multiview_core::wallclock::WallClockRef;
 
