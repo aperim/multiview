@@ -242,23 +242,30 @@ The runbook step makes the post-rebind `FP_SCORE` update explicit per rule 42.)
 
 ### 4. CLI / operator surface (device-initiated, PoP-signed, idempotent)
 
-`multiview-cli/src/licence.rs` gains two operator-invoked actions on `EntitlementPlane` —
-`pub async fn rebind(&self) -> RebindReport` and `pub async fn deactivate(&self) -> DeactivateReport`
-— that delegate to the **retained, running** `HeartbeatClient` (built once by `spawn_heartbeat` via a
-factored `build_client()` helper the daemon and the lifecycle ops share), so the nonce-store lock and
-the retry pin stay coherent (§3). They reuse `HeartbeatSettings::from_env` for the
-org/api/token/identity config; rebind additionally needs `licenceId` (a new
+`multiview-cli/src/licence.rs` gains two operator-invoked async methods on `EntitlementPlane` —
+`pub async fn rebind(&self) -> Result<HeartbeatOutcome, HeartbeatError>` and
+`pub async fn deactivate(&self) -> Result<HeartbeatOutcome, HeartbeatError>` (the success arm is
+`HeartbeatOutcome::Rebound` / `HeartbeatOutcome::Deactivated`; every failure is a fail-closed
+`HeartbeatError`) — that delegate to the **retained, running** `HeartbeatClient` (built once by
+`spawn_heartbeat` via a factored `build_client()` helper the daemon and the lifecycle ops share), so
+the nonce-store lock and the retry pin stay coherent (§3). They reuse `HeartbeatSettings::from_env`
+for the org/api/token/identity config; rebind additionally needs `licenceId` (a new
 `MULTIVIEW_LICENCE_LICENCE_ID` env field — the only config addition) and the established binding id
-(the configured `MULTIVIEW_LICENCE_BINDING_ID` or the store's current binding). These public
-`EntitlementPlane` methods **are** the device-initiated HTTPS lifecycle calls (config → the running
-client → a PoP-signed `POST` → a fail-closed report) — fully wired and tested end-to-end, exactly as
-`spawn_heartbeat` is the wired heartbeat path (neither is gated behind a dedicated arg-parsing
-subcommand). The thin arg-parsing wrapper (`multiview licence rebind|deactivate`) and the account-side
-`system/actions` re-claim API/UI surface are the eventual presentation layers (in the shared
-`cli.rs`/`main.rs` arg surface + `multiview-control`, **out of this slice's `licence.rs` territory** —
-adding a top-level subcommand there contends with other lanes on a hot shared file, rule 32). Every
-failure keeps the entitlement plane last-good and returns a clear report — never a crash, never an
-engine touch.
+(resolved via the `resolve_binding_id()` chain — learned → store → configured `MULTIVIEW_LICENCE_BINDING_ID`).
+These public `EntitlementPlane` methods **are** the device-initiated HTTPS lifecycle calls (config →
+the running client → a PoP-signed `POST` → a fail-closed `Result`) — fully wired and tested
+end-to-end, exactly as `spawn_heartbeat` is the wired heartbeat path. Every failure keeps the
+entitlement plane last-good and returns an `Err(HeartbeatError)` — never a crash, never an engine
+touch.
+
+**This slice ships the operations as the `EntitlementPlane::rebind()`/`deactivate()` methods only; it
+adds NO arg-parsing subcommands and NO REST/UI route.** A user-facing trigger surface — a thin CLI
+subcommand (e.g. `multiview licence rebind|deactivate`) in the shared `cli.rs`/`main.rs` arg surface,
+and/or an account-side `system/actions` re-claim REST/UI surface in `multiview-control` — is an
+explicit **FOLLOW-ON, not implemented here** (deliberately kept out of this slice's `licence.rs`
+territory: a top-level subcommand contends with other lanes on a hot shared file, rule 32). The
+device-initiated lifecycle calls themselves are complete and callable today via the methods; wiring a
+trigger surface to them is the only remaining step, tracked separately.
 
 ### 5. Fail closed (never off air, invariants #1/#10) — identical charter
 
@@ -332,9 +339,11 @@ shell.
   procedures for invoking rebind + deactivate (runbook update lands **with** the implementation
   commit per rule 42, not in this docs-only ADR).
 - **One config field returns** (`MULTIVIEW_LICENCE_LICENCE_ID`, for the rebind `licenceId`); no other
-  `MULTIVIEW_LICENCE_*` change. The two operator subcommands (`multiview licence rebind|deactivate`)
-  are the device-side affordance; the account-side `system/actions` API/UI re-claim surface is the
-  eventual management-completeness counterpart (out of scope for this device-client slice — tracked).
+  `MULTIVIEW_LICENCE_*` change. The device-initiated operations ship as the
+  `EntitlementPlane::rebind()`/`deactivate()` methods. A user-facing **trigger surface** — a thin CLI
+  subcommand (`multiview licence rebind|deactivate`) and/or the account-side `system/actions` REST/UI
+  re-claim surface — is an explicit **FOLLOW-ON, not built in this slice** (out of this slice's
+  `licence.rs` territory; the management-completeness counterpart is tracked separately).
 - **`multiview-licence` stays VERIFICATION-ONLY**: rebind/deactivate add no RNG and no I/O to the
   leaf crate (deterministic signing + the reused cli-side key/transport seams), and **no** new
   dependency, so the default `cargo check`/`cargo deny` shell is unchanged (network-free, LGPL-clean;
