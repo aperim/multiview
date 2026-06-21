@@ -615,7 +615,17 @@ impl SessionStream {
         snapshot: &EngineStateSnapshot,
         snapshot_seq: u64,
     ) -> Option<RealtimeFrame> {
-        let tiles = tiles_from_engine_snapshot(snapshot)?;
+        let mut tiles = tiles_from_engine_snapshot(snapshot)?;
+        // BOLA visibility (ADR-W005/ADR-W025): drop snapshot tiles bound to an
+        // out-of-scope input — the same per-object axis the `tile.state` delta
+        // is gated on ([`object_authz_scope_id`]) and `get_input_streams`
+        // authorizes. A placeholder tile (`input: None`) carries no object id, so
+        // it is retained; a no-op for an unscoped principal. Mirrors
+        // `devices_snapshot_frames`.
+        tiles.retain(|tile| match tile.input.as_deref() {
+            Some(input) => self.id_in_object_scope(input),
+            None => true,
+        });
         let seq = self.issue_seq();
         let envelope = Envelope::new(
             Topic::Tiles,
@@ -658,7 +668,7 @@ impl SessionStream {
         let status = registry
             .snapshot_all()
             .into_iter()
-            .find(|status| self.device_id_in_object_scope(&status.device_id))?;
+            .find(|status| self.id_in_object_scope(&status.device_id))?;
         Some(self.device_status_frame(status, snapshot_seq))
     }
 
@@ -687,7 +697,7 @@ impl SessionStream {
         let in_scope: Vec<DeviceStatus> = registry
             .snapshot_all()
             .into_iter()
-            .filter(|status| self.device_id_in_object_scope(&status.device_id))
+            .filter(|status| self.id_in_object_scope(&status.device_id))
             .collect();
         in_scope
             .into_iter()
@@ -865,11 +875,12 @@ impl SessionStream {
         }
     }
 
-    /// Whether a device/cast object `id` is visible to this session's principal
-    /// (BOLA visibility, ADR-W005/ADR-W025): `true` when unscoped or when `id` is
-    /// in the allowlist. Used to filter the connect-time device snapshot frames,
-    /// mirroring the per-delta [`event_in_object_scope`](Self::event_in_object_scope).
-    fn device_id_in_object_scope(&self, id: &str) -> bool {
+    /// Whether an object `id` is visible to this session's principal (BOLA
+    /// visibility, ADR-W005/ADR-W025): `true` when unscoped or when `id` is in
+    /// the allowlist. Used to filter the connect-time snapshot frames (device
+    /// status by device id, tiles by bound input id), mirroring the per-delta
+    /// [`event_in_object_scope`](Self::event_in_object_scope).
+    fn id_in_object_scope(&self, id: &str) -> bool {
         match self.object_scope.as_ref() {
             None => true,
             Some(allowed) => allowed.iter().any(|a| a == id),
@@ -937,6 +948,11 @@ pub fn event_scope_id(event: &Event) -> Option<String> {
 /// Covered (each id is an `authorize_object` axis on the matching REST read):
 /// * `device.*` lifecycle/status events — the device resource id (`get_device`).
 /// * `cast.session.*` membership events — the session id (`get_cast_session`).
+/// * `media.player_state` — the player id (`get_player`/`play`/`pause` all
+///   `authorize_object(&player_id)`; `MediaPlayerEvent.player` is that id).
+/// * `tile.state` WHEN it carries a bound input — the input id
+///   (`get_input_streams` `authorize_object`s it); a placeholder tile with no
+///   input has no object to authorize and falls through to [`None`].
 ///
 /// NOT covered ([`None`] — delivered, gated only by the connect-time role):
 /// * `TimingStatus` (a program/output stream id) — no REST read authorizes a
@@ -953,6 +969,11 @@ fn object_authz_scope_id(event: &Event) -> Option<&str> {
         Event::DeviceSync(sync) => Some(sync.device_id.as_str()),
         Event::CastSessionStarted(started) => Some(started.session_id.as_str()),
         Event::CastSessionRemoved(removed) => Some(removed.session_id.as_str()),
+        Event::MediaPlayerState(player) => Some(player.player.as_str()),
+        // Only a tile bound to an input carries an authorizable object id; a
+        // placeholder/no-signal tile (`input: None`) has none — `as_deref()`
+        // yields `None` and it rides the role-gated firehose.
+        Event::TileState(tile) => tile.input.as_deref(),
         _ => None,
     }
 }

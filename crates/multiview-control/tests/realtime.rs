@@ -14,7 +14,7 @@ use multiview_control::{DeviceStatusRegistry, SessionStream};
 use multiview_engine::EnginePublisher;
 use multiview_events::{
     Alert, AlertSeverity, CastSessionStarted, DeviceState, DeviceStatus, Event, FrameKind,
-    InputConnection, LifecycleState, Topic,
+    InputConnection, LifecycleState, MediaPlayerEvent, MediaPlayerState, TileState, Topic,
 };
 
 type Publisher = EnginePublisher<serde_json::Value, Event>;
@@ -50,6 +50,21 @@ fn delta_device_id(frame: &multiview_control::RealtimeFrame) -> String {
         Event::DeviceStatus(s) => s.device_id.clone(),
         other => panic!("expected a device.status delta, got {other:?}"),
     }
+}
+
+/// A `media.player_state` event scoped (via `authorize_object`) to `player`.
+fn media_player_state(player: &str) -> Event {
+    Event::MediaPlayerState(MediaPlayerEvent::new(player, MediaPlayerState::Playing, 0))
+}
+
+/// A `tile.state` event bound to `input` (or unbound when `None`).
+fn tile_state(input: Option<&str>) -> Event {
+    Event::TileState(TileState {
+        from: LifecycleState::Live,
+        to: LifecycleState::NoSignal,
+        input: input.map(str::to_owned),
+        trigger: "nosignal_timeout".to_owned(),
+    })
 }
 
 #[tokio::test]
@@ -286,4 +301,116 @@ async fn scoped_session_filters_device_snapshot_frames_to_the_allowlist() {
     let frames = unscoped.devices_snapshot_frames(&registry, 0);
     let ids: Vec<String> = frames.iter().map(delta_device_id).collect();
     assert_eq!(ids, vec!["dev-mine".to_owned(), "dev-other".to_owned()]);
+}
+
+/// A scoped session drops `media.player_state` (player id) and `tile.state`
+/// (bound input id) deltas outside its object allowlist — by parity with
+/// `GET /media/players/{id}` and `GET /inputs/{id}/streams` returning 403 — and
+/// delivers the in-scope ones plus any tile carrying no input.
+#[tokio::test]
+async fn scoped_session_filters_media_player_and_tile_deltas_to_the_allowlist() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let sub = engine.subscribe();
+    // Scoped to one object id, shared by a player and an input named the same.
+    let mut session = SessionStream::new(sub, "sess-scoped", None)
+        .with_object_scope(Some(vec!["mine".to_owned()]));
+
+    // In order: out-of-scope player, in-scope player, out-of-scope tile input,
+    // in-scope tile input, then a placeholder tile with no input.
+    engine.publish_event(media_player_state("vt-other"));
+    engine.publish_event(media_player_state("mine"));
+    engine.publish_event(tile_state(Some("cam-other")));
+    engine.publish_event(tile_state(Some("mine")));
+    engine.publish_event(tile_state(None));
+
+    assert_eq!(
+        session.next_delta().await.unwrap(),
+        None,
+        "an out-of-scope media.player_state must be filtered out"
+    );
+    let p = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("the in-scope media.player_state is delivered");
+    match &p.envelope.payload {
+        Event::MediaPlayerState(e) => assert_eq!(e.player, "mine"),
+        other => panic!("expected a media.player_state delta, got {other:?}"),
+    }
+    assert_eq!(
+        session.next_delta().await.unwrap(),
+        None,
+        "an out-of-scope tile.state (bound input) must be filtered out"
+    );
+    let t = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("the in-scope tile.state is delivered");
+    match &t.envelope.payload {
+        Event::TileState(e) => assert_eq!(e.input.as_deref(), Some("mine")),
+        other => panic!("expected a tile.state delta, got {other:?}"),
+    }
+    // A placeholder tile carries no object id — it rides the firehose.
+    let placeholder = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("a tile.state with no bound input is unaffected by object scope");
+    match &placeholder.envelope.payload {
+        Event::TileState(e) => assert_eq!(e.input, None),
+        other => panic!("expected the placeholder tile.state, got {other:?}"),
+    }
+}
+
+/// The connect-time tiles SNAPSHOT is filtered too: a scoped session rebuilds
+/// its tile cache from ONLY tiles whose bound input is in scope (placeholder
+/// tiles with no input are kept), so the snapshot cannot leak an out-of-scope
+/// input the deltas then hide.
+#[tokio::test]
+async fn scoped_session_filters_tiles_snapshot_to_the_allowlist() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    // The engine latest-state blob the snapshot reads: three tiles — one bound
+    // to an in-scope input, one to an out-of-scope input, one unbound.
+    let snapshot = serde_json::json!({
+        "tiles": [
+            { "id": "tile-mine", "state": "LIVE", "input": "mine" },
+            { "id": "tile-other", "state": "LIVE", "input": "cam-other" },
+            { "id": "tile-empty", "state": "NO_SIGNAL" }
+        ]
+    });
+
+    let tile_ids = |frame: &multiview_control::RealtimeFrame| -> Vec<String> {
+        match &frame.envelope.payload {
+            Event::TilesSnapshot(s) => s.tiles.iter().map(|t| t.id.clone()).collect(),
+            other => panic!("expected a tiles snapshot, got {other:?}"),
+        }
+    };
+
+    // Scoped: only the in-scope-input tile and the unbound tile survive.
+    let mut scoped = SessionStream::new(engine.subscribe(), "sess-scoped", None)
+        .with_object_scope(Some(vec!["mine".to_owned()]));
+    let frame = scoped
+        .tiles_snapshot_frame(&snapshot, 0)
+        .expect("a tiles snapshot frame is built");
+    assert_eq!(
+        tile_ids(&frame),
+        vec!["tile-mine".to_owned(), "tile-empty".to_owned()],
+        "the tiles snapshot must drop tiles bound to an out-of-scope input (no enumeration leak)"
+    );
+
+    // Unscoped: all three tiles appear, unchanged.
+    let mut unscoped =
+        SessionStream::new(engine.subscribe(), "sess-unscoped", None).with_object_scope(None);
+    let frame = unscoped
+        .tiles_snapshot_frame(&snapshot, 0)
+        .expect("a tiles snapshot frame is built");
+    assert_eq!(
+        tile_ids(&frame),
+        vec![
+            "tile-mine".to_owned(),
+            "tile-other".to_owned(),
+            "tile-empty".to_owned()
+        ]
+    );
 }
