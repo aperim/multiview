@@ -1,0 +1,242 @@
+//! CONSPECT device REBIND/DEACTIVATE — the VERB-KEYED pinned-attempt money-path
+//! defence (ADR-I009, round 2). The 3-lens panel found that a SINGLE untyped pin slot
+//! shared across run_once/rebind_once/deactivate_once let the verbs contaminate each
+//! other's pending state — so the automatic renew loop could consume a pinned rebind
+//! attempt (posting a rebind body to /heartbeat), and a definitive /heartbeat rejection
+//! could CLEAR the rebind pin → the operator's rebind retry mints a FRESH idempotency-
+//! key → a SECOND charge against the scarce 3-free-per-AEST-year budget if the first
+//! /rebind committed but its response was lost.
+//!
+//! These tests pin the fix: the pin is keyed by VERB in per-verb slots, so:
+//!   * an ambiguous rebind's pin PERSISTS across a full background renew cycle (the
+//!     renew never consumes or clears it), and the operator's rebind retry replays the
+//!     SAME idempotency-key (no double charge);
+//!   * no cross-verb replay — a renew never posts a rebind/deactivate body and vice
+//!     versa (the wrong-verb body would fail to parse at the wrong endpoint).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::as_conversions,
+    clippy::doc_markdown,
+    clippy::missing_panics_doc
+)]
+#![cfg(feature = "heartbeat")]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use multiview_licence::heartbeat::{HeartbeatClient, HeartbeatConfig, HeartbeatOutcome};
+use multiview_licence::LeaseStore;
+
+mod fake;
+use fake::{pop_test_signer, shared_fake, FakeLicenceServer};
+
+fn config() -> HeartbeatConfig {
+    HeartbeatConfig {
+        org_id: "org_test".to_owned(),
+        ..HeartbeatConfig::default()
+    }
+}
+
+/// A BOUND device whose binding matches the fake's served binding — so BOTH the renew
+/// path (run_once) AND the lifecycle ops (rebind/deactivate) have a binding to act on.
+fn bound_identity() -> multiview_licence::heartbeat::DeviceIdentity {
+    multiview_licence::heartbeat::DeviceIdentity {
+        machine_id: "mch_7c2a1f04c9e75031".to_owned(),
+        instance_id: "inst_prod_a".to_owned(),
+        binding_id: Some(FakeLicenceServer::new().binding_id().to_owned()),
+        fingerprint_digest: "a".repeat(64),
+        fingerprint_score: 95,
+        hardware_digest: "hwd_2b6e1c0e9b41".to_owned(),
+        instance_discriminator_hash: "disc_9f3a2b6e1c0e".to_owned(),
+        instance_discriminator_digest: "2".repeat(64),
+        app_version: "0.1.0-test".to_owned(),
+        device_public_key_b64url: String::new(),
+    }
+}
+
+fn client(
+    server: Arc<FakeLicenceServer>,
+    store: Arc<LeaseStore>,
+) -> HeartbeatClient<FakeLicenceServer> {
+    let pinned = server.pinned_root();
+    HeartbeatClient::with_device_signer(
+        server,
+        store,
+        pinned,
+        config(),
+        bound_identity(),
+        Arc::new(pop_test_signer()),
+    )
+}
+
+/// THE MONEY-PATH GATE: an ambiguous /rebind leaves a rebind pin; a full background
+/// renew cycle runs on the SAME client and does NOT consume or clear the rebind pin;
+/// the operator's rebind retry replays the SAME idempotency-key (no second charge).
+///
+/// Must FAIL against the shared-pin implementation (the renew would consume/clear the
+/// rebind pin → the rebind retry mints a fresh key) and PASS with the verb-keyed pin.
+#[tokio::test]
+async fn an_ambiguous_rebind_pin_survives_the_renew_loop_and_replays_same_key() {
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = client(Arc::clone(&server), Arc::clone(&store));
+
+    // 1. The first /rebind is an ambiguous lost-response (the fake RECORDS the key +
+    //    body, then drops the response → Transport) → the rebind pin PERSISTS. (The fake
+    //    records the idempotency-key on entry but only bumps `rebinds()` on a fully
+    //    successful contact, so the recorded-keys log is the ground truth here.)
+    server.set_fail_after_recording_idempotency(1);
+    let first = client.rebind_once("lic_test").await;
+    assert!(first.is_err(), "the lost-response rebind fails closed");
+    let rebind_key_1 = {
+        let keys = server.recorded_idempotency_keys();
+        assert_eq!(keys.len(), 1, "the /rebind reached the server (key recorded): {keys:?}");
+        keys[0].clone()
+    };
+
+    // 2. A FULL background renew cycle runs on the SAME client. It must NOT consume the
+    //    pinned rebind attempt (post a rebind body to /heartbeat) and must NOT clear the
+    //    rebind pin. It renews normally via /heartbeat. (If it had replayed the rebind
+    //    body, the fake /heartbeat would fail to parse it as a HeartbeatRequest → the
+    //    renew would error instead of Installed.)
+    server.set_fail_after_recording_idempotency(0); // the renew contacts cleanly now
+    let renew = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("run_once must not hang")
+        .expect("the renew must succeed via /heartbeat, not choke on a rebind body");
+    assert!(
+        matches!(renew, HeartbeatOutcome::Installed { .. }),
+        "the renew installs a lease via /heartbeat, got {renew:?}"
+    );
+    assert_eq!(
+        server.rebinds(),
+        0,
+        "the renew loop must NOT post the pinned rebind attempt to /rebind (no successful rebind)"
+    );
+    assert!(
+        server.heartbeats.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "the renew posted a heartbeat"
+    );
+    // The renew minted + recorded its OWN (distinct) idempotency-key on /heartbeat.
+    let after_renew = server.recorded_idempotency_keys();
+    assert_eq!(after_renew.len(), 2, "rebind + renew recorded: {after_renew:?}");
+    assert_ne!(
+        after_renew[1], rebind_key_1,
+        "the renew used its OWN fresh key, not the pinned rebind key: {after_renew:?}"
+    );
+
+    // 3. The operator's rebind RETRY on the same client replays the SAME idempotency-key
+    //    (the persisted pin) — so if the first /rebind actually committed, the server
+    //    dedups and the rebind budget is charged ONCE (no double charge).
+    let _second = tokio::time::timeout(Duration::from_secs(5), client.rebind_once("lic_test"))
+        .await
+        .expect("must not hang");
+    let rebind_keys = server.recorded_idempotency_keys();
+    // Recorded order: [rebind (ambiguous), renew (heartbeat), rebind (retry)].
+    let rebind_key_2 = rebind_keys.last().expect("a retry was recorded").clone();
+    assert_eq!(
+        rebind_key_1, rebind_key_2,
+        "the rebind retry MUST replay the SAME idempotency-key (no double charge); keys={rebind_keys:?}"
+    );
+}
+
+/// NO CROSS-VERB REPLAY: a pinned rebind attempt is never replayed by the renew path,
+/// and a pinned deactivate attempt is never replayed by the renew path. The fake's
+/// /heartbeat endpoint parses the body as a HeartbeatRequest, so if the renew wrongly
+/// replayed a rebind/deactivate body it would either fail to parse (Malformed) or post
+/// to the wrong verb — both observable. Here we assert the renew posts its OWN body and
+/// the lifecycle pins are independent.
+#[tokio::test]
+async fn pins_do_not_cross_replay_between_verbs() {
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = client(Arc::clone(&server), Arc::clone(&store));
+
+    // Leave an ambiguous DEACTIVATE pin (recorded on entry; `deactivates()` not bumped
+    // on the lost-response contact).
+    server.set_fail_after_recording_idempotency(1);
+    let _ = client.deactivate_once().await;
+    let deact_key_1 = {
+        let keys = server.recorded_idempotency_keys();
+        assert_eq!(keys.len(), 1, "the /deactivate reached the server: {keys:?}");
+        keys[0].clone()
+    };
+    assert_eq!(
+        server.deactivates(),
+        0,
+        "the lost-response deactivate did not complete (counter not bumped)"
+    );
+
+    // A renew cycle runs cleanly — it must post a HEARTBEAT body to /heartbeat (parsed
+    // as a HeartbeatRequest by the fake), NOT the pinned deactivate body. If it replayed
+    // the deactivate body, the fake /heartbeat would reject it (Malformed parse) and the
+    // renew would fail; assert it SUCCEEDS.
+    server.set_fail_after_recording_idempotency(0);
+    let renew = tokio::time::timeout(Duration::from_secs(5), client.run_once())
+        .await
+        .expect("no hang")
+        .expect("the renew posts its OWN heartbeat body, never the pinned deactivate body");
+    assert!(matches!(renew, HeartbeatOutcome::Installed { .. }));
+    assert_eq!(
+        server.deactivates(),
+        0,
+        "the renew loop must NOT post the pinned deactivate attempt to /deactivate"
+    );
+
+    // The deactivate pin still persists → the operator's deactivate retry replays the
+    // SAME idempotency-key (the pin survived the renew's success — verb-keyed) and now
+    // succeeds (the fake completes it).
+    let retry = tokio::time::timeout(Duration::from_secs(5), client.deactivate_once())
+        .await
+        .expect("no hang");
+    assert!(
+        retry.is_ok(),
+        "the deactivate retry replays the persisted pin and succeeds: {retry:?}"
+    );
+    assert_eq!(server.deactivates(), 1, "the deactivate retry reached + completed /deactivate");
+    let keys = server.recorded_idempotency_keys();
+    let deact_key_2 = keys.last().expect("retry recorded").clone();
+    assert_eq!(
+        deact_key_1, deact_key_2,
+        "the deactivate retry replays the SAME idempotency-key (verb-keyed pin survived): {keys:?}"
+    );
+}
+
+/// A renew rejection must NOT clear a pending rebind pin (verb-scoped reset). An
+/// ambiguous rebind leaves a pin; a renew that is DEFINITIVELY rejected (401 pop-invalid)
+/// calls reset_on_rejection for the RENEW verb only — the rebind pin survives, so the
+/// operator's rebind retry still replays the same key.
+#[tokio::test]
+async fn a_renew_rejection_does_not_clear_the_rebind_pin() {
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    let client = client(Arc::clone(&server), Arc::clone(&store));
+
+    // Ambiguous rebind → rebind pin persists.
+    server.set_fail_after_recording_idempotency(1);
+    let _ = client.rebind_once("lic_test").await;
+    let rebind_key_1 = server.recorded_idempotency_keys()[0].clone();
+
+    // A renew that is DEFINITIVELY rejected (401 pop-invalid) — reset_on_rejection fires
+    // for the RENEW verb. It must NOT clear the rebind pin.
+    server.set_fail_after_recording_idempotency(0);
+    server.set_reject_pop(true);
+    let renew = client.run_once().await;
+    assert!(renew.is_err(), "the renew is definitively rejected");
+    server.set_reject_pop(false);
+
+    // The operator's rebind retry still replays the SAME key (rebind pin survived the
+    // renew's reset_on_rejection).
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.rebind_once("lic_test"))
+        .await
+        .expect("no hang");
+    let keys = server.recorded_idempotency_keys();
+    let rebind_key_2 = keys.last().expect("a rebind retry recorded").clone();
+    assert_eq!(
+        rebind_key_1, rebind_key_2,
+        "a renew rejection must NOT clear the rebind pin; keys={keys:?}"
+    );
+}

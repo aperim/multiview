@@ -289,6 +289,49 @@ fn rebind_response_deserializes_only_a_lease_serial_no_embedded_lease() {
 }
 
 #[test]
+fn rebind_response_rejects_a_missing_required_field() {
+    // v0.46.0 marks ALL RebindResponse fields REQUIRED. The load-bearing safety property
+    // is that a response missing a NON-nullable required field is REJECTED, not silently
+    // defaulted — most critically `nextNonce` (a missing nonce would silently strand the
+    // next renew) and the scalar flags. Each omission below must fail to deserialize.
+    // (leaseSerial/notAfter are required-BUT-nullable; absence is treated identically to
+    // an explicit null — `None`, a withheld re-issue the device never installs from — so
+    // those are covered by the null-tolerance test below, not a presence assertion.)
+    let cases: &[(&str, &str)] = &[
+        (
+            "nextNonce",
+            r#"{"rebound":true,"leaseSerial":"s","notAfter":1,"enforcementState":"compliant","rebindsThisYear":1,"seatConsumed":false,"fpScore":95}"#,
+        ),
+        (
+            "rebound",
+            r#"{"leaseSerial":"s","notAfter":1,"enforcementState":"compliant","rebindsThisYear":1,"seatConsumed":false,"fpScore":95,"nextNonce":"ab"}"#,
+        ),
+        (
+            "seatConsumed",
+            r#"{"rebound":true,"leaseSerial":"s","notAfter":1,"enforcementState":"compliant","rebindsThisYear":1,"fpScore":95,"nextNonce":"ab"}"#,
+        ),
+        (
+            "rebindsThisYear",
+            r#"{"rebound":true,"leaseSerial":"s","notAfter":1,"enforcementState":"compliant","seatConsumed":false,"fpScore":95,"nextNonce":"ab"}"#,
+        ),
+        (
+            "enforcementState",
+            r#"{"rebound":true,"leaseSerial":"s","notAfter":1,"rebindsThisYear":1,"seatConsumed":false,"fpScore":95,"nextNonce":"ab"}"#,
+        ),
+        (
+            "fpScore",
+            r#"{"rebound":true,"leaseSerial":"s","notAfter":1,"enforcementState":"compliant","rebindsThisYear":1,"seatConsumed":false,"nextNonce":"ab"}"#,
+        ),
+    ];
+    for (missing, json) in cases {
+        assert!(
+            serde_json::from_str::<RebindResponse>(json).is_err(),
+            "a RebindResponse missing the required `{missing}` must be rejected, not defaulted: {json}"
+        );
+    }
+}
+
+#[test]
 fn rebind_response_tolerates_a_withheld_reissue_null_lease_serial() {
     // A revoked entitlement: rebound=false, leaseSerial=null, notAfter=null — the
     // signer withholds the re-issue (never off air). Must still deserialise.
