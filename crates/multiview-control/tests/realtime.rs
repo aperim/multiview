@@ -245,9 +245,17 @@ async fn unscoped_session_delivers_all_device_deltas() {
     engine.publish_event(device_status("dev-a"));
     engine.publish_event(device_status("dev-b"));
 
-    let d1 = session.next_delta().await.unwrap().expect("dev-a delivered");
+    let d1 = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("dev-a delivered");
     assert_eq!(delta_device_id(&d1), "dev-a");
-    let d2 = session.next_delta().await.unwrap().expect("dev-b delivered");
+    let d2 = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("dev-b delivered");
     assert_eq!(delta_device_id(&d2), "dev-b");
 }
 
