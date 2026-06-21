@@ -265,11 +265,10 @@ jobs:
           - crate: multiview-cli
             feature: overlay
           # NOTE: `multiview-overlay --features libass` is gated by a SEPARATE
-          # clippy-only job (`feature-clippy-overlay-libass`) below, NOT this
-          # clippy+test matrix: the crate's `subtitle` test suite asserts the
-          # libass-OFF fallback (`AssCapability::detect() == Unavailable`)
-          # unconditionally, so `cargo test --features libass` is red by design —
-          # the clippy lint is the coverage that closes the gap.
+          # job (`feature-clippy-overlay-libass`) below — its own cargo cache
+          # graph — but that job now runs BOTH clippy AND `cargo test`, the same
+          # as this matrix's legs (the `subtitle` capability test is cfg-gated by
+          # feature, #141, so the suite is green under `--features libass`).
           # WebRTC native egress/ingest (str0m + aws-lc-rs). The default `lint`
           # and `test` jobs build none of these, so the wave-1 union (#141↔#147)
           # broke `webrtc-native` silently on main; this leg gates it going
@@ -335,22 +334,27 @@ jobs:
           --features ${{ matrix.feature }}
           -- --skip tile_driven_meets_budget
 
-  # ── multiview-overlay libass clippy (clippy-only; closes a #134 gap) ─────────
+  # ── multiview-overlay libass clippy + test (closes a #134/#141 gap) ──────────
   # `multiview-overlay`'s off-by-default `libass` capability gate (the ASS/SSA
   # subtitle burn-in seam, ADR-R007/R008) has zero coverage in the default
-  # `lint`/`test` jobs. It gets its OWN clippy-only job rather than a slot in the
-  # `feature-clippy` clippy+test matrix because the crate's `subtitle` integration
-  # test asserts the libass-OFF fallback (`AssCapability::detect() == Unavailable`)
-  # UNCONDITIONALLY — so `cargo test -p multiview-overlay --features libass` is red
-  # by design (the capability flips to `Available` once the feature is on). The
-  # clippy lint is the gap-closing coverage: it proves the libass-gated code
-  # type-checks + lints. The crate is pure Rust here (the native libass/HarfBuzz/
-  # FriBidi toolchain is wired downstream), so it runs on the bare runner.
+  # `lint`/`test` jobs. It gets its OWN job (rather than a slot in the shared
+  # `feature-clippy` clippy+test matrix) only because its cargo-cache graph is
+  # scoped separately; it now runs BOTH clippy AND `cargo test` like every
+  # matrix leg. Previously this was clippy-only because the crate's `subtitle`
+  # test asserted the libass-OFF fallback (`AssCapability::detect() ==
+  # Unavailable`) UNCONDITIONALLY, so `cargo test --features libass` was red by
+  # design. That test is now cfg-gated by feature (#141) — the libass-OFF
+  # assertion runs only without the feature and the libass-ON dual asserts
+  # `Available` — so the test suite is green under `--features libass` and we
+  # gain real run-time coverage of the libass-gated path. The crate is pure Rust
+  # here (the native libass/HarfBuzz/FriBidi toolchain is wired downstream), so
+  # both steps run on the bare runner.
   feature-clippy-overlay-libass:
-    name: feature-gated clippy (multiview-overlay, libass)
+    name: feature-gated clippy + test (multiview-overlay, libass)
     runs-on: ubuntu-latest
-    # A single crate clippy under one feature (~1min warm); a cold per-feature
-    # cargo cache can take a few minutes. 20min matches the `feature-clippy` legs.
+    # A single crate clippy + test under one feature (~1min warm); a cold
+    # per-feature cargo cache can take a few minutes. 20min matches the
+    # `feature-clippy` legs.
     timeout-minutes: 20
     needs: changes
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
@@ -365,7 +369,7 @@ jobs:
       - name: clippy (libass)
         # --locked enforces the committed Cargo.lock (rule 33). --all-targets also
         # lints the test binaries under the feature; -D warnings matches the
-        # default `lint` gate. (No `test` step — see the job comment.)
+        # default `lint` gate.
         run: >
           cargo clippy
           --locked
@@ -373,6 +377,17 @@ jobs:
           --features libass
           --all-targets
           -- -D warnings
+      - name: test (libass)
+        # Now that the `subtitle` capability test is cfg-gated by feature (#141),
+        # the suite is green under `--features libass`, so run it for real run-time
+        # coverage of the libass-gated path. --locked mirrors CI determinism
+        # (rule 33). The crate has no compositor perf-budget test, so no
+        # `--skip tile_driven_meets_budget` is needed here.
+        run: >
+          cargo test
+          --locked
+          -p multiview-overlay
+          --features libass
 
   # ── ffmpeg-linked webrtc-native clippy (closes the #154 follow-up gap) ───────
   # The `feature-clippy` matrix above runs on a libav-FREE runner, so it cannot
