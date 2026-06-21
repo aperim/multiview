@@ -19,6 +19,7 @@ use multiview_cli::node::{
     pairing_code, ClockMode, EnrollmentRequest, NodeRuntimeConfig, PresentChoice,
     PresentationChooser, VblankPrediction,
 };
+use base64::Engine as _;
 use multiview_core::time::Rational;
 use multiview_core::wallclock::WallClockRef;
 
@@ -175,7 +176,6 @@ fn enrollment_request_carries_base64url_raw_public_key() {
     let key = [9u8; 32];
     let req = EnrollmentRequest::build(&key, "tok-abcdef0123456789", Some("Lobby left"));
     // ADR-0045 / ADR-I008: devicePublicKey is base64url of the RAW 32-byte point.
-    use base64::Engine as _;
     let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
     assert_eq!(req.device_public_key, expected);
     assert_eq!(req.enrollment_token, "tok-abcdef0123456789");

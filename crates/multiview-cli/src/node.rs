@@ -75,7 +75,7 @@ pub enum NodeConfigError {
 
 /// The node-only presentation clock policy ([ADR-0045] §7).
 ///
-/// Serialized **internally**/by value as a snake_case scalar (`"default"` /
+/// Serialized **internally**/by value as a `snake_case` scalar (`"default"` /
 /// `"display_locked"`), never `untagged` (ADR-0010). Default is [`Self::Default`]
 /// — the repeat/drop reconciliation is always correct, merely occasionally
 /// non-ideal, so locking the cadence to the panel is opt-in.
@@ -104,11 +104,16 @@ impl ClockMode {
     /// # Errors
     /// [`NodeConfigError::Validation`] when display-locked is requested on a
     /// non-dedicated host.
-    pub const fn validate_for_node(self, is_dedicated_node: bool) -> Result<(), NodeConfigError> {
+    pub fn validate_for_node(self, is_dedicated_node: bool) -> Result<(), NodeConfigError> {
         match self {
             Self::Default => Ok(()),
             Self::DisplayLocked if is_dedicated_node => Ok(()),
-            Self::DisplayLocked => Err(NodeConfigError::Validation(String::new())),
+            Self::DisplayLocked => Err(NodeConfigError::Validation(
+                "display-locked clock mode is permitted only on a dedicated display node (the \
+                 panel is the terminal output); a local multiview's clock also serves encoders \
+                 and network outputs, so locking it to a monitor would break invariant #1"
+                    .to_owned(),
+            )),
         }
     }
 }
@@ -241,13 +246,12 @@ pub fn pairing_code(device_public_key: &[u8; 32]) -> PairingCode {
         let bit = i * 5;
         let byte_idx = bit / 8;
         let shift = bit % 8;
-        // Assemble a 5-bit window that may straddle two bytes.
-        let lo = u16::from(digest[byte_idx]);
-        let hi = if byte_idx + 1 < digest.len() {
-            u16::from(digest[byte_idx + 1])
-        } else {
-            0
-        };
+        // Assemble a 5-bit window that may straddle two bytes. `.get` (not
+        // indexing) keeps the workspace `indexing_slicing` deny satisfied; an
+        // out-of-range byte contributes zero (only the trailing window can
+        // straddle the 32-byte digest end).
+        let lo = u16::from(digest.get(byte_idx).copied().unwrap_or(0));
+        let hi = u16::from(digest.get(byte_idx + 1).copied().unwrap_or(0));
         let window = (lo << 8) | hi;
         // The top bit of `lo` sits at window bit 15; the 5-bit group starts
         // `shift` bits in from the top of `lo`.
@@ -479,31 +483,32 @@ impl NodePlan {
     /// Render the plan as the multi-line text the binary prints.
     #[must_use]
     pub fn render(&self) -> String {
+        // `write!`/`writeln!` into a `String` is infallible, so the discarded
+        // `Result` is intentional (the established control.rs convention).
+        use std::fmt::Write as _;
         let mut out = String::new();
         out.push_str("multiview node — bootstrap plan\n");
-        out.push_str(&format!("  controller:     {}\n", self.controller));
-        out.push_str(&format!("  link offset:    {} ms\n", self.link_offset_ms));
-        out.push_str(&format!("  clock mode:     {:?}\n", self.clock_mode));
+        let _ = writeln!(out, "  controller:     {}", self.controller);
+        let _ = writeln!(out, "  link offset:    {} ms", self.link_offset_ms);
+        let _ = writeln!(out, "  clock mode:     {:?}", self.clock_mode);
         match &self.identity {
             NodeIdentity::Loaded {
                 device_public_key,
                 pairing_code,
             } => {
-                out.push_str(&format!("  device key:     {device_public_key}\n"));
-                out.push_str(&format!("  pairing code:   {pairing_code}\n"));
+                let _ = writeln!(out, "  device key:     {device_public_key}");
+                let _ = writeln!(out, "  pairing code:   {pairing_code}");
             }
             NodeIdentity::Unavailable { reason } => {
-                out.push_str(&format!("  device identity: unavailable ({reason})\n"));
+                let _ = writeln!(out, "  device identity: unavailable ({reason})");
             }
         }
-        out.push_str(&format!(
-            "  live path:      {}\n",
-            if self.live_path_available {
-                "wired"
-            } else {
-                "not wired (hardware follow-on: ingest → KMS scanout + ALSA)"
-            }
-        ));
+        let live = if self.live_path_available {
+            "wired"
+        } else {
+            "not wired (hardware follow-on: ingest → KMS scanout + ALSA)"
+        };
+        let _ = writeln!(out, "  live path:      {live}");
         out
     }
 }
@@ -525,6 +530,11 @@ fn resolve_identity(cfg: &NodeRuntimeConfig) -> anyhow::Result<NodeIdentity> {
 }
 
 #[cfg(not(feature = "heartbeat"))]
+// The `heartbeat`-on counterpart genuinely returns a fallible `Result` (loading
+// the persisted key can fail), and both cfgs must share one signature for the
+// single `resolve_identity(&cfg)?` call site — so this infallible arm keeps the
+// `Result` shape deliberately.
+#[allow(clippy::unnecessary_wraps)]
 fn resolve_identity(_cfg: &NodeRuntimeConfig) -> anyhow::Result<NodeIdentity> {
     Ok(NodeIdentity::Unavailable {
         reason: "the device keypair loader requires the `heartbeat` feature".to_owned(),
