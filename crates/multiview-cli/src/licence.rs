@@ -1241,6 +1241,31 @@ impl multiview_licence::heartbeat::DeviceSigner for DeviceKeyStore {
     }
 }
 
+/// Load (or, on first boot, generate + persist) the device keypair from `dir`
+/// and return its **raw 32-byte Ed25519 public key**.
+///
+/// This is the display-node bootstrap's reuse seam (DEV-B5 / ADR-0045): a node
+/// shares the *same* persisted device identity the licence heartbeat already
+/// loads ([`DeviceKeyStore`] — atomic create-once, `0600`, `O_NOFOLLOW`,
+/// TOCTOU-safe), so there is one device key per box, never a second RNG/IO/file
+/// (rule 6). The node uses only the **public** half — for its enrollment
+/// request and its display pairing code.
+///
+/// # Errors
+/// [`HeartbeatError`](multiview_licence::heartbeat::HeartbeatError) when the key
+/// directory cannot be created, a present key file is corrupt / unreadable / at
+/// weak permissions, or a freshly-generated key cannot be durably persisted —
+/// all fail closed (never silently regenerate, which would break server-side
+/// key continuity).
+#[cfg(feature = "heartbeat")]
+pub fn load_device_public_key(
+    dir: &str,
+) -> Result<[u8; 32], multiview_licence::heartbeat::HeartbeatError> {
+    use multiview_licence::heartbeat::DeviceSigner as _;
+    let store = DeviceKeyStore::load_or_generate(dir)?;
+    Ok(store.public_key_raw())
+}
+
 /// The live Conspect HTTP transport (the cli-boundary implementation of
 /// [`multiview_licence::heartbeat::LicenceServer`]). Owns the `reqwest` (rustls)
 /// client so the leaf crate stays socket-free; carries the account JWT bearer +

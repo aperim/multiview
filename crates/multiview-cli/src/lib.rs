@@ -98,6 +98,12 @@ pub mod loudness_telemetry;
 /// consent-independent [`multiview_telemetry::retention::RetentionStore`].
 /// Independent of telemetry consent.
 pub mod metrics_retention;
+/// The `multiview node` display-node subcommand (DEV-B5 / ADR-0045): the
+/// software bootstrap — node config parse/validate, the keypair-bound
+/// enrollment request + display pairing code, the node clock-mode policy, and
+/// the §8 presentation frame chooser. Always compiled and CI-tested; the live
+/// ingest → scanout path is a hardware follow-on.
+pub mod node;
 /// Build-capability gating for configured outputs (DEV-B1 / ADR-0044): a
 /// `display` output must FAIL a non-`display-kms` build with a clear error —
 /// never be silently skipped. Always compiled, so the default build tests the

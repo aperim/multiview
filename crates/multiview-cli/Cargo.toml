@@ -134,6 +134,23 @@ rand_core = { version = "0.6", default-features = false, features = [
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# The `multiview node` bootstrap (DEV-B5 / ADR-0045) parses the node-side TOML
+# config (`node::NodeRuntimeConfig`). Pure Rust (MIT/Apache-2.0), the same crate
+# `multiview-config` already uses; stays in the default build (the node
+# bootstrap is always compiled and CI-tested without hardware). `cargo deny` is
+# already satisfied — `toml` is in the workspace graph.
+toml = "1.1.2"
+# The `multiview node` enrollment request encodes the raw 32-byte Ed25519 device
+# public key as base64url (ADR-I008's verified raw-32 encoding). Pure Rust
+# (MIT/Apache-2.0); already a dev-dep and in the workspace graph (the licence
+# plane). `default-features = false` keeps it `alloc`-only.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# The `multiview node` display pairing code is a Crockford-base32 truncation of
+# the SHA-256 of the device public key — deterministic so the displayed code is
+# stable across power cycles. Pure Rust (MIT/Apache-2.0), the same hash the
+# licence plane's device-PoP uses; already in the workspace graph.
+sha2 = { version = "0.11", default-features = false }
+
 [dev-dependencies]
 tokio = { workspace = true, features = [
     "test-util",
