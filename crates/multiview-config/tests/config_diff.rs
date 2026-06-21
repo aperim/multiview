@@ -286,6 +286,201 @@ fn overlay_add_change_and_remove_report_together_deterministically() {
     assert_eq!(kinds, vec!["changed", "added", "removed"]);
 }
 
+// Task #130 — a pure REORDER of overlays/sources with identical content and
+// equal z-order is a real delta. The id-keyed Added/Changed/Removed taxonomy is
+// position-blind, so a reorder of the same id-set with identical documents
+// produces an EMPTY id-keyed list — but DECLARATION ORDER is the equal-`z`
+// draw-order tie-break (the overlay stack sorts `sort_by_key(|l| l.z)`, a STABLE
+// sort, so equal-z overlays blend in insertion order;
+// `multiview-overlay/src/layer.rs:267` + its `stack_z_sort_is_stable_for_equal_z`
+// test pin this). A config-file-watch reorder must therefore re-apply draw order,
+// not vanish as a silent lost update. The reorder is a separate signal from the
+// per-id change lists (it is a whole-section draw-order resync, not a per-id
+// Upsert/Remove command) and, being a pure z/draw-order reorder, is Class-1
+// (hot/seamless, ADR-W024 / inv #11) — NEVER reported restart-only.
+
+#[test]
+fn an_equal_z_overlay_reorder_is_a_real_delta() {
+    // running: ov1 then ov2, both z=0 (equal-z tie-break = declaration order).
+    // next: ov2 then ov1 — same ids, identical per-overlay documents, equal z,
+    // only the order swapped. The id-keyed list is EMPTY (no Added/Changed/
+    // Removed), but the draw order changed, so it MUST report a reorder delta.
+    let ov1 = "[[overlays]]\nid = \"ov1\"\nkind = \"clock\"\ntarget = \"canvas\"\nz = 0\n";
+    let ov2 =
+        "[[overlays]]\nid = \"ov2\"\nkind = \"label\"\ntarget = \"canvas\"\ntext = \"x\"\nz = 0\n";
+    let running = parsed(&format!("{BASE_DOC}{ov1}{ov2}"));
+    let next = parsed(&format!("{BASE_DOC}{ov2}{ov1}"));
+
+    let diff = ConfigDiff::between(&running, &next);
+
+    assert!(
+        diff.overlays.is_empty(),
+        "a pure reorder of identical equal-z overlays produces NO id-keyed \
+         Added/Changed/Removed; got {:?}",
+        diff.overlays
+    );
+    assert!(
+        diff.overlays_reordered,
+        "an equal-z overlay reorder MUST report overlays_reordered — declaration \
+         order is the equal-z draw-order tie-break, so a file-watch reorder is a \
+         silent lost update unless the diff flags it"
+    );
+    assert!(
+        !diff.is_empty(),
+        "the document genuinely changed (draw order), so the diff is NOT empty"
+    );
+}
+
+#[test]
+fn an_equal_z_overlay_reorder_is_not_reported_restart_only() {
+    // A pure z/draw-order reorder is Class-1 (hot/seamless): it must NOT enter
+    // `changed_sections` (the watcher restart-classifies every changed section),
+    // and it must not falsely report a canvas/layout change.
+    let ov1 = "[[overlays]]\nid = \"ov1\"\nkind = \"clock\"\ntarget = \"canvas\"\nz = 0\n";
+    let ov2 =
+        "[[overlays]]\nid = \"ov2\"\nkind = \"label\"\ntarget = \"canvas\"\ntext = \"x\"\nz = 0\n";
+    let running = parsed(&format!("{BASE_DOC}{ov1}{ov2}"));
+    let next = parsed(&format!("{BASE_DOC}{ov2}{ov1}"));
+
+    let diff = ConfigDiff::between(&running, &next);
+
+    assert!(
+        diff.overlays_reordered,
+        "precondition: the reorder is detected"
+    );
+    assert!(
+        !diff.changed_sections.contains("overlays"),
+        "a pure reorder is Class-1 hot, never a restart-only changed section; \
+         got {:?}",
+        diff.changed_sections
+    );
+    assert!(
+        diff.changed_sections.is_empty(),
+        "a pure reorder touches no restart-only section; got {:?}",
+        diff.changed_sections
+    );
+    assert!(!diff.canvas_signal_changed && !diff.canvas_cosmetic_changed && !diff.layout_changed);
+}
+
+#[test]
+fn an_equal_z_source_reorder_is_a_real_delta() {
+    // running: in_a then in_b. next: in_b then in_a — same ids, identical
+    // per-source documents, only the declaration order swapped. The id-keyed
+    // list is EMPTY, but source declaration order is observable (the software
+    // build's `enumerate()`-indexed test pattern, run.rs), so it MUST report a
+    // reorder delta — the same position-blindness the overlay path had.
+    let in_a = "[[sources]]\nid = \"in_a\"\nkind = \"solid\"\ncolor = \"#103050\"\n";
+    let in_b = "[[sources]]\nid = \"in_b\"\nkind = \"bars\"\n";
+    let cells =
+        "[[cells]]\nid = \"cell_a\"\narea = \"a\"\n[cells.source]\ninput_id = \"in_a\"\n[[cells]]\nid = \"cell_b\"\narea = \"b\"\n[cells.source]\ninput_id = \"in_b\"\n";
+    // A self-contained header (no sources/cells) so we control source order.
+    let header = "schema_version = 1\n[canvas]\nwidth = 64\nheight = 64\nfps = \"25/1\"\npixel_format = \"nv12\"\nbackground = \"#101014\"\n[canvas.color]\nprofile = \"sdr-bt709-limited\"\n[layout]\nkind = \"grid\"\ncolumns = [\"1fr\", \"1fr\"]\nrows = [\"1fr\"]\nareas = [\"a b\"]\n";
+    let outputs =
+        "[[outputs]]\nkind = \"hls\"\npath = \"/tmp/diff-base.m3u8\"\ncodec = \"mpeg2video\"\nsegment_ms = 1000\n";
+    let running = parsed(&format!("{header}{in_a}{in_b}{cells}{outputs}"));
+    let next = parsed(&format!("{header}{in_b}{in_a}{cells}{outputs}"));
+
+    let diff = ConfigDiff::between(&running, &next);
+
+    assert!(
+        diff.sources.is_empty(),
+        "a pure reorder of identical sources produces NO id-keyed \
+         Added/Changed/Removed; got {:?}",
+        diff.sources
+    );
+    assert!(
+        diff.sources_reordered,
+        "a source reorder MUST report sources_reordered — the id-keyed diff is \
+         position-blind, so a file-watch reorder is otherwise a silent lost update"
+    );
+    assert!(
+        !diff.is_empty(),
+        "the document genuinely changed (source order)"
+    );
+    assert!(
+        !diff.changed_sections.contains("sources"),
+        "sources is never a `changed_sections` name (it has its own list); a \
+         reorder must not invent one — got {:?}",
+        diff.changed_sections
+    );
+}
+
+#[test]
+fn a_reorder_with_a_real_content_change_reports_both_signals() {
+    // running: ov1(z=0), ov2(z=0). next: ov2(z=0), ov1(z=0, RETARGETED). The
+    // order swapped AND ov1's document changed — the per-id Changed AND the
+    // reorder are independent facts; both must surface.
+    let ov1 = "[[overlays]]\nid = \"ov1\"\nkind = \"clock\"\ntarget = \"canvas\"\nz = 0\n";
+    let ov1_changed = "[[overlays]]\nid = \"ov1\"\nkind = \"clock\"\ntarget = \"cell_a\"\nz = 0\n";
+    let ov2 =
+        "[[overlays]]\nid = \"ov2\"\nkind = \"label\"\ntarget = \"canvas\"\ntext = \"x\"\nz = 0\n";
+    let running = parsed(&format!("{BASE_DOC}{ov1}{ov2}"));
+    let next = parsed(&format!("{BASE_DOC}{ov2}{ov1_changed}"));
+
+    let diff = ConfigDiff::between(&running, &next);
+
+    assert_eq!(diff.overlays.len(), 1, "exactly the one changed overlay");
+    match &diff.overlays[0] {
+        OverlayChange::Changed(o) => assert_eq!(o.id, "ov1"),
+        other => panic!("expected Changed(ov1), got {other:?}"),
+    }
+    assert!(
+        diff.overlays_reordered,
+        "the surviving id-set was also reordered — an independent signal"
+    );
+}
+
+#[test]
+fn a_z_change_alone_is_a_per_id_change_not_a_reorder() {
+    // Bumping ov1's z (same declaration order) is a per-id Changed, NOT a
+    // reorder: the id-keyed list captures it and the reorder flag stays false.
+    let ov1 = "[[overlays]]\nid = \"ov1\"\nkind = \"clock\"\ntarget = \"canvas\"\nz = 0\n";
+    let ov1_z = "[[overlays]]\nid = \"ov1\"\nkind = \"clock\"\ntarget = \"canvas\"\nz = 5\n";
+    let ov2 =
+        "[[overlays]]\nid = \"ov2\"\nkind = \"label\"\ntarget = \"canvas\"\ntext = \"x\"\nz = 0\n";
+    let running = parsed(&format!("{BASE_DOC}{ov1}{ov2}"));
+    let next = parsed(&format!("{BASE_DOC}{ov1_z}{ov2}"));
+
+    let diff = ConfigDiff::between(&running, &next);
+
+    assert_eq!(diff.overlays.len(), 1);
+    match &diff.overlays[0] {
+        OverlayChange::Changed(o) => assert_eq!(o.id, "ov1"),
+        other => panic!("expected Changed(ov1), got {other:?}"),
+    }
+    assert!(
+        !diff.overlays_reordered,
+        "the surviving id sequence is unchanged (ov1, ov2 in both) — a z bump is \
+         a content change, not a reorder"
+    );
+}
+
+#[test]
+fn an_added_overlay_is_not_a_reorder() {
+    // Appending an overlay extends the id sequence; it is an Add, not a reorder
+    // of the surviving set. A reorder is strictly a permutation of the COMMON
+    // ids — adds/removes are reported by the id-keyed list, never as a reorder.
+    let diff = ConfigDiff::between(&base(), &base_with_overlay());
+    assert_eq!(diff.overlays.len(), 1, "the add is reported");
+    assert!(
+        !diff.overlays_reordered,
+        "an add is not a reorder of the common id-set"
+    );
+    let reverse = ConfigDiff::between(&base_with_overlay(), &base());
+    assert_eq!(reverse.overlays.len(), 1, "the remove is reported");
+    assert!(
+        !reverse.overlays_reordered,
+        "a remove is not a reorder of the common id-set"
+    );
+}
+
+#[test]
+fn identical_documents_report_no_reorder() {
+    let diff = ConfigDiff::between(&base_with_overlay(), &base_with_overlay());
+    assert!(diff.is_empty());
+    assert!(!diff.overlays_reordered && !diff.sources_reordered);
+}
+
 #[test]
 fn canvas_geometry_change_is_a_signal_change() {
     let next = parsed(&BASE_DOC.replace("width = 64", "width = 128"));

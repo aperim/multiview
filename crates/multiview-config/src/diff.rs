@@ -87,6 +87,24 @@ pub struct ConfigDiff {
     /// from the mutated control store. `overlays` is ALSO in `changed_sections`
     /// when non-empty (so reporting/restart accounting stays uniform).
     pub overlays: Vec<OverlayChange>,
+    /// The surviving (present-in-both) source ids appear in a **different
+    /// relative order** between `running` and `next` — a pure permutation of the
+    /// common id-set (adds/removes are reported by [`sources`](Self::sources), not
+    /// here). A reorder is invisible to the id-keyed list, yet source declaration
+    /// order is observable (the software build's `enumerate()`-indexed test
+    /// pattern), so a config-file reorder must re-apply — never silently lost.
+    /// Task #130.
+    pub sources_reordered: bool,
+    /// The surviving (present-in-both) overlay ids appear in a **different
+    /// relative order** between `running` and `next` — a pure permutation of the
+    /// common id-set. Declaration order is the equal-`z` draw-order tie-break (the
+    /// overlay stack's `sort_by_key(|l| l.z)` is **stable**, so equal-z overlays
+    /// blend in insertion order), so a reorder genuinely changes the composited
+    /// output — yet it is invisible to the id-keyed [`overlays`](Self::overlays)
+    /// list. A pure z/draw-order reorder is **Class-1** (hot/seamless, ADR-W024 /
+    /// inv #11): it is reported here, NOT as a restart-only `changed_sections`
+    /// entry. Task #130.
+    pub overlays_reordered: bool,
     /// The **pinned signal** (width / height / cadence-by-value) changed — a
     /// Class-2 change (ADR-R004): never hot-appliable.
     pub canvas_signal_changed: bool,
@@ -228,6 +246,11 @@ impl ConfigDiff {
         let mut diff = Self {
             sources: diff_sources(running, next),
             overlays: diff_overlays(running, next),
+            // RED placeholder (task #130): detection is the logic the GREEN
+            // commit adds — these stay `false` so the new tests compile and fail
+            // on the assertion, not the constructor.
+            sources_reordered: false,
+            overlays_reordered: false,
             canvas_signal_changed,
             canvas_cosmetic_changed,
             layout_changed: running_layout != next_layout || running_cells != next_cells,
@@ -243,6 +266,8 @@ impl ConfigDiff {
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()
             && self.overlays.is_empty()
+            && !self.sources_reordered
+            && !self.overlays_reordered
             && !self.canvas_signal_changed
             && !self.canvas_cosmetic_changed
             && !self.layout_changed
