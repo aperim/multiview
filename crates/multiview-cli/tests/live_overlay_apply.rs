@@ -193,6 +193,153 @@ async fn upsert_overlay_publishes_the_new_set_at_the_frame_boundary() {
     );
 }
 
+/// Task #130 (live re-blend): a pure equal-`z` REORDER must re-sequence the
+/// engine's live overlay working set at the frame boundary so the composite
+/// draw order actually changes — WITHOUT a restart. Two equal-z overlays blend
+/// in working-set order (the bake consumer's `analog_clocks_from_config` keeps
+/// input order, fed to the compositor's STABLE `sort_by_key(|l| l.z)`), so the
+/// published `OverlaySet.overlays()` order IS the equal-z draw-order tie-break.
+/// Before the fix, `UpsertOverlay` edited the mirror IN PLACE by id, so
+/// re-submitting upserts was a no-op for order; `ReorderOverlays` re-sequences
+/// it. This is Class-1 (a generation bump, one lock-free publish, no restart).
+#[tokio::test]
+async fn reorder_overlays_reblends_the_live_draw_order_at_the_frame_boundary() {
+    let config = two_cell_config();
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+    let (sender, command_rx) = command_bus(16);
+    let slot = overlay_apply_slot(config.overlays.clone());
+    let mut drain = command_drain_with_live_overlays(
+        command_rx,
+        config.clone(),
+        Arc::clone(&publisher),
+        Arc::clone(&slot),
+    );
+    let mut drive = test_drive(&config);
+    let mut sub = publisher.subscribe();
+
+    // Two analog clocks, both default z=0 → equal-z, so working-set order is the
+    // ONLY thing deciding which blends on top. Upsert clk_a then clk_b.
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_a", 10, 10)),
+        })
+        .expect("submit clk_a");
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_b", 50, 50)),
+        })
+        .expect("submit clk_b");
+    drain(&mut drive);
+
+    let set = slot.load();
+    assert_eq!(
+        set.generation(),
+        2,
+        "two upserts bumped the generation twice"
+    );
+    let ids_before: Vec<&str> = set.overlays().iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(
+        ids_before,
+        vec!["clk_a", "clk_b"],
+        "declaration/insertion order before the reorder"
+    );
+    let _ = job_phases(&mut sub); // drain the two apply_overlay phases
+
+    // REORDER: ask for [clk_b, clk_a] — same ids, same documents, only the
+    // draw order swapped. Against the pre-fix engine this is an unhandled
+    // command (skipped), so the order would NOT change.
+    sender
+        .try_submit(Command::ReorderOverlays {
+            op: OperationId::new(),
+            order: vec!["clk_b".to_owned(), "clk_a".to_owned()],
+        })
+        .expect("submit reorder");
+    drain(&mut drive);
+
+    let set = slot.load();
+    let ids_after: Vec<&str> = set.overlays().iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(
+        ids_after,
+        vec!["clk_b", "clk_a"],
+        "the reorder re-sequenced the live working set (the top overlay flipped) \
+         — the equal-z draw order actually changed live"
+    );
+    assert_eq!(
+        set.generation(),
+        3,
+        "the reorder is a frame-boundary apply (a generation bump), not a restart"
+    );
+    // The set still carries BOTH documents, unchanged — a pure permutation, not
+    // an add/remove/edit.
+    assert_eq!(set.overlays().len(), 2, "no overlay added or removed");
+    assert!(
+        set.overlays().iter().any(|o| o.id == "clk_a")
+            && set.overlays().iter().any(|o| o.id == "clk_b"),
+        "both overlays survive the reorder"
+    );
+    assert_eq!(
+        job_phases(&mut sub),
+        vec!["apply_overlay".to_owned()],
+        "the reorder is observable as a job.progress outcome (Class-1, no restart)"
+    );
+}
+
+/// A reorder request whose id sequence already matches the working set is a
+/// no-op: no generation bump, no spurious re-derivation (idempotent — a shed
+/// retry re-submitting the same order cannot thrash the bake consumer).
+#[tokio::test]
+async fn an_already_ordered_reorder_is_a_noop() {
+    let config = two_cell_config();
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+    let (sender, command_rx) = command_bus(16);
+    let slot = overlay_apply_slot(config.overlays.clone());
+    let mut drain = command_drain_with_live_overlays(
+        command_rx,
+        config.clone(),
+        Arc::clone(&publisher),
+        Arc::clone(&slot),
+    );
+    let mut drive = test_drive(&config);
+    let mut sub = publisher.subscribe();
+
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_a", 10, 10)),
+        })
+        .expect("submit clk_a");
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_b", 50, 50)),
+        })
+        .expect("submit clk_b");
+    drain(&mut drive);
+    let gen_before = slot.load().generation();
+    let _ = job_phases(&mut sub);
+
+    // Same order as the working set → nothing to do.
+    sender
+        .try_submit(Command::ReorderOverlays {
+            op: OperationId::new(),
+            order: vec!["clk_a".to_owned(), "clk_b".to_owned()],
+        })
+        .expect("submit no-op reorder");
+    drain(&mut drive);
+
+    assert_eq!(
+        slot.load().generation(),
+        gen_before,
+        "an already-ordered reorder publishes nothing (no generation bump)"
+    );
+    assert!(
+        job_phases(&mut sub).is_empty(),
+        "a no-op reorder emits no apply outcome"
+    );
+}
+
 #[tokio::test]
 async fn remove_overlay_drops_the_entry_from_the_published_set() {
     let config = two_cell_config();

@@ -391,6 +391,24 @@ pub enum Command {
         /// The overlay id to remove.
         id: String,
     },
+    /// Re-sequence the **running** engine's overlay working set to a new draw
+    /// order (task #130, ADR-W022 live apply, invariant #11). A pure
+    /// permutation: it carries the full desired overlay id sequence and the
+    /// drain re-orders its working-set mirror to match, then republishes the set
+    /// (a generation bump) so the bake consumer re-derives the new draw order at
+    /// the next frame. Declaration order is the equal-`z` draw-order tie-break
+    /// (the overlay stack's `sort_by_key(|l| l.z)` is **stable**), so a reorder
+    /// genuinely changes the composite — and `UpsertOverlay` edits the mirror in
+    /// place by id, so it can never express the reorder. Class-1 hot/seamless:
+    /// no add/remove/content change, no rasterization, no I/O. Ids not currently
+    /// in the working set are ignored; an order already matching is a no-op
+    /// (idempotent — a shed retry re-submitting the same order cannot thrash).
+    ReorderOverlays {
+        /// Correlation id for the async outcome.
+        op: OperationId,
+        /// The full desired overlay id sequence (working-set draw order).
+        order: Vec<String>,
+    },
     /// Force (or clear) a manual tally override on a tile/element, taking
     /// precedence over the arbitrated bus state until released. A `color` of
     /// [`None`] clears the override and returns the element to arbitration.
@@ -471,6 +489,7 @@ impl Command {
             | Self::RemoveSource { op, .. }
             | Self::UpsertOverlay { op, .. }
             | Self::RemoveOverlay { op, .. }
+            | Self::ReorderOverlays { op, .. }
             | Self::SetTallyOverride { op, .. }
             | Self::MediaTransport { op, .. }
             | Self::ArmMediaExit { op, .. }
@@ -497,6 +516,7 @@ impl Command {
             Self::RemoveSource { .. } => "remove_source",
             Self::UpsertOverlay { .. } => "upsert_overlay",
             Self::RemoveOverlay { .. } => "remove_overlay",
+            Self::ReorderOverlays { .. } => "reorder_overlays",
             Self::SetTallyOverride { .. } => "set_tally_override",
             // Media transport: the kind reflects the verb so the 202 body / audit
             // record names what the player was asked to do.
