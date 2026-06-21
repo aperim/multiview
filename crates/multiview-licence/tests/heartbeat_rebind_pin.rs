@@ -330,3 +330,65 @@ async fn a_renew_rejection_does_not_clear_the_rebind_pin() {
         "a renew rejection must NOT clear the rebind pin; keys={keys:?}"
     );
 }
+
+/// WIRE (ADR-I009 r4): rebind_once must resolve the bindingId via the SAME chain as
+/// renew + deactivate (configured/learned binding_id → store.current_binding_id() →
+/// identity.binding_id), NOT from identity.binding_id with an instance_id fallback. A
+/// device whose binding was LEARNED from the server (in the store, not the static
+/// identity config) must rebind under the CORRECT store-learned bindingId.
+///
+/// Must FAIL against the identity+instance_id src (the request's bindingId would be the
+/// device's instance_id) and PASS after rebind_once uses the store chain.
+#[tokio::test]
+async fn rebind_uses_the_store_learned_binding_not_the_instance_id() {
+    let server = shared_fake();
+    let store = Arc::new(LeaseStore::new());
+    // An UNBOUND identity (binding_id: None) with a DISTINCT instance_id — so the only
+    // correct binding source is the store-learned one.
+    let pinned = server.pinned_root();
+    let client = HeartbeatClient::with_device_signer(
+        Arc::clone(&server),
+        Arc::clone(&store),
+        pinned,
+        config(),
+        multiview_licence::heartbeat::DeviceIdentity {
+            binding_id: None, // NOT configured — must come from the store
+            instance_id: "inst_prod_a".to_owned(),
+            ..bound_identity()
+        },
+        Arc::new(pop_test_signer()),
+    );
+
+    // The binding is LEARNED from the server: seed a verified lease into the store so
+    // store.current_binding_id() returns the fake's binding (an `ib_…`, NOT inst_prod_a).
+    let store_binding = server.binding_id().to_owned();
+    let (binding, install_pinned) = fake::upload_binding_for(server.kit(), &store_binding);
+    store
+        .install_binding(
+            &binding,
+            &install_pinned,
+            multiview_licence::store::system_now(),
+        )
+        .expect("seed the store-learned binding");
+    assert_eq!(
+        store.current_binding_id().as_deref(),
+        Some(store_binding.as_str()),
+        "precondition: the store has the learned binding"
+    );
+
+    // Rebind: the request's bindingId MUST be the store-learned binding, NOT inst_prod_a.
+    let _ = tokio::time::timeout(Duration::from_secs(5), client.rebind_once("lic_test"))
+        .await
+        .expect("no hang")
+        .expect("a healthy rebind");
+    assert_eq!(
+        server.last_rebind_binding_id().as_deref(),
+        Some(store_binding.as_str()),
+        "rebind must target the store-learned bindingId"
+    );
+    assert_ne!(
+        server.last_rebind_binding_id().as_deref(),
+        Some("inst_prod_a"),
+        "rebind must NOT fall back to the device's instance_id as the bindingId"
+    );
+}

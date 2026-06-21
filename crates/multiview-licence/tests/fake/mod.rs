@@ -626,6 +626,9 @@ pub struct FakeLicenceServer {
     /// The `instanceId` the most recent rebind REQUEST carried (the test asserts it is
     /// the device's OWN id — continuity, not a server-assigned challenge id).
     last_rebind_instance_id: std::sync::Mutex<Option<String>>,
+    /// The `bindingId` the most recent rebind REQUEST carried (the test asserts it is
+    /// the device's resolved binding — store-learned id, not the instance_id fallback).
+    last_rebind_binding_id: std::sync::Mutex<Option<String>>,
     /// Whether the most recent rebind's `Conspect-Device-PoP` proof VERIFIED against the
     /// device key over the recomputed pre-image (binding the device's own instance id).
     last_rebind_pop_verified: AtomicBool,
@@ -676,6 +679,7 @@ impl FakeLicenceServer {
             rebinds: AtomicU64::new(0),
             deactivates: AtomicU64::new(0),
             last_rebind_instance_id: std::sync::Mutex::new(None),
+            last_rebind_binding_id: std::sync::Mutex::new(None),
             last_rebind_pop_verified: AtomicBool::new(false),
             last_deactivate_pop_verified: AtomicBool::new(false),
             last_deactivate_binding_id: std::sync::Mutex::new(None),
@@ -827,6 +831,11 @@ impl FakeLicenceServer {
         self.deactivates.load(Ordering::SeqCst)
     }
     /// The `instanceId` the most recent rebind request carried (the device's OWN id).
+    /// The `bindingId` the most recent rebind request carried (the device's resolved
+    /// binding — store-learned id, not the instance_id fallback).
+    pub fn last_rebind_binding_id(&self) -> Option<String> {
+        self.last_rebind_binding_id.lock().expect("poisoned").clone()
+    }
     pub fn last_rebind_instance_id(&self) -> Option<String> {
         self.last_rebind_instance_id
             .lock()
@@ -1265,6 +1274,7 @@ impl LicenceServer for FakeLicenceServer {
         };
         self.rebinds.fetch_add(1, Ordering::SeqCst);
         *self.last_rebind_instance_id.lock().expect("poisoned") = Some(req.instance_id.clone());
+        *self.last_rebind_binding_id.lock().expect("poisoned") = Some(req.binding_id.clone());
         // VERIFY the proof binds THIS body + THIS nonce + the device's OWN instance id
         // (continuity — NOT a server-assigned challenge id).
         let verified = self.verify_activate_pop(pop_header, &body, &req.nonce, &req.instance_id);
