@@ -18,11 +18,47 @@ use multiview_control::{
     Device, MediaFormat, Node, Receiver, ResourceCore, Sender, TransportParams,
 };
 use support::{
-    body_json, get, harness, patch_json, send, ADMIN_TOKEN, OPERATOR_TOKEN, VIEWER_TOKEN,
+    body_json, get, harness, patch_json, send, ADMIN_TOKEN, OPERATOR_TOKEN, SCOPED_TOKEN,
+    VIEWER_TOKEN,
 };
 
 fn core(id: &str) -> ResourceCore {
     ResourceCore::new(id, "1700000000:0", format!("label-{id}"))
+}
+
+/// Seed the NMOS registry with TWO devices — one in the `SCOPED_TOKEN`
+/// allowlist (`scoped-layout`) and one outside it (`dev-other`) — each with its
+/// own sender + receiver linked by `device_id`. Drives the per-object
+/// (BOLA, ADR-W005/ADR-W025) enumeration-filter tests on the NMOS LIST routes.
+fn seed_two_devices(h: &support::Harness) {
+    h.nmos.set_node(Node {
+        core: core("node-1"),
+        href: "http://multiview.local/".to_owned(),
+        hostname: Some("multiview.local".to_owned()),
+    });
+    for dev in ["scoped-layout", "dev-other"] {
+        h.nmos.add_device(Device {
+            core: core(dev),
+            node_id: "node-1".to_owned(),
+            device_type: "urn:x-nmos:device:generic".to_owned(),
+            senders: vec![format!("snd-{dev}")],
+            receivers: vec![format!("rcv-{dev}")],
+        });
+        h.nmos.add_sender(Sender {
+            core: core(&format!("snd-{dev}")),
+            device_id: dev.to_owned(),
+            flow_id: None,
+            transport: "urn:x-nmos:transport:rtp.mcast".to_owned(),
+            manifest_href: None,
+        });
+        h.nmos.add_receiver(Receiver {
+            core: core(&format!("rcv-{dev}")),
+            device_id: dev.to_owned(),
+            format: MediaFormat::Video,
+            transport: "urn:x-nmos:transport:rtp.mcast".to_owned(),
+            subscribed_sender: None,
+        });
+    }
 }
 
 /// Seed a harness's NMOS registry with one node, device, sender, and receiver.
@@ -86,6 +122,148 @@ async fn devices_senders_receivers_are_listed() {
     let resp = send(&h.router, get("/x-nmos/node/v1.3/receivers", VIEWER_TOKEN)).await;
     let receivers = body_json(resp).await;
     assert_eq!(receivers[0]["format"], "video");
+}
+
+/// BOLA enumeration (OWASP API1, conventions §H / ADR-W005 / ADR-W025): the
+/// NMOS Node API LIST routes must filter to the principal's object allowlist,
+/// by parity with the IS-05 per-id `PATCH .../staged` already authorizing the
+/// receiver id. A scoped operator that lists `/x-nmos/.../devices` must see ONLY
+/// its allowlisted device — never enumerate out-of-scope device ids.
+///
+/// `SCOPED_TOKEN` is scoped to `["scoped-layout"]`; the registry holds devices
+/// `scoped-layout` (IN) and `dev-other` (OUT). The scoped device list must be
+/// exactly `["scoped-layout"]`; an admin still sees both.
+#[tokio::test]
+async fn nmos_device_list_filters_to_the_scoped_allowlist() {
+    let h = harness();
+    seed_two_devices(&h);
+
+    let resp = send(&h.router, get("/x-nmos/node/v1.3/devices", SCOPED_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let listed = body_json(resp).await;
+    let ids: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["scoped-layout"],
+        "a scoped principal must see ONLY its allowlisted NMOS device, never enumerate others (BOLA)"
+    );
+
+    // An unscoped admin still sees both devices.
+    let resp = send(&h.router, get("/x-nmos/node/v1.3/devices", ADMIN_TOKEN)).await;
+    let listed = body_json(resp).await;
+    assert_eq!(
+        listed.as_array().unwrap().len(),
+        2,
+        "an unscoped admin still sees every NMOS device"
+    );
+}
+
+/// The sender/receiver LIST routes filter by each resource's `device_id` link:
+/// a scoped principal sees only senders/receivers whose associated device is in
+/// its allowlist — by parity with the device filter. (`/api/v1/devices` is the
+/// device-object surface; an NMOS sender/receiver is "device-scoped" via its
+/// `device_id`.)
+#[tokio::test]
+async fn nmos_sender_and_receiver_lists_filter_by_device_scope() {
+    let h = harness();
+    seed_two_devices(&h);
+
+    // Senders: only the one whose device_id is in scope.
+    let resp = send(&h.router, get("/x-nmos/node/v1.3/senders", SCOPED_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let senders = body_json(resp).await;
+    let ids: Vec<&str> = senders
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["snd-scoped-layout"],
+        "a scoped principal sees only senders linked to an in-scope device (BOLA)"
+    );
+
+    // Receivers: likewise.
+    let resp = send(&h.router, get("/x-nmos/node/v1.3/receivers", SCOPED_TOKEN)).await;
+    let receivers = body_json(resp).await;
+    let ids: Vec<&str> = receivers
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["rcv-scoped-layout"],
+        "a scoped principal sees only receivers linked to an in-scope device (BOLA)"
+    );
+
+    // An unscoped admin still sees both senders and both receivers.
+    let resp = send(&h.router, get("/x-nmos/node/v1.3/senders", ADMIN_TOKEN)).await;
+    assert_eq!(
+        body_json(resp).await.as_array().unwrap().len(),
+        2,
+        "an unscoped admin sees every NMOS sender"
+    );
+    let resp = send(&h.router, get("/x-nmos/node/v1.3/receivers", ADMIN_TOKEN)).await;
+    assert_eq!(
+        body_json(resp).await.as_array().unwrap().len(),
+        2,
+        "an unscoped admin sees every NMOS receiver"
+    );
+}
+
+/// BOLA per-object (OWASP API1, ADR-W005/ADR-W025): the IS-05 single-receiver
+/// connection READ (`GET .../single/receivers/{id}/active`) must authorize the
+/// receiver id, exactly as its sibling `PATCH .../staged` already does — else a
+/// scoped principal reads the live transport/connection state of a receiver
+/// outside its allowlist by probing the id.
+///
+/// `SCOPED_TOKEN` (allowlist `["scoped-layout"]`) reading the OUT-of-scope
+/// receiver `rcv-dev-other` must be `403`; reading its IN-scope receiver
+/// `rcv-scoped-layout` must still succeed (`200`, no over-restriction).
+#[tokio::test]
+async fn nmos_active_connection_read_is_object_scoped() {
+    let h = harness();
+    seed_two_devices(&h);
+
+    // Out-of-scope receiver id: denied.
+    let resp = send(
+        &h.router,
+        get(
+            "/x-nmos/connection/v1.1/single/receivers/rcv-dev-other/active",
+            SCOPED_TOKEN,
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a scoped principal must not read an out-of-scope receiver's connection state (BOLA)"
+    );
+    let problem = body_json(resp).await;
+    assert_eq!(problem["type"], "/problems/forbidden");
+
+    // In-scope receiver id: still readable (the guard does not over-restrict).
+    let resp = send(
+        &h.router,
+        get(
+            "/x-nmos/connection/v1.1/single/receivers/rcv-scoped-layout/active",
+            SCOPED_TOKEN,
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a scoped principal may read its own in-scope receiver's connection state"
+    );
 }
 
 #[tokio::test]
