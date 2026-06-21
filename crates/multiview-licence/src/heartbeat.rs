@@ -1266,7 +1266,7 @@ pub struct RebindRequest {
 }
 
 /// A `POST /organisations/{orgId}/rebind` response (ADR-I009): the rebind result.
-/// **Carries only a `lease_serial`** (a UUIDv7) — NOT an embedded signed lease
+/// **Carries only a `lease_serial`** (a `UUIDv7`) — NOT an embedded signed lease
 /// envelope (contrast [`ActivateResponse::lease`]/[`HeartbeatResponse::lease`]) — so
 /// the device cannot install from it; it seeds the steady-state nonce from
 /// `next_nonce` and the **next renew** installs the refreshed lease.
@@ -1277,7 +1277,7 @@ pub struct RebindResponse {
     /// Whether a fresh lease was issued. `false` when the entitlement is revoked (the
     /// signer withholds the re-issue — never off air; the current rung is still returned).
     pub rebound: bool,
-    /// The signed lease serial (a UUIDv7) when issued, or `null` when withheld.
+    /// The signed lease serial (a `UUIDv7`) when issued, or `null` when withheld.
     #[serde(default)]
     pub lease_serial: Option<String>,
     /// The new lease's expiry (Unix epoch ms), or `null` when withheld.

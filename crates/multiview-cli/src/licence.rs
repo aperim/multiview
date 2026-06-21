@@ -323,14 +323,11 @@ impl EntitlementPlane {
         let Some(client) = self.build_client(&settings) else {
             return; // build_client logged the fail-closed reason
         };
-        // Retain it for the lifecycle ops (idempotent: set_or-keep the first client).
-        let client = match self.heartbeat_client.get() {
-            Some(existing) => std::sync::Arc::clone(existing),
-            None => {
-                let _ = self.heartbeat_client.set(std::sync::Arc::clone(&client));
-                client
-            }
-        };
+        // Retain it for the lifecycle ops (idempotent: set-or-keep the first client).
+        // `get_or_init` returns the already-retained client if a prior call set one,
+        // else stores and returns this one — so the renew loop and the operator ops
+        // always drive the SAME in-process client (coherent pin + nonce-store lock).
+        let client = std::sync::Arc::clone(self.heartbeat_client.get_or_init(|| client));
         tokio::spawn(async move {
             client.run_forever().await;
         });

@@ -83,11 +83,20 @@ async fn a_healthy_rebind_succeeds_and_seeds_the_next_nonce() {
     .expect("rebind_once must not hang")
     .expect("a healthy rebind must succeed");
     assert!(
-        matches!(outcome, HeartbeatOutcome::Rebound { seat_consumed: false, .. }),
+        matches!(
+            outcome,
+            HeartbeatOutcome::Rebound {
+                seat_consumed: false,
+                ..
+            }
+        ),
         "a rebind consumes no new seat, got {outcome:?}"
     );
 
-    assert!(server.challenge_fetches() >= 1, "rebind fetches a challenge");
+    assert!(
+        server.challenge_fetches() >= 1,
+        "rebind fetches a challenge"
+    );
     assert_eq!(server.rebinds(), 1, "exactly one rebind call");
     assert!(
         server.last_rebind_pop_verified(),
@@ -151,8 +160,13 @@ async fn a_healthy_deactivate_returns_released_and_installs_nothing() {
         .expect("deactivate_once must not hang")
         .expect("a healthy deactivate must succeed");
     match outcome {
-        HeartbeatOutcome::Deactivated { lifecycle_state, .. } => {
-            assert_eq!(lifecycle_state, "released", "a deactivated binding is released");
+        HeartbeatOutcome::Deactivated {
+            lifecycle_state, ..
+        } => {
+            assert_eq!(
+                lifecycle_state, "released",
+                "a deactivated binding is released"
+            );
         }
         other => panic!("expected Deactivated, got {other:?}"),
     }
@@ -227,7 +241,10 @@ async fn rebind_rejected_pop_invalid_keeps_last_good() {
     .await
     .expect("rebind_once must not hang");
     assert!(result.is_err(), "a rejected rebind proof fails closed");
-    assert!(store.status().is_none(), "a rejected rebind installs nothing");
+    assert!(
+        store.status().is_none(),
+        "a rejected rebind installs nothing"
+    );
 }
 
 #[tokio::test]
@@ -241,5 +258,8 @@ async fn deactivate_rejected_pop_invalid_keeps_last_good() {
         .await
         .expect("deactivate_once must not hang");
     assert!(result.is_err(), "a rejected deactivate proof fails closed");
-    assert!(store.status().is_none(), "a rejected deactivate touches nothing");
+    assert!(
+        store.status().is_none(),
+        "a rejected deactivate touches nothing"
+    );
 }

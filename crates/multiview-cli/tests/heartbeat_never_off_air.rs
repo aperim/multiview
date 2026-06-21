@@ -754,8 +754,14 @@ async fn the_output_clock_ticks_while_a_rebind_call_is_stalled_in_flight() {
         }
     })
     .await;
-    assert!(parked.is_ok(), "the REBIND POST must reach an in-flight stall");
-    assert!(!handle.is_finished(), "the rebind is stalled (not returned)");
+    assert!(
+        parked.is_ok(),
+        "the REBIND POST must reach an in-flight stall"
+    );
+    assert!(
+        !handle.is_finished(),
+        "the rebind is stalled (not returned)"
+    );
 
     let time = Arc::new(ManualTimeSource::new());
     let report = tokio::time::timeout(
@@ -765,13 +771,22 @@ async fn the_output_clock_ticks_while_a_rebind_call_is_stalled_in_flight() {
     .await
     .expect("the engine run must not hang while a rebind POST is stalled")
     .expect("the engine drives regardless of an in-flight stalled rebind POST");
-    assert_eq!(report.frames, 50, "one frame per tick while a rebind POST is stalled");
-    assert!(!report.faltered, "the output clock never falters during the rebind stall");
+    assert_eq!(
+        report.frames, 50,
+        "one frame per tick while a rebind POST is stalled"
+    );
+    assert!(
+        !report.faltered,
+        "the output clock never falters during the rebind stall"
+    );
     assert!(!handle.is_finished(), "the rebind POST is STILL stalled");
 
     handle.abort();
     let _ = handle.await;
-    assert!(store.status().is_none(), "the stalled rebind installed nothing");
+    assert!(
+        store.status().is_none(),
+        "the stalled rebind installed nothing"
+    );
 }
 
 /// THE DEACTIVATE-PATH IN-FLIGHT STALL GATE (ADR-I009): a bound device's one-shot
@@ -792,8 +807,14 @@ async fn the_output_clock_ticks_while_a_deactivate_call_is_stalled_in_flight() {
         }
     })
     .await;
-    assert!(parked.is_ok(), "the DEACTIVATE POST must reach an in-flight stall");
-    assert!(!handle.is_finished(), "the deactivate is stalled (not returned)");
+    assert!(
+        parked.is_ok(),
+        "the DEACTIVATE POST must reach an in-flight stall"
+    );
+    assert!(
+        !handle.is_finished(),
+        "the deactivate is stalled (not returned)"
+    );
 
     let time = Arc::new(ManualTimeSource::new());
     let report = tokio::time::timeout(
@@ -803,11 +824,23 @@ async fn the_output_clock_ticks_while_a_deactivate_call_is_stalled_in_flight() {
     .await
     .expect("the engine run must not hang while a deactivate POST is stalled")
     .expect("the engine drives regardless of an in-flight stalled deactivate POST");
-    assert_eq!(report.frames, 50, "one frame per tick while a deactivate POST is stalled");
-    assert!(!report.faltered, "the output clock never falters during the deactivate stall");
-    assert!(!handle.is_finished(), "the deactivate POST is STILL stalled");
+    assert_eq!(
+        report.frames, 50,
+        "one frame per tick while a deactivate POST is stalled"
+    );
+    assert!(
+        !report.faltered,
+        "the output clock never falters during the deactivate stall"
+    );
+    assert!(
+        !handle.is_finished(),
+        "the deactivate POST is STILL stalled"
+    );
 
     handle.abort();
     let _ = handle.await;
-    assert!(store.status().is_none(), "the stalled deactivate touched nothing");
+    assert!(
+        store.status().is_none(),
+        "the stalled deactivate touched nothing"
+    );
 }

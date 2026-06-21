@@ -828,7 +828,10 @@ impl FakeLicenceServer {
     }
     /// The `instanceId` the most recent rebind request carried (the device's OWN id).
     pub fn last_rebind_instance_id(&self) -> Option<String> {
-        self.last_rebind_instance_id.lock().expect("poisoned").clone()
+        self.last_rebind_instance_id
+            .lock()
+            .expect("poisoned")
+            .clone()
     }
     /// Whether the most recent rebind PoP proof verified (bound the device's own id).
     pub fn last_rebind_pop_verified(&self) -> bool {
@@ -1265,7 +1268,8 @@ impl LicenceServer for FakeLicenceServer {
         // VERIFY the proof binds THIS body + THIS nonce + the device's OWN instance id
         // (continuity — NOT a server-assigned challenge id).
         let verified = self.verify_activate_pop(pop_header, &body, &req.nonce, &req.instance_id);
-        self.last_rebind_pop_verified.store(verified, Ordering::SeqCst);
+        self.last_rebind_pop_verified
+            .store(verified, Ordering::SeqCst);
         if self.reject_pop.load(Ordering::SeqCst) || !verified {
             return Err(HeartbeatError::ServerRejected(
                 "fake rebind returned HTTP 401 pop-invalid".to_owned(),

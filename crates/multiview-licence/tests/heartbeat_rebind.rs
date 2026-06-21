@@ -100,7 +100,11 @@ fn bound_identity() -> DeviceIdentity {
 }
 
 fn challenge() -> DeviceChallenge {
-    DeviceChallenge::new(NONCE_HEX.to_owned(), i64::MAX, CHALLENGE_INSTANCE_ID.to_owned())
+    DeviceChallenge::new(
+        NONCE_HEX.to_owned(),
+        i64::MAX,
+        CHALLENGE_INSTANCE_ID.to_owned(),
+    )
 }
 
 #[test]
@@ -108,7 +112,10 @@ fn build_rebind_request_carries_the_devices_own_ids_and_the_nonce() {
     // Rebind is a CONTINUITY op: it sends the device's OWN binding/instance id +
     // licence id + the refreshed fingerprint material + the challenge nonce.
     let req: RebindRequest = build_rebind_request(&bound_identity(), LICENCE_ID, &challenge());
-    assert_eq!(req.binding_id, DEVICE_BINDING_ID, "rebind sends the device's own binding");
+    assert_eq!(
+        req.binding_id, DEVICE_BINDING_ID,
+        "rebind sends the device's own binding"
+    );
     assert_eq!(
         req.instance_id, DEVICE_INSTANCE_ID,
         "rebind sends the device's OWN instance_id (continuity), not a challenge id"
@@ -118,7 +125,10 @@ fn build_rebind_request_carries_the_devices_own_ids_and_the_nonce() {
         "rebind must NOT send the server-assigned challenge instanceId"
     );
     assert_eq!(req.licence_id, LICENCE_ID);
-    assert_eq!(req.fp_score, 95, "the refreshed fingerprint score is reported");
+    assert_eq!(
+        req.fp_score, 95,
+        "the refreshed fingerprint score is reported"
+    );
     assert_eq!(req.nonce, NONCE_HEX, "rebind carries the challenge nonce");
 }
 
@@ -142,7 +152,10 @@ fn rebind_request_never_serializes_device_public_key() {
         "fpScore",
         "nonce",
     ] {
-        assert!(json.contains(field), "rebind body must carry {field}: {json}");
+        assert!(
+            json.contains(field),
+            "rebind body must carry {field}: {json}"
+        );
     }
 }
 
@@ -265,7 +278,10 @@ fn rebind_response_deserializes_only_a_lease_serial_no_embedded_lease() {
     );
     assert_eq!(resp.not_after, Some(1_784_023_648_420));
     assert_eq!(resp.rebinds_this_year, 1);
-    assert!(!resp.seat_consumed, "a rebind consumes NO new seat (always false)");
+    assert!(
+        !resp.seat_consumed,
+        "a rebind consumes NO new seat (always false)"
+    );
     assert_eq!(
         resp.next_nonce, "9f3a2b6e1c0e9b41a4c92d7e3b8f10c25e6a7d3f49b0c81e2f5a6d7c8b9e0f1a2",
         "the nextNonce seeds steady-state renew"
@@ -286,7 +302,8 @@ fn rebind_response_tolerates_a_withheld_reissue_null_lease_serial() {
         "fpScore": 40,
         "nextNonce": ""
     }"#;
-    let resp: RebindResponse = serde_json::from_str(json).expect("must deserialize a withheld rebind");
+    let resp: RebindResponse =
+        serde_json::from_str(json).expect("must deserialize a withheld rebind");
     assert!(!resp.rebound);
     assert_eq!(resp.lease_serial, None);
     assert_eq!(resp.not_after, None);
