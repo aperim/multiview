@@ -86,6 +86,74 @@ async fn output_device_ref_is_redacted_when_out_of_scope() {
     assert_eq!(out["body"]["device_ref"], "dev-other");
 }
 
+/// BOLA ROW enumeration (OWASP API1, ADR-W005/ADR-W025): an output is itself
+/// object-scoped by its OWN id (`get_output` 403s an out-of-scope id), so
+/// `list_outputs` MUST filter ROWS to the principal's allowlist — exactly as
+/// `list_devices` does. Redacting only the embedded `device_ref` (round-3) still
+/// leaked out-of-scope OUTPUT ids through the list.
+///
+/// `SCOPED_TOKEN` (allowlist `["scoped-layout"]`) lists with an in-scope output
+/// (`scoped-layout`, device_ref out of scope) and an out-of-scope output
+/// (`other-out`). The scoped list must contain ONLY `scoped-layout`, and that
+/// row's out-of-scope `device_ref` must still be redacted.
+#[tokio::test]
+async fn list_filters_output_rows_to_the_scoped_allowlist() {
+    let h = harness();
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/outputs/scoped-layout",
+            ADMIN_TOKEN,
+            &json!({
+                "name": "Mine",
+                "body": { "kind": "rtsp_server", "mount": "/mine", "codec": "h264", "device_ref": "dev-other" }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/outputs/other-out",
+            ADMIN_TOKEN,
+            &json!({
+                "name": "Theirs",
+                "body": { "kind": "rtsp_server", "mount": "/theirs", "codec": "h264" }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let resp = send(&h.router, get("/api/v1/outputs", SCOPED_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = body_json(resp).await;
+    let ids: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["scoped-layout"],
+        "a scoped principal must see ONLY its allowlisted output rows, never enumerate others (BOLA)"
+    );
+    let row = list.as_array().unwrap().iter().find(|o| o["id"] == "scoped-layout").unwrap();
+    assert!(
+        row["body"].get("device_ref").is_none(),
+        "the surviving in-scope row still has its out-of-scope device_ref redacted: {row}"
+    );
+
+    let resp = send(&h.router, get("/api/v1/outputs", ADMIN_TOKEN)).await;
+    assert_eq!(
+        body_json(resp).await.as_array().unwrap().len(),
+        2,
+        "an unscoped admin still sees every output"
+    );
+}
+
 #[tokio::test]
 async fn create_then_get_round_trips_with_etag() {
     let h = harness();
