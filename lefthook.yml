@@ -81,3 +81,19 @@ pre-push:
         else
           echo "web/node_modules absent (run 'npm --prefix web ci'); skipping i18n catalog freshness check (CI i18n-catalogs is authoritative)"
         fi
+    # ── API spec freshness (match the CI spec-freshness job, ADR-RT006) ─────────
+    # The committed docs/api/{openapi,asyncapi}.json are generated from the Rust
+    # source of truth (multiview-control utoipa + multiview-events asyncapi) via
+    # `cargo xtask gen-{openapi,asyncapi}`. Nothing else forces a regen when those
+    # annotations change, so the specs can drift behind the served document. This
+    # mirrors the CI drift gate: regenerate both specs, then fail on any
+    # uncommitted diff under docs/api/. --locked mirrors CI (rule 33). Pure-Rust
+    # (no ffmpeg), so it runs on any dev host.
+    spec-freshness:
+      run: |
+        cargo run --locked -p xtask -- gen-openapi
+        cargo run --locked -p xtask -- gen-asyncapi
+        if ! git diff --exit-code -- docs/api/; then
+          echo "API specs are stale. Run 'cargo run -p xtask -- gen-openapi && cargo run -p xtask -- gen-asyncapi' and commit docs/api/{openapi,asyncapi}.json." >&2
+          exit 1
+        fi
