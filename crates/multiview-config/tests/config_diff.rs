@@ -332,10 +332,13 @@ fn an_equal_z_overlay_reorder_is_a_real_delta() {
 }
 
 #[test]
-fn an_equal_z_overlay_reorder_is_not_reported_restart_only() {
-    // A pure z/draw-order reorder is Class-1 (hot/seamless): it must NOT enter
-    // `changed_sections` (the watcher restart-classifies every changed section),
-    // and it must not falsely report a canvas/layout change.
+fn an_equal_z_overlay_reorder_is_classified_class_1_not_canvas_or_layout() {
+    // A pure z/draw-order reorder is Class-1 (hot/seamless): the order delta is
+    // carried by `overlays_reordered`, the per-id list stays empty, and it must
+    // NOT masquerade as a Class-2 canvas reset or a layout change. The
+    // order-sensitive `overlays` changed-section entry DOES fire (it is the
+    // watcher's trigger to reseed the overlay store to the new declaration order)
+    // — but that is the only section it touches, never `canvas`/`layout`/`cells`.
     let ov1 = "[[overlays]]\nid = \"ov1\"\nkind = \"clock\"\ntarget = \"canvas\"\nz = 0\n";
     let ov2 =
         "[[overlays]]\nid = \"ov2\"\nkind = \"label\"\ntarget = \"canvas\"\ntext = \"x\"\nz = 0\n";
@@ -349,17 +352,23 @@ fn an_equal_z_overlay_reorder_is_not_reported_restart_only() {
         "precondition: the reorder is detected"
     );
     assert!(
-        !diff.changed_sections.contains("overlays"),
-        "a pure reorder is Class-1 hot, never a restart-only changed section; \
-         got {:?}",
-        diff.changed_sections
+        diff.overlays.is_empty(),
+        "a pure reorder carries no per-id content delta; got {:?}",
+        diff.overlays
     );
+    // Class-1: no Class-2 canvas reset, no layout/cells change.
     assert!(
-        diff.changed_sections.is_empty(),
-        "a pure reorder touches no restart-only section; got {:?}",
+        !diff.canvas_signal_changed && !diff.canvas_cosmetic_changed && !diff.layout_changed,
+        "a pure overlay reorder is not a canvas/layout change"
+    );
+    // The ONLY section it touches is `overlays` (the store-reseed trigger).
+    assert_eq!(
+        diff.changed_sections.iter().copied().collect::<Vec<_>>(),
+        vec!["overlays"],
+        "a pure overlay reorder touches only the overlays section (store reseed), \
+         nothing restart-class; got {:?}",
         diff.changed_sections
     );
-    assert!(!diff.canvas_signal_changed && !diff.canvas_cosmetic_changed && !diff.layout_changed);
 }
 
 #[test]

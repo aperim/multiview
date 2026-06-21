@@ -498,3 +498,37 @@ add and the remove directions (fill bus → file edit → assert not-yet-adopted
 drain → assert re-delivered on retry). META: a live-sheddable file-watch section MUST derive its
 retry delta from the file baseline (the `ConfigDiff`), never from a control store the same apply
 mutates — a store-derived delta self-erases on retry.
+
+### Task #130 — a pure equal-z reorder is a detected delta (the re-panel residual)
+
+The round-8 correctness re-panel left one **non-blocking** residual: a pure **reorder** of
+overlays/sources that keeps every document identical and every `z` equal was **invisible** to the
+id-keyed diff. `diff_overlays`/`diff_sources` key on `id`, so a permutation of the same id-set
+produces an EMPTY `Added`/`Changed`/`Removed` list — yet **declaration order is the equal-`z`
+draw-order tie-break** (the overlay stack's `OverlayStack::draw_order` sorts with a **stable**
+`sort_by_key(|l| l.z)`, so equal-z layers blend in insertion order — see
+`crates/multiview-overlay/src/layer.rs` and its `stack_z_sort_is_stable_for_equal_z` test; source
+declaration order is the software build's `enumerate()`-indexed test-pattern palette index). A
+config-file-watch reorder of equal-z overlays was therefore a **silent lost update**.
+
+`ConfigDiff` gains two boolean signals, `sources_reordered` / `overlays_reordered` (accounted for
+in `is_empty()`), computed by a pure `common_ids_reordered` helper that compares the
+**present-in-both** id subsequence of each document in its own declaration order: adds/removes are
+excluded (so an add or a remove *alone* is never a reorder), a genuine permutation of the survivors
+always differs, and it is **orthogonal to `Changed`** (a reorder that also edits a survivor's
+document reports both). A pure z/draw-order reorder is **Class-1** (hot/seamless, inv #11), distinct
+from a Class-2 canvas reset — the new flags are the honest classification signal. The order-sensitive
+`overlays` `changed_sections` entry (`running_overlays != next_overlays`, by `Vec` position) is
+deliberately **kept**, so the existing `apply_overlay_changes` still reseeds the overlay store to the
+new declaration order on a reorder (the UI mirror and `active.toml` follow the file); on an
+overlay-capable run the empty per-id delta lands trivially, so nothing is reported restart-pending.
+
+**Honest scope (rule 27).** This task makes the reorder a *detected, correctly-classified* delta and
+reseeds the control store / `active.toml` to the new order. It does **not** yet make the running
+**engine** re-blend an equal-z overlay reorder live: `Command::UpsertOverlay` updates the engine's
+working-config mirror **in place by id** (`crates/multiview-cli/src/control.rs`), so re-submitting
+upserts for unchanged-content overlays does not move their positions — the equal-z tie-break is the
+mirror's insertion order, unchanged by an in-place upsert. A live engine re-order needs the working
+set re-sequenced to the new declaration order (a small engine change, tracked as the follow-up); a
+restart already adopts the new order from the reseeded store. The diff-level detection is the
+prerequisite that unblocks it and stops the change from vanishing silently.
