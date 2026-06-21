@@ -2350,7 +2350,12 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         nonce_store: SharedNonceStore,
         device_signer: Option<Arc<dyn DeviceSigner>>,
     ) -> Self {
-        let learned_binding_id = std::sync::Mutex::new(identity.binding_id.clone());
+        // NOT seeded from `identity.binding_id` (ADR-I009): `learned_binding_id` holds
+        // ONLY genuinely server-learned ids, so `resolve_binding_id` applies the honest
+        // precedence (genuinely-learned → store → configured) and a stale configured id
+        // never short-circuits a fresher learned/installed binding. The configured value
+        // is the FINAL fallback in `resolve_binding_id` (and the renew/no-binding path).
+        let learned_binding_id = std::sync::Mutex::new(None);
         Self {
             server,
             store,
@@ -2616,11 +2621,32 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         self.config.api_base.as_str()
     }
 
-    /// The binding id to address renewals by: the learned/configured
-    /// `instanceBindingId`, or `None` until activation discovers it. NEVER the
-    /// lease serial.
+    /// The **genuinely server-learned** binding id (set by
+    /// [`remember_binding_id`](Self::remember_binding_id) on a real install/activate),
+    /// or `None` before any learn. This is NOT seeded from the configured
+    /// `identity.binding_id` — so the resolution chains can apply the honest precedence
+    /// *genuinely-learned → store → configured* (ADR-I009). NEVER the lease serial.
     fn binding_id(&self) -> Option<String> {
         self.learned_binding_id.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Resolve the binding id for a continuity operation — the **honest precedence**
+    /// (ADR-I009): a genuinely **server-learned** binding
+    /// ([`binding_id`](Self::binding_id)) first, then the **store's installed-lease**
+    /// binding ([`current_binding_id`](crate::store::LeaseStore::current_binding_id)),
+    /// then the **configured** `identity.binding_id`, then `None`. Shared by the renew
+    /// resolution and the rebind/deactivate lifecycle ops so all three agree.
+    ///
+    /// The key correctness point (the iso-lens finding): a **stale configured** id must
+    /// NOT short-circuit a fresher server-learned or installed-store binding. Because
+    /// `learned_binding_id` is no longer seeded from config, learned holds only real
+    /// server ids; and the store (the installed lease) outranks a configured guess. A
+    /// configured-only device (no learn, no installed lease) still resolves via the
+    /// final `identity.binding_id` arm, so the renew/no-binding contract is unchanged.
+    fn resolve_binding_id(&self) -> Option<String> {
+        self.binding_id()
+            .or_else(|| self.store.current_binding_id())
+            .or_else(|| self.identity.binding_id.clone())
     }
 
     /// Record the server-issued `instanceBindingId` from a verified lease body so
@@ -2714,9 +2740,12 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         //    current lease binding. A device that already holds a lease is NEVER
         //    "fresh": a foreign-binding lease is rejected because it has an identity
         //    to violate.
-        let established_binding = self
-            .binding_id()
-            .or_else(|| self.store.current_binding_id());
+        // Resolve the binding to RENEW with the honest precedence (ADR-I009):
+        // genuinely-learned → store's installed lease → configured `identity.binding_id`.
+        // (The configured arm replaces the old `learned_binding_id` config pre-seed, so a
+        // configured-only device still renews; a stale configured no longer outranks a
+        // fresher learned/installed binding — which previously caused a BindingMismatch.)
+        let established_binding = self.resolve_binding_id();
 
         // No established binding: either ENROL (first-contact activate, ADR-I008) or
         // — renew-only — no-op. With `enable_activate` the device registers online:
@@ -3091,20 +3120,16 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// [`HeartbeatError`] on transport / trust / PoP failure — every one keeps
     /// last-good; nothing is installed or removed.
     pub async fn rebind_once(&self, licence_id: &str) -> Result<HeartbeatOutcome, HeartbeatError> {
-        // The binding to rebind: the SAME resolution chain as deactivate + renew — the
-        // configured/learned binding, the store's current binding, or the configured
-        // identity binding. A device whose binding was LEARNED from the server (in the
-        // store, not the static identity config) must rebind under THAT id, never the
-        // `instance_id` fallback. Fail closed if none is known (nothing to rebind).
-        let binding_id = self
-            .binding_id()
-            .or_else(|| self.store.current_binding_id())
-            .or_else(|| self.identity.binding_id.clone())
-            .ok_or_else(|| {
-                HeartbeatError::Pop(PopError::Cose(
-                    "no established binding to rebind".to_owned(),
-                ))
-            })?;
+        // The binding to rebind: the SAME `resolve_binding_id` chain as renew + deactivate
+        // — genuinely-learned → store's installed lease → configured (ADR-I009). A device
+        // whose binding was LEARNED from the server (or is in the store) rebinds under THAT
+        // id; a stale configured id never short-circuits it, and `instance_id` is never a
+        // bindingId fallback. Fail closed if none is known (nothing to rebind).
+        let binding_id = self.resolve_binding_id().ok_or_else(|| {
+            HeartbeatError::Pop(PopError::Cose(
+                "no established binding to rebind".to_owned(),
+            ))
+        })?;
 
         // 1. Pre-network key-trust fast-fail.
         let keys = self.server.fetch_keys().await?;
@@ -3186,17 +3211,15 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// [`HeartbeatError`] on transport / trust / PoP failure — every one keeps
     /// last-good; nothing is installed or removed.
     pub async fn deactivate_once(&self) -> Result<HeartbeatOutcome, HeartbeatError> {
-        // The binding to decommission: the configured/learned binding, or the store's
-        // current binding. Fail closed if none is known (nothing to deactivate).
-        let binding_id = self
-            .binding_id()
-            .or_else(|| self.store.current_binding_id())
-            .or_else(|| self.identity.binding_id.clone())
-            .ok_or_else(|| {
-                HeartbeatError::Pop(PopError::Cose(
-                    "no established binding to deactivate".to_owned(),
-                ))
-            })?;
+        // The binding to decommission: the SAME `resolve_binding_id` chain as renew +
+        // rebind — genuinely-learned → store's installed lease → configured (ADR-I009);
+        // a stale configured id never short-circuits a fresher learned/installed binding.
+        // Fail closed if none is known (nothing to deactivate).
+        let binding_id = self.resolve_binding_id().ok_or_else(|| {
+            HeartbeatError::Pop(PopError::Cose(
+                "no established binding to deactivate".to_owned(),
+            ))
+        })?;
 
         // 1. Pre-network key-trust fast-fail.
         let keys = self.server.fetch_keys().await?;

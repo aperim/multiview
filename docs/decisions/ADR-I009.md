@@ -126,8 +126,13 @@ status-aware retry, and (for rebind) `verify_signed_lease_chain` + `install` are
   deactivate yields `lifecycle_state == "released"`.
 
 Two pure builders mirror `build_activate_request`:
-`build_rebind_request(identity, challenge) -> RebindRequest` (echoes the device's own
-`instance_id`/`binding_id`/`licence_id`/fingerprint material + the challenge `nonce`) and
+`build_rebind_request_for(identity, licence_id, binding_id, challenge) -> RebindRequest` takes the
+**caller-resolved `binding_id`** explicitly (so the live client passes the binding from the
+learned → store → configured chain, never an `instance_id` fallback) and echoes the device's own
+`instance_id`/`licence_id`/fingerprint material + the challenge `nonce`;
+`build_rebind_request(identity, licence_id, challenge)` is a thin convenience that resolves the
+binding from the identity alone (`identity.binding_id`, else `identity.instance_id`) and delegates to
+`build_rebind_request_for` — used by the pure wire tests. And
 `build_deactivate_request(binding_id, nonce) -> DeactivateRequest`. Two thin PoP wrappers mirror
 `pop_activate_header_value`: `pop_rebind_header_value` / `pop_deactivate_header_value` (both
 `htm = "POST"`, `htu = …/organisations/{org}/rebind|deactivate`, `instance_id` = the device's own).
@@ -161,10 +166,14 @@ a verbatim replay never triggers — so the merged paths keep their proven behav
 `HeartbeatClient::rebind_once()` mirrors `activate_once`'s four stages — pre-network key-trust
 fast-fail; build-or-replay the pinned `{idempotency-key, body, nonce, proof}` retry unit (fetch a
 fresh `/challenge` for the single-use nonce, build the `RebindRequest` — its `bindingId` **resolved
-via the same chain as renew + deactivate** (learned binding → `store.current_binding_id()` →
-configured `identity.binding_id`; fail-closed if none, so a STORE-LEARNED binding is rebound under
-the correct id, never the `instance_id` fallback) and its PoP pre-image bound to the device's **own**
-`instance_id` (continuity), serialise once, sign the PoP, mint the durable key last, pin); POST with the
+via the shared `resolve_binding_id()` chain that renew + deactivate also use**: a genuinely
+**server-learned** binding → `store.current_binding_id()` (the installed lease) → configured
+`identity.binding_id`; fail-closed if none, so a store-learned binding is rebound under the correct
+id, never the `instance_id` fallback. **`learned_binding_id` is NOT seeded from the configured
+`identity.binding_id`** (it holds only real server-learned ids), so the precedence is honest — a
+**stale configured** id can never short-circuit a fresher learned/installed binding (the iso-lens
+finding; the configured value is the FINAL fallback). Its PoP pre-image is bound to the device's
+**own** `instance_id` (continuity); serialise once, sign the PoP, mint the durable key last, pin); POST with the
 status-aware retry (`ServerRejected`/`Malformed` → `reset_on_rejection`; `Transport` → leave pinned);
 on a `2xx` clear/rotate the attempt and **seed the steady-state nonce from `nextNonce`** so the next
 heartbeat renews with no extra `/challenge`. It returns a new
