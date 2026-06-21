@@ -1040,6 +1040,58 @@
         }
       }
     },
+    "/api/v1/config/boot-model": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "`GET /api/v1/config/boot-model` — the Boot/Loaded/Running model status\n(ADR-W024 §7; role: read).",
+        "description": "Reports whether this run carries a boot model, the boot path and start\npolicy, whether the run resumed (+ the fallback reason), the per-section\ndivergence of Running from the Loaded snapshot and from the current boot\nfile, and the last `active.toml` write time.",
+        "operationId": "boot_model_status",
+        "responses": {
+          "200": {
+            "description": "The Boot/Loaded/Running model status with per-section divergence.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BootModelBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated but not authorized to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The live stores do not compose into a valid Running document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/config/export": {
       "get": {
         "tags": [
@@ -1081,6 +1133,130 @@
           },
           "422": {
             "description": "The stores do not compose into a valid configuration (detail names the violation).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/promote": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "summary": "`POST /api/v1/config/promote` — write the current Running document to the\nBOOT file path, server-side (ADR-W024 §6; role: write; `Idempotency-Key`;\naudited; UI-confirmed).",
+        "description": "Compose → validate → render TOML → announce the write through the\ninstalled ADR-W020 watcher's `expect_write` suppression seam (this is\nthe seam's designed caller — the watcher adopts the write as its new\nbaseline without re-applying) → atomic write to the boot path → a\nconfig-versioning commit (target `boot`) → audit. With no watcher\ninstalled there is nothing to suppress and the step is skipped.",
+        "operationId": "promote_to_boot",
+        "responses": {
+          "200": {
+            "description": "The Running document was written to the boot file and committed as a `boot` config revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromoteBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "This run has no boot model (no config file); there is no boot file to promote to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The live stores do not compose into a valid Running document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/revert-to-start": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "summary": "`POST /api/v1/config/revert-to-start` — Running := Loaded, live\n(ADR-W024 §5; role: write; `Idempotency-Key`; audited).",
+        "description": "Composes the current Running document, diffs it against the immutable\nLoaded snapshot, and applies the diff through the ONE ADR-W020\ndiff→apply machinery ([`crate::config_watch::apply_document_diff`]) under\nthe requesting principal: synthetic source changes ride\n`UpsertSource`/`RemoveSource` on the bounded bus, layout/cells ride the\nshared resolve+solve+Class-1 gate, stores resync to the Loaded values, and\nrestart-only sections are reported honestly. The ADR-W020 watcher's file\nbaseline is deliberately untouched (it tracks the last applied FILE\ncontent). An empty diff applies nothing and reports `reverted: false`.\n\nThis is a distinct operator capability from the config-versioning\n`POST /config/{target}/rollback` (which restores a prior committed\nrevision of one tracked document): revert-to-start returns the whole\nRunning state to the deliberate cold-start baseline, live (ADR-W024 §1).",
+        "operationId": "revert_to_start",
+        "responses": {
+          "202": {
+            "description": "The revert was applied (or was an honest no-op) with a per-section summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevertToStartBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "This run has no boot model (no config file); there is no start state to revert to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The live stores do not compose into a valid Running document.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8908,6 +9084,85 @@
           }
         }
       },
+      "BootModelBody": {
+        "type": "object",
+        "description": "The `GET /api/v1/config/boot-model` body (ADR-W024 §7): the run's\nBoot/Loaded/Running model and the per-section divergence the UI indicator\nshows.",
+        "required": [
+          "modeled",
+          "resumed",
+          "diverged_from_loaded"
+        ],
+        "properties": {
+          "active_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The persisted Running state path (`<config-dir>/.multiview/active.toml`)."
+          },
+          "active_written_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix milliseconds of the last successful `active.toml` write this run."
+          },
+          "boot_file_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the boot file could not be compared (unreadable / parse /\nvalidation failure), when it could not."
+          },
+          "boot_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The boot config file path (the watch + promote target)."
+          },
+          "diverged_from_boot_file": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The section names where Running diverges from the **current boot\nfile** on disk; `null` when the file is unreadable/invalid (see\n[`boot_file_error`](Self::boot_file_error))."
+          },
+          "diverged_from_loaded": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The section names where Running diverges from the **Loaded** startup\nsnapshot (exact, computed by the pure `ConfigDiff`). Empty ⇒ in sync."
+          },
+          "modeled": {
+            "type": "boolean",
+            "description": "Whether this run carries a boot model (started from a config file with\na control plane). `false` ⇒ every other field is its honest empty\ndefault and the revert/promote actions refuse with `409`."
+          },
+          "resume_fallback": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a `start = \"resume\"` run fell back to boot, if it did."
+          },
+          "resumed": {
+            "type": "boolean",
+            "description": "Whether this run started from a valid persisted `active.toml`."
+          },
+          "start": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `[control] start` cold-start policy (`boot` | `resume`)."
+          }
+        }
+      },
       "Bundle": {
         "type": "object",
         "description": "One composed support bundle: the echoed request, the redacted/diagnostic\nsections, and the list of every redaction the config pass made. **Carries no\nmedia** by construction — there is no field that could hold a frame/picture.",
@@ -12221,6 +12476,49 @@
           "pre-encode-canvas-approx"
         ]
       },
+      "PromoteBody": {
+        "type": "object",
+        "description": "The `POST /api/v1/config/promote` response (ADR-W024 §6).",
+        "required": [
+          "operation_id",
+          "replayed"
+        ],
+        "properties": {
+          "bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The number of bytes written.",
+            "minimum": 0
+          },
+          "operation_id": {
+            "type": "string",
+            "description": "The operation id this promote is correlated under."
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The boot file path the Running document was written to."
+          },
+          "replayed": {
+            "type": "boolean",
+            "description": "`true` when a replayed `Idempotency-Key` answered from the original\nreservation: the file was NOT rewritten and `path`/`bytes`/`revision`\nare absent (the original response carried them)."
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The committed `boot` config revision id.",
+            "minimum": 0
+          }
+        }
+      },
       "QuarterTurnDoc": {
         "type": "string",
         "description": "`OpenAPI` mirror of `multiview_core::layout::QuarterTurn` for the output\norientation turn (`none`/`cw90`/`cw180`/`cw270`).",
@@ -12479,6 +12777,52 @@
           "sender",
           "receiver"
         ]
+      },
+      "RevertToStartBody": {
+        "type": "object",
+        "description": "The `POST /api/v1/config/revert-to-start` response (ADR-W024 §5).",
+        "required": [
+          "operation_id",
+          "replayed",
+          "reverted",
+          "shed",
+          "summary",
+          "restart_only"
+        ],
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "description": "The operation id this revert is correlated under."
+          },
+          "replayed": {
+            "type": "boolean",
+            "description": "`true` when a replayed `Idempotency-Key` answered from the original\nreservation (nothing was re-applied; the other fields are this\nreplay's empty defaults, not a record of the original outcome)."
+          },
+          "restart_only": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The sections that could not hot-revert and re-converge on restart."
+          },
+          "reverted": {
+            "type": "boolean",
+            "description": "Whether the revert FULLY applied (`false` ⇒ either Running already\nequalled Loaded and nothing was enqueued, or — when\n[`shed`](Self::shed) is non-zero — the revert applied only partially)."
+          },
+          "shed": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many engine commands were shed on a full command bus (review M4):\n`0` ⇒ every command landed; non-zero ⇒ the stores were reverted but\nthe engine may not reflect every change — retry the revert once the\nbus drains (the `config-file-apply-incomplete` warning is raised).",
+            "minimum": 0
+          },
+          "summary": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Per-section applied/warned summary parts from the one apply machinery\n(e.g. `sources: in_a changed`)."
+          }
+        }
       },
       "RevisionId": {
         "type": "integer",

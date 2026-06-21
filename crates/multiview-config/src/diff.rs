@@ -75,6 +75,13 @@ pub enum OverlayChange {
 /// [`ConfigDiff::is_empty`]) means the documents are identical.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
+// The boolean fields are INDEPENDENT, simultaneously-true facts about one diff
+// (a single edit can be e.g. both `layout_changed` AND `canvas_cosmetic_changed`,
+// or both `overlays_reordered` AND carry per-id overlay changes), not the states
+// of a single state machine — so the `struct_excessive_bools` "use a state
+// machine / two-variant enum" refactor does not apply (it would misrepresent
+// orthogonal flags as mutually-exclusive states). Task #130 added two of them.
+#[allow(clippy::struct_excessive_bools)]
 pub struct ConfigDiff {
     /// Source changes by id: `Added`/`Changed` in `next` declaration order,
     /// then `Removed` in `running` declaration order (deterministic — and the
@@ -85,8 +92,36 @@ pub struct ConfigDiff {
     /// file-watch overlay apply derives its `UpsertOverlay`/`RemoveOverlay`
     /// commands from THIS (baseline-derived, stable across shed retries), never
     /// from the mutated control store. `overlays` is ALSO in `changed_sections`
-    /// when non-empty (so reporting/restart accounting stays uniform).
+    /// when the overlay `Vec` differs (so reporting/restart accounting stays
+    /// uniform AND the watcher reseeds the store on a pure reorder). A pure
+    /// reorder leaves THIS per-id list empty — the order delta surfaces via
+    /// [`overlays_reordered`](Self::overlays_reordered) (Class-1).
     pub overlays: Vec<OverlayChange>,
+    /// The surviving (present-in-both) source ids appear in a **different
+    /// relative order** between `running` and `next` — a pure permutation of the
+    /// common id-set (adds/removes are reported by [`sources`](Self::sources), not
+    /// here). A reorder is invisible to the id-keyed list, yet source declaration
+    /// order is observable: it sets the cold-start test-pattern palette index
+    /// (`enumerate()` over the boot file's sources). Unlike the overlay reorder,
+    /// this has **no live engine seam** (cells bind by `input_id`; the live source
+    /// stores are id-keyed, so order is not even representable in the
+    /// store/`active.toml`) — so it is a **Class-2 / restart-pending** delta: the
+    /// watcher reports `sources` restart-pending (it takes effect on the next
+    /// restart, which re-reads the boot file's order), never silently dropped and
+    /// never via a (non-existent) live `ReorderSources` command. Task #130.
+    pub sources_reordered: bool,
+    /// The surviving (present-in-both) overlay ids appear in a **different
+    /// relative order** between `running` and `next` — a pure permutation of the
+    /// common id-set. Declaration order is the equal-`z` draw-order tie-break (the
+    /// overlay stack's `sort_by_key(|l| l.z)` is **stable**, so equal-z overlays
+    /// blend in insertion order), so a reorder genuinely changes the composited
+    /// output — yet the per-id [`overlays`](Self::overlays) list stays empty for
+    /// it. A pure z/draw-order reorder is **Class-1** (hot/seamless, ADR-W024 /
+    /// inv #11), distinct from a Class-2 canvas reset: this flag is the honest
+    /// classification signal (the order-sensitive `overlays` `changed_sections`
+    /// entry still fires so the watcher reseeds the store to the new order).
+    /// Task #130.
+    pub overlays_reordered: bool,
     /// The **pinned signal** (width / height / cadence-by-value) changed — a
     /// Class-2 change (ADR-R004): never hot-appliable.
     pub canvas_signal_changed: bool,
@@ -195,6 +230,14 @@ impl ConfigDiff {
                 running_schema_version != next_schema_version,
             ),
             ("outputs", running_outputs != next_outputs),
+            // Order-sensitive (`Vec` compares by position): a pure overlay
+            // REORDER sets this so the file-watch overlay apply (`apply_overlay_
+            // changes`) still reseeds the store to the new declaration order — the
+            // equal-`z` draw-order tie-break (task #130). The CLASSIFICATION of a
+            // pure reorder is carried by `overlays_reordered` (Class-1) — with a
+            // live overlay capability the watcher leaves nothing restart-pending
+            // (the empty per-id delta lands trivially); a no-capability run is
+            // honestly restart-only (no live overlay seam at all).
             ("overlays", running_overlays != next_overlays),
             ("probes", running_probes != next_probes),
             ("audio", running_audio != next_audio),
@@ -228,6 +271,22 @@ impl ConfigDiff {
         let mut diff = Self {
             sources: diff_sources(running, next),
             overlays: diff_overlays(running, next),
+            // A pure permutation of the present-in-both id-set is invisible to the
+            // id-keyed lists above (task #130) — yet declaration order is the
+            // equal-`z` overlay draw-order tie-break and the software test
+            // pattern's source index. Compare the COMMON-id subsequence in each
+            // document's declaration order: adds/removes are excluded (so an
+            // add/remove alone is never a reorder), a genuine permutation of the
+            // survivors always differs. Orthogonal to `Changed`: a reorder that
+            // also edits a survivor's document reports both.
+            sources_reordered: common_ids_reordered(
+                running.sources.iter().map(|s| &s.id),
+                next.sources.iter().map(|s| &s.id),
+            ),
+            overlays_reordered: common_ids_reordered(
+                running.overlays.iter().map(|o| &o.id),
+                next.overlays.iter().map(|o| &o.id),
+            ),
             canvas_signal_changed,
             canvas_cosmetic_changed,
             layout_changed: running_layout != next_layout || running_cells != next_cells,
@@ -243,6 +302,8 @@ impl ConfigDiff {
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()
             && self.overlays.is_empty()
+            && !self.sources_reordered
+            && !self.overlays_reordered
             && !self.canvas_signal_changed
             && !self.canvas_cosmetic_changed
             && !self.layout_changed
@@ -308,11 +369,118 @@ fn diff_overlays(running: &MultiviewConfig, next: &MultiviewConfig) -> Vec<Overl
     changes
 }
 
+/// Whether the ids **present in both** lists appear in a different relative
+/// order between `running` and `next` — a pure permutation of the common id-set
+/// that the id-keyed diff is blind to (task #130).
+///
+/// The comparison restricts each side to its present-in-both subsequence (in
+/// declaration order), then compares those two sequences:
+/// * Adds/removes are excluded, so an add or a remove **alone** is never a
+///   reorder (the surviving sequence is unchanged) — they are already reported by
+///   the id-keyed [`SourceChange`]/[`OverlayChange`] lists.
+/// * A genuine swap of two common ids changes the surviving sequence, so it is
+///   reported even when every common document is otherwise identical.
+/// * It is **orthogonal to `Changed`**: editing a survivor's document does not
+///   move it in the id-sequence, and reordering survivors does not depend on
+///   their documents — so a combined edit-and-reorder reports both signals.
+///
+/// The two legs classify differently (by what order affects at runtime): for
+/// overlays it is the equal-`z` draw-order tie-break (stable sort), a **live
+/// Class-1** re-blend via `ReorderOverlays`; for sources it is the cold-start
+/// `enumerate()` test-pattern index with no live seam (cells bind by `input_id`),
+/// a **Class-2 restart-pending** delta. Either way the reorder is detected (the
+/// caller routes it to the right classification) — never a silent lost update.
+fn common_ids_reordered<'a>(
+    running: impl Iterator<Item = &'a String>,
+    next: impl Iterator<Item = &'a String>,
+) -> bool {
+    // Collect once so each side can be scanned against the other's membership.
+    let running: Vec<&String> = running.collect();
+    let next_ids: Vec<&String> = next.collect();
+    // The common-id subsequence in each document's own declaration order.
+    let running_common: Vec<&String> = running
+        .iter()
+        .copied()
+        .filter(|id| next_ids.contains(id))
+        .collect();
+    let next_common: Vec<&String> = next_ids
+        .iter()
+        .copied()
+        .filter(|id| running.contains(id))
+        .collect();
+    running_common != next_common
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::{backstop_unrecognized, ConfigDiff};
+    use super::{backstop_unrecognized, common_ids_reordered, ConfigDiff};
+
+    /// Drive [`common_ids_reordered`] directly over id sequences (task #130). The
+    /// helper compares the present-in-BOTH subsequence of each side in its own
+    /// order: a permutation of the common ids is a reorder; an add/remove alone is
+    /// not; ids unique to one side are ignored.
+    fn reordered(running: &[&str], next: &[&str]) -> bool {
+        let r: Vec<String> = running.iter().map(|s| (*s).to_owned()).collect();
+        let n: Vec<String> = next.iter().map(|s| (*s).to_owned()).collect();
+        common_ids_reordered(r.iter(), n.iter())
+    }
+
+    #[test]
+    fn common_ids_reordered_detects_a_pure_swap() {
+        assert!(reordered(&["a", "b"], &["b", "a"]), "a swap is a reorder");
+        assert!(
+            reordered(&["a", "b", "c"], &["c", "b", "a"]),
+            "a 3-way permutation is a reorder"
+        );
+    }
+
+    #[test]
+    fn common_ids_reordered_ignores_same_order() {
+        assert!(!reordered(&["a", "b", "c"], &["a", "b", "c"]), "identical");
+        assert!(!reordered(&[], &[]), "both empty");
+        assert!(!reordered(&["a"], &["a"]), "single element, same");
+    }
+
+    #[test]
+    fn common_ids_reordered_excludes_adds_and_removes() {
+        // Pure add (b appended) — the common subsequence [a] is unchanged.
+        assert!(
+            !reordered(&["a"], &["a", "b"]),
+            "an add alone is not a reorder"
+        );
+        // Pure remove (b dropped) — the common subsequence [a] is unchanged.
+        assert!(
+            !reordered(&["a", "b"], &["a"]),
+            "a remove alone is not a reorder"
+        );
+        // An add that lands BETWEEN two common ids that keep their relative order
+        // is still not a reorder: common subsequence [a, c] vs [a, c].
+        assert!(
+            !reordered(&["a", "c"], &["a", "b", "c"]),
+            "an insertion that preserves the common order is not a reorder"
+        );
+    }
+
+    #[test]
+    fn common_ids_reordered_detects_a_swap_amid_adds_and_removes() {
+        // a,b survive but swap; x removed; y added — the common subsequence is
+        // [a, b] vs [b, a], a genuine reorder despite the add/remove churn.
+        assert!(
+            reordered(&["x", "a", "b"], &["b", "a", "y"]),
+            "a survivor swap under add/remove churn is a reorder"
+        );
+    }
+
+    #[test]
+    fn common_ids_reordered_ignores_fully_disjoint_sets() {
+        // No common ids ⇒ no common subsequence to permute ⇒ never a reorder.
+        assert!(
+            !reordered(&["a", "b"], &["c", "d"]),
+            "fully disjoint id-sets share no order to change"
+        );
+    }
 
     /// REVIEW m1 backstop: if the per-section comparison ever reports an
     /// EMPTY diff for two documents that are NOT equal (a future field missed

@@ -498,3 +498,57 @@ add and the remove directions (fill bus → file edit → assert not-yet-adopted
 drain → assert re-delivered on retry). META: a live-sheddable file-watch section MUST derive its
 retry delta from the file baseline (the `ConfigDiff`), never from a control store the same apply
 mutates — a store-derived delta self-erases on retry.
+
+### Task #130 — a pure equal-z reorder is a detected delta (the re-panel residual)
+
+The round-8 correctness re-panel left one **non-blocking** residual: a pure **reorder** of
+overlays/sources that keeps every document identical and every `z` equal was **invisible** to the
+id-keyed diff. `diff_overlays`/`diff_sources` key on `id`, so a permutation of the same id-set
+produces an EMPTY `Added`/`Changed`/`Removed` list — yet **declaration order is the equal-`z`
+draw-order tie-break** (the overlay stack's `OverlayStack::draw_order` sorts with a **stable**
+`sort_by_key(|l| l.z)`, so equal-z layers blend in insertion order — see
+`crates/multiview-overlay/src/layer.rs` and its `stack_z_sort_is_stable_for_equal_z` test; source
+declaration order is the software build's `enumerate()`-indexed test-pattern palette index). A
+config-file-watch reorder of equal-z overlays was therefore a **silent lost update**.
+
+`ConfigDiff` gains two boolean signals, `sources_reordered` / `overlays_reordered` (accounted for
+in `is_empty()`), computed by a pure `common_ids_reordered` helper that compares the
+**present-in-both** id subsequence of each document in its own declaration order: adds/removes are
+excluded (so an add or a remove *alone* is never a reorder), a genuine permutation of the survivors
+always differs, and it is **orthogonal to `Changed`** (a reorder that also edits a survivor's
+document reports both). The two legs are classified **differently**, by what each actually affects at
+runtime — detection, application, and classification are kept consistent (no dead detection, no false
+Class-1):
+
+* **Overlay reorder = Class-1 (live, hot/seamless).** Declaration order is the equal-`z` draw-order
+  tie-break, which the engine renders live (below). The order-sensitive `overlays` `changed_sections`
+  entry (`running_overlays != next_overlays`, by `Vec` position) is deliberately **kept**, so the
+  existing `apply_overlay_changes` still reseeds the overlay store + submits the live re-blend.
+* **Source reorder = Class-2 (restart-pending).** Source declaration order has **no live engine
+  seam**: it sets only the cold-start test-pattern palette index (`run.rs` `enumerate()` over the boot
+  file's sources), while cells bind by `input_id` and the live source stores are id-keyed (`list()`
+  is id-sorted), so the order is not even representable in the store/`active.toml`. The watcher's
+  `apply_document_diff` reports `sources` **restart-pending** on `diff.sources_reordered` and submits
+  **no** command — there is deliberately **no** live `ReorderSources` (it would be theater); it takes
+  effect on the next restart, which re-reads the boot file's order. Both reorder flags are surfaced in
+  the boot-model `diverged_sections` (so a pure reorder is a named divergence, never a silent no-op).
+
+**The live engine re-blend (the Class-1 promise made true).** Detecting the reorder is necessary but
+not sufficient: `Command::UpsertOverlay` updates the engine's working-config mirror **in place by
+id** (`crates/multiview-cli/src/control.rs`), so re-submitting upserts for unchanged-content overlays
+cannot move their positions — the equal-`z` tie-break is the mirror's insertion order, and the bake
+consumer's stable `sort_by_key(|l| l.z)` preserves it. A dedicated **`Command::ReorderOverlays {
+order: Vec<String> }`** carries the full desired id sequence; the engine drain's `reorder_overlays`
+re-sequences its working mirror to that order (a pure permutation — nothing added, removed, or
+edited) and republishes the lock-free `OverlaySet` with a bumped generation, so the bake consumer
+re-derives the new draw order at the next frame — a clean frame-boundary (Class-1) transition, no
+restart. An order already matching is a no-op (no generation bump), so a shed retry re-submitting the
+same order cannot thrash the consumer. Both triggers drive it: the file-watch `apply_overlay_changes`
+submits `ReorderOverlays` when `diff.overlays_reordered` (the `order` is the file's id sequence,
+baseline-derived and stable across shed retries, submitted after any add/remove so the set is
+complete before it is re-sequenced); the command path carries it as a first-class `Command` for any
+submitter (e.g. a future bulk-reorder REST endpoint). On an overlay-capable run a landed reorder
+leaves nothing restart-pending (genuinely Class-1); a no-capability run is honestly restart-only (no
+live overlay seam at all), and a restart adopts the new order from the reseeded store. The reorder
+changes neither which overlays exist nor their content, so it needs no adopted-snapshot change (the
+ADR-W024 snapshot tracks content, adopted per-id by the upsert/remove path).

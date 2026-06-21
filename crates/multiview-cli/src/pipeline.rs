@@ -6044,8 +6044,13 @@ fn u32_from_usize_audio(value: usize) -> u32 {
 /// offset (default UTC). Returns an empty set when no analog clock is
 /// requested (the digital label still renders). Without the `overlay` feature
 /// this is never called.
+// `pub` so a render-level integration test can drive the EXACT derivation the
+// bake consumer's `refresh_overlays` uses (slot overlay set → ordered analog
+// face specs → `OverlayBaker::draw_list`), proving an equal-z overlay reorder
+// changes the RENDERED draw order, not just the published slot (task #130).
 #[cfg(feature = "overlay")]
-fn analog_clocks_from_config(
+#[must_use]
+pub fn analog_clocks_from_config(
     overlays: &[multiview_config::Overlay],
     canvas_w: u32,
     canvas_h: u32,

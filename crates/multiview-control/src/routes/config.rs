@@ -545,8 +545,16 @@ impl BootModelBody {
 /// unreliable change count — ADR-W024 §7).
 fn diverged_sections(diff: &multiview_config::ConfigDiff) -> Vec<String> {
     let mut sections = std::collections::BTreeSet::new();
-    if !diff.sources.is_empty() {
+    // A per-id content delta OR a pure reorder both diverge `sources` — a reorder
+    // is a real (restart-class) delta, not a silent no-op (task #130).
+    if !diff.sources.is_empty() || diff.sources_reordered {
         sections.insert("sources");
+    }
+    // Likewise overlays: a per-id delta lands in `changed_sections` below, but a
+    // pure overlay reorder must also surface (it re-blends live via
+    // `ReorderOverlays`, yet stays diverged from Loaded until reverted/promoted).
+    if diff.overlays_reordered {
+        sections.insert("overlays");
     }
     if diff.canvas_signal_changed || diff.canvas_cosmetic_changed {
         sections.insert("canvas");
@@ -1006,4 +1014,39 @@ pub(crate) async fn promote_to_boot(
         bytes: Some(u64::try_from(toml.len()).unwrap_or(u64::MAX)),
         revision: Some(revision.revision.get()),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::diverged_sections;
+
+    /// Task #130: a pure REORDER (no per-id content delta) must STILL be named in
+    /// the boot-model divergence report — `sources_reordered`/`overlays_reordered`
+    /// are real deltas, not silent no-ops. Before the fix `diverged_sections`
+    /// keyed only off `diff.sources` non-empty and `changed_sections`, so a pure
+    /// reorder reported no divergence (the rule-6 dead-detection the re-review
+    /// flagged).
+    #[test]
+    fn a_pure_source_reorder_is_named_in_divergence() {
+        let mut diff = multiview_config::ConfigDiff::default();
+        diff.sources_reordered = true;
+        let sections = diverged_sections(&diff);
+        assert!(
+            sections.iter().any(|s| s == "sources"),
+            "a source reorder must surface `sources` as diverged; got {sections:?}"
+        );
+    }
+
+    #[test]
+    fn a_pure_overlay_reorder_is_named_in_divergence() {
+        let mut diff = multiview_config::ConfigDiff::default();
+        diff.overlays_reordered = true;
+        let sections = diverged_sections(&diff);
+        assert!(
+            sections.iter().any(|s| s == "overlays"),
+            "an overlay reorder must surface `overlays` as diverged; got {sections:?}"
+        );
+    }
 }
