@@ -3069,3 +3069,63 @@ async fn a_file_watch_overlay_reorder_rides_reorder_overlays_command() {
     );
     assert_eq!(outcome.shed, 0, "nothing shed on a capacity-64 bus");
 }
+
+/// Task #130 (source-leg honesty): a pure SOURCE reorder has NO live engine
+/// seam — source declaration order affects only the cold-start test-pattern
+/// palette index (`run.rs`), never a live render path (cells bind by `input_id`;
+/// the live source stores are id-keyed and `list()` is id-sorted, so order is
+/// not even representable in the store/`active.toml`). So it must be reported as
+/// a real, RESTART-pending (Class-2) delta — NOT silently dropped, and NOT a
+/// live `Command::ReorderSources` (there is no such command — that would be
+/// theater). Before the fix `apply_document_diff` ignored a pure source reorder
+/// entirely (block 1 only fires on `!diff.sources.is_empty()`) — an unapplied,
+/// unreported no-op.
+#[tokio::test]
+async fn a_file_watch_source_reorder_is_reported_restart_pending() {
+    let mut r = rig(BOOT_DOC_TWO_OVERLAYS);
+    let _ = r.commands.try_drain();
+
+    // Swap the two sources' declaration order; identical documents otherwise.
+    let running = MultiviewConfig::load_from_toml(BOOT_DOC_TWO_OVERLAYS).expect("parse running");
+    let reordered_doc = BOOT_DOC_TWO_OVERLAYS.replace(
+        "[[sources]]\nid = \"in_a\"\nkind = \"solid\"\ncolor = \"#103050\"\n[[sources]]\nid = \"in_b\"\nkind = \"bars\"\n",
+        "[[sources]]\nid = \"in_b\"\nkind = \"bars\"\n[[sources]]\nid = \"in_a\"\nkind = \"solid\"\ncolor = \"#103050\"\n",
+    );
+    let next = MultiviewConfig::load_from_toml(&reordered_doc).expect("parse reordered");
+    assert_eq!(
+        next.sources
+            .iter()
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>(),
+        vec!["in_b".to_owned(), "in_a".to_owned()],
+        "the perturbed doc actually swapped the source order"
+    );
+
+    let diff = ConfigDiff::between(&running, &next);
+    assert!(
+        diff.sources_reordered,
+        "precondition: the diff sees the source reorder"
+    );
+    assert!(
+        diff.sources.is_empty(),
+        "precondition: a pure source reorder has no per-id source delta"
+    );
+
+    let outcome = apply_document_diff(&r.state, "config-file", &diff, &next);
+
+    // Reported as a real, restart-pending delta — never silently dropped.
+    assert!(
+        outcome.restart.contains("sources"),
+        "a pure source reorder is restart-pending (Class-2; no live seam); \
+         restart = {:?}",
+        outcome.restart
+    );
+    // NO engine command: there is no live source-order seam (a ReorderSources
+    // command would be theater — the engine consumes source order only at
+    // cold-start for the test-pattern palette).
+    let drained = r.commands.try_drain();
+    assert!(
+        drained.is_empty(),
+        "a source reorder submits NO engine command, got {drained:?}"
+    );
+}

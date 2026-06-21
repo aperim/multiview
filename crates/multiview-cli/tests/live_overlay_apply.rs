@@ -340,6 +340,134 @@ async fn an_already_ordered_reorder_is_a_noop() {
     );
 }
 
+/// Task #130 (GENUINE render-level proof): a pure equal-`z` overlay reorder
+/// changes the **rendered** draw order — not merely the published slot.
+///
+/// This drives the EXACT bake-consumer derivation `StreamBaker::refresh_overlays`
+/// uses (`crate::pipeline::analog_clocks_from_config(set.overlays(), w, h)` →
+/// `OverlayBaker::set_analog_clocks` → `OverlayBaker::draw_list`) and asserts the
+/// order of the rendered clock-face **`Ring` primitives** (back-to-front draw
+/// order) flips with the reorder. Two analog clocks at distinct centres make each
+/// face identifiable by its `Ring` centre. Pre-fix (`UpsertOverlay` edits the
+/// mirror in place by id) the published set order — and therefore the rendered
+/// order — does NOT change; post-fix `ReorderOverlays` re-sequences it. Requires
+/// `ffmpeg` (the bake module home) + `overlay` (the renderer) — the real
+/// deployment posture; run with `--features ffmpeg,overlay`.
+#[cfg(all(feature = "ffmpeg", feature = "overlay"))]
+#[tokio::test]
+async fn reorder_overlays_changes_the_rendered_draw_order() {
+    use multiview_cli::overlays::OverlayBaker;
+    use multiview_cli::pipeline::analog_clocks_from_config;
+    use multiview_compositor::overlay::OverlayPrimitive;
+    use multiview_core::time::MediaTime;
+    use multiview_overlay::geometry::PixelRect;
+
+    // The canvas of `two_cell_config()` (64×64) as f32 literals — avoids a
+    // u32→f32 `as` cast in this integration test (where `as_conversions` is not
+    // relaxed). The faces are placed at whole-pixel centres, so `Ring.cx/cy` are
+    // exact integer-valued f32 (the config placement rounds to i32 then widens).
+    const CANVAS_W: u32 = 64;
+    const CANVAS_H: u32 = 64;
+    const CANVAS_WF: f32 = 64.0;
+    const CANVAS_HF: f32 = 64.0;
+
+    // The rendered draw order of the analog faces, identified by `Ring` centre,
+    // derived through the REAL bake path from the live slot's published set.
+    fn rendered_ring_centres(
+        slot: &multiview_cli::live_overlays::OverlayApplySlot,
+    ) -> Vec<(f32, f32)> {
+        let set = slot.load();
+        // EXACTLY what `refresh_overlays` does: derive the ordered face specs
+        // from the published set, in slot order.
+        let specs = analog_clocks_from_config(set.overlays(), CANVAS_W, CANVAS_H);
+        let tile = multiview_cli::overlays::TileSpec::new(
+            "t",
+            "T",
+            PixelRect {
+                x: 0.0,
+                y: 0.0,
+                width: CANVAS_WF,
+                height: CANVAS_HF,
+            },
+        );
+        let mut baker = OverlayBaker::new(
+            vec![tile],
+            multiview_cli::wallclock::WallClockSource::system(),
+        )
+        .expect("build baker");
+        baker.set_analog_clocks(specs);
+        let list = baker
+            .draw_list(
+                MediaTime::ZERO,
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+            )
+            .expect("draw list");
+        // The clock-face bezel `Ring`s, in back-to-front draw order, by centre.
+        list.primitives
+            .iter()
+            .filter_map(|p| match p {
+                OverlayPrimitive::Ring { cx, cy, .. } => Some((*cx, *cy)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let config = two_cell_config();
+    let publisher = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(16));
+    let (sender, command_rx) = command_bus(16);
+    let slot = overlay_apply_slot(config.overlays.clone());
+    let mut drain = command_drain_with_live_overlays(
+        command_rx,
+        config.clone(),
+        Arc::clone(&publisher),
+        Arc::clone(&slot),
+    );
+    let mut drive = test_drive(&config);
+
+    // Two analog clocks at distinct centres, both equal z=0. (Radius 16 fits the
+    // 64×64 canvas so the placement is not clamped.)
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_a", 10, 10)),
+        })
+        .expect("submit clk_a");
+    sender
+        .try_submit(Command::UpsertOverlay {
+            op: OperationId::new(),
+            overlay: Box::new(analog_clock("clk_b", 50, 50)),
+        })
+        .expect("submit clk_b");
+    drain(&mut drive);
+
+    let before = rendered_ring_centres(&slot);
+    assert_eq!(
+        before,
+        vec![(10.0, 10.0), (50.0, 50.0)],
+        "the RENDERED face draw order before the reorder follows insertion order"
+    );
+
+    // The reorder must flip the RENDERED order, not just the slot Vec.
+    sender
+        .try_submit(Command::ReorderOverlays {
+            op: OperationId::new(),
+            order: vec!["clk_b".to_owned(), "clk_a".to_owned()],
+        })
+        .expect("submit reorder");
+    drain(&mut drive);
+
+    let after = rendered_ring_centres(&slot);
+    assert_eq!(
+        after,
+        vec![(50.0, 50.0), (10.0, 10.0)],
+        "the reorder changed the RENDERED clock-face draw order (clk_b now draws \
+         first/under, clk_a last/on-top) — proven through the real bake path, not \
+         just the published slot"
+    );
+}
+
 #[tokio::test]
 async fn remove_overlay_drops_the_entry_from_the_published_set() {
     let config = two_cell_config();
