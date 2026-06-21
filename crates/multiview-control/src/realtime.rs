@@ -500,6 +500,15 @@ pub struct SessionStream {
     /// `corr` (op id) the accepted command recorded (ADR-W008). When [`None`]
     /// (e.g. the existing transport-only tests) no `corr` is stamped.
     corr: Option<Arc<CorrRegistry>>,
+    /// The connecting principal's object-id allowlist (BOLA, ADR-W005/ADR-W025),
+    /// or [`None`] for an unscoped principal that sees every object. When set,
+    /// the stream is filtered to a read-side projection: a delta whose event
+    /// scopes to a Devices-domain object id outside the allowlist is dropped, and
+    /// the connect-time device snapshot skips out-of-scope ids — by parity with
+    /// `GET /{id}` returning `403` out of scope, so a scoped client cannot
+    /// enumerate objects it could not read. Pure per-client read filtering: it
+    /// never blocks and never touches the engine publish path (invariant #10).
+    object_scope: Option<Vec<String>>,
 }
 
 impl SessionStream {
@@ -520,6 +529,7 @@ impl SessionStream {
             snapshot_sent: false,
             resume_after,
             corr: None,
+            object_scope: None,
         }
     }
 
@@ -532,6 +542,21 @@ impl SessionStream {
     #[must_use]
     pub fn with_corr_registry(mut self, corr: Arc<CorrRegistry>) -> Self {
         self.corr = Some(corr);
+        self
+    }
+
+    /// Confine this session to the connecting principal's object-id allowlist
+    /// (BOLA visibility, ADR-W005/ADR-W025).
+    ///
+    /// `scope` is the principal's [`scoped_object_ids`](crate::auth::Principal):
+    /// `Some(allowlist)` filters the stream to a read-side projection (a
+    /// Devices-domain delta or connect snapshot for an object outside the
+    /// allowlist is dropped), `None` (an unscoped admin/operator/viewer) leaves
+    /// the stream unfiltered. A pure per-client read decision — never blocks, and
+    /// never touches the engine publish path (invariant #10).
+    #[must_use]
+    pub fn with_object_scope(mut self, scope: Option<Vec<String>>) -> Self {
+        self.object_scope = scope;
         self
     }
 

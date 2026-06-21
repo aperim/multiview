@@ -10,10 +10,11 @@
 
 use std::sync::Arc;
 
-use multiview_control::SessionStream;
+use multiview_control::{DeviceStatusRegistry, SessionStream};
 use multiview_engine::EnginePublisher;
 use multiview_events::{
-    Alert, AlertSeverity, Event, FrameKind, InputConnection, LifecycleState, Topic,
+    Alert, AlertSeverity, CastSessionStarted, DeviceState, DeviceStatus, Event, FrameKind,
+    InputConnection, LifecycleState, Topic,
 };
 
 type Publisher = EnginePublisher<serde_json::Value, Event>;
@@ -26,6 +27,29 @@ fn alert(key: &str) -> Event {
         detail: None,
         active: true,
     })
+}
+
+/// A `device.status` event scoped (by `event_scope_id`) to `device_id`.
+fn device_status(device_id: &str) -> Event {
+    Event::DeviceStatus(DeviceStatus::new(device_id, DeviceState::Online))
+}
+
+/// A `cast.session.started` event scoped (by `event_scope_id`) to `session_id`.
+fn cast_started(session_id: &str) -> Event {
+    Event::CastSessionStarted(CastSessionStarted {
+        session_id: session_id.to_owned(),
+        name: None,
+        address: "[2001:db8::20]:8009".to_owned(),
+        output: "out-a".to_owned(),
+    })
+}
+
+/// Pull the device id off a `DeviceStatus` delta (test helper).
+fn delta_device_id(frame: &multiview_control::RealtimeFrame) -> String {
+    match &frame.envelope.payload {
+        Event::DeviceStatus(s) => s.device_id.clone(),
+        other => panic!("expected a device.status delta, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -148,4 +172,110 @@ async fn slow_client_lags_without_back_pressuring_the_publisher() {
         Event::AlertRaised(a) => assert_eq!(a.key, "after-recovery"),
         other => panic!("expected the post-recovery alert, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Object-scope realtime filtering (BOLA, ADR-W005 / ADR-W025): a scoped
+// principal's realtime stream is a read-side projection that delivers only the
+// Devices-domain object events (device.* / cast.session.*) whose scope id is in
+// its allowlist — by parity with `GET /{id}` returning 403 out of scope. The
+// filter is a pure per-client read decision: it NEVER blocks or touches the
+// engine publish path (invariant #10).
+// ---------------------------------------------------------------------------
+
+/// A scoped session drops device/cast deltas whose scope id is outside its
+/// object allowlist, and delivers the in-scope ones — so a scoped client cannot
+/// enumerate (or read the status of) devices/sessions it could not `GET`.
+#[tokio::test]
+async fn scoped_session_filters_device_and_cast_deltas_to_the_allowlist() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let sub = engine.subscribe();
+    // Scoped to a single object id: only `dev-mine` / `cast-mine` are visible.
+    let mut session = SessionStream::new(sub, "sess-scoped", None)
+        .with_object_scope(Some(vec!["dev-mine".to_owned()]));
+
+    // The engine publishes, in order: an out-of-scope device status, an in-scope
+    // device status, an out-of-scope cast-session-start, then an unscoped alert.
+    engine.publish_event(device_status("dev-other"));
+    engine.publish_event(device_status("dev-mine"));
+    engine.publish_event(cast_started("cast-other"));
+    engine.publish_event(alert("global"));
+
+    // The out-of-scope device status is dropped (Ok(None)) — never leaked.
+    assert_eq!(
+        session.next_delta().await.unwrap(),
+        None,
+        "an out-of-scope device.status must be filtered out"
+    );
+    // The in-scope device status is delivered.
+    let d = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("the in-scope device.status is delivered");
+    assert_eq!(delta_device_id(&d), "dev-mine");
+    // The out-of-scope cast session start is dropped.
+    assert_eq!(
+        session.next_delta().await.unwrap(),
+        None,
+        "an out-of-scope cast.session.started must be filtered out"
+    );
+    // The unscoped firehose event (an alert, no object scope) is still delivered
+    // — object scope filters object-bearing Devices-domain events only, not the
+    // role-gated firehose.
+    let a = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("a non-object event is unaffected by object scope");
+    match &a.envelope.payload {
+        Event::AlertRaised(alert) => assert_eq!(alert.key, "global"),
+        other => panic!("expected the global alert, got {other:?}"),
+    }
+}
+
+/// An unscoped session (the default admin/operator/viewer) delivers EVERY
+/// device/cast delta — the filter must not over-restrict.
+#[tokio::test]
+async fn unscoped_session_delivers_all_device_deltas() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let sub = engine.subscribe();
+    let mut session = SessionStream::new(sub, "sess-unscoped", None).with_object_scope(None);
+
+    engine.publish_event(device_status("dev-a"));
+    engine.publish_event(device_status("dev-b"));
+
+    let d1 = session.next_delta().await.unwrap().expect("dev-a delivered");
+    assert_eq!(delta_device_id(&d1), "dev-a");
+    let d2 = session.next_delta().await.unwrap().expect("dev-b delivered");
+    assert_eq!(delta_device_id(&d2), "dev-b");
+}
+
+/// The connect-time device-status SNAPSHOT frames are filtered too: a scoped
+/// session rebuilds its device cache from ONLY its in-scope devices, so the
+/// snapshot cannot leak an out-of-scope device the deltas then hide.
+#[tokio::test]
+async fn scoped_session_filters_device_snapshot_frames_to_the_allowlist() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let registry = DeviceStatusRegistry::new();
+    registry.set_status(DeviceStatus::new("dev-mine", DeviceState::Online));
+    registry.set_status(DeviceStatus::new("dev-other", DeviceState::Online));
+
+    // Scoped: only `dev-mine` may appear in the connect snapshot.
+    let mut scoped = SessionStream::new(engine.subscribe(), "sess-scoped", None)
+        .with_object_scope(Some(vec!["dev-mine".to_owned()]));
+    let frames = scoped.devices_snapshot_frames(&registry, 0);
+    let ids: Vec<String> = frames.iter().map(delta_device_id).collect();
+    assert_eq!(
+        ids,
+        vec!["dev-mine".to_owned()],
+        "the connect snapshot must carry ONLY in-scope devices (no enumeration leak)"
+    );
+
+    // Unscoped: both devices appear (id-sorted), unchanged.
+    let mut unscoped =
+        SessionStream::new(engine.subscribe(), "sess-unscoped", None).with_object_scope(None);
+    let frames = unscoped.devices_snapshot_frames(&registry, 0);
+    let ids: Vec<String> = frames.iter().map(delta_device_id).collect();
+    assert_eq!(ids, vec!["dev-mine".to_owned(), "dev-other".to_owned()]);
 }
