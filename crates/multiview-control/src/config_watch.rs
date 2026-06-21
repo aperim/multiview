@@ -1281,6 +1281,33 @@ fn apply_overlay_changes(
                 }
             }
         }
+
+        // Task #130: a pure draw-order REORDER of equal-z overlays is invisible
+        // to the per-id delta above (`diff.overlays` is empty for it), yet
+        // declaration order is the equal-`z` draw-order tie-break. `UpsertOverlay`
+        // edits the engine's working mirror IN PLACE by id, so re-submitting
+        // upserts can never re-sequence it — a dedicated `ReorderOverlays`
+        // (a pure permutation) does. `diff.overlays_reordered` is baseline-derived
+        // (stable across shed retries, like `diff.overlays`); the `order` is the
+        // file's full desired id sequence, submitted AFTER any add/remove so the
+        // set is complete before it is re-sequenced. A shed counts toward the M1
+        // retry and keeps the section restart-pending. No adopted-snapshot change:
+        // a reorder alters neither which overlays exist nor their content (the
+        // ADR-W024 snapshot tracks content, adopted per-id above), only draw order.
+        if diff.overlays_reordered {
+            let order: Vec<String> = next.overlays.iter().map(|o| o.id.clone()).collect();
+            described.push("draw order re-sequenced".to_owned());
+            if !submit(
+                state,
+                Command::ReorderOverlays {
+                    op: OperationId::new(),
+                    order,
+                },
+            ) {
+                *shed = shed.saturating_add(1);
+                all_landed = false;
+            }
+        }
     }
 
     // The UI overlay list follows the file in every case (capability or not).

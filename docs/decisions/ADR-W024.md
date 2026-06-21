@@ -520,15 +520,24 @@ document reports both). A pure z/draw-order reorder is **Class-1** (hot/seamless
 from a Class-2 canvas reset — the new flags are the honest classification signal. The order-sensitive
 `overlays` `changed_sections` entry (`running_overlays != next_overlays`, by `Vec` position) is
 deliberately **kept**, so the existing `apply_overlay_changes` still reseeds the overlay store to the
-new declaration order on a reorder (the UI mirror and `active.toml` follow the file); on an
-overlay-capable run the empty per-id delta lands trivially, so nothing is reported restart-pending.
+new declaration order on a reorder (the UI mirror and `active.toml` follow the file).
 
-**Honest scope (rule 27).** This task makes the reorder a *detected, correctly-classified* delta and
-reseeds the control store / `active.toml` to the new order. It does **not** yet make the running
-**engine** re-blend an equal-z overlay reorder live: `Command::UpsertOverlay` updates the engine's
-working-config mirror **in place by id** (`crates/multiview-cli/src/control.rs`), so re-submitting
-upserts for unchanged-content overlays does not move their positions — the equal-z tie-break is the
-mirror's insertion order, unchanged by an in-place upsert. A live engine re-order needs the working
-set re-sequenced to the new declaration order (a small engine change, tracked as the follow-up); a
-restart already adopts the new order from the reseeded store. The diff-level detection is the
-prerequisite that unblocks it and stops the change from vanishing silently.
+**The live engine re-blend (the Class-1 promise made true).** Detecting the reorder is necessary but
+not sufficient: `Command::UpsertOverlay` updates the engine's working-config mirror **in place by
+id** (`crates/multiview-cli/src/control.rs`), so re-submitting upserts for unchanged-content overlays
+cannot move their positions — the equal-`z` tie-break is the mirror's insertion order, and the bake
+consumer's stable `sort_by_key(|l| l.z)` preserves it. A dedicated **`Command::ReorderOverlays {
+order: Vec<String> }`** carries the full desired id sequence; the engine drain's `reorder_overlays`
+re-sequences its working mirror to that order (a pure permutation — nothing added, removed, or
+edited) and republishes the lock-free `OverlaySet` with a bumped generation, so the bake consumer
+re-derives the new draw order at the next frame — a clean frame-boundary (Class-1) transition, no
+restart. An order already matching is a no-op (no generation bump), so a shed retry re-submitting the
+same order cannot thrash the consumer. Both triggers drive it: the file-watch `apply_overlay_changes`
+submits `ReorderOverlays` when `diff.overlays_reordered` (the `order` is the file's id sequence,
+baseline-derived and stable across shed retries, submitted after any add/remove so the set is
+complete before it is re-sequenced); the command path carries it as a first-class `Command` for any
+submitter (e.g. a future bulk-reorder REST endpoint). On an overlay-capable run a landed reorder
+leaves nothing restart-pending (genuinely Class-1); a no-capability run is honestly restart-only (no
+live overlay seam at all), and a restart adopts the new order from the reseeded store. The reorder
+changes neither which overlays exist nor their content, so it needs no adopted-snapshot change (the
+ADR-W024 snapshot tracks content, adopted per-id by the upsert/remove path).
