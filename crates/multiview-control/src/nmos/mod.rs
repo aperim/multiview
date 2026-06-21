@@ -141,6 +141,20 @@ impl NmosRegistry {
         self.lock().receivers.clone()
     }
 
+    /// The `device_id` the receiver `receiver_id` belongs to, if it exists.
+    ///
+    /// Used by the IS-05 single-receiver handlers to authorize the receiver by
+    /// its device-link scope (per-object BOLA, ADR-W005/ADR-W025), mirroring how
+    /// the receiver LIST is filtered.
+    #[must_use]
+    pub fn receiver_device_id(&self, receiver_id: &str) -> Option<String> {
+        self.lock()
+            .receivers
+            .iter()
+            .find(|r| r.core.id == receiver_id)
+            .map(|r| r.device_id.clone())
+    }
+
     /// The connection state of one receiver, if it exists.
     #[must_use]
     pub fn connection(&self, receiver_id: &str) -> Option<ConnectionState> {
@@ -175,6 +189,60 @@ impl NmosRegistry {
 
 /// The resource-collection name for an NMOS receiver, used in not-found errors.
 pub const NMOS_RECEIVER_KIND: &str = "nmos_receiver";
+
+/// Whether a `principal` may see/act on an NMOS sender/receiver, by per-object
+/// scope (BOLA visibility, ADR-W005/ADR-W025).
+///
+/// A sender/receiver is in scope when **either** its own resource id **or** its
+/// `device_id` link is in the principal's allowlist — so a principal scoped to a
+/// device sees that device's senders/receivers, and one scoped directly to a
+/// sender/receiver id sees it too (never over-restrictive). An unscoped
+/// principal (`scoped_object_ids: None`) is in scope for everything. This is the
+/// uniform predicate the sender/receiver LIST filters and the per-receiver IS-05
+/// handlers use, so the model is consistent across the NMOS surface.
+#[must_use]
+fn nmos_resource_in_scope(principal: &Principal, own_id: &str, device_id: &str) -> bool {
+    crate::auth::authorize_object(principal, own_id).is_ok()
+        || crate::auth::authorize_object(principal, device_id).is_ok()
+}
+
+/// Authorize a `principal` for the single IS-05 receiver `id` (per-object BOLA,
+/// ADR-W005/ADR-W025), the shared gate for the per-receiver connection
+/// read/stage handlers.
+///
+/// A **known** receiver is authorized by [`nmos_resource_in_scope`] (its own id
+/// or its `device_id` link), consistent with the receiver LIST filter — so a
+/// scoped principal is `403`'d on a receiver outside its scope. An **unknown**
+/// receiver passes here and is reported as the handler's `404` downstream (so a
+/// missing id stays "not found", never disclosed as a "forbidden"). An unscoped
+/// principal is always authorized.
+///
+/// # Errors
+///
+/// [`ControlError::Forbidden`] if the receiver exists but is outside the
+/// principal's object scope.
+fn authorize_receiver(
+    state: &AppState,
+    principal: &Principal,
+    id: &str,
+) -> Result<(), ControlError> {
+    match state.nmos.receiver_device_id(id) {
+        // Known receiver: gate by its own id or device-link scope.
+        Some(device_id) => {
+            if nmos_resource_in_scope(principal, id, &device_id) {
+                Ok(())
+            } else {
+                Err(ControlError::Forbidden(format!(
+                    "principal {:?} is not authorized for receiver {id:?}",
+                    principal.key_id
+                )))
+            }
+        }
+        // Unknown receiver: let the handler's lookup return 404 (don't turn a
+        // missing id into a 403 that would disclose nothing useful anyway).
+        None => Ok(()),
+    }
+}
 
 /// `GET /x-nmos/node/v1.3/self` — the node resource (role: read).
 #[cfg_attr(
@@ -223,7 +291,17 @@ pub(crate) async fn list_devices(
     principal: Principal,
 ) -> ControlResult<Json<Vec<Device>>> {
     principal.role.require(Action::Read)?;
-    Ok(Json(state.nmos.devices()))
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): a scoped principal sees
+    // ONLY its allowlisted NMOS devices — by parity with the IS-05 per-id
+    // handlers authorizing the resource id, an unfiltered list would let it
+    // enumerate device ids it cannot address. An unscoped principal keeps all.
+    let devices = state
+        .nmos
+        .devices()
+        .into_iter()
+        .filter(|d| crate::auth::authorize_object(&principal, &d.core.id).is_ok())
+        .collect();
+    Ok(Json(devices))
 }
 
 /// `GET /x-nmos/node/v1.3/senders` — the sender resources (role: read).
@@ -244,7 +322,16 @@ pub(crate) async fn list_senders(
     principal: Principal,
 ) -> ControlResult<Json<Vec<Sender>>> {
     principal.role.require(Action::Read)?;
-    Ok(Json(state.nmos.senders()))
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): a sender belongs to a
+    // device, so a scoped principal sees only senders whose device (or own id)
+    // is in its allowlist — never enumerate another tenant's egress.
+    let senders = state
+        .nmos
+        .senders()
+        .into_iter()
+        .filter(|s| nmos_resource_in_scope(&principal, &s.core.id, &s.device_id))
+        .collect();
+    Ok(Json(senders))
 }
 
 /// `GET /x-nmos/node/v1.3/receivers` — the receiver resources (role: read).
@@ -265,7 +352,16 @@ pub(crate) async fn list_receivers(
     principal: Principal,
 ) -> ControlResult<Json<Vec<Receiver>>> {
     principal.role.require(Action::Read)?;
-    Ok(Json(state.nmos.receivers()))
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): a receiver belongs to a
+    // device, so a scoped principal sees only receivers whose device (or own id)
+    // is in its allowlist — never enumerate another tenant's ingress.
+    let receivers = state
+        .nmos
+        .receivers()
+        .into_iter()
+        .filter(|r| nmos_resource_in_scope(&principal, &r.core.id, &r.device_id))
+        .collect();
+    Ok(Json(receivers))
 }
 
 /// `GET /x-nmos/connection/v1.1/single/receivers/{id}/active` — the receiver's
@@ -276,6 +372,11 @@ pub(crate) async fn get_active(
     Path(id): Path<String>,
 ) -> ControlResult<Json<ConnectionState>> {
     principal.role.require(Action::Read)?;
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): a scoped principal may
+    // read the connection state only of a receiver in its scope — mirroring the
+    // staged-PATCH gate and the receiver LIST filter, so reading and writing a
+    // receiver share one authorization model.
+    authorize_receiver(&state, &principal, &id)?;
     state
         .nmos
         .connection(&id)
@@ -311,7 +412,11 @@ pub(crate) async fn patch_staged(
     Json(request): Json<ConnectionRequest>,
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
-    crate::auth::authorize_object(&principal, &id)?;
+    // Per-object authz (BOLA, ADR-W005/ADR-W025): the SAME gate as the connection
+    // read + the receiver LIST — a scoped principal may stage only a receiver in
+    // its scope (its own id or its device-link). A known out-of-scope receiver is
+    // a 403; an unknown id stays the 404 `stage_connection` reports.
+    authorize_receiver(&state, &principal, &id)?;
     let connection = state.nmos.stage_connection(&id, request)?;
     Ok((StatusCode::OK, Json(connection)).into_response())
 }

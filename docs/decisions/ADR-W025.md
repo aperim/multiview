@@ -23,7 +23,12 @@ panel found that the two collection reads (`list_cast_sessions`, `list_devices`)
 and the realtime snapshot+delta surface ([`realtime.rs`](../../crates/multiview-control/src/realtime.rs))
 returned the **full** device/cast surface to a scoped principal — every row and
 every event, regardless of its allowlist. That is a pre-existing surface-wide gap
-on `main` (not introduced by #205), tracked as task #140.
+on `main` (not introduced by #205), tracked as task #140. The task-140 review
+panel's exhaustive sweep additionally found the same class on the AMWA NMOS Node
+API: the IS-04 LIST routes (`/x-nmos/.../devices|senders|receivers`) were
+role-gated only, and the IS-05 single-receiver connection **read**
+(`GET .../receivers/{id}/active`) was not per-object authorized even though its
+sibling stage `PATCH` was — both folded into this decision.
 
 The decision is bounded by invariant #10 (isolation): the realtime path is
 best-effort, bounded, and **physically incapable of back-pressuring the engine**
@@ -56,6 +61,14 @@ the allowlist:
    unscoped principal's stream is unchanged. The filter is a per-client read
    decision on the already-delivered event — the engine's publish path
    (`broadcast::send`) is untouched (invariant #10).
+4. **AMWA NMOS Node API** ([`nmos/mod.rs`](../../crates/multiview-control/src/nmos/mod.rs))
+   — the IS-04 LIST routes filter to the allowlist by parity with the IS-05
+   per-receiver handlers: `list_devices` by the device's own id; `list_senders` /
+   `list_receivers` by the resource's own id **or** its `device_id` link
+   (`nmos_resource_in_scope`). The per-receiver IS-05 connection read
+   (`get_active`) and stage (`patch_staged`) share one gate (`authorize_receiver`),
+   so reading, staging, and listing an NMOS receiver use the same object-scope
+   model; a known out-of-scope receiver is `403`, an unknown id stays `404`.
 
 The scope axis filtered is the **object** axis (`scoped_object_ids`,
 [`authorize_object`](../../crates/multiview-control/src/auth.rs)), matching the
@@ -64,13 +77,21 @@ per-object handlers. The output axis (`scoped_output_ids`,
 it gates the cast-target rendition on `start_cast_session`, a write, and is not a
 read-visibility concern here.
 
-Scope is matched against the event's resource id as
-[`event_scope_id`](../../crates/multiview-control/src/realtime.rs) already
-derives it (device id for `device.*`, session id for `cast.session.*`). Only
-events that carry a Devices-domain object id are subject to the object-scope
-filter; events with no object scope (the `$control`/tiles/alerts/audio firehose,
-and `device.discovered` rows which have no registry id yet) are unaffected — that
-firehose is gated by the role (`Action::Read`) at connect, not by object scope.
+On the realtime path, scope is matched against the event's object id as the
+**dedicated, narrower** helper
+[`device_object_scope_id`](../../crates/multiview-control/src/realtime.rs)
+derives it — the device id for `device.*` and the session id for
+`cast.session.*`. This is **intentionally narrower** than the existing
+[`event_scope_id`](../../crates/multiview-control/src/realtime.rs) (used to set
+the envelope `id` for the `ids` filter): `event_scope_id` also returns an id for
+`tile.state` (an input/tile id), `timing.status` (a program/output stream id),
+and `media.player_state` (a switcher player id), none of which are
+`authorize_object`-gated device/cast objects. Filtering those by
+`scoped_object_ids` would be a wrong-axis check that could over-restrict, so the
+object-scope filter uses `device_object_scope_id` and leaves every other event —
+the `$control`/tiles/alerts/audio firehose, and `device.discovered` rows which
+have no registry id yet — gated only by the connect-time role (`Action::Read`),
+never by object scope.
 
 ## Rationale
 
@@ -104,12 +125,13 @@ firehose is gated by the role (`Action::Read`) at connect, not by object scope.
 - **Easier:** the BOLA posture is now uniform — single-object, collection, and
   realtime reads all honour the same allowlist; a future scoped role
   (config-declared API keys) gets correct visibility for free.
-- **Committed to maintain:** any **new** collection read or any new
-  Devices-domain realtime event must apply the same per-row / per-event object
-  filter, and any new object-bearing event must be reachable by
-  [`event_scope_id`](../../crates/multiview-control/src/realtime.rs) so the
-  realtime filter can see its id. A new collection that forgets the filter is a
-  re-introduced leak — covered by the BOLA tests added with this ADR.
+- **Committed to maintain:** any **new** collection read (REST or NMOS) or any
+  new Devices-domain realtime event must apply the same per-row / per-event
+  object filter, and any new device/cast **object** event must be added to
+  [`device_object_scope_id`](../../crates/multiview-control/src/realtime.rs) (the
+  narrow authz helper, not the broader `event_scope_id`) so the realtime filter
+  can gate its id. A new collection that forgets the filter is a re-introduced
+  leak — covered by the BOLA tests added with this ADR.
 - **Invariant #10 (isolation):** preserved. The realtime filter is a pure
   per-client read-side projection on events already received from the bounded
   broadcast; it adds no blocking, no await, and never touches the engine publish
