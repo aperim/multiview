@@ -93,7 +93,11 @@ async fn an_ambiguous_rebind_pin_survives_the_renew_loop_and_replays_same_key() 
     assert!(first.is_err(), "the lost-response rebind fails closed");
     let rebind_key_1 = {
         let keys = server.recorded_idempotency_keys();
-        assert_eq!(keys.len(), 1, "the /rebind reached the server (key recorded): {keys:?}");
+        assert_eq!(
+            keys.len(),
+            1,
+            "the /rebind reached the server (key recorded): {keys:?}"
+        );
         keys[0].clone()
     };
 
@@ -122,7 +126,11 @@ async fn an_ambiguous_rebind_pin_survives_the_renew_loop_and_replays_same_key() 
     );
     // The renew minted + recorded its OWN (distinct) idempotency-key on /heartbeat.
     let after_renew = server.recorded_idempotency_keys();
-    assert_eq!(after_renew.len(), 2, "rebind + renew recorded: {after_renew:?}");
+    assert_eq!(
+        after_renew.len(),
+        2,
+        "rebind + renew recorded: {after_renew:?}"
+    );
     assert_ne!(
         after_renew[1], rebind_key_1,
         "the renew used its OWN fresh key, not the pinned rebind key: {after_renew:?}"
@@ -161,7 +169,11 @@ async fn pins_do_not_cross_replay_between_verbs() {
     let _ = client.deactivate_once().await;
     let deact_key_1 = {
         let keys = server.recorded_idempotency_keys();
-        assert_eq!(keys.len(), 1, "the /deactivate reached the server: {keys:?}");
+        assert_eq!(
+            keys.len(),
+            1,
+            "the /deactivate reached the server: {keys:?}"
+        );
         keys[0].clone()
     };
     assert_eq!(
@@ -196,7 +208,11 @@ async fn pins_do_not_cross_replay_between_verbs() {
         retry.is_ok(),
         "the deactivate retry replays the persisted pin and succeeds: {retry:?}"
     );
-    assert_eq!(server.deactivates(), 1, "the deactivate retry reached + completed /deactivate");
+    assert_eq!(
+        server.deactivates(),
+        1,
+        "the deactivate retry reached + completed /deactivate"
+    );
     let keys = server.recorded_idempotency_keys();
     let deact_key_2 = keys.last().expect("retry recorded").clone();
     assert_eq!(
