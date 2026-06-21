@@ -384,9 +384,12 @@ fn diff_overlays(running: &MultiviewConfig, next: &MultiviewConfig) -> Vec<Overl
 ///   move it in the id-sequence, and reordering survivors does not depend on
 ///   their documents — so a combined edit-and-reorder reports both signals.
 ///
-/// Order is the equal-`z` draw-order tie-break for overlays (stable sort) and the
-/// `enumerate()` index for the software test pattern's sources, so a reorder is a
-/// real, hot-appliable (Class-1) delta — never a silent lost update.
+/// The two legs classify differently (by what order affects at runtime): for
+/// overlays it is the equal-`z` draw-order tie-break (stable sort), a **live
+/// Class-1** re-blend via `ReorderOverlays`; for sources it is the cold-start
+/// `enumerate()` test-pattern index with no live seam (cells bind by `input_id`),
+/// a **Class-2 restart-pending** delta. Either way the reorder is detected (the
+/// caller routes it to the right classification) — never a silent lost update.
 fn common_ids_reordered<'a>(
     running: impl Iterator<Item = &'a String>,
     next: impl Iterator<Item = &'a String>,
