@@ -834,7 +834,10 @@ impl FakeLicenceServer {
     /// The `bindingId` the most recent rebind request carried (the device's resolved
     /// binding — store-learned id, not the instance_id fallback).
     pub fn last_rebind_binding_id(&self) -> Option<String> {
-        self.last_rebind_binding_id.lock().expect("poisoned").clone()
+        self.last_rebind_binding_id
+            .lock()
+            .expect("poisoned")
+            .clone()
     }
     pub fn last_rebind_instance_id(&self) -> Option<String> {
         self.last_rebind_instance_id
