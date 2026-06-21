@@ -373,10 +373,7 @@ async fn scoped_principal_cannot_compose_or_read_a_support_bundle() {
         .to_owned();
     let resp = send(
         &h.router,
-        get(
-            &format!("/api/v1/support/bundle/{bundle_id}"),
-            SCOPED_TOKEN,
-        ),
+        get(&format!("/api/v1/support/bundle/{bundle_id}"), SCOPED_TOKEN),
     )
     .await;
     assert_eq!(

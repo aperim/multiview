@@ -446,6 +446,31 @@ pub(crate) fn redact_out_of_scope_device_refs(
     }
 }
 
+/// Deny a request that exposes a **whole-system** artifact to an object-scoped
+/// principal (BOLA wholesale-enumeration defense, ADR-W005/ADR-W025).
+///
+/// Some responses aggregate the entire desired-state — the config export and the
+/// support bundle both embed *every* device id, `device_ref`, and sync-group
+/// member id in one document. Per-field redaction cannot apply (a scope-filtered
+/// config is not a valid runnable document), so an object-scoped principal
+/// (`scoped_object_ids: Some`) is denied outright: such artifacts are confined to
+/// a principal that can see the whole system. An **unscoped** principal (the
+/// default admin/operator/viewer) is allowed — this is a no-op for it.
+///
+/// # Errors
+///
+/// [`ControlError::Forbidden`] if the principal is object-scoped.
+pub(crate) fn require_unscoped_for_whole_system(principal: &Principal) -> Result<(), ControlError> {
+    if principal.is_scoped() {
+        return Err(ControlError::Forbidden(format!(
+            "principal {:?} is object-scoped and may not access a whole-system artifact \
+             (it would disclose objects outside its allowlist)",
+            principal.key_id
+        )));
+    }
+    Ok(())
+}
+
 /// The exact operator/portal copy the Conspect startup gate (S1) refuses a NEW
 /// program-output start with at the `block-new-instance` rung (ADR-0050 §5/§6.2).
 /// **Verbatim** — the cli's `BLOCK_NEW_INSTANCE_REASON` and the portal show the
