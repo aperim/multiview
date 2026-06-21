@@ -24,8 +24,36 @@ use multiview_control::{
 };
 use serde_json::json;
 use support::{
-    body_json, get, harness_with, post_if_match, send, OPERATOR_TOKEN, SCOPED_TOKEN, VIEWER_TOKEN,
+    body_json, get, harness_with, post_if_match, send, ADMIN_TOKEN, OPERATOR_TOKEN, SCOPED_TOKEN,
+    VIEWER_TOKEN,
 };
+
+/// BOLA ROW enumeration (OWASP API1, ADR-W005/ADR-W025): a media player is
+/// object-scoped by its OWN id (`get_player` 403s an out-of-scope id), so
+/// `list_players` MUST filter ROWS to the principal's allowlist — by the same
+/// parity as `list_devices`. `SCOPED_TOKEN` is scoped to `["scoped-layout"]`.
+#[tokio::test]
+async fn list_filters_media_player_rows_to_the_scoped_allowlist() {
+    let (h, _store) = harness_with_players(&["scoped-layout", "other-player"]);
+
+    let resp = send(&h.router, get("/api/v1/media/players", SCOPED_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ids: Vec<String> = body_json(resp)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["scoped-layout".to_owned()],
+        "a scoped principal must see ONLY its allowlisted media-player rows (BOLA)"
+    );
+
+    let resp = send(&h.router, get("/api/v1/media/players", ADMIN_TOKEN)).await;
+    assert_eq!(body_json(resp).await.as_array().unwrap().len(), 2);
+}
 
 /// Build a harness whose media-player store is seeded with the given player
 /// ids, returning the harness plus the store handle (so a test can assert on

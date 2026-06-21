@@ -13,8 +13,51 @@ mod support;
 use axum::http::{header, StatusCode};
 use serde_json::json;
 use support::{
-    body_json, get, harness, post_json, put_json, send, ADMIN_TOKEN, OPERATOR_TOKEN, VIEWER_TOKEN,
+    body_json, get, harness, post_json, put_json, send, ADMIN_TOKEN, OPERATOR_TOKEN, SCOPED_TOKEN,
+    VIEWER_TOKEN,
 };
+
+/// BOLA ROW enumeration (OWASP API1, ADR-W005/ADR-W025): an overlay is
+/// object-scoped by its OWN id (`get_overlay` 403s an out-of-scope id), so
+/// `list_overlays` MUST filter ROWS to the principal's allowlist — by the same
+/// parity as `list_devices`. `SCOPED_TOKEN` is scoped to `["scoped-layout"]`.
+#[tokio::test]
+async fn list_filters_overlay_rows_to_the_scoped_allowlist() {
+    let h = harness();
+    for id in ["scoped-layout", "other-overlay"] {
+        let resp = send(
+            &h.router,
+            post_json(
+                &format!("/api/v1/overlays/{id}"),
+                ADMIN_TOKEN,
+                &json!({
+                    "name": id,
+                    "body": { "id": id, "kind": "clock", "target": "canvas", "z": 10 }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    let resp = send(&h.router, get("/api/v1/overlays", SCOPED_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ids: Vec<String> = body_json(resp)
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["scoped-layout".to_owned()],
+        "a scoped principal must see ONLY its allowlisted overlay rows (BOLA)"
+    );
+
+    let resp = send(&h.router, get("/api/v1/overlays", ADMIN_TOKEN)).await;
+    assert_eq!(body_json(resp).await.as_array().unwrap().len(), 2);
+}
 
 fn overlay_body(name: &str) -> serde_json::Value {
     json!({
