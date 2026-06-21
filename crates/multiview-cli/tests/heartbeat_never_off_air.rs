@@ -36,8 +36,9 @@ use multiview_cli::run::SoftwareEngine;
 use multiview_config::MultiviewConfig;
 use multiview_engine::{CooperativePacer, ManualTimeSource};
 use multiview_licence::heartbeat::{
-    ActivateResponse, DeviceChallenge, DeviceIdentity, HeartbeatClient, HeartbeatConfig,
-    HeartbeatError, HeartbeatResponse, LicenceServer, LicensingKeys, PinnedRoot,
+    ActivateResponse, DeactivateResponse, DeviceChallenge, DeviceIdentity, HeartbeatClient,
+    HeartbeatConfig, HeartbeatError, HeartbeatResponse, LicenceServer, LicensingKeys, PinnedRoot,
+    RebindResponse,
 };
 use multiview_licence::{EnforcementLevel, LeaseStore};
 
@@ -147,6 +148,30 @@ impl LicenceServer for HostileServer {
     ) -> Result<ActivateResponse, HeartbeatError> {
         // The first-contact ACTIVATE path is just as hostile (stall / partition) —
         // it must NOT be able to stall the output clock either (ADR-I008, inv #10).
+        self.maybe_stall().await;
+        Err(HeartbeatError::Transport("partitioned".to_owned()))
+    }
+    async fn rebind(
+        &self,
+        _org: &str,
+        _body: Vec<u8>,
+        _idem: &str,
+        _pop_header: &str,
+    ) -> Result<RebindResponse, HeartbeatError> {
+        // The REBIND lifecycle POST is just as hostile — it must NOT stall the clock
+        // (ADR-I009, inv #1/#10).
+        self.maybe_stall().await;
+        Err(HeartbeatError::Transport("partitioned".to_owned()))
+    }
+    async fn deactivate(
+        &self,
+        _org: &str,
+        _body: Vec<u8>,
+        _idem: &str,
+        _pop_header: &str,
+    ) -> Result<DeactivateResponse, HeartbeatError> {
+        // The DEACTIVATE lifecycle POST is just as hostile — it must NOT stall the
+        // clock (ADR-I009, inv #1/#10).
         self.maybe_stall().await;
         Err(HeartbeatError::Transport("partitioned".to_owned()))
     }
@@ -504,6 +529,39 @@ impl LicenceServer for ChaosActivateServer {
             "chaos: activate partitioned".to_owned(),
         ))
     }
+    async fn rebind(
+        &self,
+        _org: &str,
+        _body: Vec<u8>,
+        _idem: &str,
+        _pop_header: &str,
+    ) -> Result<RebindResponse, HeartbeatError> {
+        // The REBIND POST stalls/errors just like activate (the lifecycle chaos gate
+        // drives this directly via rebind_once).
+        if self.stall_activate.load(Ordering::SeqCst) {
+            self.in_flight.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+        Err(HeartbeatError::Transport(
+            "chaos: rebind partitioned".to_owned(),
+        ))
+    }
+    async fn deactivate(
+        &self,
+        _org: &str,
+        _body: Vec<u8>,
+        _idem: &str,
+        _pop_header: &str,
+    ) -> Result<DeactivateResponse, HeartbeatError> {
+        // The DEACTIVATE POST stalls/errors just like activate.
+        if self.stall_activate.load(Ordering::SeqCst) {
+            self.in_flight.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        }
+        Err(HeartbeatError::Transport(
+            "chaos: deactivate partitioned".to_owned(),
+        ))
+    }
 }
 
 /// A FRESH, un-bound device identity (no binding) — the first-contact ACTIVATE case.
@@ -639,5 +697,150 @@ async fn a_partitioned_activate_loop_runs_alongside_the_clock_without_effect() {
     assert!(
         store.status().is_none(),
         "a partitioned activate POST never installs a lease (fresh device stays empty)"
+    );
+}
+
+// ===========================================================================
+// Device REBIND + DEACTIVATE never-off-air gate (ADR-I009).
+//
+// The one-shot lifecycle ops (`rebind_once` / `deactivate_once`) call fetch_keys →
+// verify → fetch_challenge → sign → server.rebind/deactivate(...). To prove a
+// stalled/partitioned lifecycle POST cannot back-pressure the output clock, the
+// chaos server lets fetch_keys + fetch_challenge SUCCEED and stalls ONLY on the
+// lifecycle POST (reusing ChaosActivateServer, whose rebind/deactivate honour the
+// same stall knob). A BOUND device drives the one-shot op directly.
+// ===========================================================================
+
+/// A BOUND device (it already holds `ib_test`) driving a one-shot lifecycle op with
+/// a real device signer, so `rebind_once`/`deactivate_once` reach the lifecycle POST.
+fn lifecycle_client(
+    server: Arc<ChaosActivateServer>,
+    store: Arc<LeaseStore>,
+) -> HeartbeatClient<ChaosActivateServer> {
+    let pinned = server.pinned_root();
+    let signer: Arc<dyn multiview_licence::heartbeat::DeviceSigner> = Arc::new(FixedDeviceSigner {
+        key: ed25519_dalek::SigningKey::from_bytes(&[0x5a; 32]),
+    });
+    HeartbeatClient::new(
+        server,
+        store,
+        pinned,
+        HeartbeatConfig {
+            org_id: "org_test".to_owned(),
+            min_interval: Duration::from_millis(1),
+            ..HeartbeatConfig::default()
+        },
+        identity(), // bound: binding_id = Some("ib_test")
+    )
+    .with_signer(signer)
+}
+
+/// THE REBIND-PATH IN-FLIGHT STALL GATE (ADR-I009): a bound device's one-shot REBIND
+/// POST, black-holed in flight, cannot back-pressure the output clock.
+#[tokio::test]
+async fn the_output_clock_ticks_while_a_rebind_call_is_stalled_in_flight() {
+    let store = Arc::new(LeaseStore::new());
+    let mut engine = SoftwareEngine::build_gated(&small_config(), Some(EnforcementLevel::Active))
+        .expect("build");
+
+    let server = Arc::new(ChaosActivateServer::stalling());
+    let hb = lifecycle_client(Arc::clone(&server), Arc::clone(&store));
+    // Drive the one-shot rebind concurrently — it black-holes in the rebind POST.
+    let handle = tokio::spawn(async move { hb.rebind_once("lic_test").await });
+
+    let parked = tokio::time::timeout(Duration::from_secs(5), async {
+        while !server.is_in_flight() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(
+        parked.is_ok(),
+        "the REBIND POST must reach an in-flight stall"
+    );
+    assert!(
+        !handle.is_finished(),
+        "the rebind is stalled (not returned)"
+    );
+
+    let time = Arc::new(ManualTimeSource::new());
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.run_for(time, CooperativePacer, 50),
+    )
+    .await
+    .expect("the engine run must not hang while a rebind POST is stalled")
+    .expect("the engine drives regardless of an in-flight stalled rebind POST");
+    assert_eq!(
+        report.frames, 50,
+        "one frame per tick while a rebind POST is stalled"
+    );
+    assert!(
+        !report.faltered,
+        "the output clock never falters during the rebind stall"
+    );
+    assert!(!handle.is_finished(), "the rebind POST is STILL stalled");
+
+    handle.abort();
+    let _ = handle.await;
+    assert!(
+        store.status().is_none(),
+        "the stalled rebind installed nothing"
+    );
+}
+
+/// THE DEACTIVATE-PATH IN-FLIGHT STALL GATE (ADR-I009): a bound device's one-shot
+/// DEACTIVATE POST, black-holed in flight, cannot back-pressure the output clock.
+#[tokio::test]
+async fn the_output_clock_ticks_while_a_deactivate_call_is_stalled_in_flight() {
+    let store = Arc::new(LeaseStore::new());
+    let mut engine = SoftwareEngine::build_gated(&small_config(), Some(EnforcementLevel::Active))
+        .expect("build");
+
+    let server = Arc::new(ChaosActivateServer::stalling());
+    let hb = lifecycle_client(Arc::clone(&server), Arc::clone(&store));
+    let handle = tokio::spawn(async move { hb.deactivate_once().await });
+
+    let parked = tokio::time::timeout(Duration::from_secs(5), async {
+        while !server.is_in_flight() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(
+        parked.is_ok(),
+        "the DEACTIVATE POST must reach an in-flight stall"
+    );
+    assert!(
+        !handle.is_finished(),
+        "the deactivate is stalled (not returned)"
+    );
+
+    let time = Arc::new(ManualTimeSource::new());
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        engine.run_for(time, CooperativePacer, 50),
+    )
+    .await
+    .expect("the engine run must not hang while a deactivate POST is stalled")
+    .expect("the engine drives regardless of an in-flight stalled deactivate POST");
+    assert_eq!(
+        report.frames, 50,
+        "one frame per tick while a deactivate POST is stalled"
+    );
+    assert!(
+        !report.faltered,
+        "the output clock never falters during the deactivate stall"
+    );
+    assert!(
+        !handle.is_finished(),
+        "the deactivate POST is STILL stalled"
+    );
+
+    handle.abort();
+    let _ = handle.await;
+    assert!(
+        store.status().is_none(),
+        "the stalled deactivate touched nothing"
     );
 }

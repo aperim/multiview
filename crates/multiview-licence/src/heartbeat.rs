@@ -1225,6 +1225,258 @@ pub fn pop_activate_header_value(
 }
 
 // ===========================================================================
+// Device lifecycle (ADR-I009): REBIND + DEACTIVATE wire shapes + PoP wrappers.
+//
+// CONTINUITY ops on an ALREADY-BOUND instance — distinct from first-contact
+// activate: the PoP binds the device's OWN durable `instance_id` (NOT a server-
+// assigned challenge id), and neither request carries `devicePublicKey` (the
+// server verifies the STORED bound key). Byte-exact to Conspect OpenAPI v0.46.0.
+// ===========================================================================
+
+/// A `POST /organisations/{orgId}/rebind` request — the **rebind** body (ADR-I009).
+/// Reactivates the device's **already-bound** instance after a lawful hardware
+/// change (the fingerprint-drift self-heal); it reactivates the SAME binding (no
+/// new seat) and refreshes the lease. A **continuity** op: the request carries the
+/// device's OWN `binding_id`/`instance_id` (NOT a server-assigned challenge id) and
+/// **no** `devicePublicKey` (the server verifies the binding's STORED Ed25519 key).
+/// Serialised camelCase; the byte-exact required set (Conspect v0.46.0).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct RebindRequest {
+    /// The licence the instance is bound to (the seat source).
+    pub licence_id: String,
+    /// The instance binding to rebind — the device's OWN seat-consuming, lease-bearing
+    /// unit (ADR-0015). The rebind reactivates THIS row; it never mints a second seat.
+    pub binding_id: String,
+    /// The device's OWN ADR-0015 instance id carried inside the signed lease body.
+    /// Bound into the PoP pre-image too (continuity — NOT a challenge id).
+    pub instance_id: String,
+    /// The instance discriminator hash — must match the binding on record (a divergent
+    /// discriminator is a fingerprint-mismatch: a foreign instance cannot rebind here).
+    pub instance_discriminator_hash: String,
+    /// The salted fingerprint digest (lower-case hex SHA-256) carried in the lease body.
+    pub fingerprint_digest: String,
+    /// The new fingerprint's match score against the binding (0–100). Below 70 is the
+    /// self-heal trigger; the score is recorded + surfaced, never used to invent a refusal.
+    pub fp_score: u8,
+    /// The single-use device-PoP challenge nonce (lower-case hex). Bound into the signed
+    /// PoP pre-image and burned on a successful proof (ADR-0042).
+    pub nonce: String,
+}
+
+/// A `POST /organisations/{orgId}/rebind` response (ADR-I009): the rebind result.
+/// **Carries only a `lease_serial`** (a `UUIDv7`) — NOT an embedded signed lease
+/// envelope (contrast [`ActivateResponse::lease`]/[`HeartbeatResponse::lease`]) — so
+/// the device cannot install from it; it seeds the steady-state nonce from
+/// `next_nonce` and the **next renew** installs the refreshed lease.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct RebindResponse {
+    /// Whether a fresh lease was issued. `false` when the entitlement is revoked (the
+    /// signer withholds the re-issue — never off air; the current rung is still returned).
+    pub rebound: bool,
+    /// The signed lease serial (a `UUIDv7`) when issued, or `null` when withheld.
+    /// **REQUIRED + nullable** in the wire (v0.46.0). An `Option` field, so serde treats
+    /// an absent key identically to an explicit `null` (both → `None`) — operationally
+    /// identical for the device, which never installs from the response either way (it
+    /// re-renews to get the refreshed lease). The device only reads it for the operator's
+    /// outcome report. (The load-bearing presence check is on the non-nullable fields +
+    /// `next_nonce`, which serde DOES reject when absent.)
+    pub lease_serial: Option<String>,
+    /// The new lease's expiry (Unix epoch ms), or `null` when withheld. REQUIRED +
+    /// nullable, same handling as `lease_serial` (absent or `null` → `None`).
+    pub not_after: Option<i64>,
+    /// The enforcement-ladder rung as DATA (always returned, never a kill).
+    pub enforcement_state: EnforcementState,
+    /// Rebinds charged against the 3-free-per-licence-per-AEST-year budget so far this
+    /// year, including this one (ADR-0050 §7). Server-tracked; the device only reports it.
+    pub rebinds_this_year: i64,
+    /// Always `false`: a rebind reactivates the SAME binding and consumes NO new seat.
+    pub seat_consumed: bool,
+    /// The new fingerprint match score the device reported (0–100), echoed back.
+    pub fp_score: u8,
+    /// The NEXT single-use device-PoP challenge nonce (DPoP-nonce style) — seeds the
+    /// following heartbeat. **REQUIRED** in the wire (v0.46.0): NO `#[serde(default)]`,
+    /// so a response that omits `nextNonce` is malformed and rejected (a missing nonce
+    /// would silently strand the next renew otherwise).
+    pub next_nonce: String,
+}
+
+impl RebindResponse {
+    /// Assemble a rebind response (the type is `#[non_exhaustive]`; the in-process
+    /// fake + the cli transport build it explicitly).
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        rebound: bool,
+        lease_serial: Option<String>,
+        not_after: Option<i64>,
+        enforcement_state: EnforcementState,
+        rebinds_this_year: i64,
+        seat_consumed: bool,
+        fp_score: u8,
+        next_nonce: String,
+    ) -> Self {
+        Self {
+            rebound,
+            lease_serial,
+            not_after,
+            enforcement_state,
+            rebinds_this_year,
+            seat_consumed,
+            fp_score,
+            next_nonce,
+        }
+    }
+}
+
+/// A `POST /organisations/{orgId}/deactivate` request — the **deactivate** body
+/// (ADR-I009): decommission the device's binding and return its seat. A
+/// **continuity** op (the server verifies the binding's STORED key); it carries only
+/// the device's OWN `binding_id` + the challenge nonce, and **no** `devicePublicKey`.
+/// The release is idempotent and never errors a running output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct DeactivateRequest {
+    /// The device's OWN seat-consuming instance binding to decommission.
+    pub binding_id: String,
+    /// The single-use device-PoP challenge nonce (lower-case hex), bound into the
+    /// signed PoP pre-image and burned on a successful proof (ADR-0042).
+    pub nonce: String,
+}
+
+/// A `POST /organisations/{orgId}/deactivate` response — a **device-local
+/// projection** of the wire `InstanceBinding` the 200 returns (there is no
+/// `DeactivateResponse` schema upstream). The device acts only on the seat-return
+/// confirmation, so it parses the load-bearing subset (`id`, `lifecycleState`,
+/// `enforcementState`); serde drops the rest of the `InstanceBinding` payload
+/// (`#[non_exhaustive]`, no `deny_unknown_fields`). A successful release yields
+/// `lifecycle_state == "released"`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct DeactivateResponse {
+    /// The binding's server-minted id (the seat that was returned).
+    pub id: String,
+    /// The binding lifecycle state — `released` after a successful deactivate. Typed as
+    /// a `String` (not a closed enum) for forward-compat: a new upstream lifecycle value
+    /// must not break parsing of a seat-return the device only inspects for `released`.
+    pub lifecycle_state: String,
+    /// The enforcement-ladder rung snapshotted onto the binding (data, never a verb).
+    pub enforcement_state: EnforcementState,
+}
+
+impl DeactivateResponse {
+    /// Assemble a deactivate response projection (the type is `#[non_exhaustive]`;
+    /// the in-process fake + the cli transport build it explicitly).
+    #[must_use]
+    pub fn new(id: String, lifecycle_state: String, enforcement_state: EnforcementState) -> Self {
+        Self {
+            id,
+            lifecycle_state,
+            enforcement_state,
+        }
+    }
+}
+
+/// Assemble the [`RebindRequest`] for the device's **already-bound** instance with an
+/// **explicitly-resolved `binding_id`** (ADR-I009). The caller resolves the binding via
+/// the same chain renew + deactivate use (learned binding → `store.current_binding_id()`
+/// → configured `identity.binding_id`) and passes it here — so a STORE-LEARNED binding
+/// (not in the static identity config) is rebound under the CORRECT id, never the
+/// `instance_id` fallback. The `instance_id` stays the device's OWN durable id
+/// (continuity — bound into the PoP pre-image). Pure + total; the caller serialises once
+/// and signs the PoP over those exact bytes.
+#[must_use]
+pub fn build_rebind_request_for(
+    identity: &DeviceIdentity,
+    licence_id: &str,
+    binding_id: &str,
+    challenge: &DeviceChallenge,
+) -> RebindRequest {
+    RebindRequest {
+        licence_id: licence_id.to_owned(),
+        binding_id: binding_id.to_owned(),
+        instance_id: identity.instance_id.clone(),
+        instance_discriminator_hash: identity.instance_discriminator_hash.clone(),
+        fingerprint_digest: identity.fingerprint_digest.clone(),
+        fp_score: identity.fingerprint_score,
+        nonce: challenge.nonce.clone(),
+    }
+}
+
+/// Assemble the [`RebindRequest`] resolving the `binding_id` from the identity alone
+/// (`identity.binding_id`, falling back to `identity.instance_id`). This is the pure
+/// builder the wire tests exercise; the live client path uses
+/// [`build_rebind_request_for`] with the binding resolved via the store chain
+/// (`rebind_once`), so a store-learned binding is never lost. Mirrors
+/// [`build_activate_request`].
+#[must_use]
+pub fn build_rebind_request(
+    identity: &DeviceIdentity,
+    licence_id: &str,
+    challenge: &DeviceChallenge,
+) -> RebindRequest {
+    let binding_id = identity
+        .binding_id
+        .clone()
+        .unwrap_or_else(|| identity.instance_id.clone());
+    build_rebind_request_for(identity, licence_id, &binding_id, challenge)
+}
+
+/// Assemble the [`DeactivateRequest`] for the device's binding (ADR-I009): the
+/// device's OWN `binding_id` + the challenge `nonce`. Pure + total.
+#[must_use]
+pub fn build_deactivate_request(binding_id: &str, nonce: &str) -> DeactivateRequest {
+    DeactivateRequest {
+        binding_id: binding_id.to_owned(),
+        nonce: nonce.to_owned(),
+    }
+}
+
+/// Build the `Conspect-Device-PoP` header for a **rebind** request (ADR-I009): the
+/// base64 `COSE_Sign1` over the canonical pre-image with `htm = "POST"`. Identical
+/// machinery to [`pop_header_value`]; `instance_id` is the device's **OWN** durable
+/// id (continuity — the server verifies the STORED key). `body` is the exact
+/// serialised [`RebindRequest`] bytes the transport sends; `iat` is epoch seconds.
+///
+/// # Errors
+/// [`PopError`] on a COSE/nonce failure (the caller maps it to a fail-closed
+/// `HeartbeatError::Pop` — no rebind is sent without a valid proof).
+pub fn pop_rebind_header_value(
+    signer: &dyn DeviceSigner,
+    htu: &str,
+    body: &[u8],
+    instance_id: &str,
+    nonce_hex: &str,
+    iat: i64,
+) -> Result<String, PopError> {
+    pop_header_value(signer, "POST", htu, body, instance_id, nonce_hex, iat)
+}
+
+/// Build the `Conspect-Device-PoP` header for a **deactivate** request (ADR-I009):
+/// the base64 `COSE_Sign1` over the canonical pre-image with `htm = "POST"` and the
+/// device's **OWN** durable `instance_id` bound in (continuity). `body` is the exact
+/// serialised [`DeactivateRequest`] bytes; `iat` is epoch seconds.
+///
+/// # Errors
+/// [`PopError`] on a COSE/nonce failure (the caller maps it to a fail-closed
+/// `HeartbeatError::Pop` — no deactivate is sent without a valid proof).
+pub fn pop_deactivate_header_value(
+    signer: &dyn DeviceSigner,
+    htu: &str,
+    body: &[u8],
+    instance_id: &str,
+    nonce_hex: &str,
+    iat: i64,
+) -> Result<String, PopError> {
+    pop_header_value(signer, "POST", htu, body, instance_id, nonce_hex, iat)
+}
+
+// ===========================================================================
 // The LicenceServer seam + the HeartbeatClient loop.
 // ===========================================================================
 
@@ -1322,6 +1574,61 @@ pub trait LicenceServer: Send + Sync {
         idempotency_key: &str,
         pop_header: &str,
     ) -> impl std::future::Future<Output = Result<ActivateResponse, HeartbeatError>> + Send;
+
+    /// `POST /organisations/{org}/rebind` — the **device REBIND** lifecycle call
+    /// (ADR-I009), with a required `Idempotency-Key` and the required
+    /// `Conspect-Device-PoP` header. `body` is the EXACT serialised [`RebindRequest`]
+    /// bytes the PoP signed over (sent verbatim — no drift); it carries the device's
+    /// own binding/instance id + the challenge `nonce`, and **no** `devicePublicKey`
+    /// (continuity — the server verifies the STORED bound key).
+    ///
+    /// # Error-mapping contract (implementors MUST uphold — the lifecycle refinement)
+    ///
+    /// The same burned-nonce boundary as [`heartbeat`](Self::heartbeat), **with one
+    /// deliberate refinement for the lifecycle verb**:
+    /// [`HeartbeatError::Transport`] = AMBIGUOUS (no response / `5xx`) — replay the
+    /// pinned attempt verbatim; **and a `409` MUST also map to
+    /// [`Transport`](HeartbeatError::Transport)**, not
+    /// [`ServerRejected`](HeartbeatError::ServerRejected). The live `409` is overloaded
+    /// (rebinds-exhausted / discriminator-mismatch / no-live-instance / the same
+    /// Idempotency-Key still in progress) with **no JSON body to disambiguate**;
+    /// replaying the SAME idempotency-key + body is the only choice that is correct for
+    /// all of them — the server dedups, so an exhausted/mismatch re-POST returns the
+    /// same `409` deterministically with **no second rebind charge**, and an in-progress
+    /// request completes. Mapping `409` to `ServerRejected` (drop + mint a fresh key)
+    /// would **double-charge the scarce 3-free-per-year budget** on an ambiguous
+    /// failure. [`HeartbeatError::ServerRejected`] = the OTHER definitive received
+    /// non-2xx the device cannot fix by resending the same bytes (`401`
+    /// `pop-invalid`/`pop-required`, `403`, `404`, `422`). [`HeartbeatError::Malformed`]
+    /// = only after a received `2xx` whose body would not parse. The shipped
+    /// `ConspectHttpServer` lifecycle transport (`post_raw_json_lifecycle`) decodes the
+    /// body only after `status.is_success()` and maps `409 → Transport`, upholding this.
+    fn rebind(
+        &self,
+        org: &str,
+        body: Vec<u8>,
+        idempotency_key: &str,
+        pop_header: &str,
+    ) -> impl std::future::Future<Output = Result<RebindResponse, HeartbeatError>> + Send;
+
+    /// `POST /organisations/{org}/deactivate` — the **device DEACTIVATE** lifecycle
+    /// call (ADR-I009): decommission the binding and return its seat. Required
+    /// `Idempotency-Key` + `Conspect-Device-PoP`; `body` is the EXACT serialised
+    /// [`DeactivateRequest`] bytes (the device's own binding id + the challenge nonce,
+    /// **no** `devicePublicKey` — continuity). The release is idempotent and the
+    /// **identical lifecycle error-mapping contract** as [`rebind`](Self::rebind)
+    /// applies (`409 → Transport`/replay-same-key; `401`/`403`/`404`/`422` →
+    /// `ServerRejected`; `2xx`-bad-body → `Malformed`). On a 200 the wire returns an
+    /// `InstanceBinding`; the device parses it into the [`DeactivateResponse`]
+    /// projection. Deactivate installs **nothing** — the local last-good lease ages out
+    /// naturally (never off air).
+    fn deactivate(
+        &self,
+        org: &str,
+        body: Vec<u8>,
+        idempotency_key: &str,
+        pop_header: &str,
+    ) -> impl std::future::Future<Output = Result<DeactivateResponse, HeartbeatError>> + Send;
 }
 
 /// A failure talking to the licence server. None of these tighten the machine —
@@ -1529,6 +1836,32 @@ pub enum HeartbeatOutcome {
         /// When the next heartbeat is due (epoch milliseconds).
         next_due: i64,
     },
+    /// A **device REBIND** succeeded (ADR-I009): the device's already-bound instance
+    /// was reactivated against refreshed hardware (the SAME binding — no new seat). The
+    /// `RebindResponse` carries only a serial (no embedded signed lease), so nothing is
+    /// installed here; the steady-state nonce is seeded from the response `nextNonce`
+    /// and the **next renew** installs the refreshed lease. Carries the result fields
+    /// the operator reads (the rebind budget consumed; the seat assertion).
+    Rebound {
+        /// Whether a fresh lease was issued (`false` on a withheld re-issue / revoked).
+        rebound: bool,
+        /// The refreshed lease serial when issued, or `None` when withheld.
+        lease_serial: Option<String>,
+        /// Rebinds charged against the 3-free-per-AEST-year budget this year (incl. this).
+        rebinds_this_year: i64,
+        /// Always `false` — a rebind consumes no new seat (surfaced so a caller asserts it).
+        seat_consumed: bool,
+    },
+    /// A **device DEACTIVATE** succeeded (ADR-I009): the binding's seat was returned
+    /// server-side (idempotent). Nothing is installed or removed locally — the
+    /// last-good lease ages out via the offline ladder (never off air). Carries the
+    /// binding id + its post-release lifecycle state (`released`).
+    Deactivated {
+        /// The binding id that was decommissioned.
+        binding_id: String,
+        /// The binding's lifecycle state after the release (`released`).
+        lifecycle_state: String,
+    },
     /// The server withheld the lease (`lease: null`, revocation by non-reissue):
     /// the last-good lease is kept and ages naturally. Carries the rung + nextDue.
     LeaseWithheld {
@@ -1631,8 +1964,67 @@ pub struct HeartbeatClient<S: LicenceServer> {
     /// nonce, which a strict server rejects as an idempotency body-mismatch and
     /// could strand the client). It is set when a NEW logical operation is built and
     /// cleared ONLY on a successful contact (then the next cycle mints afresh).
-    /// Control-plane only; the loop is the sole accessor.
-    pending: std::sync::Mutex<Option<PendingAttempt>>,
+    ///
+    /// **Verb-keyed (ADR-I009, money-path defence).** The pin is keyed by
+    /// [`AttemptVerb`] in PER-VERB slots so the verbs CANNOT contaminate each other's
+    /// pending state: the automatic renew loop (`run_once`) only ever consumes/clears
+    /// the `Renew`/`Activate` slot, and the operator-invoked one-shot ops only ever
+    /// consume/clear their own `Rebind`/`Deactivate` slot. An ambiguous `/rebind`'s pin
+    /// therefore PERSISTS (same idempotency-key/body/nonce) until the OPERATOR's rebind
+    /// retry replays it verbatim — the background heartbeat loop is physically unable to
+    /// consume it (which would let a definitive `/heartbeat` rejection clear the rebind
+    /// pin → a fresh key on the operator's retry → a SECOND charge against the scarce
+    /// 3-free-per-AEST-year budget). Control-plane only.
+    pending: std::sync::Mutex<PendingSlots>,
+}
+
+/// Which logical operation a [`PendingAttempt`] belongs to (ADR-I009). The pin is
+/// keyed by this so a verb only ever replays/clears its OWN attempt — the automatic
+/// renew loop can never touch an operator-invoked rebind/deactivate pin, and vice
+/// versa (the no-cross-verb-replay + no-double-charge guarantee).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptVerb {
+    /// The automatic renew (`POST …/heartbeat`) path.
+    Renew,
+    /// The automatic first-contact enrolment (`POST …/activate`) path.
+    Activate,
+    /// The operator-invoked one-shot rebind (`POST …/rebind`) path.
+    Rebind,
+    /// The operator-invoked one-shot deactivate (`POST …/deactivate`) path.
+    Deactivate,
+}
+
+/// Per-verb pinned-attempt slots (ADR-I009). ONE slot PER VERB so no two verbs ever
+/// share pending state: an in-flight operator rebind/deactivate pin coexists with the
+/// always-running renew loop's pin without either overwriting the other, and clearing
+/// one verb's pin never touches another's. Renew and Activate get **separate** slots
+/// (r3 fix): although a device is normally either bound→renew or unbound→activate, the
+/// binding state can change between cycles (an ambiguous activate's pin persists, then a
+/// lease arrives via an install surface so the next cycle renews), and a shared slot
+/// would let a stale activate attempt be posted by the renew path. Separate slots make
+/// that structurally impossible.
+#[derive(Debug, Default)]
+struct PendingSlots {
+    /// The automatic renew (`POST …/heartbeat`) path's pin.
+    renew: Option<PendingAttempt>,
+    /// The automatic first-contact activate (`POST …/activate`) path's pin.
+    activate: Option<PendingAttempt>,
+    /// The operator-invoked rebind path's pin.
+    rebind: Option<PendingAttempt>,
+    /// The operator-invoked deactivate path's pin.
+    deactivate: Option<PendingAttempt>,
+}
+
+impl PendingSlots {
+    /// A `&mut` to the slot a given verb owns — one slot per verb (no sharing).
+    fn slot_mut(&mut self, verb: AttemptVerb) -> &mut Option<PendingAttempt> {
+        match verb {
+            AttemptVerb::Renew => &mut self.renew,
+            AttemptVerb::Activate => &mut self.activate,
+            AttemptVerb::Rebind => &mut self.rebind,
+            AttemptVerb::Deactivate => &mut self.deactivate,
+        }
+    }
 }
 
 /// A held device-PoP challenge nonce + the instant it expires (epoch ms), so the
@@ -1654,6 +2046,9 @@ struct PopNonce {
 /// `pop_header`), so pinning the body pins the nonce.
 #[derive(Debug, Clone)]
 struct PendingAttempt {
+    /// Which logical operation this attempt belongs to (ADR-I009) — the pin is keyed
+    /// by this so a verb only ever replays/clears its OWN attempt.
+    verb: AttemptVerb,
     /// The retry-stable Idempotency-Key (also tracked in [`IdempotencyState`]).
     idempotency_key: String,
     /// The EXACT JSON body bytes the transport POSTs verbatim (the PoP signed
@@ -1740,18 +2135,46 @@ impl NonceStore for InMemoryNonceStore {
 /// default).
 pub type SharedNonceStore = Arc<dyn NonceStore>;
 
-/// The retry-stable idempotency-key state for [`HeartbeatClient`]. `counter` only
-/// advances when a fresh key is minted (i.e. after a success rotates `current` to
-/// `None`), so each logical operation owns one stable key across its retries. The
-/// counter is seeded from (and committed to) a durable [`NonceStore`] so it does
-/// not reset on restart.
+/// The retry-stable idempotency-key state for [`HeartbeatClient`]. The `counter`
+/// only advances when a fresh key is minted, so each logical operation owns one
+/// stable key across its retries. The counter is seeded from (and committed to) a
+/// durable [`NonceStore`] so it does not reset on restart.
+///
+/// **The in-flight `current` key is PER-VERB (ADR-I009, money-path defence).** A
+/// single shared `current` would let one verb's freshly-minted key be handed to a
+/// DIFFERENT verb's next build (the renew loop reusing a pending rebind's key, posting
+/// a renew body under the rebind's idempotency-key) — a cross-verb idempotency
+/// collision and a budget-charge hazard. Keying `current` by [`AttemptVerb`] (the same
+/// per-verb slots as [`PendingSlots`]) means each verb's retry reuses only ITS OWN
+/// in-flight key, and the always-monotonic `counter` still guarantees every minted key
+/// is globally unique. (The verb-keyed [`PendingAttempt`] is the primary retry-stability
+/// mechanism; `current` is the pre-pin mint cache, now correctly per-verb.)
 #[derive(Debug, Default)]
 struct IdempotencyState {
-    /// Monotonic per-client mint counter (advances once per logical operation).
+    /// Monotonic per-client mint counter (advances once per logical operation, across
+    /// ALL verbs — every minted key is globally unique + monotonic).
     counter: u64,
-    /// The key for the in-flight logical operation, or `None` before the first
-    /// mint and after a success rotates it.
-    current: Option<String>,
+    /// The in-flight key for the automatic renew path.
+    current_renew: Option<String>,
+    /// The in-flight key for the automatic activate path.
+    current_activate: Option<String>,
+    /// The in-flight key for the operator-invoked rebind path.
+    current_rebind: Option<String>,
+    /// The in-flight key for the operator-invoked deactivate path.
+    current_deactivate: Option<String>,
+}
+
+impl IdempotencyState {
+    /// A `&mut` to the in-flight-key slot a given verb owns — one slot per verb (no
+    /// sharing), matching [`PendingSlots`] (ADR-I009 r3).
+    fn current_mut(&mut self, verb: AttemptVerb) -> &mut Option<String> {
+        match verb {
+            AttemptVerb::Renew => &mut self.current_renew,
+            AttemptVerb::Activate => &mut self.current_activate,
+            AttemptVerb::Rebind => &mut self.current_rebind,
+            AttemptVerb::Deactivate => &mut self.current_deactivate,
+        }
+    }
 }
 
 impl<S: LicenceServer> HeartbeatClient<S> {
@@ -1927,7 +2350,12 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         nonce_store: SharedNonceStore,
         device_signer: Option<Arc<dyn DeviceSigner>>,
     ) -> Self {
-        let learned_binding_id = std::sync::Mutex::new(identity.binding_id.clone());
+        // NOT seeded from `identity.binding_id` (ADR-I009): `learned_binding_id` holds
+        // ONLY genuinely server-learned ids, so `resolve_binding_id` applies the honest
+        // precedence (genuinely-learned → store → configured) and a stale configured id
+        // never short-circuits a fresher learned/installed binding. The configured value
+        // is the FINAL fallback in `resolve_binding_id` (and the renew/no-binding path).
+        let learned_binding_id = std::sync::Mutex::new(None);
         Self {
             server,
             store,
@@ -1940,7 +2368,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             nonce_store,
             device_signer,
             pop_nonce: std::sync::Mutex::new(None),
-            pending: std::sync::Mutex::new(None),
+            pending: std::sync::Mutex::new(PendingSlots::default()),
         }
     }
 
@@ -1962,12 +2390,15 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// # Errors
     /// [`HeartbeatError::NonceStore`] when the durable nonce store cannot be trusted
     /// (a present-but-corrupt load, or a non-persisting commit).
-    fn idempotency_key(&self) -> Result<String, HeartbeatError> {
+    fn idempotency_key(&self, verb: AttemptVerb) -> Result<String, HeartbeatError> {
         let mut guard = match self.idempotency.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some(existing) = guard.current.clone() {
+        // Reuse only THIS verb's in-flight key (ADR-I009) — never another verb's, so a
+        // pending rebind's key is never handed to a building renew (no cross-verb
+        // idempotency collision / budget hazard).
+        if let Some(existing) = guard.current_mut(verb).clone() {
             return Ok(existing);
         }
         // Read the durable high-water FIRST — a present-but-corrupt value fails
@@ -1977,7 +2408,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         // AND the durable high-water — so a restart (in-memory resets to 0, durable
         // persists) never reuses a prior lifetime's value. `saturating_add` (not
         // `wrapping_add`) so the monotonic guarantee never wraps back to a reused
-        // low value.
+        // low value. The counter is GLOBAL across verbs, so every minted key is unique.
         let counter = guard.counter.max(durable).saturating_add(1);
         // Commit the new high-water DURABLY before exposing the key: only on a
         // successful persist do we advance in-process state and return. A commit
@@ -1987,67 +2418,98 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         self.nonce_store.commit(counter)?;
         guard.counter = counter;
         let key = format!("mv-{}-{counter}", self.identity.machine_id);
-        guard.current = Some(key.clone());
+        *guard.current_mut(verb) = Some(key.clone());
         Ok(key)
     }
 
-    /// Rotate the idempotency key after a SUCCESSFUL contact, so the NEXT logical
-    /// operation mints a fresh key. Called only on a positive outcome (install /
-    /// stale-no-op / withheld lease) — never on a failure, so a failure's retry
-    /// replays the same key. A poisoned lock recovers by clearing the inner value.
-    fn rotate_idempotency(&self) {
+    /// Rotate **`verb`'s** idempotency key after a SUCCESSFUL contact, so the NEXT
+    /// operation of that verb mints a fresh key. Called only on a positive outcome
+    /// (install / stale-no-op / withheld lease) — never on a failure, so a failure's
+    /// retry replays the same key. Clears ONLY that verb's slot (ADR-I009): a renew
+    /// success never rotates a pending rebind/deactivate key. A poisoned lock recovers
+    /// by clearing the inner value.
+    fn rotate_idempotency(&self, verb: AttemptVerb) {
         match self.idempotency.lock() {
-            Ok(mut g) => g.current = None,
-            Err(poisoned) => poisoned.into_inner().current = None,
+            Ok(mut g) => *g.current_mut(verb) = None,
+            Err(poisoned) => *poisoned.into_inner().current_mut(verb) = None,
         }
     }
 
     /// The pinned in-flight attempt to REPLAY on a retry, or `None` for a fresh
     /// logical operation. A poisoned lock recovers by reading the inner value.
-    fn pinned_attempt(&self) -> Option<PendingAttempt> {
-        match self.pending.lock() {
-            Ok(g) => g.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
+    /// The pinned attempt **for `verb`**, if any (ADR-I009 verb-keyed pin). A verb
+    /// only ever sees its OWN slot — so the renew loop never replays a rebind/
+    /// deactivate attempt (no cross-verb replay) and an operator op never replays a
+    /// renew attempt.
+    fn pinned_attempt(&self, verb: AttemptVerb) -> Option<PendingAttempt> {
+        let mut guard = match self.pending.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let slot = guard.slot_mut(verb);
+        // Defence in depth: a slot only ever returns an attempt whose `.verb` matches
+        // the requested verb. With one slot per verb this always holds, but the explicit
+        // guard means a wrong-verb attempt is NEVER replayed/posted (it is dropped so the
+        // caller mints a fresh attempt for the requested verb) — no cross-verb body/proof
+        // can reach the wrong endpoint (ADR-I009 r3).
+        match slot {
+            Some(attempt) if attempt.verb == verb => Some(attempt.clone()),
+            Some(_) => {
+                *slot = None;
+                None
+            }
+            None => None,
         }
     }
 
-    /// Pin the attempt so any retry of an ambiguous/failed contact replays the SAME
-    /// `{Idempotency-Key, body, nonce, proof}` (ADR-I007 retry coupling).
+    /// Pin the attempt in ITS verb's slot so any retry of an ambiguous/failed contact
+    /// replays the SAME `{Idempotency-Key, body, nonce, proof}` (ADR-I007 retry
+    /// coupling). The verb is read off the attempt itself ([`PendingAttempt::verb`]).
     fn pin_attempt(&self, attempt: PendingAttempt) {
-        match self.pending.lock() {
-            Ok(mut g) => *g = Some(attempt),
-            Err(poisoned) => *poisoned.into_inner() = Some(attempt),
-        }
+        let verb = attempt.verb;
+        let mut guard = match self.pending.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard.slot_mut(verb) = Some(attempt);
     }
 
-    /// Clear the pinned attempt AND rotate the Idempotency-Key on a SUCCESSFUL
-    /// contact — they are one retry unit, so the next cycle builds a wholly fresh
-    /// attempt (fresh nonce + body + key). Called once per success, before the
-    /// install-outcome handling below.
-    fn clear_pending(&self) {
-        match self.pending.lock() {
-            Ok(mut g) => *g = None,
-            Err(poisoned) => *poisoned.into_inner() = None,
+    /// Clear the pinned attempt **for `verb`** AND rotate the Idempotency-Key on a
+    /// SUCCESSFUL contact — they are one retry unit, so the next op of that verb builds
+    /// a wholly fresh attempt (fresh nonce + body + key). Clears ONLY that verb's slot
+    /// (ADR-I009): a renew success never clears a pending rebind/deactivate, and vice
+    /// versa.
+    fn clear_pending(&self, verb: AttemptVerb) {
+        {
+            let mut guard = match self.pending.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *guard.slot_mut(verb) = None;
         }
-        self.rotate_idempotency();
+        self.rotate_idempotency(verb);
     }
 
-    /// Recover from a DEFINITIVE server rejection (`ServerRejected` — 401
+    /// Recover from a DEFINITIVE server rejection of `verb` (`ServerRejected` — 401
     /// pop-invalid/pop-required or 409 body-mismatch; ADR-I007 §8, round 3). The
     /// single-use PoP nonce was SEEN + burned server-side, so:
-    /// 1. drop the pinned attempt + rotate the Idempotency-Key ([`clear_pending`]) —
-    ///    the burned attempt must NEVER be replayed (a verbatim replay loops
-    ///    pop-invalid forever and strands renewal);
+    /// 1. drop the pinned attempt **for that verb** + rotate the Idempotency-Key
+    ///    ([`clear_pending`]) — the burned attempt must NEVER be replayed (a verbatim
+    ///    replay loops pop-invalid forever and strands the op); a DIFFERENT verb's pin
+    ///    is left UNTOUCHED (ADR-I009);
     /// 2. clear any held PoP nonce so the next cycle COLD-STARTS a fresh
     ///    `GET /challenge` and signs a FRESH proof.
     ///
     /// The device **key is untouched** — only the single-use nonce is burned. Keeps
     /// last-good (never off air): the cycle still returns an error, the loop backs
     /// off, and the NEXT cycle recovers cleanly.
-    fn reset_on_rejection(&self) {
-        self.clear_pending();
+    fn reset_on_rejection(&self, verb: AttemptVerb) {
+        self.clear_pending(verb);
         // Drop the held nextNonce — it is either the just-burned one or stale; the
-        // next cycle must fetch a fresh challenge, never present a burned nonce.
+        // next cycle must fetch a fresh challenge, never present a burned nonce. The
+        // nonce is a single shared DPoP-nonce (the server burns whichever it saw), so
+        // a definitive rejection of ANY verb invalidates the held nonce — clearing it
+        // is correct regardless of verb (the next op re-fetches a fresh challenge).
         match self.pop_nonce.lock() {
             Ok(mut g) => *g = None,
             Err(poisoned) => *poisoned.into_inner() = None,
@@ -2159,11 +2621,32 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         self.config.api_base.as_str()
     }
 
-    /// The binding id to address renewals by: the learned/configured
-    /// `instanceBindingId`, or `None` until activation discovers it. NEVER the
-    /// lease serial.
+    /// The **genuinely server-learned** binding id (set by
+    /// [`remember_binding_id`](Self::remember_binding_id) on a real install/activate),
+    /// or `None` before any learn. This is NOT seeded from the configured
+    /// `identity.binding_id` — so the resolution chains can apply the honest precedence
+    /// *genuinely-learned → store → configured* (ADR-I009). NEVER the lease serial.
     fn binding_id(&self) -> Option<String> {
         self.learned_binding_id.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Resolve the binding id for a continuity operation — the **honest precedence**
+    /// (ADR-I009): a genuinely **server-learned** binding
+    /// ([`binding_id`](Self::binding_id)) first, then the **store's installed-lease**
+    /// binding ([`current_binding_id`](crate::store::LeaseStore::current_binding_id)),
+    /// then the **configured** `identity.binding_id`, then `None`. Shared by the renew
+    /// resolution and the rebind/deactivate lifecycle ops so all three agree.
+    ///
+    /// The key correctness point (the iso-lens finding): a **stale configured** id must
+    /// NOT short-circuit a fresher server-learned or installed-store binding. Because
+    /// `learned_binding_id` is no longer seeded from config, learned holds only real
+    /// server ids; and the store (the installed lease) outranks a configured guess. A
+    /// configured-only device (no learn, no installed lease) still resolves via the
+    /// final `identity.binding_id` arm, so the renew/no-binding contract is unchanged.
+    fn resolve_binding_id(&self) -> Option<String> {
+        self.binding_id()
+            .or_else(|| self.store.current_binding_id())
+            .or_else(|| self.identity.binding_id.clone())
     }
 
     /// Record the server-issued `instanceBindingId` from a verified lease body so
@@ -2257,9 +2740,12 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         //    current lease binding. A device that already holds a lease is NEVER
         //    "fresh": a foreign-binding lease is rejected because it has an identity
         //    to violate.
-        let established_binding = self
-            .binding_id()
-            .or_else(|| self.store.current_binding_id());
+        // Resolve the binding to RENEW with the honest precedence (ADR-I009):
+        // genuinely-learned → store's installed lease → configured `identity.binding_id`.
+        // (The configured arm replaces the old `learned_binding_id` config pre-seed, so a
+        // configured-only device still renews; a stale configured no longer outranks a
+        // fresher learned/installed binding — which previously caused a BindingMismatch.)
+        let established_binding = self.resolve_binding_id();
 
         // No established binding: either ENROL (first-contact activate, ADR-I008) or
         // — renew-only — no-op. With `enable_activate` the device registers online:
@@ -2300,8 +2786,9 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         //    durable Idempotency-Key. EVERY build step fails closed BEFORE the
         //    mutation (a PoP/challenge/nonce-store failure `?`-propagates and sends
         //    nothing) — keep last-good, retry next cycle, never off air (inv #1/#10).
-        let attempt = if let Some(pinned) = self.pinned_attempt() {
-            // A retry of an in-flight attempt — replay it verbatim.
+        let attempt = if let Some(pinned) = self.pinned_attempt(AttemptVerb::Renew) {
+            // A retry of an in-flight RENEW attempt — replay it verbatim. (Verb-keyed:
+            // this NEVER returns a pending rebind/deactivate attempt — ADR-I009.)
             pinned
         } else {
             // A genuinely-new logical operation — build a fresh attempt + pin it.
@@ -2321,8 +2808,9 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             // Mint the durable Idempotency-Key LAST (after the fallible PoP build, so
             // a PoP failure never burns a counter), then PIN the whole unit so any
             // retry replays it byte-for-byte.
-            let idempotency_key = self.idempotency_key()?;
+            let idempotency_key = self.idempotency_key(AttemptVerb::Renew)?;
             let attempt = PendingAttempt {
+                verb: AttemptVerb::Renew,
                 idempotency_key,
                 body,
                 pop_header,
@@ -2369,9 +2857,10 @@ impl<S: LicenceServer> HeartbeatClient<S> {
                 // wrongly drop a nonce the server never saw. The shipped ConspectHttpServer +
                 // the test fake decode the body only after status.is_success(), upholding it.
                 //
-                // Drop the pinned attempt + burned nonce so the next cycle recovers with a
-                // fresh challenge (a fresh idempotency-keyed unit; the lease re-renews safely).
-                self.reset_on_rejection();
+                // Drop the pinned RENEW attempt + burned nonce so the next cycle recovers
+                // with a fresh challenge (a fresh idempotency-keyed unit; the lease
+                // re-renews safely). Verb-keyed: a pending rebind/deactivate is UNTOUCHED.
+                self.reset_on_rejection(AttemptVerb::Renew);
                 return Err(err);
             }
             // Ambiguous (no response / 5xx → Transport, per the trait contract): the server
@@ -2384,12 +2873,12 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             resp.next_due,
             resp.next_nonce,
         );
-        // The contact succeeded → this logical operation is DONE. Clear the pinned
+        // The contact succeeded → this logical operation is DONE. Clear the pinned RENEW
         // attempt + rotate the Idempotency-Key so the next cycle is a fresh unit, and
         // remember the server's `nextNonce` for it (steady-state DPoP-nonce; an empty
         // one cold-starts next cycle). The success-clear happens here for the
         // withheld-lease early return below AND every install outcome.
-        self.clear_pending();
+        self.clear_pending(AttemptVerb::Renew);
         self.remember_next_nonce(&next_nonce);
 
         // 5. A withheld lease (revocation by non-reissue) is a normal outcome:
@@ -2472,7 +2961,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         let _ = TrustedKeys::verify(&keys, &self.pinned, now_ms)?;
 
         // 2. Build or REPLAY the in-flight activate attempt as one retry unit.
-        let attempt = if let Some(pinned) = self.pinned_attempt() {
+        let attempt = if let Some(pinned) = self.pinned_attempt(AttemptVerb::Activate) {
             pinned
         } else {
             // Fetch a fresh challenge — activate needs the nonce AND the
@@ -2505,8 +2994,9 @@ impl<S: LicenceServer> HeartbeatClient<S> {
                 self.build_activate_pop_header(&body, &challenge.instance_id, &req.nonce)?;
             // Mint the durable Idempotency-Key LAST (after the fallible PoP build),
             // then pin the whole unit for verbatim replay.
-            let idempotency_key = self.idempotency_key()?;
+            let idempotency_key = self.idempotency_key(AttemptVerb::Activate)?;
             let attempt = PendingAttempt {
+                verb: AttemptVerb::Activate,
                 idempotency_key,
                 body,
                 pop_header,
@@ -2530,7 +3020,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             Err(err @ (HeartbeatError::ServerRejected(_) | HeartbeatError::Malformed(_))) => {
                 // A RECEIVED contact burned the single-use nonce — drop the pinned
                 // attempt + nonce so the next cycle re-enrols with a fresh challenge.
-                self.reset_on_rejection();
+                self.reset_on_rejection(AttemptVerb::Activate);
                 return Err(err);
             }
             // Ambiguous (no response / 5xx → Transport): leave the attempt pinned to
@@ -2540,7 +3030,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         let (lease, _state, next_nonce) = (resp.lease, resp.enforcement_state, resp.next_nonce);
         // The contact succeeded → this logical operation is DONE. Clear/rotate the
         // attempt + remember the server's nextNonce (seeds the steady-state renew).
-        self.clear_pending();
+        self.clear_pending(AttemptVerb::Activate);
         self.remember_next_nonce(&next_nonce);
 
         // A null activate lease is a fail-closed keep-last-good (the device is not
@@ -2598,6 +3088,225 @@ impl<S: LicenceServer> HeartbeatClient<S> {
             &htu,
             body,
             server_instance_id,
+            nonce_hex,
+            iat,
+        )?;
+        Ok(header)
+    }
+
+    /// One **device REBIND** lifecycle cycle (ADR-I009). Operator-invoked (NOT a
+    /// `run_once`/`run_forever` branch — auto-rebind would silently spend the scarce
+    /// 3-free-per-AEST-year budget). It reactivates the device's already-bound
+    /// instance against refreshed hardware:
+    ///
+    /// 1. Pre-network key-trust fast-fail.
+    /// 2. Build (or REPLAY) the pinned attempt as ONE retry unit — fetch a fresh
+    ///    `/challenge` for the single-use nonce, build the [`RebindRequest`] over the
+    ///    device's OWN binding/instance id (continuity), serialise ONCE, sign the PoP
+    ///    over those bytes (binding the device's own `instance_id`), mint the durable
+    ///    key LAST, pin.
+    /// 3. `POST /rebind` with the status-aware retry: `ServerRejected`/`Malformed`
+    ///    (a received contact that burned the nonce) drops the pinned attempt + nonce
+    ///    and recovers; an ambiguous `Transport` (incl. a `409` per the lifecycle
+    ///    contract) keeps it pinned to replay verbatim — so a re-invocation on this
+    ///    SAME running client replays the SAME idempotency-key (no double charge).
+    /// 4. On a positively-decoded [`RebindResponse`]: clear/rotate the attempt and seed
+    ///    the steady-state nonce from `nextNonce`. The response carries only a serial
+    ///    (no embedded signed lease), so NOTHING is installed here — the next renew
+    ///    installs the refreshed lease via the unchanged chokepoint. Keeps last-good on
+    ///    every failure (never off air, inv #1/#10).
+    ///
+    /// # Errors
+    /// [`HeartbeatError`] on transport / trust / PoP failure — every one keeps
+    /// last-good; nothing is installed or removed.
+    pub async fn rebind_once(&self, licence_id: &str) -> Result<HeartbeatOutcome, HeartbeatError> {
+        // The binding to rebind: the SAME `resolve_binding_id` chain as renew + deactivate
+        // — genuinely-learned → store's installed lease → configured (ADR-I009). A device
+        // whose binding was LEARNED from the server (or is in the store) rebinds under THAT
+        // id; a stale configured id never short-circuits it, and `instance_id` is never a
+        // bindingId fallback. Fail closed if none is known (nothing to rebind).
+        let binding_id = self.resolve_binding_id().ok_or_else(|| {
+            HeartbeatError::Pop(PopError::Cose(
+                "no established binding to rebind".to_owned(),
+            ))
+        })?;
+
+        // 1. Pre-network key-trust fast-fail.
+        let keys = self.server.fetch_keys().await?;
+        let now_ms = (self.now_ms)();
+        let _ = TrustedKeys::verify(&keys, &self.pinned, now_ms)?;
+
+        // 2. Build or REPLAY the in-flight REBIND attempt as one retry unit. Verb-keyed
+        //    (ADR-I009): this slot is touched ONLY by rebind — the automatic renew loop
+        //    can never consume or clear it, so an ambiguous rebind's pin PERSISTS until
+        //    the OPERATOR's rebind retry replays it verbatim (no double charge).
+        let attempt = if let Some(pinned) = self.pinned_attempt(AttemptVerb::Rebind) {
+            pinned
+        } else {
+            let nonce = self.obtain_pop_nonce(&self.config.org_id).await?;
+            let challenge = DeviceChallenge::new(nonce, 0, String::new());
+            let req = build_rebind_request_for(&self.identity, licence_id, &binding_id, &challenge);
+            let body = serde_json::to_vec(&req)
+                .map_err(|e| HeartbeatError::Malformed(format!("rebind body serialise: {e}")))?;
+            let pop_header = self.build_lifecycle_pop_header("rebind", &body, &req.nonce)?;
+            let idempotency_key = self.idempotency_key(AttemptVerb::Rebind)?;
+            let attempt = PendingAttempt {
+                verb: AttemptVerb::Rebind,
+                idempotency_key,
+                body,
+                pop_header,
+            };
+            self.pin_attempt(attempt.clone());
+            attempt
+        };
+
+        // 3. POST the pinned attempt with the lifecycle status-aware retry contract.
+        let resp = match self
+            .server
+            .rebind(
+                &self.config.org_id,
+                attempt.body.clone(),
+                &attempt.idempotency_key,
+                &attempt.pop_header,
+            )
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err @ (HeartbeatError::ServerRejected(_) | HeartbeatError::Malformed(_))) => {
+                // A RECEIVED definitive contact burned the nonce — drop the REBIND pin +
+                // recover. Verb-keyed: a pending renew/deactivate is UNTOUCHED.
+                self.reset_on_rejection(AttemptVerb::Rebind);
+                return Err(err);
+            }
+            // Ambiguous (Transport, incl. a 409 per the lifecycle contract): keep the
+            // attempt pinned so a re-invocation on this client replays it verbatim
+            // (the server dedups on the Idempotency-Key — no second rebind charge).
+            Err(err) => return Err(err),
+        };
+
+        // 4. The contact succeeded → clear/rotate the REBIND pin + seed the steady-state
+        //    nonce. The response carries only a serial, so NOTHING is installed here (the
+        //    next renew installs the refreshed lease).
+        self.clear_pending(AttemptVerb::Rebind);
+        self.remember_next_nonce(&resp.next_nonce);
+        Ok(HeartbeatOutcome::Rebound {
+            rebound: resp.rebound,
+            lease_serial: resp.lease_serial,
+            rebinds_this_year: resp.rebinds_this_year,
+            seat_consumed: resp.seat_consumed,
+        })
+    }
+
+    /// One **device DEACTIVATE** lifecycle cycle (ADR-I009). Operator-invoked. It
+    /// returns the binding's seat server-side (idempotent) and installs **nothing**
+    /// locally — the last-good lease ages out via the offline ladder (never off air).
+    /// Same four-stage shape as [`rebind_once`](Self::rebind_once) minus any install:
+    /// fetch challenge → build [`DeactivateRequest`] (the device's own binding id +
+    /// nonce) → sign the PoP (binding the device's own `instance_id`) → `POST
+    /// /deactivate` with the lifecycle retry → on a `2xx` clear/rotate the attempt and
+    /// return. It does NOT seed a renew nonce (there is nothing to renew after a
+    /// surrender) and does NOT touch the store or engine.
+    ///
+    /// # Errors
+    /// [`HeartbeatError`] on transport / trust / PoP failure — every one keeps
+    /// last-good; nothing is installed or removed.
+    pub async fn deactivate_once(&self) -> Result<HeartbeatOutcome, HeartbeatError> {
+        // The binding to decommission: the SAME `resolve_binding_id` chain as renew +
+        // rebind — genuinely-learned → store's installed lease → configured (ADR-I009);
+        // a stale configured id never short-circuits a fresher learned/installed binding.
+        // Fail closed if none is known (nothing to deactivate).
+        let binding_id = self.resolve_binding_id().ok_or_else(|| {
+            HeartbeatError::Pop(PopError::Cose(
+                "no established binding to deactivate".to_owned(),
+            ))
+        })?;
+
+        // 1. Pre-network key-trust fast-fail.
+        let keys = self.server.fetch_keys().await?;
+        let now_ms = (self.now_ms)();
+        let _ = TrustedKeys::verify(&keys, &self.pinned, now_ms)?;
+
+        // 2. Build or REPLAY the in-flight DEACTIVATE attempt as one retry unit.
+        //    Verb-keyed (ADR-I009): touched ONLY by deactivate — the renew loop can
+        //    never consume or clear it (no cross-verb replay, idempotent surrender).
+        let attempt = if let Some(pinned) = self.pinned_attempt(AttemptVerb::Deactivate) {
+            pinned
+        } else {
+            let nonce = self.obtain_pop_nonce(&self.config.org_id).await?;
+            let req = build_deactivate_request(&binding_id, &nonce);
+            let body = serde_json::to_vec(&req).map_err(|e| {
+                HeartbeatError::Malformed(format!("deactivate body serialise: {e}"))
+            })?;
+            let pop_header = self.build_lifecycle_pop_header("deactivate", &body, &req.nonce)?;
+            let idempotency_key = self.idempotency_key(AttemptVerb::Deactivate)?;
+            let attempt = PendingAttempt {
+                verb: AttemptVerb::Deactivate,
+                idempotency_key,
+                body,
+                pop_header,
+            };
+            self.pin_attempt(attempt.clone());
+            attempt
+        };
+
+        // 3. POST with the lifecycle status-aware retry contract.
+        let resp = match self
+            .server
+            .deactivate(
+                &self.config.org_id,
+                attempt.body.clone(),
+                &attempt.idempotency_key,
+                &attempt.pop_header,
+            )
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err @ (HeartbeatError::ServerRejected(_) | HeartbeatError::Malformed(_))) => {
+                // Verb-keyed: drops only the DEACTIVATE pin; renew/rebind are UNTOUCHED.
+                self.reset_on_rejection(AttemptVerb::Deactivate);
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        };
+
+        // 4. The contact succeeded → clear/rotate the DEACTIVATE pin. Drop the held
+        //    nonce too (there is no renew after a surrender). Install NOTHING — the
+        //    local lease ages out.
+        self.clear_pending(AttemptVerb::Deactivate);
+        self.remember_next_nonce(""); // clear: no steady-state renew after surrender
+        Ok(HeartbeatOutcome::Deactivated {
+            binding_id: resp.id,
+            lifecycle_state: resp.lifecycle_state,
+        })
+    }
+
+    /// Build the `Conspect-Device-PoP` header for a **rebind**/**deactivate** request
+    /// (ADR-I009): the base64 `COSE_Sign1` over the canonical pre-image with the verb's
+    /// `htu` and the device's **OWN** durable `instance_id` bound in (continuity).
+    /// `verb` is `"rebind"` or `"deactivate"`. Fail closed (a missing signer / COSE
+    /// error is a [`HeartbeatError::Pop`] — no lifecycle op is sent without a proof).
+    fn build_lifecycle_pop_header(
+        &self,
+        verb: &str,
+        body: &[u8],
+        nonce_hex: &str,
+    ) -> Result<String, HeartbeatError> {
+        let signer = self
+            .device_signer
+            .as_ref()
+            .ok_or_else(|| PopError::Cose("no device signer configured".to_owned()))?;
+        let htu = format!(
+            "{}/organisations/{}/{verb}",
+            self.api_base_for_pop(),
+            self.config.org_id
+        );
+        let iat = (self.now_ms)() / 1000; // epoch seconds (server checks ±60s)
+        let header = pop_header_value(
+            signer.as_ref(),
+            "POST",
+            &htu,
+            body,
+            &self.identity.instance_id,
             nonce_hex,
             iat,
         )?;
@@ -2737,6 +3446,15 @@ impl<S: LicenceServer> HeartbeatClient<S> {
                     backoff = self.config.min_interval;
                     let sleep = sleep_until_due(next_due, self.config.min_interval);
                     tokio::time::sleep(sleep).await;
+                }
+                // The one-shot lifecycle outcomes (ADR-I009) are NEVER produced by
+                // `run_once` — they only ever come from `rebind_once`/`deactivate_once`,
+                // which the operator drives directly, not the renew loop. This arm is a
+                // defensive no-op (re-check on the min interval) so the match stays
+                // exhaustive without inventing a renew cadence for a one-shot result.
+                Ok(HeartbeatOutcome::Rebound { .. } | HeartbeatOutcome::Deactivated { .. }) => {
+                    backoff = self.config.min_interval;
+                    tokio::time::sleep(self.config.min_interval).await;
                 }
                 Err(err) => {
                     tracing::info!(

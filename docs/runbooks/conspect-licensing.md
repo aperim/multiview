@@ -117,10 +117,65 @@ machine runs unlicensed-honest):
 | `MULTIVIEW_LICENCE_DIR` | lease-state dir (default `/var/lib/conspect/licence/`) |
 | `MULTIVIEW_LICENCE_DEVICE_KEY` | **legacy public-key string — inert for PoP** (deprecation candidate) |
 | `MULTIVIEW_LICENCE_CLAIM_CODE` | optional 6-char paid claim code sent on **activate** (ADR-I008); **unset → free non-commercial auto-issue** |
+| `MULTIVIEW_LICENCE_LICENCE_ID` | licence id the binding draws its seat from — **required by the device REBIND op** (ADR-I009, `RebindRequest.licenceId`); unused by heartbeat/activate/deactivate |
 
 The remaining `MULTIVIEW_LICENCE_*` vars (machine/instance/binding ids, fingerprint
 digest/score, hardware/discriminator digests) carry the salted device identity on the
 renew request — never raw serials/MACs (data minimisation, ADR-0036 §8).
+
+## Device lifecycle ops — REBIND + DEACTIVATE (ADR-I009)
+
+Two **operator-invoked, one-shot** device-initiated lifecycle ops complement the
+always-on renew loop. They are **device-PoP-signed** (continuity — the server verifies
+the binding's STORED key; neither carries `devicePublicKey`, which is activate-only) and
+**idempotent** (`Idempotency-Key`). They run on the **same in-process client** the
+heartbeat daemon uses, so the in-memory retry pin + the single-owner `FileNonceStore`
+flock stay coherent — an ambiguous network failure replays the **same** Idempotency-Key
+verbatim and **never double-charges** the scarce rebind budget. Both **fail closed** and
+**never take output off air** (they hold no engine handle).
+
+> Programmatically they are `EntitlementPlane::rebind()` / `EntitlementPlane::deactivate()`.
+> Invoke them via the running daemon (the operator surface — a CLI subcommand / the
+> account-side `system/actions` re-claim affordance — is the thin presentation layer).
+
+### REBIND — lawful hardware change / fingerprint self-heal
+
+When this device's salted fingerprint match score against its binding drops below `70`
+(a disk swap, NIC change, re-platform — the self-heal trigger), an operator **rebinds**:
+it reactivates the **same** binding (consumes **no new seat**) and refreshes the lease.
+
+- **Budget:** rebind charges the **3-free-per-licence-per-AEST-calendar-year** budget
+  (server-side; the response carries `rebindsThisYear`). The **4th** in a year is a
+  `409 rebinds-exhausted` — the client surfaces it and keeps last-good (no local retry
+  loop; the only recovery is the next AEST year or a paid seat).
+- **Config:** rebind requires `MULTIVIEW_LICENCE_LICENCE_ID` (the `RebindRequest.licenceId`)
+  in addition to the four heartbeat essentials + the device-identity triple.
+- **The fingerprint handoff (load-bearing):** `RebindResponse` carries only a
+  `leaseSerial` (NOT an embedded signed lease), so the rebind itself installs **nothing**
+  — it seeds the steady-state nonce and the **next renew** installs the refreshed lease
+  via the unchanged chokepoint. For that renew's install to clear the local `≥ 70`
+  fingerprint-continuity gate, **update `MULTIVIEW_LICENCE_FP_SCORE` to the post-rebind
+  self-match** (the new hardware scores ~100 against the refreshed binding) **before** the
+  next renew. If the configured score is still the pre-rebind `< 70`, the renew install is
+  rejected `FingerprintMismatch` and the refreshed lease never installs (still never off
+  air — keep-last-good — but a stuck refresh).
+- **Verify:** the op returns `Rebound { rebound: true, seat_consumed: false,
+  rebinds_this_year: N }`; the next renew returns `200` with a fresh lease.
+
+### DEACTIVATE — graceful seat surrender / decommission
+
+When retiring a device, an operator **deactivates**: it returns the seat server-side (the
+binding moves to `lifecycleState: released`), is idempotent (a re-deactivate is a `200`
+no-op), and issues **no** new lease (revocation by non-reissue).
+
+- **Local effect (important):** deactivate installs **nothing** and does **NOT** stop
+  local output. The installed last-good lease keeps the program on air and **ages out via
+  the offline ladder** (up to `LEASE_FULL = 35d`, then grace/hard) — a decommissioned
+  seat keeps producing output for **weeks**, not minutes. There is **no kill verb** (by
+  design — invariant #1). For an immediate local stop, **stop the `multiview` process**.
+- After a successful deactivate, **stop the heartbeat loop** (nothing to renew — the
+  server will non-reissue); the lease then expires on its own offline clock.
+- **Verify:** the op returns `Deactivated { lifecycle_state: "released" }`.
 
 ## Rule-26 — live-server PoP validation (REQUIRED operator action)
 
@@ -172,6 +227,16 @@ unit-tested but **NOT** live-server-validated here):
   first-contact unknowns to confirm against the live server: that the PoP pre-image
   `instance_id` on activate is the **server-assigned** `DeviceChallenge.instanceId`
   (echoed), and that activate carries `devicePublicKey` while heartbeat omits it.
+- **Rebind (ADR-I009):** with a bound device + `MULTIVIEW_LICENCE_LICENCE_ID` set,
+  trigger a rebind and confirm `POST /rebind` returns `200` (`rebound: true`,
+  `seatConsumed: false`, `rebindsThisYear: N`), not `401 pop-invalid` / `409`. The
+  load-bearing rebind unknown to confirm: that the PoP pre-image `instance_id` is the
+  device's **OWN** durable id (continuity), **not** a challenge id; and that after
+  updating `MULTIVIEW_LICENCE_FP_SCORE` to the post-rebind self-match, the **next renew**
+  installs the refreshed lease (the response carries only a `leaseSerial`).
+- **Deactivate (ADR-I009):** trigger a deactivate and confirm `POST /deactivate` returns
+  `200` with `lifecycleState: released` (idempotent on a repeat), and that the local
+  program **stays on air** afterwards (the last-good lease ages out — no kill).
 
 A `pop-invalid` points at one of the four byte-level items above (or a key/continuity
 mismatch); flip the corresponding item and re-test.
@@ -185,6 +250,11 @@ mismatch); flip the corresponding item and re-test.
 | `/challenge` unreachable at cold start | network / server down with no held `nextNonce` | skips the cycle; keeps last-good; retries (fresh `/challenge`) next cycle |
 | Held/fresh nonce expired | clock skew / slow round-trip | fails closed; fetches a fresh `/challenge` next cycle |
 | `lease: null` in a `200` | revoked entitlement (revocation by non-reissue) | keeps last-good; ages it via the ladder; never tightens output on its own |
+| `409` on rebind/deactivate | rebinds-exhausted / discriminator-mismatch / no-live-instance / same key still in progress (body-less, overloaded) | maps to `Transport` → replays the **same** Idempotency-Key (server dedups; **no second rebind charge**); a persistent `409` surfaces to the operator (e.g. budget exhausted) |
+| Rebind `200` but the next renew won't install | `MULTIVIEW_LICENCE_FP_SCORE` still the pre-rebind `< 70` → the local continuity gate rejects the refreshed lease | keeps last-good (never off air); fix: set the post-rebind self-match score, then the next renew installs |
+| `multiview licence rebind` with no licence id | `MULTIVIEW_LICENCE_LICENCE_ID` unset | fails closed with a clear message; sends nothing; keeps last-good |
 
 None of these stop the program output — the device-licensing client holds **no** engine
-handle and is physically unable to back-pressure the output clock.
+handle and is physically unable to back-pressure the output clock. A **successful
+deactivate** likewise does not stop output: the seat is surrendered server-side and the
+local lease ages out via the ladder (no kill verb — invariant #1).

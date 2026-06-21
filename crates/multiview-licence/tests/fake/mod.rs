@@ -38,9 +38,9 @@ use p256::ecdsa::{Signature as P256Sig, SigningKey as P256Key};
 use ed25519_dalek::{Verifier as _, VerifyingKey as EdVerifyingKey};
 use multiview_licence::heartbeat::{
     canonical_key_preimage, canonical_revocation_preimage, ActivateRequest, ActivateResponse,
-    DeviceChallenge, DeviceSigner, EnforcementState, HeartbeatError, HeartbeatRequest,
-    HeartbeatResponse, LeaseBodyFields, LicenceServer, LicensingKeys, PinnedRoot, ServerLease,
-    TrustedKeys,
+    DeactivateRequest, DeactivateResponse, DeviceChallenge, DeviceSigner, EnforcementState,
+    HeartbeatError, HeartbeatRequest, HeartbeatResponse, LeaseBodyFields, LicenceServer,
+    LicensingKeys, PinnedRoot, RebindRequest, RebindResponse, ServerLease, TrustedKeys,
 };
 
 /// The fixed device-key seed the PoP loop tests sign with, so the fake can verify
@@ -618,6 +618,24 @@ pub struct FakeLicenceServer {
     /// subsequent renew (`heartbeat`) serves a lease bound to the SAME id (otherwise
     /// the renew would `BindingMismatch` against the activate-learned binding).
     activated_binding: std::sync::Mutex<Option<String>>,
+    // --- device REBIND + DEACTIVATE lifecycle (ADR-I009) ---
+    /// Counts `rebind` calls (the lifecycle loop test asserts exactly one).
+    rebinds: AtomicU64,
+    /// Counts `deactivate` calls.
+    deactivates: AtomicU64,
+    /// The `instanceId` the most recent rebind REQUEST carried (the test asserts it is
+    /// the device's OWN id — continuity, not a server-assigned challenge id).
+    last_rebind_instance_id: std::sync::Mutex<Option<String>>,
+    /// The `bindingId` the most recent rebind REQUEST carried (the test asserts it is
+    /// the device's resolved binding — store-learned id, not the instance_id fallback).
+    last_rebind_binding_id: std::sync::Mutex<Option<String>>,
+    /// Whether the most recent rebind's `Conspect-Device-PoP` proof VERIFIED against the
+    /// device key over the recomputed pre-image (binding the device's own instance id).
+    last_rebind_pop_verified: AtomicBool,
+    /// Whether the most recent deactivate's `Conspect-Device-PoP` proof VERIFIED.
+    last_deactivate_pop_verified: AtomicBool,
+    /// The `bindingId` the most recent deactivate request carried.
+    last_deactivate_binding_id: std::sync::Mutex<Option<String>>,
 }
 
 impl FakeLicenceServer {
@@ -658,6 +676,13 @@ impl FakeLicenceServer {
             last_activate_device_public_key: std::sync::Mutex::new(None),
             last_activate_pop_verified: AtomicBool::new(false),
             activated_binding: std::sync::Mutex::new(None),
+            rebinds: AtomicU64::new(0),
+            deactivates: AtomicU64::new(0),
+            last_rebind_instance_id: std::sync::Mutex::new(None),
+            last_rebind_binding_id: std::sync::Mutex::new(None),
+            last_rebind_pop_verified: AtomicBool::new(false),
+            last_deactivate_pop_verified: AtomicBool::new(false),
+            last_deactivate_binding_id: std::sync::Mutex::new(None),
         }
     }
 
@@ -666,6 +691,12 @@ impl FakeLicenceServer {
     }
     pub fn pinned_root(&self) -> PinnedRoot {
         self.kit.pinned_root()
+    }
+    /// The server's established binding id (the lease the renew path serves binds it) —
+    /// so a BOUND device identity for the rebind/deactivate continuity ops addresses
+    /// the binding the fake actually holds (ADR-I009).
+    pub fn binding_id(&self) -> &'static str {
+        self.kit.binding_id()
     }
     pub fn set_withhold_lease(&self, on: bool) {
         self.withhold_lease.store(on, Ordering::SeqCst);
@@ -790,6 +821,49 @@ impl FakeLicenceServer {
     /// server-assigned instance id).
     pub fn last_activate_pop_verified(&self) -> bool {
         self.last_activate_pop_verified.load(Ordering::SeqCst)
+    }
+    /// Count `rebind` calls (ADR-I009).
+    pub fn rebinds(&self) -> u64 {
+        self.rebinds.load(Ordering::SeqCst)
+    }
+    /// Count `deactivate` calls (ADR-I009).
+    pub fn deactivates(&self) -> u64 {
+        self.deactivates.load(Ordering::SeqCst)
+    }
+    /// The `instanceId` the most recent rebind request carried (the device's OWN id).
+    /// The `bindingId` the most recent rebind request carried (the device's resolved
+    /// binding — store-learned id, not the instance_id fallback).
+    pub fn last_rebind_binding_id(&self) -> Option<String> {
+        self.last_rebind_binding_id
+            .lock()
+            .expect("poisoned")
+            .clone()
+    }
+    pub fn last_rebind_instance_id(&self) -> Option<String> {
+        self.last_rebind_instance_id
+            .lock()
+            .expect("poisoned")
+            .clone()
+    }
+    /// Whether the most recent rebind PoP proof verified (bound the device's own id).
+    pub fn last_rebind_pop_verified(&self) -> bool {
+        self.last_rebind_pop_verified.load(Ordering::SeqCst)
+    }
+    /// Whether the most recent deactivate PoP proof verified.
+    pub fn last_deactivate_pop_verified(&self) -> bool {
+        self.last_deactivate_pop_verified.load(Ordering::SeqCst)
+    }
+    /// The `bindingId` the most recent deactivate request carried.
+    pub fn last_deactivate_binding_id(&self) -> Option<String> {
+        self.last_deactivate_binding_id
+            .lock()
+            .expect("poisoned")
+            .clone()
+    }
+    /// The Idempotency-Keys recorded across all mutations, in order — so a test can
+    /// assert a retry replayed the SAME key (idempotency stability, ADR-I009).
+    pub fn recorded_idempotency_keys(&self) -> Vec<String> {
+        self.idempotency_keys.lock().expect("poisoned").clone()
     }
     /// Mint the server-assigned durable instance id reserved with a challenge nonce
     /// (deterministic per counter), shaped like `ib_<hex>`.
@@ -1178,6 +1252,120 @@ impl LicenceServer for FakeLicenceServer {
             Some(lease),
             EnforcementState::Compliant,
             next_nonce,
+        ))
+    }
+
+    async fn rebind(
+        &self,
+        _org: &str,
+        body: Vec<u8>,
+        idempotency_key: &str,
+        pop_header: &str,
+    ) -> Result<RebindResponse, HeartbeatError> {
+        self.maybe_block().await;
+        self.bodies.lock().expect("poisoned").push(body.clone());
+        if let Some(err) = self.record_idempotency_then_maybe_fail(idempotency_key) {
+            return Err(err);
+        }
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(HeartbeatError::Transport("fake offline".to_owned()));
+        }
+        // Parse the EXACT rebind body bytes (the same bytes the PoP signed over).
+        let req: RebindRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => return Err(HeartbeatError::Malformed(format!("fake rebind parse: {e}"))),
+        };
+        self.rebinds.fetch_add(1, Ordering::SeqCst);
+        *self.last_rebind_instance_id.lock().expect("poisoned") = Some(req.instance_id.clone());
+        *self.last_rebind_binding_id.lock().expect("poisoned") = Some(req.binding_id.clone());
+        // VERIFY the proof binds THIS body + THIS nonce + the device's OWN instance id
+        // (continuity — NOT a server-assigned challenge id).
+        let verified = self.verify_activate_pop(pop_header, &body, &req.nonce, &req.instance_id);
+        self.last_rebind_pop_verified
+            .store(verified, Ordering::SeqCst);
+        if self.reject_pop.load(Ordering::SeqCst) || !verified {
+            return Err(HeartbeatError::ServerRejected(
+                "fake rebind returned HTTP 401 pop-invalid".to_owned(),
+            ));
+        }
+        if self.malformed_2xx.load(Ordering::SeqCst) {
+            return Err(HeartbeatError::Malformed(
+                "fake rebind returned HTTP 200 with an unparseable body".to_owned(),
+            ));
+        }
+        // A successful rebind reactivates the SAME binding (no new seat) and records it
+        // so the SUBSEQUENT renew serves a lease bound to the SAME id.
+        let bound = req.binding_id.clone();
+        *self.activated_binding.lock().expect("poisoned") = Some(bound);
+        // The response carries only a serial (NOT an embedded lease) + the next nonce.
+        let next_nonce = if self.drop_next_nonce.load(Ordering::SeqCst) {
+            String::new()
+        } else {
+            self.mint_nonce()
+        };
+        *self.last_next_nonce.lock().expect("poisoned") = if next_nonce.is_empty() {
+            None
+        } else {
+            Some(next_nonce.clone())
+        };
+        Ok(RebindResponse::new(
+            true,
+            Some(self.kit.lease_serial().to_owned()),
+            Some(self.kit.now_ms() + 35 * 86_400_000),
+            EnforcementState::Compliant,
+            1,
+            false,
+            req.fp_score,
+            next_nonce,
+        ))
+    }
+
+    async fn deactivate(
+        &self,
+        _org: &str,
+        body: Vec<u8>,
+        idempotency_key: &str,
+        pop_header: &str,
+    ) -> Result<DeactivateResponse, HeartbeatError> {
+        self.maybe_block().await;
+        self.bodies.lock().expect("poisoned").push(body.clone());
+        if let Some(err) = self.record_idempotency_then_maybe_fail(idempotency_key) {
+            return Err(err);
+        }
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(HeartbeatError::Transport("fake offline".to_owned()));
+        }
+        let req: DeactivateRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(HeartbeatError::Malformed(format!(
+                    "fake deactivate parse: {e}"
+                )))
+            }
+        };
+        self.deactivates.fetch_add(1, Ordering::SeqCst);
+        *self.last_deactivate_binding_id.lock().expect("poisoned") = Some(req.binding_id.clone());
+        // VERIFY the proof binds THIS body + THIS nonce + the device's OWN instance id.
+        // The deactivate body has no instance_id field, so the device signs over its
+        // configured identity instance_id (continuity); the loop test uses inst_prod_a.
+        let verified = self.verify_activate_pop(pop_header, &body, &req.nonce, "inst_prod_a");
+        self.last_deactivate_pop_verified
+            .store(verified, Ordering::SeqCst);
+        if self.reject_pop.load(Ordering::SeqCst) || !verified {
+            return Err(HeartbeatError::ServerRejected(
+                "fake deactivate returned HTTP 401 pop-invalid".to_owned(),
+            ));
+        }
+        if self.malformed_2xx.load(Ordering::SeqCst) {
+            return Err(HeartbeatError::Malformed(
+                "fake deactivate returned HTTP 200 with an unparseable body".to_owned(),
+            ));
+        }
+        // The 200 returns an InstanceBinding whose lifecycleState is `released`.
+        Ok(DeactivateResponse::new(
+            req.binding_id,
+            "released".to_owned(),
+            EnforcementState::Revoked,
         ))
     }
 }

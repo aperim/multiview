@@ -127,6 +127,16 @@ pub struct EntitlementPlane {
     /// always-on announce/browse loop maintains. Always wired so the API serves a
     /// real shared store; control-plane only, no engine handle (invariant #10).
     pub mesh: Arc<MeshState>,
+    /// The retained device-licensing client, set once when `spawn_heartbeat` builds
+    /// it (ADR-I009). The operator-invoked one-shot lifecycle ops
+    /// ([`rebind`](Self::rebind)/[`deactivate`](Self::deactivate)) reuse THIS SAME
+    /// in-process client so the in-memory retry pin (`PendingAttempt`) and the
+    /// single-owner `FileNonceStore` flock stay coherent — an ambiguous transport /
+    /// `409` then replays the SAME idempotency-key verbatim and never double-charges
+    /// the scarce rebind budget. `None` until the heartbeat is configured + started
+    /// (a lifecycle op then builds a one-shot client itself, see `lifecycle_client`).
+    #[cfg(feature = "heartbeat")]
+    heartbeat_client: std::sync::OnceLock<std::sync::Arc<HeartbeatClient<ConspectHttpServer>>>,
 }
 
 impl EntitlementPlane {
@@ -170,6 +180,8 @@ impl EntitlementPlane {
             // under `mesh-mdns` the spawned announce/browse loop folds discovered
             // neighbours into it. Control-plane only (invariant #10).
             mesh: Arc::new(MeshState::new()),
+            #[cfg(feature = "heartbeat")]
+            heartbeat_client: std::sync::OnceLock::new(),
         }
     }
 
@@ -303,6 +315,42 @@ impl EntitlementPlane {
             );
             return;
         };
+        let api = settings.api_base.clone();
+        let org = settings.org_id.clone();
+        // Build (and RETAIN) the one client this process drives — the renew loop AND
+        // the operator-invoked lifecycle ops (rebind/deactivate, ADR-I009) share it,
+        // so the in-memory retry pin + the single-owner nonce-store lock stay coherent.
+        let Some(client) = self.build_client(&settings) else {
+            return; // build_client logged the fail-closed reason
+        };
+        // Retain it for the lifecycle ops (idempotent: set-or-keep the first client).
+        // `get_or_init` returns the already-retained client if a prior call set one,
+        // else stores and returns this one — so the renew loop and the operator ops
+        // always drive the SAME in-process client (coherent pin + nonce-store lock).
+        let client = std::sync::Arc::clone(self.heartbeat_client.get_or_init(|| client));
+        tokio::spawn(async move {
+            client.run_forever().await;
+        });
+        tracing::info!(
+            org = %org,
+            api = %api,
+            "Conspect device heartbeat running (control-plane phone-home; renews the lease via \
+             the shared install convergence; never off air)"
+        );
+    }
+
+    /// Build the device-licensing [`HeartbeatClient`] from `settings` (ADR-I006/I007/
+    /// I008/I009), or `None` (logging the fail-closed reason) when any piece cannot be
+    /// built — a malformed pinned root, an un-buildable HTTPS-only client (never a
+    /// plaintext credential-carrying fallback), an un-takeable durable idempotency-nonce
+    /// lock (a second owner on this lease dir), or an un-loadable/generatable device key.
+    /// Shared by `spawn_heartbeat` (the renew loop) and the one-shot lifecycle ops so
+    /// they wire the SAME server + nonce store + device key (the `heartbeat`-only seam).
+    #[cfg(feature = "heartbeat")]
+    fn build_client(
+        &self,
+        settings: &HeartbeatSettings,
+    ) -> Option<std::sync::Arc<HeartbeatClient<ConspectHttpServer>>> {
         let pinned_root = match multiview_licence::heartbeat::PinnedRoot::from_base64url(
             &settings.pinned_root_b64url,
         ) {
@@ -310,16 +358,15 @@ impl EntitlementPlane {
             Err(err) => {
                 tracing::warn!(
                     %err,
-                    "Conspect heartbeat is OFF: {} is not a valid base64url ECDSA-P256 root \
+                    "Conspect licensing is OFF: {} is not a valid base64url ECDSA-P256 root \
                      point — running unlicensed-honest",
                     HeartbeatSettings::ROOT_ENV
                 );
-                return;
+                return None;
             }
         };
         // Fail closed: if the HTTPS-only client cannot be built, do NOT fall back
-        // to a plaintext-capable client that would leak the bearer JWT — the
-        // heartbeat stays OFF (the entitlement plane keeps last-good).
+        // to a plaintext-capable client that would leak the bearer JWT.
         let server =
             match ConspectHttpServer::new(settings.api_base.clone(), settings.bearer_token.clone())
             {
@@ -327,10 +374,10 @@ impl EntitlementPlane {
                 Err(err) => {
                     tracing::warn!(
                         %err,
-                        "Conspect heartbeat is OFF: could not build the HTTPS-only client — \
+                        "Conspect licensing is OFF: could not build the HTTPS-only client — \
                          running unlicensed-honest (never a plaintext credential-carrying client)"
                     );
-                    return;
+                    return None;
                 }
             };
         // Durable idempotency nonce beside the lease state (the same dir the
@@ -341,42 +388,38 @@ impl EntitlementPlane {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_LEASE_DIR.to_owned());
         // Fail closed: if the nonce lock cannot be taken (another `multiview` owns
-        // this lease dir, or the dir is unwritable) do NOT start a second minter
-        // that could issue colliding Idempotency-Keys — the heartbeat stays OFF
-        // (the entitlement plane keeps last-good).
+        // this lease dir) do NOT start a second minter that could issue colliding
+        // Idempotency-Keys.
         let nonce_store: multiview_licence::heartbeat::SharedNonceStore =
             match FileNonceStore::in_dir(&lease_dir) {
                 Ok(store) => std::sync::Arc::new(store),
                 Err(err) => {
                     tracing::warn!(
                         %err,
-                        "Conspect heartbeat is OFF: could not take the durable idempotency-nonce \
+                        "Conspect licensing is OFF: could not take the durable idempotency-nonce \
                          lock (a second heartbeat owner on this lease dir?) — keeping last-good"
                     );
-                    return;
+                    return None;
                 }
             };
         // Device-PoP (v0.9.0 enforced, ADR-I007): load (or first-boot generate +
         // persist) the per-instance Ed25519 device keypair beside the lease state.
-        // Fail closed: if it cannot be loaded/generated/persisted (e.g. a corrupt
-        // key file, or an unwritable dir) do NOT start a heartbeat that would be
-        // rejected `pop-required` every cycle — keep last-good (never off air). A
-        // present-but-corrupt key is NOT silently regenerated (that would change the
-        // device identity and break server-side key continuity).
+        // Fail closed: a corrupt/unwritable key keeps licensing OFF (a present-but-
+        // corrupt key is NOT silently regenerated — that breaks server-side continuity).
         let device_signer: std::sync::Arc<dyn multiview_licence::heartbeat::DeviceSigner> =
             match DeviceKeyStore::load_or_generate(&lease_dir) {
                 Ok(store) => std::sync::Arc::new(store),
                 Err(err) => {
                     tracing::warn!(
                         %err,
-                        "Conspect heartbeat is OFF: could not load/generate the durable device \
-                         proof-of-possession keypair — keeping last-good (never a heartbeat \
-                         without a valid device-PoP proof)"
+                        "Conspect licensing is OFF: could not load/generate the durable device \
+                         proof-of-possession keypair — keeping last-good (never an op without a \
+                         valid device-PoP proof)"
                     );
-                    return;
+                    return None;
                 }
             };
-        let client = HeartbeatClient::with_nonce_and_signer(
+        Some(std::sync::Arc::new(HeartbeatClient::with_nonce_and_signer(
             server,
             std::sync::Arc::clone(&self.store),
             pinned_root,
@@ -384,17 +427,97 @@ impl EntitlementPlane {
             settings.identity.clone(),
             nonce_store,
             device_signer,
-        );
-        let org = settings.org_id.clone();
-        tokio::spawn(async move {
-            client.run_forever().await;
-        });
-        tracing::info!(
-            org = %org,
-            api = %settings.api_base,
-            "Conspect device heartbeat running (control-plane phone-home; renews the lease via \
-             the shared install convergence; never off air)"
-        );
+        )))
+    }
+
+    /// Get the retained device-licensing client (set by `spawn_heartbeat`), or build a
+    /// fresh one from the environment for a one-shot lifecycle op invoked WITHOUT a
+    /// running daemon. Reusing the retained client (the common case) keeps the in-memory
+    /// retry pin + the nonce-store flock coherent (ADR-I009); building a fresh one is the
+    /// no-daemon fallback (it takes the flock for the duration of the op). `None` when
+    /// licensing is unconfigured / un-buildable (the caller reports it).
+    #[cfg(feature = "heartbeat")]
+    fn lifecycle_client(
+        &self,
+        settings: &HeartbeatSettings,
+    ) -> Option<std::sync::Arc<HeartbeatClient<ConspectHttpServer>>> {
+        if let Some(existing) = self.heartbeat_client.get() {
+            return Some(std::sync::Arc::clone(existing));
+        }
+        let client = self.build_client(settings)?;
+        // Retain it so a subsequent op (or a later daemon start) reuses the SAME client
+        // (the pin stays coherent across operator re-invocations within this process).
+        let _ = self.heartbeat_client.set(std::sync::Arc::clone(&client));
+        Some(client)
+    }
+
+    /// Operator-invoked **device REBIND** (ADR-I009): reactivate this device's bound
+    /// instance after a lawful hardware change (the same binding — no new seat), charging
+    /// the 3-free-per-AEST-year budget. A device-initiated, PoP-signed, idempotent HTTPS
+    /// call on the in-process client. Returns the [`HeartbeatOutcome::Rebound`] on
+    /// success, or a [`HeartbeatError`] (fail-closed — keep last-good, never off air,
+    /// never an engine touch). Requires the licence id ([`HeartbeatSettings::LICENCE_ID_ENV`]).
+    ///
+    /// # Errors
+    /// [`HeartbeatError`] when licensing is unconfigured, the licence id is unset, or the
+    /// rebind contact / proof fails — every one keeps the entitlement plane last-good.
+    #[cfg(feature = "heartbeat")]
+    pub async fn rebind(
+        &self,
+    ) -> Result<
+        multiview_licence::heartbeat::HeartbeatOutcome,
+        multiview_licence::heartbeat::HeartbeatError,
+    > {
+        use multiview_licence::heartbeat::{HeartbeatError, PopError};
+        let settings = HeartbeatSettings::from_env().ok_or_else(|| {
+            HeartbeatError::Pop(PopError::Cose(
+                "Conspect licensing is unconfigured (set MULTIVIEW_LICENCE_* env)".to_owned(),
+            ))
+        })?;
+        if settings.licence_id.is_empty() {
+            return Err(HeartbeatError::Pop(PopError::Cose(format!(
+                "no licence id configured ({}) — a rebind needs RebindRequest.licenceId",
+                HeartbeatSettings::LICENCE_ID_ENV
+            ))));
+        }
+        let client = self.lifecycle_client(&settings).ok_or_else(|| {
+            HeartbeatError::Pop(PopError::Cose(
+                "Conspect licensing client could not be built (keeping last-good)".to_owned(),
+            ))
+        })?;
+        client.rebind_once(&settings.licence_id).await
+    }
+
+    /// Operator-invoked **device DEACTIVATE** (ADR-I009): decommission this device's
+    /// binding and return its seat (idempotent, graceful surrender). A device-initiated,
+    /// PoP-signed HTTPS call on the in-process client. Returns
+    /// [`HeartbeatOutcome::Deactivated`] on success. It installs **nothing** and does
+    /// **not** stop local output — the last-good lease ages out via the offline ladder
+    /// (never off air). The operator stops the running process for an immediate local
+    /// stop (there is no kill verb — invariant #1).
+    ///
+    /// # Errors
+    /// [`HeartbeatError`] when licensing is unconfigured or the deactivate contact /
+    /// proof fails — every one keeps the entitlement plane last-good.
+    #[cfg(feature = "heartbeat")]
+    pub async fn deactivate(
+        &self,
+    ) -> Result<
+        multiview_licence::heartbeat::HeartbeatOutcome,
+        multiview_licence::heartbeat::HeartbeatError,
+    > {
+        use multiview_licence::heartbeat::{HeartbeatError, PopError};
+        let settings = HeartbeatSettings::from_env().ok_or_else(|| {
+            HeartbeatError::Pop(PopError::Cose(
+                "Conspect licensing is unconfigured (set MULTIVIEW_LICENCE_* env)".to_owned(),
+            ))
+        })?;
+        let client = self.lifecycle_client(&settings).ok_or_else(|| {
+            HeartbeatError::Pop(PopError::Cose(
+                "Conspect licensing client could not be built (keeping last-good)".to_owned(),
+            ))
+        })?;
+        client.deactivate_once().await
     }
 
     /// No-op when the `heartbeat` feature is off: the entitlement plane is fully
@@ -509,6 +632,11 @@ pub struct HeartbeatSettings {
     pub bearer_token: String,
     /// The salted device identity the requests carry (no raw identifiers).
     pub identity: DeviceIdentity,
+    /// The licence id the binding draws its seat from (ADR-I009) — required by the
+    /// device REBIND lifecycle op (`RebindRequest.licenceId`); unused by heartbeat /
+    /// activate / deactivate. Empty when unset (rebind then fails closed with a clear
+    /// "no licence id configured" message — never a silent wrong id).
+    pub licence_id: String,
     /// Whether first-contact device ACTIVATE / enrolment is enabled (ADR-I008) —
     /// `true` only when the full device-identity triple required for a valid
     /// `ActivateRequest` is configured (so a fresh device enrols rather than waiting
@@ -552,6 +680,9 @@ impl HeartbeatSettings {
     /// The env var the optional paid claim code is read from (ADR-I008). Unset →
     /// the free non-commercial auto-issue path on activate.
     pub const CLAIM_ENV: &'static str = "MULTIVIEW_LICENCE_CLAIM_CODE";
+    /// The env var the licence id is read from (ADR-I009) — required by the device
+    /// REBIND lifecycle op (`RebindRequest.licenceId`).
+    pub const LICENCE_ID_ENV: &'static str = "MULTIVIEW_LICENCE_LICENCE_ID";
 
     /// Assemble settings from the process environment, or `None` when the
     /// essential ones (org id, pinned root, API base, bearer token) are unset —
@@ -590,12 +721,14 @@ impl HeartbeatSettings {
             && !identity.hardware_digest.is_empty()
             && !identity.instance_discriminator_hash.is_empty()
             && !identity.instance_discriminator_digest.is_empty();
+        let licence_id = non_empty_env(Self::LICENCE_ID_ENV).unwrap_or_default();
         Some(Self {
             org_id,
             pinned_root_b64url,
             api_base,
             bearer_token,
             identity,
+            licence_id,
             enable_activate,
             claim_code,
         })
@@ -1398,6 +1531,77 @@ impl ConspectHttpServer {
             .await
             .map_err(|e| HeartbeatError::Malformed(e.to_string()))
     }
+
+    /// `POST` for the **lifecycle** verbs (rebind/deactivate, ADR-I009) — identical to
+    /// [`post_raw_json`](Self::post_raw_json) EXCEPT a received `409` maps to
+    /// [`Transport`](multiview_licence::heartbeat::HeartbeatError::Transport) (replay
+    /// the SAME idempotency-key), NOT
+    /// [`ServerRejected`](multiview_licence::heartbeat::HeartbeatError::ServerRejected).
+    ///
+    /// The live rebind/deactivate `409` is overloaded — "the same Idempotency-Key is
+    /// still in progress" (both verbs), plus, for rebind, "rebinds-exhausted" /
+    /// "discriminator-mismatch" / "no-live-instance" — and carries **no JSON body to
+    /// disambiguate**. Replaying the SAME idempotency-key + body is the only choice
+    /// correct for all of them: the server dedups, so an exhausted/mismatch re-POST
+    /// returns the same `409` deterministically with **no second rebind charge**, and an
+    /// in-progress request completes. Mapping `409 → ServerRejected` (drop + mint a
+    /// fresh key) would double-charge the scarce 3-free-per-year budget on an ambiguous
+    /// failure. The other 4xx (`401`/`403`/`404`/`422`) stay definitive `ServerRejected`;
+    /// a `5xx`/no-response stays `Transport`; a `2xx` with a bad body stays `Malformed`.
+    async fn post_raw_json_lifecycle<T: serde::de::DeserializeOwned>(
+        &self,
+        url: String,
+        body: Vec<u8>,
+        idempotency_key: &str,
+        pop_header: &str,
+    ) -> Result<T, multiview_licence::heartbeat::HeartbeatError> {
+        use multiview_licence::heartbeat::HeartbeatError;
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.bearer_token)
+            .header("Idempotency-Key", idempotency_key)
+            .header("Conspect-Device-PoP", pop_header)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| HeartbeatError::Transport(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(lifecycle_status_error(status, &url));
+        }
+        resp.json::<T>()
+            .await
+            .map_err(|e| HeartbeatError::Malformed(e.to_string()))
+    }
+}
+
+/// Classify a non-2xx **lifecycle** (rebind/deactivate) response (ADR-I009). Differs
+/// from [`heartbeat_status_error`] in ONE way: a `409` maps to
+/// [`Transport`](multiview_licence::heartbeat::HeartbeatError::Transport) (an ambiguous
+/// "retry the same idempotency-key" — the overloaded, body-less lifecycle `409`), so an
+/// in-progress / exhausted / mismatch `409` replays the SAME key (the server dedups; no
+/// second rebind charge) instead of dropping the pinned attempt and minting a fresh key.
+/// Every OTHER 4xx is a DEFINITIVE [`ServerRejected`] (`401`/`403`/`404`/`422` — the
+/// burned-nonce recovery path); a 5xx is ambiguous [`Transport`].
+///
+/// [`ServerRejected`]: multiview_licence::heartbeat::HeartbeatError::ServerRejected
+#[cfg(feature = "heartbeat")]
+fn lifecycle_status_error(
+    status: reqwest::StatusCode,
+    url: &str,
+) -> multiview_licence::heartbeat::HeartbeatError {
+    use multiview_licence::heartbeat::HeartbeatError;
+    let detail = format!("{url} returned HTTP {status}");
+    if status == reqwest::StatusCode::CONFLICT {
+        // 409: overloaded + body-less → replay the same idempotency-key (no double charge).
+        HeartbeatError::Transport(detail)
+    } else if status.is_client_error() {
+        HeartbeatError::ServerRejected(detail)
+    } else {
+        HeartbeatError::Transport(detail)
+    }
 }
 
 /// Classify a non-2xx heartbeat-POST response into the STATUS-AWARE retry error
@@ -1495,6 +1699,50 @@ impl multiview_licence::heartbeat::LicenceServer for ConspectHttpServer {
         // (4xx → ServerRejected, 5xx/no-response → Transport, Malformed only after 2xx).
         self.post_raw_json(
             format!("{}/organisations/{org}/activate", self.api_base),
+            body,
+            idempotency_key,
+            pop_header,
+        )
+        .await
+    }
+
+    async fn rebind(
+        &self,
+        org: &str,
+        body: Vec<u8>,
+        idempotency_key: &str,
+        pop_header: &str,
+    ) -> Result<
+        multiview_licence::heartbeat::RebindResponse,
+        multiview_licence::heartbeat::HeartbeatError,
+    > {
+        // POST /organisations/{org}/rebind (ADR-I009) — the device lifecycle rebind.
+        // Verbatim body + Idempotency-Key + Conspect-Device-PoP; the LIFECYCLE transport
+        // helper maps 409 -> Transport (replay-same-key, no double rebind charge), other
+        // 4xx -> ServerRejected, 5xx/no-response -> Transport, Malformed only after 2xx.
+        self.post_raw_json_lifecycle(
+            format!("{}/organisations/{org}/rebind", self.api_base),
+            body,
+            idempotency_key,
+            pop_header,
+        )
+        .await
+    }
+
+    async fn deactivate(
+        &self,
+        org: &str,
+        body: Vec<u8>,
+        idempotency_key: &str,
+        pop_header: &str,
+    ) -> Result<
+        multiview_licence::heartbeat::DeactivateResponse,
+        multiview_licence::heartbeat::HeartbeatError,
+    > {
+        // POST /organisations/{org}/deactivate (ADR-I009) — the device lifecycle seat
+        // surrender. Same lifecycle transport discipline as `rebind` (409 -> Transport).
+        self.post_raw_json_lifecycle(
+            format!("{}/organisations/{org}/deactivate", self.api_base),
             body,
             idempotency_key,
             pop_header,
