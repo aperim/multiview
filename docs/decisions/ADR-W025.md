@@ -33,10 +33,10 @@ for device-id *references*, not just device collections) found two further
 classes: (a) config objects that **embed** a managed device id in a field rather
 than being a device collection — device-projected sources/outputs
 (`body.device_ref`, ADR-M009) and sync-group members (`body.members[].device`,
-ADR-M010); and (b) the **whole-system config export** (`GET /config/export`),
-gated only by `Action::Read`, which composes every device + ref + member id into
-one document a scoped principal could read wholesale. All folded into this
-decision.
+ADR-M010); and (b) two **whole-system artifacts** — the config export (`GET /config/export`)
+and the support bundle (`POST`/`GET /support/bundle`), gated only by role, which
+compose every device + ref + member id into one document a scoped principal could
+read wholesale. All folded into this decision.
 
 The decision is bounded by invariant #10 (isolation): the realtime path is
 best-effort, bounded, and **physically incapable of back-pressuring the engine**
@@ -96,15 +96,27 @@ the allowlist:
      stay). The resource itself is still gated by its own id (so an in-scope
      principal sees the row); only the embedded out-of-scope device id is hidden,
      by parity with a single-device `GET` `403`. No-op for an unscoped principal.
-6. **Whole-system config export** (`GET /api/v1/config/export`,
-   [`routes/config.rs`](../../crates/multiview-control/src/routes/config.rs)) — a
-   single document composing **every** device, `device_ref`, and sync-group
-   member id. Per-field redaction cannot apply (a partial config is not a valid
-   runnable document), so an **object-scoped principal is denied** (`403`): the
-   export is confined to a principal that can see the whole system. Unscoped
-   admin/operator/viewer keep export. The whole-system config *writes*
+6. **Whole-system artifacts** — a single document that composes **every** device,
+   `device_ref`, and sync-group member id. Per-field redaction cannot apply (a
+   partial config is not a valid runnable document), so an **object-scoped
+   principal is denied** (`403`) by the shared
+   [`require_unscoped_for_whole_system`](../../crates/multiview-control/src/routes/mod.rs)
+   gate; such artifacts are confined to a principal that can see the whole system.
+   Three surfaces:
+   - the **config export** (`GET /api/v1/config/export`,
+     [`routes/config.rs`](../../crates/multiview-control/src/routes/config.rs));
+   - the **support bundle** (`POST` + `GET /api/v1/support/bundle[/{id}]`,
+     [`routes/support.rs`](../../crates/multiview-control/src/routes/support.rs));
+   - the **diagnostics snapshot** (`POST /api/v1/diagnostics/snapshot` +
+     `GET /api/v1/diagnostics/{id}`,
+     [`routes/telemetry.rs`](../../crates/multiview-control/src/routes/telemetry.rs)).
+
+   The support bundle and diagnostics snapshot both compose a `config` section
+   that embeds the whole config redacted only for secrets/URLs (**not** ids); for
+   each, both the compose (`POST`) and read (`GET`) are gated. Unscoped
+   admin/operator/viewer keep all three. The whole-system config *writes*
    (`revert-to-start`, `promote`) return only status (no device ids) — not a
-   read-leak, so unchanged by this decision.
+   read-leak, so unchanged.
 
 The scope axis filtered is the **object** axis (`scoped_object_ids`,
 [`authorize_object`](../../crates/multiview-control/src/auth.rs)), matching the
