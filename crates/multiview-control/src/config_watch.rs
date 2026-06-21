@@ -959,6 +959,22 @@ pub fn apply_document_diff(
         resync_store(state, actor, &state.sources, &desired_sources(next));
     }
 
+    // 1b. A pure SOURCE REORDER (task #130) has NO live engine seam: source
+    //     declaration order affects only the cold-start test-pattern palette
+    //     index (`run.rs`), never a live render path (cells bind by `input_id`;
+    //     the live source stores are id-keyed and `list()` is id-sorted, so the
+    //     order is not even representable in the store/`active.toml`). Unlike the
+    //     overlay reorder (a live `ReorderOverlays`), there is NO `ReorderSources`
+    //     command — that would be theater. So it is reported honestly as a
+    //     RESTART-pending (Class-2) delta: it applies on the next restart (which
+    //     re-reads the boot file's order), never silently dropped. The store
+    //     resync above (if any content changed) is order-agnostic; nothing live
+    //     is submitted for the reorder itself.
+    if diff.sources_reordered {
+        restart.insert("sources".to_owned());
+        parts.push("sources reordered (applies on restart)".to_owned());
+    }
+
     // 2. Canvas: the pinned signal is Class-2 (ADR-R004) and the cosmetic
     //    axes have no live render path either — restart, never silently.
     if diff.canvas_signal_changed || diff.canvas_cosmetic_changed {

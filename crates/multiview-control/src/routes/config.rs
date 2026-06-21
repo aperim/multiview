@@ -545,8 +545,16 @@ impl BootModelBody {
 /// unreliable change count — ADR-W024 §7).
 fn diverged_sections(diff: &multiview_config::ConfigDiff) -> Vec<String> {
     let mut sections = std::collections::BTreeSet::new();
-    if !diff.sources.is_empty() {
+    // A per-id content delta OR a pure reorder both diverge `sources` — a reorder
+    // is a real (restart-class) delta, not a silent no-op (task #130).
+    if !diff.sources.is_empty() || diff.sources_reordered {
         sections.insert("sources");
+    }
+    // Likewise overlays: a per-id delta lands in `changed_sections` below, but a
+    // pure overlay reorder must also surface (it re-blends live via
+    // `ReorderOverlays`, yet stays diverged from Loaded until reverted/promoted).
+    if diff.overlays_reordered {
+        sections.insert("overlays");
     }
     if diff.canvas_signal_changed || diff.canvas_cosmetic_changed {
         sections.insert("canvas");

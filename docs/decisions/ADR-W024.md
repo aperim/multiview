@@ -516,11 +516,22 @@ in `is_empty()`), computed by a pure `common_ids_reordered` helper that compares
 **present-in-both** id subsequence of each document in its own declaration order: adds/removes are
 excluded (so an add or a remove *alone* is never a reorder), a genuine permutation of the survivors
 always differs, and it is **orthogonal to `Changed`** (a reorder that also edits a survivor's
-document reports both). A pure z/draw-order reorder is **Class-1** (hot/seamless, inv #11), distinct
-from a Class-2 canvas reset — the new flags are the honest classification signal. The order-sensitive
-`overlays` `changed_sections` entry (`running_overlays != next_overlays`, by `Vec` position) is
-deliberately **kept**, so the existing `apply_overlay_changes` still reseeds the overlay store to the
-new declaration order on a reorder (the UI mirror and `active.toml` follow the file).
+document reports both). The two legs are classified **differently**, by what each actually affects at
+runtime — detection, application, and classification are kept consistent (no dead detection, no false
+Class-1):
+
+* **Overlay reorder = Class-1 (live, hot/seamless).** Declaration order is the equal-`z` draw-order
+  tie-break, which the engine renders live (below). The order-sensitive `overlays` `changed_sections`
+  entry (`running_overlays != next_overlays`, by `Vec` position) is deliberately **kept**, so the
+  existing `apply_overlay_changes` still reseeds the overlay store + submits the live re-blend.
+* **Source reorder = Class-2 (restart-pending).** Source declaration order has **no live engine
+  seam**: it sets only the cold-start test-pattern palette index (`run.rs` `enumerate()` over the boot
+  file's sources), while cells bind by `input_id` and the live source stores are id-keyed (`list()`
+  is id-sorted), so the order is not even representable in the store/`active.toml`. The watcher's
+  `apply_document_diff` reports `sources` **restart-pending** on `diff.sources_reordered` and submits
+  **no** command — there is deliberately **no** live `ReorderSources` (it would be theater); it takes
+  effect on the next restart, which re-reads the boot file's order. Both reorder flags are surfaced in
+  the boot-model `diverged_sections` (so a pure reorder is a named divergence, never a silent no-op).
 
 **The live engine re-blend (the Class-1 promise made true).** Detecting the reorder is necessary but
 not sufficient: `Command::UpsertOverlay` updates the engine's working-config mirror **in place by

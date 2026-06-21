@@ -101,9 +101,14 @@ pub struct ConfigDiff {
     /// relative order** between `running` and `next` — a pure permutation of the
     /// common id-set (adds/removes are reported by [`sources`](Self::sources), not
     /// here). A reorder is invisible to the id-keyed list, yet source declaration
-    /// order is observable (the software build's `enumerate()`-indexed test
-    /// pattern), so a config-file reorder must re-apply — never silently lost.
-    /// Task #130.
+    /// order is observable: it sets the cold-start test-pattern palette index
+    /// (`enumerate()` over the boot file's sources). Unlike the overlay reorder,
+    /// this has **no live engine seam** (cells bind by `input_id`; the live source
+    /// stores are id-keyed, so order is not even representable in the
+    /// store/`active.toml`) — so it is a **Class-2 / restart-pending** delta: the
+    /// watcher reports `sources` restart-pending (it takes effect on the next
+    /// restart, which re-reads the boot file's order), never silently dropped and
+    /// never via a (non-existent) live `ReorderSources` command. Task #130.
     pub sources_reordered: bool,
     /// The surviving (present-in-both) overlay ids appear in a **different
     /// relative order** between `running` and `next` — a pure permutation of the
