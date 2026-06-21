@@ -258,7 +258,7 @@ async fn an_activate_pin_is_not_replayed_by_a_subsequent_renew() {
     let act = client.run_once().await;
     assert!(act.is_err(), "the lost-response activate fails closed");
     assert!(
-        server.recorded_idempotency_keys().len() >= 1,
+        !server.recorded_idempotency_keys().is_empty(),
         "the activate reached the server"
     );
 

@@ -100,11 +100,17 @@ status-aware retry, and (for rebind) `verify_signed_lease_chain` + `install` are
   `licence_id`, `binding_id`, `instance_id`, `instance_discriminator_hash`, `fingerprint_digest`,
   `fp_score: u8`, `nonce`. **No `device_public_key` field** (the type cannot send it — continuity).
 - **`RebindResponse`** (`Deserialize`, camelCase, `#[non_exhaustive]`, `new()` constructor):
-  `rebound: bool`, `lease_serial: Option<String>` (`#[serde(default)]`), `not_after: Option<i64>`
-  (`#[serde(default)]`), `enforcement_state: EnforcementState`, `rebinds_this_year: i64`,
-  `seat_consumed: bool`, `fp_score: u8`, `next_nonce: String` (`#[serde(default)]`). **Note: the live
-  v0.46.0 `RebindResponse` carries the fresh lease only as a `leaseSerial`, not an embedded signed
-  lease envelope** — so the rebind client cannot install a lease from the response alone. It seeds
+  `rebound: bool`, `lease_serial: Option<String>`, `not_after: Option<i64>`,
+  `enforcement_state: EnforcementState`, `rebinds_this_year: i64`, `seat_consumed: bool`,
+  `fp_score: u8`, `next_nonce: String`. **Decoded strictly** (all 8 fields are v0.46.0-`required`):
+  the non-nullable fields — `rebound`, `enforcement_state`, `rebinds_this_year`, `seat_consumed`,
+  `fp_score`, and **`next_nonce`** — carry **no `#[serde(default)]`**, so a response missing one is
+  **rejected**, not silently defaulted (a missing `next_nonce` would otherwise silently strand the
+  next renew). The required-but-nullable `lease_serial`/`not_after` are `Option` (serde treats an
+  absent key identically to an explicit `null` → `None`; operationally identical for the device,
+  which never installs from the response either way). **Note: the live v0.46.0 `RebindResponse`
+  carries the fresh lease only as a `leaseSerial`, not an embedded signed lease envelope** — so the
+  rebind client cannot install a lease from the response alone. It seeds
   the steady-state nonce from `nextNonce` and lets the **next heartbeat cycle** fetch + install the
   refreshed lease via the unchanged renew chokepoint (the binding is unchanged, so the renew path
   picks up the new lease serial naturally). This keeps the install path single-chokepoint and avoids

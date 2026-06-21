@@ -1976,16 +1976,21 @@ enum AttemptVerb {
     Deactivate,
 }
 
-/// Per-verb pinned-attempt slots (ADR-I009). Separate slots so an in-flight
-/// operator rebind/deactivate pin coexists with the always-running renew loop's pin
-/// without either overwriting the other — and so clearing one verb's pin never
-/// touches another's.
+/// Per-verb pinned-attempt slots (ADR-I009). ONE slot PER VERB so no two verbs ever
+/// share pending state: an in-flight operator rebind/deactivate pin coexists with the
+/// always-running renew loop's pin without either overwriting the other, and clearing
+/// one verb's pin never touches another's. Renew and Activate get **separate** slots
+/// (r3 fix): although a device is normally either bound→renew or unbound→activate, the
+/// binding state can change between cycles (an ambiguous activate's pin persists, then a
+/// lease arrives via an install surface so the next cycle renews), and a shared slot
+/// would let a stale activate attempt be posted by the renew path. Separate slots make
+/// that structurally impossible.
 #[derive(Debug, Default)]
 struct PendingSlots {
-    /// The automatic renew/activate path's pin (mutually exclusive — a device is
-    /// either bound→renew or unbound→activate on the `run_once` path, so they share
-    /// one slot; whichever the cycle ran owns it).
-    auto: Option<PendingAttempt>,
+    /// The automatic renew (`POST …/heartbeat`) path's pin.
+    renew: Option<PendingAttempt>,
+    /// The automatic first-contact activate (`POST …/activate`) path's pin.
+    activate: Option<PendingAttempt>,
     /// The operator-invoked rebind path's pin.
     rebind: Option<PendingAttempt>,
     /// The operator-invoked deactivate path's pin.
@@ -1993,10 +1998,11 @@ struct PendingSlots {
 }
 
 impl PendingSlots {
-    /// A `&mut` to the slot a given verb owns (Renew + Activate share the `auto` slot).
+    /// A `&mut` to the slot a given verb owns — one slot per verb (no sharing).
     fn slot_mut(&mut self, verb: AttemptVerb) -> &mut Option<PendingAttempt> {
         match verb {
-            AttemptVerb::Renew | AttemptVerb::Activate => &mut self.auto,
+            AttemptVerb::Renew => &mut self.renew,
+            AttemptVerb::Activate => &mut self.activate,
             AttemptVerb::Rebind => &mut self.rebind,
             AttemptVerb::Deactivate => &mut self.deactivate,
         }
@@ -2130,8 +2136,10 @@ struct IdempotencyState {
     /// Monotonic per-client mint counter (advances once per logical operation, across
     /// ALL verbs — every minted key is globally unique + monotonic).
     counter: u64,
-    /// The in-flight key for the automatic renew/activate path (the `auto` slot).
-    current_auto: Option<String>,
+    /// The in-flight key for the automatic renew path.
+    current_renew: Option<String>,
+    /// The in-flight key for the automatic activate path.
+    current_activate: Option<String>,
     /// The in-flight key for the operator-invoked rebind path.
     current_rebind: Option<String>,
     /// The in-flight key for the operator-invoked deactivate path.
@@ -2139,11 +2147,12 @@ struct IdempotencyState {
 }
 
 impl IdempotencyState {
-    /// A `&mut` to the in-flight-key slot a given verb owns (Renew + Activate share the
-    /// `auto` slot, matching [`PendingSlots`]).
+    /// A `&mut` to the in-flight-key slot a given verb owns — one slot per verb (no
+    /// sharing), matching [`PendingSlots`] (ADR-I009 r3).
     fn current_mut(&mut self, verb: AttemptVerb) -> &mut Option<String> {
         match verb {
-            AttemptVerb::Renew | AttemptVerb::Activate => &mut self.current_auto,
+            AttemptVerb::Renew => &mut self.current_renew,
+            AttemptVerb::Activate => &mut self.current_activate,
             AttemptVerb::Rebind => &mut self.current_rebind,
             AttemptVerb::Deactivate => &mut self.current_deactivate,
         }
@@ -2410,14 +2419,23 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// deactivate attempt (no cross-verb replay) and an operator op never replays a
     /// renew attempt.
     fn pinned_attempt(&self, verb: AttemptVerb) -> Option<PendingAttempt> {
-        let guard = match self.pending.lock() {
+        let mut guard = match self.pending.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        match verb {
-            AttemptVerb::Renew | AttemptVerb::Activate => guard.auto.clone(),
-            AttemptVerb::Rebind => guard.rebind.clone(),
-            AttemptVerb::Deactivate => guard.deactivate.clone(),
+        let slot = guard.slot_mut(verb);
+        // Defence in depth: a slot only ever returns an attempt whose `.verb` matches
+        // the requested verb. With one slot per verb this always holds, but the explicit
+        // guard means a wrong-verb attempt is NEVER replayed/posted (it is dropped so the
+        // caller mints a fresh attempt for the requested verb) — no cross-verb body/proof
+        // can reach the wrong endpoint (ADR-I009 r3).
+        match slot {
+            Some(attempt) if attempt.verb == verb => Some(attempt.clone()),
+            Some(_) => {
+                *slot = None;
+                None
+            }
+            None => None,
         }
     }
 
