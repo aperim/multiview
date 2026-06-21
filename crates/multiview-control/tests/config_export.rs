@@ -13,7 +13,9 @@ mod support;
 
 use axum::http::{header, StatusCode};
 use serde_json::json;
-use support::{get, harness, post_json, put_json, send, OPERATOR_TOKEN, VIEWER_TOKEN};
+use support::{
+    body_json, get, harness, post_json, put_json, send, OPERATOR_TOKEN, SCOPED_TOKEN, VIEWER_TOKEN,
+};
 
 /// Seed a working layout + one source + one output through the public API,
 /// mirroring what `seed_resources` does for a config-driven run.
@@ -76,6 +78,39 @@ async fn seed(h: &support::Harness) {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED, "output seed must land");
+}
+
+/// BOLA wholesale-enumeration leak (OWASP API1, ADR-W005/ADR-W025): the full
+/// config export is a whole-system desired-state document — every device, every
+/// `device_ref`, every sync-group member id. An **object-scoped** principal must
+/// NOT be able to export it: it would disclose the ids of every object outside
+/// its allowlist in one call, bypassing per-object authorization wholesale. The
+/// export is meaningful only for a principal that can see the whole system.
+///
+/// `SCOPED_TOKEN` (allowlist `["scoped-layout"]`) is denied `403`; an unscoped
+/// reader still exports (no over-restriction).
+#[tokio::test]
+async fn scoped_principal_cannot_export_the_whole_config() {
+    let h = harness();
+    seed(&h).await;
+
+    // A scoped principal must be forbidden the whole-system export.
+    let resp = send(&h.router, get("/api/v1/config/export", SCOPED_TOKEN)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a scoped principal must not export the whole-system config (BOLA wholesale leak)"
+    );
+    let problem = body_json(resp).await;
+    assert_eq!(problem["type"], "/problems/forbidden");
+
+    // An unscoped reader still exports (the guard does not over-restrict).
+    let resp = send(&h.router, get("/api/v1/config/export", VIEWER_TOKEN)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "an unscoped reader may still export the config"
+    );
 }
 
 #[tokio::test]
