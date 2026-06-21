@@ -153,7 +153,12 @@ async fn list_filters_source_rows_to_the_scoped_allowlist() {
         "a scoped principal must see ONLY its allowlisted source rows, never enumerate others (BOLA)"
     );
     // …and the in-scope row's out-of-scope device_ref is still redacted.
-    let row = list.as_array().unwrap().iter().find(|s| s["id"] == "scoped-layout").unwrap();
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "scoped-layout")
+        .unwrap();
     assert!(
         row["body"].get("device_ref").is_none(),
         "the surviving in-scope row still has its out-of-scope device_ref redacted: {row}"

@@ -58,8 +58,14 @@ the allowlist:
    `authorize_object(&principal, &record.id)` succeeds. An unscoped principal
    (`scoped_object_ids: None`, e.g. admin/unrestricted operator) sees every row,
    exactly as before.
-2. **`list_devices`** ([`routes/devices.rs`](../../crates/multiview-control/src/routes/devices.rs))
-   — the same per-row filter on the device resource id.
+2. **`list_devices`, `list_sources`, `list_outputs`, `list_sync_groups`**
+   ([`routes/{devices,sources,outputs,sync_groups}.rs`](../../crates/multiview-control/src/routes/))
+   — the same per-**row** filter on the resource's own id. Each resource is gated
+   by its own id on the single `GET` (`get_source`/`get_output`/`get_sync_group`
+   all `authorize_object(&id)`), so the *list* must drop out-of-scope rows, not
+   merely redact embedded fields (a redacted-but-present row would still leak the
+   row's own id). Sources/outputs/sync-groups additionally redact an embedded
+   out-of-scope device ref on the *surviving* in-scope rows (item 5).
 3. **Realtime WS/SSE** ([`realtime.rs`](../../crates/multiview-control/src/realtime.rs))
    — [`SessionStream`](../../crates/multiview-control/src/realtime.rs) carries an
    optional object-scope allowlist set from the connecting principal. A delta
@@ -86,9 +92,11 @@ the allowlist:
    id is reported as not-found, never disclosed as forbidden).
 5. **Embedded device-id references** (config objects that *reference* a managed
    device in a field rather than being a device collection) — redacted for a
-   scoped principal by `redact_out_of_scope_device_refs`
+   scoped principal by `redact_out_of_scope_device_refs` / its body-level core
+   `redact_device_refs_in_body`
    ([`routes/mod.rs`](../../crates/multiview-control/src/routes/mod.rs)), applied
-   on both the single `GET` and the list of:
+   on the single `GET`, on the **surviving** in-scope list rows (after the item-2
+   row filter), and on the audit `detail` bodies (item 7), for:
    - **sources / outputs** — `body.device_ref` (the ADR-M009 device-projection
      link): the key is removed when the referenced device is out of scope.
    - **sync groups** — each `body.members[].device` (ADR-M010): the `device` key
@@ -117,6 +125,16 @@ the allowlist:
    admin/operator/viewer keep all three. The whole-system config *writes*
    (`revert-to-start`, `promote`) return only status (no device ids) — not a
    read-leak, so unchanged.
+7. **The change-audit log** (`GET /api/v1/audit`,
+   [`routes/audit.rs`](../../crates/multiview-control/src/routes/audit.rs)) —
+   every entry carries an `object_id` AND a `detail` body that, for an Update,
+   is the full resource body (device ids, `device_ref`, members). Unfiltered it
+   re-discloses every object id and the very refs items 2/5 hide. For a scoped
+   principal: an explicit `?object_id=<out-of-scope>` is denied `403` (a
+   per-object probe, like a single-object `GET`); entries are retained only when
+   their `object_id` is in the allowlist; and each surviving entry's `detail`
+   body is run through `redact_device_refs_in_body`. No-op for an unscoped
+   principal.
 
 The scope axis filtered is the **object** axis (`scoped_object_ids`,
 [`authorize_object`](../../crates/multiview-control/src/auth.rs)), matching the

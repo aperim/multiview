@@ -163,13 +163,17 @@ pub(crate) async fn list_sources(
     principal: Principal,
 ) -> ControlResult<Json<Vec<Resource>>> {
     principal.role.require(Action::Read)?;
-    // Redact embedded out-of-scope `device_ref` links for a scoped principal
-    // (BOLA visibility, ADR-W005/ADR-W025): a device-projected source must not
-    // disclose a device id the principal could not `GET`. No-op when unscoped.
+    // Per-object ROW visibility (BOLA, ADR-W005/ADR-W025): a source is gated by
+    // its OWN id (`get_source` 403s an out-of-scope id), so the list must drop
+    // rows outside the allowlist — exactly as `list_devices` does. THEN redact an
+    // embedded out-of-scope `device_ref` on a surviving in-scope row (its
+    // device-projection link may point to a device the principal cannot `GET`).
+    // Both are no-ops for an unscoped principal.
     let sources = state
         .sources
         .list()?
         .into_iter()
+        .filter(|v| crate::auth::authorize_object(&principal, &v.resource.id).is_ok())
         .map(|v| {
             let mut resource = v.resource;
             crate::routes::redact_out_of_scope_device_refs(&principal, &mut resource);

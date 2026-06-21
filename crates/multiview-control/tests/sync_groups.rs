@@ -190,7 +190,12 @@ async fn list_filters_sync_group_rows_to_the_scoped_allowlist() {
         "a scoped principal must see ONLY its allowlisted sync-group rows, never enumerate others (BOLA)"
     );
     // …and the surviving in-scope group's out-of-scope member device is redacted.
-    let row = list.as_array().unwrap().iter().find(|g| g["id"] == "scoped-layout").unwrap();
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["id"] == "scoped-layout")
+        .unwrap();
     assert_eq!(
         member_devices(row),
         vec!["scoped-layout".to_owned()],

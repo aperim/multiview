@@ -414,6 +414,26 @@ pub(crate) fn redact_out_of_scope_device_refs(
     principal: &Principal,
     resource: &mut crate::resource_store::Resource,
 ) {
+    redact_device_refs_in_body(principal, &mut resource.body);
+}
+
+/// Redact embedded out-of-scope managed-device id references **in a body
+/// [`serde_json::Value`]** for a scoped principal (BOLA visibility,
+/// ADR-W005/ADR-W025) — the shape-level core of
+/// [`redact_out_of_scope_device_refs`].
+///
+/// Operates directly on a JSON body so it serves both a wrapped
+/// [`Resource`](crate::resource_store::Resource) (the live source/output/
+/// sync-group reads) and a bare body value (an **audit `detail`**, which carries
+/// the full resource body on an Update). Drops, when the referenced device is
+/// outside the allowlist:
+///
+/// * top-level `device_ref` (source/output) — the key is removed.
+/// * each `members[].device` (sync group) — the key is removed from that member.
+///
+/// An **unscoped** principal is a no-op. A `body` that is not a JSON object (or
+/// carries neither key) is left unchanged.
+pub(crate) fn redact_device_refs_in_body(principal: &Principal, body: &mut serde_json::Value) {
     // Unscoped principals see everything: nothing to redact (fast path).
     if !principal.is_scoped() {
         return;
@@ -422,16 +442,16 @@ pub(crate) fn redact_out_of_scope_device_refs(
         |device_id: &str| crate::auth::authorize_object(principal, device_id).is_err();
 
     // Source/output device-projection link.
-    if let Some(serde_json::Value::String(device_id)) = resource.body.get("device_ref") {
+    if let Some(serde_json::Value::String(device_id)) = body.get("device_ref") {
         if out_of_scope(device_id) {
-            if let Some(map) = resource.body.as_object_mut() {
+            if let Some(map) = body.as_object_mut() {
                 map.remove("device_ref");
             }
         }
     }
 
     // Sync-group member device ids.
-    if let Some(serde_json::Value::Array(members)) = resource.body.get_mut("members") {
+    if let Some(serde_json::Value::Array(members)) = body.get_mut("members") {
         for member in members.iter_mut() {
             let leaks = matches!(
                 member.get("device"),

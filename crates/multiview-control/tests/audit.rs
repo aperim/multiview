@@ -116,11 +116,11 @@ async fn mutation_through_the_router_is_audited() {
 /// entries' detail bodies must still redact out-of-scope device refs.
 ///
 /// `SCOPED_TOKEN` (allowlist `["scoped-layout"]`). Admin creates an out-of-scope
-/// device `dev-other` (audited under object_id `dev-other`) and an in-scope
+/// device `dev-other` (audited under `object_id` `dev-other`) and an in-scope
 /// source `scoped-layout` whose `device_ref` is `dev-other` (audited under
-/// object_id `scoped-layout`, detail body carrying the device_ref). The scoped
-/// `/audit` must show only the `scoped-layout` entry, with its detail device_ref
-/// redacted; never an entry whose object_id is `dev-other`.
+/// `object_id` `scoped-layout`, detail body carrying the `device_ref`). The
+/// scoped `/audit` must show only the `scoped-layout` entry, with its detail
+/// `device_ref` redacted; never an entry whose `object_id` is `dev-other`.
 #[tokio::test]
 async fn audit_list_filters_entries_and_redacts_detail_for_a_scoped_principal() {
     let h = harness();

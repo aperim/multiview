@@ -63,13 +63,15 @@ pub(crate) async fn list_sync_groups(
     principal: Principal,
 ) -> ControlResult<Json<Vec<Resource>>> {
     principal.role.require(Action::Read)?;
-    // Redact out-of-scope member device ids for a scoped principal (BOLA
-    // visibility, ADR-W005/ADR-W025): a sync group must not disclose a member
-    // device id the principal could not `GET`. No-op when unscoped.
+    // Per-object ROW visibility (BOLA, ADR-W005/ADR-W025): a sync group is gated
+    // by its OWN id (`get_sync_group` 403s an out-of-scope id), so the list must
+    // drop rows outside the allowlist. THEN redact an out-of-scope member device
+    // id on a surviving in-scope row. Both are no-ops for an unscoped principal.
     let groups = state
         .sync_groups
         .list()?
         .into_iter()
+        .filter(|v| crate::auth::authorize_object(&principal, &v.resource.id).is_ok())
         .map(|v| {
             let mut resource = v.resource;
             crate::routes::redact_out_of_scope_device_refs(&principal, &mut resource);

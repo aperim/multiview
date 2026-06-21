@@ -93,7 +93,7 @@ async fn output_device_ref_is_redacted_when_out_of_scope() {
 /// leaked out-of-scope OUTPUT ids through the list.
 ///
 /// `SCOPED_TOKEN` (allowlist `["scoped-layout"]`) lists with an in-scope output
-/// (`scoped-layout`, device_ref out of scope) and an out-of-scope output
+/// (`scoped-layout`, `device_ref` out of scope) and an out-of-scope output
 /// (`other-out`). The scoped list must contain ONLY `scoped-layout`, and that
 /// row's out-of-scope `device_ref` must still be redacted.
 #[tokio::test]
@@ -140,7 +140,12 @@ async fn list_filters_output_rows_to_the_scoped_allowlist() {
         vec!["scoped-layout"],
         "a scoped principal must see ONLY its allowlisted output rows, never enumerate others (BOLA)"
     );
-    let row = list.as_array().unwrap().iter().find(|o| o["id"] == "scoped-layout").unwrap();
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "scoped-layout")
+        .unwrap();
     assert!(
         row["body"].get("device_ref").is_none(),
         "the surviving in-scope row still has its out-of-scope device_ref redacted: {row}"
