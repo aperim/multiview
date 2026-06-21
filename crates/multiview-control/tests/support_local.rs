@@ -48,7 +48,7 @@ use multiview_telemetry::RetentionStore;
 use rand_core::OsRng;
 use support::{
     body_json, get, harness_with, post_json, send, Harness, ADMIN_TOKEN, OPERATOR_TOKEN,
-    VIEWER_TOKEN,
+    SCOPED_TOKEN, VIEWER_TOKEN,
 };
 
 /// A fixed deterministic instant the injected licence-store clock returns.
@@ -326,6 +326,81 @@ async fn free_tier_cannot_list_or_read_tickets_403() {
 }
 
 // ── 3. Context-pack composer ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn scoped_principal_cannot_compose_or_read_a_support_bundle() {
+    // BOLA wholesale-enumeration leak (OWASP API1, ADR-W005/ADR-W025): a support
+    // bundle's `config` section embeds the WHOLE config — every device id, every
+    // device_ref, every sync-group member — redacted only for secrets/URLs, not
+    // ids. An OBJECT-scoped principal must not compose or read it (it would
+    // disclose every object outside its allowlist), exactly like the config
+    // export. SCOPED_TOKEN is an Operator (Write-capable) scoped to
+    // `["scoped-layout"]`, on an eligible tier — only the new scope guard can
+    // deny it.
+    let (h, _dr) = harness_at_tier("studio");
+
+    // Compose is forbidden for a scoped principal.
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/support/bundle",
+            SCOPED_TOKEN,
+            &serde_json::json!({ "window": "24h", "include": ["config"] }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a scoped principal must not compose a whole-system support bundle (BOLA wholesale leak)"
+    );
+
+    // Reading a bundle (composed by an unscoped admin) is also forbidden for a
+    // scoped principal — defence in depth on the same whole-system artifact.
+    let compose = send(
+        &h.router,
+        post_json(
+            "/api/v1/support/bundle",
+            ADMIN_TOKEN,
+            &serde_json::json!({ "window": "24h", "include": ["config"] }),
+        ),
+    )
+    .await;
+    assert_eq!(compose.status(), StatusCode::ACCEPTED);
+    let bundle_id = body_json(compose).await["bundle_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let resp = send(
+        &h.router,
+        get(
+            &format!("/api/v1/support/bundle/{bundle_id}"),
+            SCOPED_TOKEN,
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a scoped principal must not read a whole-system support bundle"
+    );
+
+    // An unscoped operator may still compose + read (no over-restriction).
+    let compose = send(
+        &h.router,
+        post_json(
+            "/api/v1/support/bundle",
+            OPERATOR_TOKEN,
+            &serde_json::json!({ "window": "24h", "include": ["config"] }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        compose.status(),
+        StatusCode::ACCEPTED,
+        "an unscoped operator may still compose a bundle"
+    );
+}
 
 #[tokio::test]
 async fn bundle_redacts_secrets_and_source_urls_and_lists_the_removals() {
