@@ -187,6 +187,22 @@ there is **no lock contention** (the one process holds the `FileNonceStore` floc
 ages the lease; it never auto-rebinds (that would silently spend the scarce 3/year budget against the
 operator's intent).
 
+**The pin is VERB-KEYED (the money-path keystone — a 3-lens-panel correction).** Sharing the running
+client between the always-on renew loop and the operator ops is only safe if the pinned attempt
+**cannot be consumed or cleared by a different verb**. Both the `PendingAttempt` slot **and** the
+in-flight idempotency key are keyed by `AttemptVerb` (`Renew | Activate | Rebind | Deactivate`, in
+per-verb slots; Renew+Activate share one `auto` slot as they are mutually exclusive on `run_once`).
+A verb only ever (a) replays **its own** pinned attempt — so the renew loop never posts a rebind body
+to `/heartbeat`, and an operator op never posts a renew body (no cross-verb replay) — and (b) clears
+**its own** pin/key on success or definitive rejection — so a definitive `/heartbeat` rejection never
+clears a pending rebind pin. An ambiguous `/rebind`'s pin + idempotency key therefore **persist
+untouched through any number of background renew cycles** until the operator's rebind retry replays
+them verbatim; the background loop is **physically unable** to mint a fresh rebind key. (Without
+verb-keying — a single shared slot — the renew loop would consume the pinned rebind attempt, a
+definitive rejection would clear it, and the operator's retry would mint a fresh key = a **second
+charge** against the budget. That was the critical defect a single shared slot introduced; the
+per-verb slots close it.)
+
 **The rebind → next-renew lease handoff (the fingerprint-continuity gate).** A rebind exists because
 the device's fingerprint match score against the **old** binding dropped (`fpScore < 70` — the
 self-heal trigger the request reports). After the server rebinds, the binding's reference fingerprint
@@ -311,12 +327,17 @@ shell.
   stall/partition the **rebind** and **deactivate** POSTs (one-frame-per-tick asserted while each is
   parked), mirroring the heartbeat + activate proofs.
 - **Idempotency is preserved across operator re-invocations** because the ops run on the retained
-  in-process client (§3): the durable `FileNonceStore` counter + the in-memory `PendingAttempt` pin
-  mean an ambiguous `Transport`/`409` failure replays the SAME idempotency-key verbatim — a network
-  blip never burns a second rebind charge. The `DeactivateResponse` type is a **device-local
+  in-process client with a **verb-keyed** pin + idempotency key (§3): the durable `FileNonceStore`
+  counter + the per-verb `PendingAttempt` pin mean an ambiguous `Transport`/`409` rebind replays the
+  SAME idempotency-key verbatim — and the background renew loop can neither consume nor clear it — so
+  a network blip never burns a second rebind charge. The `DeactivateResponse` type is a **device-local
   projection** of the wire `InstanceBinding` (there is no `DeactivateResponse` schema upstream — the
   200 returns `InstanceBinding`); it parses only `id` + `lifecycleState` + `enforcementState` via
-  serde-drop-unknown.
+  serde-drop-unknown. `RebindResponse` decodes **strictly**: the v0.46.0-required non-nullable fields
+  (`nextNonce`, `rebound`, `enforcementState`, `rebindsThisYear`, `seatConsumed`, `fpScore`) have **no
+  serde default**, so a malformed response missing one is rejected (a missing `nextNonce` would
+  otherwise silently strand the next renew); the required-but-nullable `leaseSerial`/`notAfter` accept
+  absent-or-null as `None` (the device never installs from them).
 - **Trait-impl blast radius**: adding two `LicenceServer` methods means every existing impl gains
   them — the cli `ConspectHttpServer` (real, routed through `post_raw_json`), and the test fakes
   (`FakeLicenceServer`, `HostileServer`, `ChaosActivateServer`). The hostile/chaos impls return the
