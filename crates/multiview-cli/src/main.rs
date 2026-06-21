@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser as _;
-use multiview_cli::cli::{Cli, Command, RunArgs, ValidateArgs};
+use multiview_cli::cli::{Cli, Command, NodeArgs, RunArgs, ValidateArgs};
 use multiview_cli::control;
 use multiview_cli::run::{RunReport, SoftwareEngine};
 use multiview_cli::validate::validate_config;
@@ -159,7 +159,19 @@ async fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
         Command::Validate(args) => run_validate(&args),
         Command::Run(args) => run_run(args).await,
+        Command::Node(args) => run_node(&args),
     }
+}
+
+/// The `node` subcommand (DEV-B5 / ADR-0045): resolve + validate the display-
+/// node bootstrap config and identity and print the plan. This slice ships the
+/// `--plan-only` software surface; the live ingest → KMS scanout path is a
+/// hardware follow-on, so the plan reports it as not-yet-wired rather than
+/// silently doing nothing.
+fn run_node(args: &NodeArgs) -> anyhow::Result<ExitCode> {
+    let plan = multiview_cli::node::run_node(args)?;
+    println!("{}", plan.render());
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The `validate` subcommand: validate one config and print its report. Exits
