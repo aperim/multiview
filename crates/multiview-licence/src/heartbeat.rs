@@ -1382,31 +1382,49 @@ impl DeactivateResponse {
     }
 }
 
-/// Assemble the [`RebindRequest`] for the device's **already-bound** instance
-/// (ADR-I009): the device's OWN `binding_id`/`instance_id` (continuity — NOT a
-/// challenge id), the `licence_id`, the refreshed fingerprint digest + score, and the
-/// challenge `nonce`. Pure + total (mirrors [`build_activate_request`]); the caller
-/// serialises it once and signs the PoP over those exact bytes. The
-/// `binding_id` falls back to the device's `instance_id` only if the identity carries
-/// no explicit binding (a misconfiguration the server will 404 — never a silent wrong id).
+/// Assemble the [`RebindRequest`] for the device's **already-bound** instance with an
+/// **explicitly-resolved `binding_id`** (ADR-I009). The caller resolves the binding via
+/// the same chain renew + deactivate use (learned binding → `store.current_binding_id()`
+/// → configured `identity.binding_id`) and passes it here — so a STORE-LEARNED binding
+/// (not in the static identity config) is rebound under the CORRECT id, never the
+/// `instance_id` fallback. The `instance_id` stays the device's OWN durable id
+/// (continuity — bound into the PoP pre-image). Pure + total; the caller serialises once
+/// and signs the PoP over those exact bytes.
 #[must_use]
-pub fn build_rebind_request(
+pub fn build_rebind_request_for(
     identity: &DeviceIdentity,
     licence_id: &str,
+    binding_id: &str,
     challenge: &DeviceChallenge,
 ) -> RebindRequest {
     RebindRequest {
         licence_id: licence_id.to_owned(),
-        binding_id: identity
-            .binding_id
-            .clone()
-            .unwrap_or_else(|| identity.instance_id.clone()),
+        binding_id: binding_id.to_owned(),
         instance_id: identity.instance_id.clone(),
         instance_discriminator_hash: identity.instance_discriminator_hash.clone(),
         fingerprint_digest: identity.fingerprint_digest.clone(),
         fp_score: identity.fingerprint_score,
         nonce: challenge.nonce.clone(),
     }
+}
+
+/// Assemble the [`RebindRequest`] resolving the `binding_id` from the identity alone
+/// (`identity.binding_id`, falling back to `identity.instance_id`). This is the pure
+/// builder the wire tests exercise; the live client path uses
+/// [`build_rebind_request_for`] with the binding resolved via the store chain
+/// (`rebind_once`), so a store-learned binding is never lost. Mirrors
+/// [`build_activate_request`].
+#[must_use]
+pub fn build_rebind_request(
+    identity: &DeviceIdentity,
+    licence_id: &str,
+    challenge: &DeviceChallenge,
+) -> RebindRequest {
+    let binding_id = identity
+        .binding_id
+        .clone()
+        .unwrap_or_else(|| identity.instance_id.clone());
+    build_rebind_request_for(identity, licence_id, &binding_id, challenge)
 }
 
 /// Assemble the [`DeactivateRequest`] for the device's binding (ADR-I009): the
@@ -3073,6 +3091,21 @@ impl<S: LicenceServer> HeartbeatClient<S> {
     /// [`HeartbeatError`] on transport / trust / PoP failure — every one keeps
     /// last-good; nothing is installed or removed.
     pub async fn rebind_once(&self, licence_id: &str) -> Result<HeartbeatOutcome, HeartbeatError> {
+        // The binding to rebind: the SAME resolution chain as deactivate + renew — the
+        // configured/learned binding, the store's current binding, or the configured
+        // identity binding. A device whose binding was LEARNED from the server (in the
+        // store, not the static identity config) must rebind under THAT id, never the
+        // `instance_id` fallback. Fail closed if none is known (nothing to rebind).
+        let binding_id = self
+            .binding_id()
+            .or_else(|| self.store.current_binding_id())
+            .or_else(|| self.identity.binding_id.clone())
+            .ok_or_else(|| {
+                HeartbeatError::Pop(PopError::Cose(
+                    "no established binding to rebind".to_owned(),
+                ))
+            })?;
+
         // 1. Pre-network key-trust fast-fail.
         let keys = self.server.fetch_keys().await?;
         let now_ms = (self.now_ms)();
@@ -3087,7 +3120,7 @@ impl<S: LicenceServer> HeartbeatClient<S> {
         } else {
             let nonce = self.obtain_pop_nonce(&self.config.org_id).await?;
             let challenge = DeviceChallenge::new(nonce, 0, String::new());
-            let req = build_rebind_request(&self.identity, licence_id, &challenge);
+            let req = build_rebind_request_for(&self.identity, licence_id, &binding_id, &challenge);
             let body = serde_json::to_vec(&req)
                 .map_err(|e| HeartbeatError::Malformed(format!("rebind body serialise: {e}")))?;
             let pop_header = self.build_lifecycle_pop_header("rebind", &body, &req.nonce)?;

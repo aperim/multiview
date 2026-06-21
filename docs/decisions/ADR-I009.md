@@ -160,8 +160,11 @@ a verbatim replay never triggers — so the merged paths keep their proven behav
 
 `HeartbeatClient::rebind_once()` mirrors `activate_once`'s four stages — pre-network key-trust
 fast-fail; build-or-replay the pinned `{idempotency-key, body, nonce, proof}` retry unit (fetch a
-fresh `/challenge` for the single-use nonce, build the `RebindRequest` over the device's **own**
-`instance_id`, serialise once, sign the PoP, mint the durable key last, pin); POST with the
+fresh `/challenge` for the single-use nonce, build the `RebindRequest` — its `bindingId` **resolved
+via the same chain as renew + deactivate** (learned binding → `store.current_binding_id()` →
+configured `identity.binding_id`; fail-closed if none, so a STORE-LEARNED binding is rebound under
+the correct id, never the `instance_id` fallback) and its PoP pre-image bound to the device's **own**
+`instance_id` (continuity), serialise once, sign the PoP, mint the durable key last, pin); POST with the
 status-aware retry (`ServerRejected`/`Malformed` → `reset_on_rejection`; `Transport` → leave pinned);
 on a `2xx` clear/rotate the attempt and **seed the steady-state nonce from `nextNonce`** so the next
 heartbeat renews with no extra `/challenge`. It returns a new
@@ -196,10 +199,17 @@ operator's intent).
 **The pin is VERB-KEYED (the money-path keystone — a 3-lens-panel correction).** Sharing the running
 client between the always-on renew loop and the operator ops is only safe if the pinned attempt
 **cannot be consumed or cleared by a different verb**. Both the `PendingAttempt` slot **and** the
-in-flight idempotency key are keyed by `AttemptVerb` (`Renew | Activate | Rebind | Deactivate`, in
-per-verb slots; Renew+Activate share one `auto` slot as they are mutually exclusive on `run_once`).
-A verb only ever (a) replays **its own** pinned attempt — so the renew loop never posts a rebind body
-to `/heartbeat`, and an operator op never posts a renew body (no cross-verb replay) — and (b) clears
+in-flight idempotency key are keyed by `AttemptVerb` (`Renew | Activate | Rebind | Deactivate`) in
+**four separate per-verb slots** — `renew`, `activate`, `rebind`, `deactivate` (each verb has its
+own slot; no two verbs ever share pending state). Renew and Activate get **distinct** slots rather
+than a shared one: although a device is normally either bound→renew or unbound→activate, the binding
+state can change between cycles (an ambiguous activate's pin persists, then a lease arrives via an
+install surface so the next cycle renews), and a shared slot would let a stale activate attempt be
+posted by the renew path — separate slots make that structurally impossible.
+`pinned_attempt(verb)` returns a slot's attempt **only when its `.verb` matches the requested verb**
+(defence in depth — a wrong-verb attempt is dropped, never replayed/posted). So a verb only ever
+(a) replays **its own** pinned attempt — the renew loop never posts a rebind/activate body to
+`/heartbeat`, and an operator op never posts a renew body (no cross-verb replay) — and (b) clears
 **its own** pin/key on success or definitive rejection — so a definitive `/heartbeat` rejection never
 clears a pending rebind pin. An ambiguous `/rebind`'s pin + idempotency key therefore **persist
 untouched through any number of background renew cycles** until the operator's rebind retry replays
