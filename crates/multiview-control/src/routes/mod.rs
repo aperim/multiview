@@ -144,11 +144,17 @@ async fn list_layouts(
     principal: Principal,
 ) -> ControlResult<Json<Vec<Layout>>> {
     principal.role.require(Action::Read)?;
+    // Per-object ROW visibility (BOLA, ADR-W005/ADR-W025): a layout is gated by
+    // its OWN id (`get_layout` 403s an out-of-scope id), so the list must drop
+    // rows outside the allowlist — exactly as `list_devices` does. A layout
+    // carries no embedded device_ref, so the row filter alone is complete; it is
+    // a no-op for an unscoped principal.
     let layouts = state
         .repository
         .list_layouts()?
         .into_iter()
         .map(|v| v.layout)
+        .filter(|layout| crate::auth::authorize_object(&principal, &layout.id).is_ok())
         .collect();
     Ok(Json(layouts))
 }

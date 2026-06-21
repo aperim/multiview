@@ -78,7 +78,18 @@ pub(crate) async fn list_salvos(
     principal: Principal,
 ) -> ControlResult<Json<Vec<Salvo>>> {
     principal.role.require(Action::Read)?;
-    let salvos = state.salvos.list()?.into_iter().map(|v| v.salvo).collect();
+    // Per-object ROW visibility (BOLA, ADR-W005/ADR-W025): a salvo is gated by
+    // its OWN id (`get_salvo` 403s an out-of-scope id), so the list must drop
+    // rows outside the allowlist — exactly as `list_devices` does. A salvo
+    // carries no embedded device_ref, so the row filter alone is complete; it is
+    // a no-op for an unscoped principal.
+    let salvos = state
+        .salvos
+        .list()?
+        .into_iter()
+        .map(|v| v.salvo)
+        .filter(|salvo| crate::auth::authorize_object(&principal, &salvo.id).is_ok())
+        .collect();
     Ok(Json(salvos))
 }
 
