@@ -28,7 +28,12 @@ panel's exhaustive sweep additionally found the same class on the AMWA NMOS Node
 API: the IS-04 LIST routes (`/x-nmos/.../devices|senders|receivers`) were
 role-gated only, and the IS-05 single-receiver connection **read**
 (`GET .../receivers/{id}/active`) was not per-object authorized even though its
-sibling stage `PATCH` was — both folded into this decision.
+sibling stage `PATCH` was. A subsequent round (corrected sweep methodology: grep
+for device-id *references*, not just device collections) found a further class —
+config objects that **embed** a managed device id in a field rather than being a
+device collection: device-projected sources/outputs (`body.device_ref`,
+ADR-M009) and sync-group members (`body.members[].device`, ADR-M010) disclosed
+out-of-scope device ids to a scoped principal. All folded into this decision.
 
 The decision is bounded by invariant #10 (isolation): the realtime path is
 best-effort, bounded, and **physically incapable of back-pressuring the engine**
@@ -62,13 +67,32 @@ the allowlist:
    decision on the already-delivered event — the engine's publish path
    (`broadcast::send`) is untouched (invariant #10).
 4. **AMWA NMOS Node API** ([`nmos/mod.rs`](../../crates/multiview-control/src/nmos/mod.rs))
-   — the IS-04 LIST routes filter to the allowlist by parity with the IS-05
-   per-receiver handlers: `list_devices` by the device's own id; `list_senders` /
-   `list_receivers` by the resource's own id **or** its `device_id` link
-   (`nmos_resource_in_scope`). The per-receiver IS-05 connection read
-   (`get_active`) and stage (`patch_staged`) share one gate (`authorize_receiver`),
-   so reading, staging, and listing an NMOS receiver use the same object-scope
-   model; a known out-of-scope receiver is `403`, an unknown id stays `404`.
+   — the IS-04 LIST routes filter to the allowlist: `list_devices` by the
+   device's own id; `list_senders` / `list_receivers` by the resource's own id
+   **or** its `device_id` link (`nmos_resource_in_scope`, so a device-scoped
+   principal sees that device's senders/receivers). The IS-05 single-receiver
+   surface is **deliberately asymmetric** between read and write:
+   - the connection **READ** (`get_active`) uses the device-link gate
+     (`authorize_receiver`) — a visibility concern, matching the receiver LIST;
+   - the staged-connection **WRITE** (`patch_staged`) uses the **strict
+     own-receiver-id** gate (`authorize_object(&id)`) — a mutation must not widen
+     to "any receiver of a device I'm scoped to", so the write authz is exactly
+     the pre-existing behaviour (non-weakening).
+
+   A known out-of-scope receiver is `403`; an unknown id stays `404` (a missing
+   id is reported as not-found, never disclosed as forbidden).
+5. **Embedded device-id references** (config objects that *reference* a managed
+   device in a field rather than being a device collection) — redacted for a
+   scoped principal by `redact_out_of_scope_device_refs`
+   ([`routes/mod.rs`](../../crates/multiview-control/src/routes/mod.rs)), applied
+   on both the single `GET` and the list of:
+   - **sources / outputs** — `body.device_ref` (the ADR-M009 device-projection
+     link): the key is removed when the referenced device is out of scope.
+   - **sync groups** — each `body.members[].device` (ADR-M010): the `device` key
+     is removed from an out-of-scope member (the member entry + `offset_ms`
+     stay). The resource itself is still gated by its own id (so an in-scope
+     principal sees the row); only the embedded out-of-scope device id is hidden,
+     by parity with a single-device `GET` `403`. No-op for an unscoped principal.
 
 The scope axis filtered is the **object** axis (`scoped_object_ids`,
 [`authorize_object`](../../crates/multiview-control/src/auth.rs)), matching the
@@ -127,11 +151,15 @@ never by object scope.
   (config-declared API keys) gets correct visibility for free.
 - **Committed to maintain:** any **new** collection read (REST or NMOS) or any
   new Devices-domain realtime event must apply the same per-row / per-event
-  object filter, and any new device/cast **object** event must be added to
+  object filter; any new device/cast **object** event must be added to
   [`device_object_scope_id`](../../crates/multiview-control/src/realtime.rs) (the
   narrow authz helper, not the broader `event_scope_id`) so the realtime filter
-  can gate its id. A new collection that forgets the filter is a re-introduced
-  leak — covered by the BOLA tests added with this ADR.
+  can gate its id; and any new config field that **embeds a managed device id**
+  must be added to
+  [`redact_out_of_scope_device_refs`](../../crates/multiview-control/src/routes/mod.rs)
+  (the sweep is for device-id *references*, not only device-typed collections). A
+  new collection/field that forgets the filter is a re-introduced leak — covered
+  by the BOLA tests added with this ADR.
 - **Invariant #10 (isolation):** preserved. The realtime filter is a pure
   per-client read-side projection on events already received from the bounded
   broadcast; it adds no blocking, no await, and never touches the engine publish

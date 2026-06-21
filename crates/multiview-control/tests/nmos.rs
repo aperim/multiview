@@ -221,13 +221,15 @@ async fn nmos_sender_and_receiver_lists_filter_by_device_scope() {
 
 /// BOLA per-object (OWASP API1, ADR-W005/ADR-W025): the IS-05 single-receiver
 /// connection READ (`GET .../single/receivers/{id}/active`) must authorize the
-/// receiver id, exactly as its sibling `PATCH .../staged` already does — else a
-/// scoped principal reads the live transport/connection state of a receiver
-/// outside its allowlist by probing the id.
+/// receiver — else a scoped principal reads the live transport/connection state
+/// of a receiver outside its scope by probing the id. The READ honours the
+/// device-link scope (visibility): a principal scoped to a receiver's DEVICE may
+/// read that receiver (the write path is stricter — see
+/// `staging_a_connection_uses_strict_own_receiver_id_authz`).
 ///
-/// `SCOPED_TOKEN` (allowlist `["scoped-layout"]`) reading the OUT-of-scope
-/// receiver `rcv-dev-other` must be `403`; reading its IN-scope receiver
-/// `rcv-scoped-layout` must still succeed (`200`, no over-restriction).
+/// `SCOPED_TOKEN` (allowlist `["scoped-layout"]`, which is `rcv-scoped-layout`'s
+/// device) reading the OUT-of-scope receiver `rcv-dev-other` must be `403`;
+/// reading its in-device receiver `rcv-scoped-layout` must succeed (`200`).
 #[tokio::test]
 async fn nmos_active_connection_read_is_object_scoped() {
     let h = harness();
@@ -263,6 +265,87 @@ async fn nmos_active_connection_read_is_object_scoped() {
         resp.status(),
         StatusCode::OK,
         "a scoped principal may read its own in-scope receiver's connection state"
+    );
+}
+
+/// Pins the deliberate READ/WRITE authz asymmetry on the IS-05 receiver
+/// (ADR-W025): the staged-connection WRITE (`PATCH .../staged`) authorizes
+/// **strictly the receiver's own id** — it does NOT widen to the device-link the
+/// READ honours. A mutation on a receiver is not implied by being scoped to that
+/// receiver's device; so a `device`-scoped principal can READ but cannot STAGE.
+///
+/// `SCOPED_TOKEN` is scoped to `["scoped-layout"]` — that is `rcv-scoped-layout`'s
+/// DEVICE, not the receiver id. It may read the receiver's connection state (the
+/// device-link READ gate, asserted above) but must be `403` staging it (the
+/// strict own-receiver-id WRITE gate). This is the non-weakening guarantee: the
+/// write stays exactly the pre-existing `authorize_object(receiver_id)` behaviour.
+#[tokio::test]
+async fn staging_a_connection_uses_strict_own_receiver_id_authz() {
+    let h = harness();
+    seed_two_devices(&h);
+
+    let request = serde_json::json!({
+        "master_enable": true,
+        "activation": { "mode": "activate_immediate" },
+        "transport_params": [{
+            "destination_ip": "239.0.0.1",
+            "destination_port": 5004,
+            "rtp_enabled": true
+        }]
+    });
+
+    // The DEVICE-scoped principal may READ the receiver (device-link visibility)…
+    let resp = send(
+        &h.router,
+        get(
+            "/x-nmos/connection/v1.1/single/receivers/rcv-scoped-layout/active",
+            SCOPED_TOKEN,
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the device-scoped principal may read its device's receiver"
+    );
+
+    // …but may NOT STAGE it: the write authorizes the receiver's own id
+    // (`rcv-scoped-layout`), which is NOT in the allowlist `["scoped-layout"]`.
+    // Staging through the device-link would be a privilege widening on a mutation
+    // surface — forbidden by design (ADR-W025).
+    let resp = send(
+        &h.router,
+        patch_json(
+            "/x-nmos/connection/v1.1/single/receivers/rcv-scoped-layout/staged",
+            SCOPED_TOKEN,
+            &request,
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "staging must use strict own-receiver-id authz — a device-scoped principal cannot stage \
+         a receiver whose own id is not allowlisted (non-weakening WRITE)"
+    );
+    let problem = body_json(resp).await;
+    assert_eq!(problem["type"], "/problems/forbidden");
+
+    // An unscoped admin may stage it (positive control: the gate does not block
+    // a legitimately-authorized principal).
+    let resp = send(
+        &h.router,
+        patch_json(
+            "/x-nmos/connection/v1.1/single/receivers/rcv-scoped-layout/staged",
+            ADMIN_TOKEN,
+            &request,
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "an unscoped admin may stage the receiver"
     );
 }
 

@@ -163,11 +163,18 @@ pub(crate) async fn list_sources(
     principal: Principal,
 ) -> ControlResult<Json<Vec<Resource>>> {
     principal.role.require(Action::Read)?;
+    // Redact embedded out-of-scope `device_ref` links for a scoped principal
+    // (BOLA visibility, ADR-W005/ADR-W025): a device-projected source must not
+    // disclose a device id the principal could not `GET`. No-op when unscoped.
     let sources = state
         .sources
         .list()?
         .into_iter()
-        .map(|v| v.resource)
+        .map(|v| {
+            let mut resource = v.resource;
+            crate::routes::redact_out_of_scope_device_refs(&principal, &mut resource);
+            resource
+        })
         .collect();
     Ok(Json(sources))
 }
@@ -195,7 +202,12 @@ pub(crate) async fn get_source(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Read)?;
     crate::auth::authorize_object(&principal, &id)?;
-    let versioned = state.sources.get(&id)?;
+    let mut versioned = state.sources.get(&id)?;
+    // Redact an embedded out-of-scope `device_ref` (BOLA visibility,
+    // ADR-W005/ADR-W025): the source itself is in scope (authorized above), but
+    // its device-projection link must not leak a device id the principal could
+    // not `GET`. No-op when unscoped.
+    crate::routes::redact_out_of_scope_device_refs(&principal, &mut versioned.resource);
     Ok(source_response(StatusCode::OK, &versioned))
 }
 

@@ -81,11 +81,7 @@ async fn output_device_ref_is_redacted_when_out_of_scope() {
     );
 
     // An unscoped admin sees the device_ref unchanged.
-    let resp = send(
-        &h.router,
-        get("/api/v1/outputs/scoped-layout", ADMIN_TOKEN),
-    )
-    .await;
+    let resp = send(&h.router, get("/api/v1/outputs/scoped-layout", ADMIN_TOKEN)).await;
     let out = body_json(resp).await;
     assert_eq!(out["body"]["device_ref"], "dev-other");
 }

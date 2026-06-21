@@ -389,6 +389,63 @@ pub(crate) fn submit_accepted_body(
     }
 }
 
+/// Redact embedded **managed-device id** references from a resource `body` that a
+/// scoped principal is not authorized to see (BOLA visibility, ADR-W005/ADR-W025).
+///
+/// Some config objects carry a managed device id in a *field* rather than being a
+/// device collection: a device-projected source/output via `device_ref`
+/// (ADR-M009), and a sync group's `members[].device` (ADR-M010). The resource
+/// itself is gated by its own id, so an in-scope principal still sees the row —
+/// but an **out-of-scope device id embedded in it would leak the device's
+/// existence**, exactly the enumeration a single-device `GET` would `403`. So for
+/// an object-scoped principal this drops any such reference whose device is
+/// outside the allowlist:
+///
+/// * top-level `body.device_ref` (source/output) — the key is removed.
+/// * each `body.members[].device` (sync group) — the key is removed from that
+///   member object (the member entry and its `offset_ms` stay; only the hidden
+///   device id is dropped).
+///
+/// An **unscoped** principal (`scoped_object_ids: None`, the default
+/// admin/operator/viewer) is a no-op — every reference is shown unchanged. This
+/// is a pure read-side projection on the response body; it never mutates the
+/// stored resource.
+pub(crate) fn redact_out_of_scope_device_refs(
+    principal: &Principal,
+    resource: &mut crate::resource_store::Resource,
+) {
+    // Unscoped principals see everything: nothing to redact (fast path).
+    if !principal.is_scoped() {
+        return;
+    }
+    let out_of_scope =
+        |device_id: &str| crate::auth::authorize_object(principal, device_id).is_err();
+
+    // Source/output device-projection link.
+    if let Some(serde_json::Value::String(device_id)) = resource.body.get("device_ref") {
+        if out_of_scope(device_id) {
+            if let Some(map) = resource.body.as_object_mut() {
+                map.remove("device_ref");
+            }
+        }
+    }
+
+    // Sync-group member device ids.
+    if let Some(serde_json::Value::Array(members)) = resource.body.get_mut("members") {
+        for member in members.iter_mut() {
+            let leaks = matches!(
+                member.get("device"),
+                Some(serde_json::Value::String(device_id)) if out_of_scope(device_id)
+            );
+            if leaks {
+                if let Some(member_map) = member.as_object_mut() {
+                    member_map.remove("device");
+                }
+            }
+        }
+    }
+}
+
 /// The exact operator/portal copy the Conspect startup gate (S1) refuses a NEW
 /// program-output start with at the `block-new-instance` rung (ADR-0050 §5/§6.2).
 /// **Verbatim** — the cli's `BLOCK_NEW_INSTANCE_REASON` and the portal show the

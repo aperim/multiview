@@ -206,9 +206,9 @@ fn nmos_resource_in_scope(principal: &Principal, own_id: &str, device_id: &str) 
         || crate::auth::authorize_object(principal, device_id).is_ok()
 }
 
-/// Authorize a `principal` for the single IS-05 receiver `id` (per-object BOLA,
-/// ADR-W005/ADR-W025), the shared gate for the per-receiver connection
-/// read/stage handlers.
+/// Authorize a `principal` to **read** the single IS-05 receiver `id` (per-object
+/// BOLA visibility, ADR-W005/ADR-W025) — the gate for the connection `get_active`
+/// READ.
 ///
 /// A **known** receiver is authorized by [`nmos_resource_in_scope`] (its own id
 /// or its `device_id` link), consistent with the receiver LIST filter — so a
@@ -216,6 +216,10 @@ fn nmos_resource_in_scope(principal: &Principal, own_id: &str, device_id: &str) 
 /// receiver passes here and is reported as the handler's `404` downstream (so a
 /// missing id stays "not found", never disclosed as a "forbidden"). An unscoped
 /// principal is always authorized.
+///
+/// Read-only by design: the staged-connection WRITE (`patch_staged`) uses the
+/// strict own-receiver-id [`authorize_object`](crate::auth::authorize_object)
+/// gate instead — a mutation must not widen to the device-link (ADR-W025).
 ///
 /// # Errors
 ///
@@ -412,11 +416,13 @@ pub(crate) async fn patch_staged(
     Json(request): Json<ConnectionRequest>,
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
-    // Per-object authz (BOLA, ADR-W005/ADR-W025): the SAME gate as the connection
-    // read + the receiver LIST — a scoped principal may stage only a receiver in
-    // its scope (its own id or its device-link). A known out-of-scope receiver is
-    // a 403; an unknown id stays the 404 `stage_connection` reports.
-    authorize_receiver(&state, &principal, &id)?;
+    // Per-object authz (BOLA, ADR-W005/ADR-W025) — STRICT own-receiver-id on the
+    // WRITE path: a scoped principal may stage only a receiver id explicitly in
+    // its allowlist. Deliberately NARROWER than the `get_active` READ (which also
+    // honours the device-link, a visibility concern): a mutation must not widen to
+    // "any receiver of a device I'm scoped to", so staging stays exactly the
+    // pre-existing `authorize_object(&id)` gate (strictly non-weakening).
+    crate::auth::authorize_object(&principal, &id)?;
     let connection = state.nmos.stage_connection(&id, request)?;
     Ok((StatusCode::OK, Json(connection)).into_response())
 }
