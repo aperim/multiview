@@ -87,7 +87,7 @@ jobs:
       digest-gpl-arm64: ${{ steps.export.outputs.digest-gpl-arm64 }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4.1.0
@@ -102,7 +102,7 @@ jobs:
 
       - name: Build + push by digest
         id: build
-        uses: docker/build-push-action@v7.2.0
+        uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: deploy/Dockerfile.ffmpeg
@@ -202,7 +202,7 @@ jobs:
           if [ "$sbom" = "null" ] || [ -z "$sbom" ]; then echo "::error::merged manifest lost SBOM"; exit 1; fi
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v4.1.0
+        uses: actions/attest-build-provenance@v4.1.1
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
