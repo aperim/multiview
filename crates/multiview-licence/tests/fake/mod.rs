@@ -30,9 +30,13 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey as EdKey};
-// `p256::ecdsa::SigningKey::sign` is provided by the inherent `Signer` impl that
-// `ecdsa` brings into scope through the type itself (no separate trait import is
-// needed in p256 0.13); `Signature` is `P256Sig`.
+// ed25519-dalek 3.x uses `signature` 3.0 while `p256` 0.13 still uses `signature`
+// 2.2.0, so their two `Signer` traits are DISTINCT types: the ed25519 `Signer as _`
+// above no longer covers a p256 key. Import p256's own re-exported `signature::Signer`
+// (2.2.0) for `SigningKey::sign` below. Both are `use … as _`, and each `.sign()`
+// resolves by its receiver type (ed25519 vs p256 key), so there is no ambiguity.
+// `Signature` is `P256Sig` (ADR-I010).
+use p256::ecdsa::signature::Signer as _;
 use p256::ecdsa::{Signature as P256Sig, SigningKey as P256Key};
 
 use ed25519_dalek::{Verifier as _, VerifyingKey as EdVerifyingKey};

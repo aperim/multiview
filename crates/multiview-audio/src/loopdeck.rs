@@ -403,7 +403,11 @@ impl LoopDeck {
             // Centred phase p = (m + 0.5) / xfade ∈ (0, 1): at m=0 the tail
             // dominates (continuous with the previous sample), at m=xfade-1 the
             // head dominates (continuous into the clean middle).
-            let p = (frame_ratio(m, xfade) * 2.0 + 1.0) / 2.0;
+            // `f64::midpoint(2·ratio, 1)` == `(2·ratio + 1)/2` bit-for-bit here (both
+            // operands are far below `f64::MAX/2`, so `midpoint` takes its plain
+            // `(a+b)/2` branch); the Rust-1.85 `midpoint` form silences
+            // `clippy::manual_midpoint` (MSRV-gated on) without changing the value.
+            let p = f64::midpoint(frame_ratio(m, xfade) * 2.0, 1.0);
             let (g_tail, g_head) = if linear {
                 // Linear constant-amplitude: g_tail + g_head == 1.
                 (1.0 - p, p)

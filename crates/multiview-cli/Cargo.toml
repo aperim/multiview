@@ -115,16 +115,16 @@ rustix = { workspace = true, features = ["fs", "process"], optional = true }
 # ADR-I007): GENERATE (the only RNG in the product, at the cli boundary — the leaf
 # crate stays no-RNG) + LOAD a persisted Ed25519 device keypair and SIGN the
 # COSE_Sign1 proof with it. `ed25519-dalek` is `MIT OR Apache-2.0`, deny-clean, and
-# already in the workspace graph (the licence crate's verify path); `rand_core`
-# (`getrandom`) seeds the one-time keygen. Optional + gated so the default build
-# pulls no RNG/signing surface.
-ed25519-dalek = { version = "2", default-features = false, features = [
+# already in the workspace graph (the licence crate's verify path); `getrandom`
+# (`fill`) draws the 32 seed bytes for the one-time keygen, fail-closed on an OS
+# entropy error (so no `SigningKey::generate` RNG-trait surface is needed, and the
+# ed25519-dalek `rand_core` feature is not pulled). Optional + gated so the default
+# build pulls no RNG/signing surface. ed25519-dalek 3.x aligns to rand_core 0.10 /
+# getrandom 0.4 / curve25519-dalek 5 (ADR-I010).
+ed25519-dalek = { version = "3", default-features = false, features = [
     "alloc",
-    "rand_core",
 ], optional = true }
-rand_core = { version = "0.6", default-features = false, features = [
-    "getrandom",
-], optional = true }
+getrandom = { version = "0.4", default-features = false, optional = true }
 
 # Used by the control bridge (the compact per-tick engine state snapshot the
 # control plane republishes is a `serde_json::Value`) and by the `overlay`
@@ -167,7 +167,7 @@ tempfile = "3"
 # stalled/partitioned `server.activate(...)`), and an Ed25519 device key signs the PoP.
 # All already in the workspace graph behind `heartbeat` (deny-clean, no new crate);
 # dev-only — the cli's non-test code has no signer/RNG.
-ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 serde_json = { workspace = true }
@@ -386,7 +386,7 @@ heartbeat = [
     "reqwest?/json",
     "dep:rustix",
     "dep:ed25519-dalek",
-    "dep:rand_core",
+    "dep:getrandom",
 ]
 
 # Sample a PTP Hardware Clock (`[timing] ptp_phc`, e.g. /dev/ptp0) to discipline

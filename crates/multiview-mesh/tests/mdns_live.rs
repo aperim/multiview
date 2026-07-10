@@ -11,17 +11,18 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use ed25519_dalek::rand_core::UnwrapErr;
 use ed25519_dalek::SigningKey;
+use getrandom::SysRng;
 use multiview_mesh::announce::{
     AnnouncePayload, EntitlementSummary, SaltedDigest, ANNOUNCE_PROTOCOL_VERSION,
 };
 use multiview_mesh::service::MdnsService;
 use multiview_mesh::transport::MeshTransport;
 use multiview_mesh::ClaimState;
-use rand_core::OsRng;
 
 fn signed_wire(byte: u8) -> Vec<u8> {
-    let key = SigningKey::generate(&mut OsRng);
+    let key = SigningKey::generate(&mut UnwrapErr(SysRng));
     let granted = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
     let expires = granted + chrono::Duration::days(35);
     let summary = EntitlementSummary::new(

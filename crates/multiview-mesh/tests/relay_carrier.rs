@@ -12,7 +12,9 @@
 )]
 
 use chrono::{DateTime, Utc};
+use ed25519_dalek::rand_core::UnwrapErr;
 use ed25519_dalek::{Signer, SigningKey};
+use getrandom::SysRng;
 use multiview_licence::entitlement::{
     Entitlement, EntitlementFlags, GpuLimit, HardwareClass, Tier,
 };
@@ -22,7 +24,6 @@ use multiview_licence::verify::{PinnedKey, SignedLease};
 use multiview_licence::ACTIVATION_WINDOW_DAYS;
 use multiview_mesh::peer::PeerKey;
 use multiview_mesh::relay::{RelayConfig, RelayQueue, RelayedBinding, RELAY_QUEUE_CAP};
-use rand_core::OsRng;
 
 fn epoch() -> DateTime<Utc> {
     DateTime::from_timestamp(1_700_000_000, 0).unwrap()
@@ -61,7 +62,7 @@ fn a_relayed_binding_installs_at_the_destination_using_the_server_key() {
     // The destination machine pins the SERVER key (not the relayer's). The carrier
     // forwarded the server-signed binding verbatim; it installs because the
     // server's signature verifies — the relayer's identity is irrelevant.
-    let server = SigningKey::generate(&mut OsRng);
+    let server = SigningKey::generate(&mut UnwrapErr(SysRng));
     let pinned = PinnedKey::from_verifying_key(&server.verifying_key());
     let now = epoch();
     let carried = RelayedBinding::new(origin(0x09), server_binding(&server, "serial-RLY", now));
@@ -83,8 +84,8 @@ fn a_relayer_cannot_forge_an_assertion_it_lacks_the_server_key() {
     // The relayer signs with ITS OWN key (a forgery attempt). The destination
     // pins the SERVER key, so the forged binding fails verification — the relayer
     // is a dumb carrier with no authority.
-    let server = SigningKey::generate(&mut OsRng);
-    let relayer = SigningKey::generate(&mut OsRng); // the malicious relayer's key
+    let server = SigningKey::generate(&mut UnwrapErr(SysRng));
+    let relayer = SigningKey::generate(&mut UnwrapErr(SysRng)); // the malicious relayer's key
     let pinned = PinnedKey::from_verifying_key(&server.verifying_key());
     let now = epoch();
 
@@ -104,7 +105,7 @@ fn a_relayer_cannot_forge_an_assertion_it_lacks_the_server_key() {
 fn a_tampered_relayed_binding_is_rejected() {
     // The carrier (or a man-in-the-middle) flips a covered field after the server
     // signed it. The signature no longer matches → rejected at the destination.
-    let server = SigningKey::generate(&mut OsRng);
+    let server = SigningKey::generate(&mut UnwrapErr(SysRng));
     let pinned = PinnedKey::from_verifying_key(&server.verifying_key());
     let now = epoch();
     let mut binding = server_binding(&server, "serial-OK", now);
@@ -125,7 +126,7 @@ fn a_tampered_relayed_binding_is_rejected() {
 fn the_relay_queue_is_bounded_drop_oldest() {
     // A relayer enqueues at most RELAY_QUEUE_CAP neighbour requests; beyond that
     // the OLDEST is dropped (never grows — invariant #10). The newest survive.
-    let server = SigningKey::generate(&mut OsRng);
+    let server = SigningKey::generate(&mut UnwrapErr(SysRng));
     let now = epoch();
     let mut queue = RelayQueue::new();
     for i in 0..=RELAY_QUEUE_CAP {
@@ -172,7 +173,7 @@ fn the_carrier_exposes_the_origin_peer_for_audit_but_not_the_lease_contents() {
     // The carrier surfaces WHO it is relaying for (the origin peer digest, for the
     // operator's Mesh screen) but does not interpret the binding — it is opaque
     // bytes the carrier forwards.
-    let server = SigningKey::generate(&mut OsRng);
+    let server = SigningKey::generate(&mut UnwrapErr(SysRng));
     let now = epoch();
     let carried = RelayedBinding::new(origin(0x0C), server_binding(&server, "serial-AUD", now));
     assert_eq!(carried.origin(), &origin(0x0C));
