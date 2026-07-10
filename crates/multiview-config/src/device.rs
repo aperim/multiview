@@ -350,7 +350,7 @@ impl Device {
             ConfigError::Validation(format!("device {:?} address {address:?}: {e}", self.id))
         };
         let host = match self.driver {
-            DeviceDriver::Zowietek => net_guard::parse_management_url(address).map_err(wrap)?,
+            DeviceDriver::Zowietek => net_guard::parse_device_address(address).map_err(wrap)?,
             DeviceDriver::Cast => net_guard::parse_cast_authority(address)
                 .map(|(host, _port)| host)
                 .map_err(wrap)?,

@@ -16,7 +16,7 @@
 //!    offline. It rejects the **never-legitimate** literal dial targets
 //!    (loopback, link-local incl. IMDS, unspecified, multicast/broadcast, and
 //!    their IPv4-mapped forms) and — for device-management URLs — enforces the
-//!    `http`/`https` [scheme allowlist](parse_management_url). Private/ULA LAN
+//!    `http`/`https` [scheme allowlist](parse_device_address). Private/ULA LAN
 //!    literals are **accepted** here: a managed device legitimately lives on the
 //!    LAN, so whether its private address may be dialled is a runtime policy
 //!    decision, not a config-syntax one.
@@ -407,29 +407,36 @@ pub fn resolve_and_screen<R: HostResolver + ?Sized>(
     Ok(addrs)
 }
 
-/// Parse a device-management URL, enforcing the `http`/`https` scheme allowlist,
-/// and return the host (userinfo stripped; brackets stripped for an IPv6
-/// literal).
+/// Parse a device-management address and return its host (userinfo stripped;
+/// brackets stripped for an IPv6 literal).
 ///
-/// The scheme allowlist blocks `file:`/`gopher:`/`dict:` SSRF gadgets; userinfo
-/// stripping blocks the `http://trusted@169.254.169.254/` confusion.
+/// A device-management address is either an `http`/`https` **URL**
+/// (`http://[fd00:db8::42]`) or a bare **authority** (`[fd00:db8::42]:5961`, as
+/// discovery emits) — both are accepted. When a URL scheme is present it must be
+/// `http`/`https` (blocking `file:`/`gopher:`/`dict:` SSRF gadgets); a scheme
+/// with no host, or userinfo confusion (`http://trusted@169.254.169.254/`), is
+/// resolved to the real host after the last `@`.
 ///
 /// # Errors
 ///
-/// [`AddressError::Empty`], [`AddressError::Scheme`], or [`AddressError::NoHost`].
-pub fn parse_management_url(address: &str) -> Result<HostSpec, AddressError> {
+/// [`AddressError::Empty`], [`AddressError::Scheme`] (a non-HTTP scheme), or
+/// [`AddressError::NoHost`].
+pub fn parse_device_address(address: &str) -> Result<HostSpec, AddressError> {
     let trimmed = address.trim();
     if trimmed.is_empty() {
         return Err(AddressError::Empty);
     }
-    let rest = trimmed
-        .strip_prefix("http://")
-        .or_else(|| trimmed.strip_prefix("https://"))
-        .ok_or_else(|| AddressError::Scheme {
-            address: address.to_owned(),
-        })?;
-    // The authority runs to the first path/query/fragment delimiter.
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // A `scheme://` prefix must be http/https; no scheme ⇒ a bare authority.
+    let authority = if let Some((scheme, rest)) = trimmed.split_once("://") {
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return Err(AddressError::Scheme {
+                address: address.to_owned(),
+            });
+        }
+        rest.split(['/', '?', '#']).next().unwrap_or("")
+    } else {
+        trimmed
+    };
     // Strip any `userinfo@` prefix — the real host is after the last `@`.
     let authority = authority
         .rsplit_once('@')

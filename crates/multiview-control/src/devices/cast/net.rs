@@ -34,9 +34,11 @@
 //! [`CastChannel`](super::session::CastChannel) seam stays socket-free
 //! testable. Google Cast and Chromecast are trademarks of Google LLC.
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use multiview_config::device::net_guard::{self, DialPolicy};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::{self, pki_types};
@@ -248,13 +250,18 @@ impl CastChannel for TlsCastChannel {
 }
 
 /// The live connector: dials `host[:port]` (default 8009) with a bounded
-/// connect timeout and the permissive device-certificate verifier.
+/// connect timeout and the permissive device-certificate verifier. Every dial
+/// resolves the host and screens the RESOLVED IP against the operator dial
+/// policy (SEC-04, CWE-918), so a rebind between session start and (re)connect
+/// cannot redirect the actor at an internal host.
 pub struct TlsCastConnector {
     connector: TlsConnector,
+    dial_policy: Arc<DialPolicy>,
 }
 
 impl TlsCastConnector {
-    /// Build the connector (one rustls client config shared by every dial).
+    /// Build the connector (one rustls client config shared by every dial) with
+    /// the outbound-dial SSRF `dial_policy`.
     ///
     /// # Errors
     ///
@@ -262,7 +269,7 @@ impl TlsCastConnector {
     /// only possible if the linked provider supports none of rustls's default
     /// protocol versions, i.e. a broken build. Propagated (never panicked) so
     /// the binary can log it and run without a cast factory.
-    pub fn new() -> Result<Self, CastChannelError> {
+    pub fn new(dial_policy: Arc<DialPolicy>) -> Result<Self, CastChannelError> {
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let schemes = provider
             .signature_verification_algorithms
@@ -275,8 +282,38 @@ impl TlsCastConnector {
             .with_no_client_auth();
         Ok(Self {
             connector: TlsConnector::from(Arc::new(config)),
+            dial_policy,
         })
     }
+}
+
+/// Resolve `host` to its candidate socket addresses and screen every RESOLVED
+/// IP against `policy` — fail-closed — returning only the vetted addresses to
+/// dial. An IP literal resolves to itself. Screening the resolved answer (not
+/// the name) defeats DNS-rebind.
+async fn resolve_screened_addrs(
+    host: &str,
+    port: u16,
+    policy: &DialPolicy,
+) -> Result<Vec<SocketAddr>, CastChannelError> {
+    let addrs: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+        net_guard::screen_ip(ip, policy).map_err(CastChannelError::new)?;
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(CastChannelError::new)?
+            .collect();
+        net_guard::screen_resolved(resolved.iter().map(SocketAddr::ip), policy)
+            .map_err(CastChannelError::new)?;
+        resolved
+    };
+    if addrs.is_empty() {
+        return Err(CastChannelError {
+            message: format!("cast host {host:?} did not resolve to a dialable address"),
+        });
+    }
+    Ok(addrs)
 }
 
 impl CastConnector for TlsCastConnector {
@@ -286,6 +323,10 @@ impl CastConnector for TlsCastConnector {
         let (host, port) = split_authority(authority).ok_or_else(|| CastChannelError {
             message: format!("cast authority {authority:?} is not a valid host[:port]"),
         })?;
+        // SSRF guard (SEC-04): resolve + screen the RESOLVED IP, then dial ONLY
+        // a vetted address (pinned) — every reconnect re-screens, defeating a
+        // DNS-rebind after the start-time check.
+        let vetted = resolve_screened_addrs(&host, port, &self.dial_policy).await?;
         // SNI is irrelevant under the permissive verifier; an IP literal
         // becomes ServerName::IpAddress, a name stays a DNS name.
         let server_name =
@@ -294,7 +335,7 @@ impl CastConnector for TlsCastConnector {
         // handshake), so a device that accepts the socket but stalls the
         // handshake still times out into the supervised-reconnect path.
         let dial = async {
-            let tcp = TcpStream::connect((host.as_str(), port))
+            let tcp = TcpStream::connect(vetted.as_slice())
                 .await
                 .map_err(CastChannelError::new)?;
             self.connector

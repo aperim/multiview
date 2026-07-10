@@ -624,6 +624,13 @@ pub struct AppState {
     /// derived and the cast-session routes refuse with an honest `409`.
     /// Read-only control-plane state (invariant #10).
     pub cast_delivery: Option<Arc<CastDelivery>>,
+    /// The outbound-dial SSRF allowlist (SEC-02/SEC-04, CWE-918): the operator
+    /// CIDRs (`control.device_dial_allow`) that re-enable internal ranges for
+    /// the managed-device poller and Cast session actor to dial. The secure
+    /// default ([`DialPolicy::deny_internal`](multiview_config::device::net_guard::DialPolicy::deny_internal))
+    /// allows only globally-routable hosts; the binary widens it from config.
+    /// Read-only control-plane state (invariant #10).
+    pub dial_policy: Arc<multiview_config::device::net_guard::DialPolicy>,
     /// The runtime store of **ephemeral** cast sessions (DEV-D2, ADR-M011):
     /// runtime-only records that never enter the devices store, so a config
     /// export can never emit them. "Save as device" promotes one into a
@@ -910,6 +917,9 @@ impl AppState {
             device_drivers: Arc::new(DeviceDriverRegistry::new()),
             device_pollers: Arc::new(DevicePollerRegistry::new()),
             cast_delivery: None,
+            // Secure default: dial only globally-routable hosts. The binary
+            // widens this from `control.device_dial_allow` (SEC-02/SEC-04).
+            dial_policy: Arc::new(multiview_config::device::net_guard::DialPolicy::deny_internal()),
             cast_sessions: Arc::new(CastSessionStore::new()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
@@ -1526,6 +1536,18 @@ impl AppState {
     #[must_use]
     pub fn with_cast_delivery(mut self, delivery: Arc<CastDelivery>) -> Self {
         self.cast_delivery = Some(delivery);
+        self
+    }
+
+    /// Install the outbound-dial SSRF allowlist (SEC-02/SEC-04): the binary
+    /// builds it from `control.device_dial_allow`; tests inject a fixed policy.
+    /// Without one, the secure default denies every internal range.
+    #[must_use]
+    pub fn with_dial_policy(
+        mut self,
+        policy: Arc<multiview_config::device::net_guard::DialPolicy>,
+    ) -> Self {
+        self.dial_policy = policy;
         self
     }
 

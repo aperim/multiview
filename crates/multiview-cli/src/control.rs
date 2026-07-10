@@ -207,6 +207,10 @@ where
     // registry carries no cast member.
     let delivery = cast_delivery(config);
 
+    // The outbound-dial SSRF allowlist (SEC-02/SEC-04, CWE-918): default-deny
+    // every internal range, widened by the operator's dial allowlist.
+    let dial_policy = device_dial_policy();
+
     let mut state = AppState::new(
         publisher,
         commands,
@@ -224,7 +228,8 @@ where
         state = state.with_whep(whep);
     }
     let mut state = state
-    .with_device_pollers(device_poller_registry(delivery.as_ref()))
+    .with_device_pollers(device_poller_registry(delivery.as_ref(), &dial_policy))
+    .with_dial_policy(Arc::clone(&dial_policy))
     .with_auth_disabled(auth_disabled)
     // The CORS allow-list for the WebRTC media-signalling routes (ADR-0048 §9):
     // map `[webrtc].cors_allow_origins` (default `["*"]`) onto the control plane
@@ -385,6 +390,7 @@ where
 #[cfg(feature = "devices-net")]
 fn device_poller_registry(
     cast_delivery: Option<&std::sync::Arc<multiview_control::devices::cast::media::CastDelivery>>,
+    dial_policy: &std::sync::Arc<multiview_config::device::net_guard::DialPolicy>,
 ) -> Arc<multiview_control::devices::DevicePollerRegistry> {
     use multiview_control::devices::cast::net::TlsCastConnector;
     use multiview_control::devices::cast::runtime::CastSessionFactory;
@@ -394,14 +400,16 @@ fn device_poller_registry(
     };
     // A 5s per-request timeout: generous for a LAN appliance, bounded so a hung
     // device times out into the supervised-reconnect path rather than wedging
-    // the poller task.
+    // the poller task. Both live transports screen every resolved dial IP
+    // against the SSRF `dial_policy` (SEC-02/SEC-04).
     let zowietek = ReqwestPollerFactory::new(
         std::time::Duration::from_secs(5),
         resolve_device_credentials,
+        Arc::clone(dial_policy),
     );
     let mut members: Vec<Arc<dyn DevicePollerFactory>> = vec![Arc::new(zowietek)];
     if let Some(delivery) = cast_delivery {
-        match TlsCastConnector::new() {
+        match TlsCastConnector::new(Arc::clone(dial_policy)) {
             Ok(connector) => members.push(Arc::new(CastSessionFactory::new(
                 Arc::new(connector),
                 Arc::clone(delivery),
@@ -425,8 +433,49 @@ fn device_poller_registry(
 #[cfg(not(feature = "devices-net"))]
 fn device_poller_registry(
     _cast_delivery: Option<&std::sync::Arc<multiview_control::devices::cast::media::CastDelivery>>,
+    _dial_policy: &std::sync::Arc<multiview_config::device::net_guard::DialPolicy>,
 ) -> Arc<multiview_control::devices::DevicePollerRegistry> {
     Arc::new(multiview_control::devices::DevicePollerRegistry::new())
+}
+
+/// Build the outbound-dial SSRF allowlist (SEC-02/SEC-04, CWE-918) from the
+/// `MULTIVIEW_DEVICE_DIAL_ALLOW` environment variable — a comma/whitespace-
+/// separated list of CIDRs (e.g. `"192.168.0.0/16, fd00:db8::/32"`) an operator
+/// opts back in so managed devices on those LAN ranges remain reachable under
+/// the default-deny dial screen. Unset (or empty) ⇒ deny every internal range:
+/// only globally-routable hosts are dialled. An unparseable entry logs a warning
+/// and falls back to deny-all (fail-closed) rather than dialling wide.
+fn device_dial_policy() -> Arc<multiview_config::device::net_guard::DialPolicy> {
+    use multiview_config::device::net_guard::DialPolicy;
+
+    let policy = match std::env::var("MULTIVIEW_DEVICE_DIAL_ALLOW") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let cidrs: Vec<&str> = raw
+                .split([',', ' ', '\t', '\n'])
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .collect();
+            match DialPolicy::from_cidrs(cidrs.iter().copied()) {
+                Ok(policy) => {
+                    tracing::info!(
+                        entries = cidrs.len(),
+                        "device-dial allowlist loaded from MULTIVIEW_DEVICE_DIAL_ALLOW"
+                    );
+                    policy
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "MULTIVIEW_DEVICE_DIAL_ALLOW has an invalid CIDR; denying all internal \
+                         dial targets (only globally-routable hosts are dialled)"
+                    );
+                    DialPolicy::deny_internal()
+                }
+            }
+        }
+        _ => DialPolicy::deny_internal(),
+    };
+    Arc::new(policy)
 }
 
 /// Resolve a managed device's `(username, password)` from its

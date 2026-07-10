@@ -822,9 +822,45 @@ mod scripted {
 /// The real reqwest-backed transport — off-by-default (`zowietek` feature).
 #[cfg(feature = "zowietek")]
 mod net {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use multiview_config::device::net_guard::{self, DialPolicy};
     use serde_json::Value;
 
     use super::{RpcVerb, TransportError, TransportResponse, ZowietekTransport};
+
+    /// The boxed error type reqwest's DNS resolver returns.
+    type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+    /// A reqwest DNS resolver that screens every RESOLVED IP against the
+    /// outbound-dial SSRF policy (SEC-02, CWE-918). Because reqwest resolves
+    /// (and re-resolves, per redirect / reconnect) through this seam, a public
+    /// name that answers with an internal address — a DNS-rebind — is refused at
+    /// resolution time, so the device poller never dials the cloud-metadata
+    /// endpoint or an internal host.
+    struct ScreeningResolver {
+        policy: Arc<DialPolicy>,
+    }
+
+    impl reqwest::dns::Resolve for ScreeningResolver {
+        fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            let policy = Arc::clone(&self.policy);
+            Box::pin(async move {
+                // reqwest supplies the host only; the real port is applied by
+                // reqwest to the returned IPs, so port 0 here is a placeholder.
+                let boxed = |e: std::io::Error| -> BoxError { Box::new(e) };
+                let resolved: Vec<SocketAddr> = tokio::net::lookup_host((name.as_str(), 0))
+                    .await
+                    .map_err(boxed)?
+                    .collect();
+                net_guard::screen_resolved(resolved.iter().map(SocketAddr::ip), &policy)
+                    .map_err(|e| -> BoxError { Box::new(e) })?;
+                let addrs: reqwest::dns::Addrs = Box::new(resolved.into_iter());
+                Ok(addrs)
+            })
+        }
+    }
 
     /// A live HTTP transport to one `ZowieBox` device, over plain HTTP (the vendor
     /// API is plain HTTP JSON-over-POST; a management VLAN is recommended in the
@@ -843,12 +879,26 @@ mod net {
         /// `http://[fd00:db8::42]`). The base is the scheme+authority; the
         /// module path and query are appended per request.
         ///
+        /// The client screens every resolved dial IP against `dial_policy`
+        /// (SEC-02, CWE-918) and follows **no** redirects
+        /// ([`redirect::Policy::none`](reqwest::redirect::Policy::none)) — a
+        /// validated host cannot 30x-bounce the poller to a blocked one, and the
+        /// device's named credentials are never re-sent to a redirect target.
+        ///
         /// # Errors
         ///
         /// [`TransportError`] if the HTTP client cannot be constructed.
-        pub fn new(base: &str, timeout: std::time::Duration) -> Result<Self, TransportError> {
+        pub fn new(
+            base: &str,
+            timeout: std::time::Duration,
+            dial_policy: Arc<DialPolicy>,
+        ) -> Result<Self, TransportError> {
             let client = reqwest::Client::builder()
                 .timeout(timeout)
+                .redirect(reqwest::redirect::Policy::none())
+                .dns_resolver(Arc::new(ScreeningResolver {
+                    policy: dial_policy,
+                }))
                 .build()
                 .map_err(|e| TransportError::new(e.to_string()))?;
             Ok(Self {
