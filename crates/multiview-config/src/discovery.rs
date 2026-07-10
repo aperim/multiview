@@ -38,6 +38,16 @@ pub struct DiscoveryConfig {
     /// (usually `unknown`) — extra browse scope, never extra trust.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_service_types: Vec<String>,
+    /// The **discovery domain** this node stamps onto every discovery-inventory
+    /// row it observes (ADR-W026): `[discovery] domain = "site-a"`. A
+    /// DNS-label-like id (non-empty, ≤64 chars, `[a-z0-9-]`). This is the SOLE
+    /// source of the authz domain label — the observing node stamps its own
+    /// configured value; a discovered device's payload/TXT records never
+    /// contribute. Absent ⇒ this node's discovery rows are unlabelled, and a
+    /// discovery-scoped principal is denied them (fail-closed). One node = one
+    /// domain; per-NIC/per-VLAN split is out of scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
 }
 
 impl DiscoveryConfig {
@@ -49,7 +59,15 @@ impl DiscoveryConfig {
         Self {
             zowietek_service_type,
             extra_service_types,
+            domain: None,
         }
+    }
+
+    /// Stamp this node's discovery domain (ADR-W026).
+    #[must_use]
+    pub fn with_domain(mut self, domain: String) -> Self {
+        self.domain = Some(domain);
+        self
     }
 
     /// Validate every configured service type: each must be a well-formed
@@ -65,8 +83,42 @@ impl DiscoveryConfig {
         for ty in &self.extra_service_types {
             validate_service_type(ty, "discovery.extra_service_types")?;
         }
+        if let Some(domain) = &self.domain {
+            validate_domain(domain)?;
+        }
         Ok(())
     }
+}
+
+/// Check that `domain` is a DNS-label-like discovery domain (ADR-W026):
+/// non-empty, ≤64 chars, and only lowercase ASCII letters, digits, and `-`.
+/// Rejecting anything else keeps the label operator-legible and unambiguous as
+/// an authz key.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Validation`] describing the violation.
+fn validate_domain(domain: &str) -> Result<(), ConfigError> {
+    if domain.is_empty() {
+        return Err(ConfigError::Validation(
+            "discovery.domain: must not be empty (omit the field instead)".to_owned(),
+        ));
+    }
+    if domain.len() > 64 {
+        return Err(ConfigError::Validation(format!(
+            "discovery.domain: {domain:?} exceeds 64 characters"
+        )));
+    }
+    if !domain
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(ConfigError::Validation(format!(
+            "discovery.domain: {domain:?} must contain only lowercase letters, \
+             digits, and '-' (DNS-label-like)"
+        )));
+    }
+    Ok(())
 }
 
 /// Check that `ty` is a plausible DNS-SD service type: it must start with `_`
