@@ -472,25 +472,33 @@ pub(crate) fn redact_device_refs_in_body(principal: &Principal, body: &mut serde
     }
 }
 
-/// Deny a request that exposes a **whole-system** artifact to an object-scoped
-/// principal (BOLA wholesale-enumeration defense, ADR-W005/ADR-W025).
+/// Deny a request that exposes or mutates a **whole-system** artifact for a
+/// principal scoped on ANY authorization axis (BOLA wholesale-enumeration
+/// defense, ADR-W005 / ADR-W025 / ADR-W026).
 ///
-/// Some responses aggregate the entire desired-state — the config export and the
-/// support bundle both embed *every* device id, `device_ref`, and sync-group
-/// member id in one document. Per-field redaction cannot apply (a scope-filtered
-/// config is not a valid runnable document), so an object-scoped principal
-/// (`scoped_object_ids: Some`) is denied outright: such artifacts are confined to
-/// a principal that can see the whole system. An **unscoped** principal (the
-/// default admin/operator/viewer) is allowed — this is a no-op for it.
+/// Some surfaces span the entire desired-state: the config export and the
+/// support bundle embed *every* device id, `device_ref`, and sync-group member
+/// id in one document, and the config mutations revert-to-start / promote
+/// rewrite the *entire* running / boot document across all objects. Per-field
+/// redaction cannot apply (a scope-filtered config is not a valid runnable
+/// document), and a scoped operator has no business rewriting state for objects
+/// outside its allowlist — so a principal restricted on the object, output, OR
+/// discovery-domain axis is denied outright. Only a principal that can see the
+/// whole system ([`Principal::is_global`]) is allowed; an unscoped
+/// admin/operator/viewer is a no-op.
+///
+/// Keyed off the unified `is_global` predicate rather than a frozen per-axis
+/// check, so a newly-added scope axis is covered automatically.
 ///
 /// # Errors
 ///
-/// [`ControlError::Forbidden`] if the principal is object-scoped.
+/// [`ControlError::Forbidden`] if the principal is scoped on any axis.
 pub(crate) fn require_unscoped_for_whole_system(principal: &Principal) -> Result<(), ControlError> {
-    if principal.is_scoped() {
+    if !principal.is_global() {
         return Err(ControlError::Forbidden(format!(
-            "principal {:?} is object-scoped and may not access a whole-system artifact \
-             (it would disclose objects outside its allowlist)",
+            "principal {:?} is scoped (object, output, or discovery-domain) and may not \
+             access a whole-system artifact (it would disclose or mutate resources outside \
+             its allowlist)",
             principal.key_id
         )));
     }

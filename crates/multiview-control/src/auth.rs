@@ -160,6 +160,20 @@ impl<'a> AuthzScopes<'a> {
             discovery_domains,
         }
     }
+
+    /// Whether this view imposes **no** restriction on any axis — the principal
+    /// can see and act on the whole system.
+    ///
+    /// True iff every axis is `None` (unrestricted). Any `Some(_)` axis — even
+    /// `Some([])`, which denies everything on that axis — makes the principal
+    /// restricted and therefore **not** global. This is the single definition of
+    /// "unrestricted across all axes"; whole-system-artifact gating keys off it
+    /// (via [`Principal::is_global`]) so a newly-added axis is covered here in one
+    /// place rather than in a frozen per-axis check (ADR-W026).
+    #[must_use]
+    pub fn is_global(&self) -> bool {
+        self.objects.is_none() && self.outputs.is_none() && self.discovery_domains.is_none()
+    }
 }
 
 impl Principal {
@@ -190,6 +204,21 @@ impl Principal {
             self.scoped_output_ids.as_deref(),
             self.scoped_discovery_domains.as_deref(),
         )
+    }
+
+    /// Whether this principal is unrestricted on **every** authorization axis
+    /// (object, output, discovery-domain) — i.e. it can see the whole system.
+    ///
+    /// The inverse (restricted on at least one axis) gates whole-system
+    /// artifacts like the config export, support bundle, and the whole-document
+    /// config mutations (revert-to-start / promote): any scoped principal is
+    /// denied outright, because such a document embeds every object / output /
+    /// domain and cannot be meaningfully redacted per-field. Delegates to the
+    /// unified [`AuthzScopes::is_global`] so the axis set lives in one place
+    /// (ADR-W026).
+    #[must_use]
+    pub fn is_global(&self) -> bool {
+        self.scopes().is_global()
     }
 
     /// The full-access principal used when authentication is **disabled** (an
@@ -501,6 +530,12 @@ impl ApiKeyStore {
     }
 }
 
+/// The reserved key id of the bootstrap **admin** (environment-provisioned,
+/// always unscoped). A config-declared key may never reuse it — see
+/// [`register_config_api_keys`], which rejects the collision rather than let a
+/// declared key silently overwrite the administrator (ADR-W026).
+pub(crate) const BOOTSTRAP_ADMIN_KEY_ID: &str = "admin";
+
 /// Build the control plane's API-key store with a bootstrap **admin** key.
 ///
 /// Secure-by-default access for the management API/UI without shipping a secret
@@ -537,10 +572,10 @@ pub fn provision_admin_keys(admin_secret: Option<String>) -> (ApiKeyStore, Optio
     };
 
     store.register(
-        "admin",
+        BOOTSTRAP_ADMIN_KEY_ID,
         &secret,
         Principal {
-            key_id: "admin".to_owned(),
+            key_id: BOOTSTRAP_ADMIN_KEY_ID.to_owned(),
             role: Role::Admin,
             scoped_object_ids: None,
             scoped_output_ids: None,
@@ -599,6 +634,27 @@ where
     R: FnMut(&str) -> Option<String>,
 {
     for key in keys {
+        // Fail-closed on a reserved or already-registered id: a config key must
+        // never silently overwrite another key's secret + principal (auth-panel
+        // F3 — a `key_id = "admin"` would otherwise clobber the bootstrap
+        // administrator, a lockout / takeover). The bootstrap admin is
+        // provisioned before this runs, so the already-registered check below
+        // also catches it; the explicit reserved check is order-independent
+        // defense with a precise diagnostic, and also rejects an in-batch
+        // duplicate the moment the first of the pair is registered.
+        if key.key_id == BOOTSTRAP_ADMIN_KEY_ID {
+            return Err(format!(
+                "api.keys[{}]: key_id is reserved for the bootstrap administrator and \
+                 cannot be declared in config",
+                key.key_id
+            ));
+        }
+        if store.principal_for_key(&key.key_id).is_some() {
+            return Err(format!(
+                "api.keys[{}]: key_id is already registered; refusing to overwrite it",
+                key.key_id
+            ));
+        }
         let secret = resolve_secret(&key.secret_env)
             .filter(|secret| !secret.is_empty())
             .ok_or_else(|| {
