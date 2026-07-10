@@ -475,6 +475,8 @@ fn crossfade_of_a_nonexistent_point_is_a_clean_error() {
 /// once retirement reclaims the slot.
 #[test]
 fn repeated_crossfades_reclaim_strips_and_stay_bounded() {
+    const CYCLES: usize = 200;
+
     let fmt = stereo();
     // 25 fps @ 48k = 1920 samples/tick; a 480-frame (~10 ms) ramp is well under
     // one tick block, so a single tick completes each fade and retires its strip.
@@ -495,7 +497,6 @@ fn repeated_crossfades_reclaim_strips_and_stay_bounded() {
         "one routed source is one live strip at start"
     );
 
-    const CYCLES: usize = 200;
     for i in 0..CYCLES {
         // Cross-fade the single channel onto a fresh store over a short ramp. The
         // channel keeps its identity (`point`), so we re-point it every cycle.
@@ -535,4 +536,130 @@ fn repeated_crossfades_reclaim_strips_and_stay_bounded() {
         bus.mixer_slot_count(),
         baseline_slots
     );
+}
+
+/// SOAK — the mixer's physical strip storage stays a small CONSTANT across a long
+/// run of cross-fades (catches slow growth a single-shot bound would miss). One
+/// channel plus at most one in-flight outgoing strip means exactly TWO physical
+/// slots ever exist — the channel slot and the single reused outgoing slot —
+/// forever; a per-cross-fade leak would make this grow toward `N`.
+#[test]
+fn crossfade_strip_storage_is_flat_over_a_long_soak() {
+    const CYCLES: usize = 2_000;
+
+    let fmt = stereo();
+    let mut bus = ProgramBus::new(fmt, Rational::new(25, 1)); // 1920 samples/tick
+    let ramp = 480usize;
+
+    let store = Arc::new(AudioStore::new(fmt, 192_000));
+    store
+        .publish(&AudioBlock::from_interleaved(fmt, vec![0.3f32; 8_000 * 2]).unwrap())
+        .unwrap();
+    let point = bus.add_source("prog", Arc::clone(&store), 1.0);
+
+    let mut peak_slots = bus.mixer_slot_count();
+    for _ in 0..CYCLES {
+        let next = Arc::new(AudioStore::new(fmt, 192_000));
+        next.publish(&AudioBlock::from_interleaved(fmt, vec![0.3f32; 8_000 * 2]).unwrap())
+            .unwrap();
+        bus.repoint_crossfade(point, Arc::clone(&next), ramp)
+            .unwrap();
+        // Fresh audio at the live edge to cover the reads.
+        next.publish(&AudioBlock::from_interleaved(fmt, vec![0.3f32; 4_000 * 2]).unwrap())
+            .unwrap();
+        // One tick (1920 > 480) completes the ramp and reclaims the outgoing strip.
+        let _ = bus.tick();
+        peak_slots = peak_slots.max(bus.mixer_slot_count());
+    }
+
+    // Exactly two physical slots ever — the channel + the one reused outgoing
+    // slot — not `CYCLES`. This is the invariant-#9 guarantee as a flat constant.
+    assert_eq!(
+        peak_slots, 2,
+        "strip storage must stay flat at 2 slots across {CYCLES} cross-fades \
+         (channel + one reused outgoing slot); saw peak {peak_slots}"
+    );
+    assert_eq!(
+        bus.live_strip_count(),
+        1,
+        "at rest exactly one strip (the channel) is live"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Generation guard (ABA safety): a reused slot rejects stale handles.
+// ---------------------------------------------------------------------------
+
+/// GENERATION GUARD (ABA safety) — reclaiming a strip and reusing its slot for a
+/// DIFFERENT source must NOT let a stale `RoutePoint` (one that named the slot
+/// before it was reclaimed) address or perturb the new occupant. The slot's
+/// generation tag makes the stale handle read as unknown, so a freed route can
+/// never silently bind the wrong source — the ABA hazard the resilience brief
+/// warns about ("non-refcounted … silently reused on the next decode →
+/// corruption"). Without the generation tag the reused slot would answer to the
+/// old index and the two sources would cross-wire.
+#[test]
+fn a_reused_slot_rejects_a_stale_route_point() {
+    let fmt = stereo();
+    let mut mixer = Mixer::new(fmt);
+
+    // Occupy a slot, route + arm it, then reclaim it — keep the now-stale handle.
+    let stale = mixer.add_input("old");
+    mixer.route_to_program(stale, 0.9);
+    mixer.set_gain_ramp(stale, GainRamp::down(100));
+    assert!(mixer.remove_input(stale), "the live strip is reclaimed");
+    // Removing an already-reclaimed handle is a safe no-op (no double-free).
+    assert!(
+        !mixer.remove_input(stale),
+        "a second remove of the same handle must be a no-op"
+    );
+
+    // A new input REUSES the freed slot: same index, bumped generation.
+    let fresh = mixer.add_input("new");
+    assert_eq!(
+        fresh.index(),
+        stale.index(),
+        "the freed slot index must be reused (bounded storage)"
+    );
+    assert_ne!(
+        fresh, stale,
+        "but the handle must differ — the generation was bumped"
+    );
+
+    // The stale handle is INERT: it names no strip and cannot mutate the reused
+    // occupant.
+    assert!(
+        mixer.input_id(stale).is_none(),
+        "the stale handle must address nothing"
+    );
+    assert!(mixer.program_gain(stale).is_none());
+    mixer.route_to_program(stale, 0.1); // must NOT touch `fresh`
+    mixer.set_gain_ramp(stale, GainRamp::up(50)); // must NOT touch `fresh`
+    mixer.unroute_from_program(stale);
+    assert!(
+        mixer.gain_ramp(stale).is_none(),
+        "a stale handle must carry no ramp"
+    );
+    // `submit` through the stale handle is a typed UnknownInput error, never a
+    // wrong-source bind.
+    let err = mixer
+        .submit(stale, AudioBlock::silence(fmt, 4))
+        .unwrap_err();
+    assert!(matches!(err, multiview_audio::AudioError::UnknownInput(_)));
+
+    // The fresh strip is untouched by every stale write: its own id, no ramp, and
+    // its default gain of 1.0 — NOT the 0.1 the stale `route_to_program` tried.
+    assert_eq!(mixer.input_id(fresh), Some("new"));
+    assert!(
+        mixer.gain_ramp(fresh).is_none(),
+        "the stale set_gain_ramp must not have armed the fresh strip"
+    );
+    assert_eq!(
+        mixer.program_gain(fresh),
+        Some(1.0),
+        "the fresh strip keeps its own default gain; the stale route was inert"
+    );
+    // And `fresh` addresses the reused slot correctly.
+    mixer.route_to_program(fresh, 0.5);
+    assert_eq!(mixer.program_gain(fresh), Some(0.5));
 }
