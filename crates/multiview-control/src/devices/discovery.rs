@@ -1017,6 +1017,34 @@ mod tests {
     }
 
     #[test]
+    fn from_raw_stamps_domain_from_param_never_from_wire() {
+        // ADR-W026 provenance: the discovery domain is stamped by the OBSERVING
+        // NODE from its own operator-declared config (the param), never from the
+        // untrusted responder payload — a discovered device cannot assert its
+        // own authorization scope.
+        let now = Instant::now() + Duration::from_secs(60);
+
+        let labelled =
+            DiscoveredService::from_raw(&raw_ndi(), None, now, Some("site-a".to_owned()));
+        assert_eq!(labelled.domain.as_deref(), Some("site-a"));
+
+        // No config domain → the row is unlabelled (a discovery-scoped principal
+        // is denied it, fail-closed).
+        let unlabelled = DiscoveredService::from_raw(&raw_ndi(), None, now, None);
+        assert_eq!(unlabelled.domain, None);
+
+        // A responder that advertises a `domain` TXT cannot self-label: from_raw
+        // never reads the domain from the wire.
+        let mut raw = raw_ndi();
+        raw.txt.push(("domain".to_owned(), "attacker-site".to_owned()));
+        let spoofed = DiscoveredService::from_raw(&raw, None, now, None);
+        assert_eq!(
+            spoofed.domain, None,
+            "domain must never be read from responder TXT (untrusted self-assertion)"
+        );
+    }
+
+    #[test]
     fn inventory_dedups_latest_wins() {
         let inv = DiscoveryInventory::new(8);
         let future = Instant::now() + Duration::from_secs(60);
