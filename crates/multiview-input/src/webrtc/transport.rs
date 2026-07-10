@@ -392,9 +392,12 @@ impl H264Depacketizer {
                 data,
                 keyframe: original_type == NAL_TYPE_IDR,
             });
-        } else if let Some(asm) = self.fragment.as_mut() {
-            // Continuation/end fragment: a timestamp mismatch means the start was
-            // lost — abandon this reassembly rather than splice across frames.
+        } else {
+            // Continuation/end fragment. A continuation with no in-progress start
+            // (a lost start fragment) drops via `?`.
+            let asm = self.fragment.as_mut()?;
+            // A timestamp mismatch means the start was lost — abandon this
+            // reassembly rather than splice across frames.
             if asm.timestamp != packet.timestamp {
                 self.drop_fragment();
                 return None;
@@ -405,9 +408,6 @@ impl H264Depacketizer {
                 return None;
             }
             asm.data.extend_from_slice(fragment_data);
-        } else {
-            // A continuation with no in-progress start (lost start fragment): drop.
-            return None;
         }
 
         if end {
