@@ -760,6 +760,16 @@ impl ScratchPool {
         self.alloc_count.load(Ordering::Relaxed)
     }
 
+    /// The number of per-band scratch slots the pool holds (grow-only high-water,
+    /// [`ScratchPool::ensure_bands`]). The serial branch uses one band; the
+    /// parallel branch grows this to the (clamped) worker count, so `>= 2` proves
+    /// a composite actually fanned across the multi-band parallel path rather than
+    /// the serial fallback. An observability/test seam, not part of the composite.
+    #[must_use]
+    pub(crate) fn band_count(&self) -> usize {
+        self.bands.len()
+    }
+
     /// Ensure at least `n_bands` band-scratch slots exist (grow-only), bumping the
     /// allocation counter for each new slot.
     fn ensure_bands(&mut self, n_bands: usize) {
