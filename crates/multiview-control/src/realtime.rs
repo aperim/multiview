@@ -509,6 +509,17 @@ pub struct SessionStream {
     /// enumerate objects it could not read. Pure per-client read filtering: it
     /// never blocks and never touches the engine publish path (invariant #10).
     object_scope: Option<Vec<String>>,
+    /// The connect-time **broadcast watermark** (ADR-RT009): the engine event
+    /// sequence (`EnginePublisher::events.sequence()`) captured together with the
+    /// connect snapshot, or [`None`] for a session with no snapshot pairing (the
+    /// resume path and transport-only tests). When set, a delta whose engine
+    /// `seq <= watermark` is already reflected in the snapshot the client
+    /// received, so it is dropped rather than re-delivered — killing the duplicate
+    /// and the transient backward-roll a queued pre-snapshot transition would
+    /// cause. The drop is a read-side, per-connection decision on events already
+    /// pulled from the bounded broadcast: no lock, no await, no back-pressure on
+    /// the engine (invariant #10).
+    snapshot_watermark: Option<u64>,
 }
 
 impl SessionStream {
@@ -530,6 +541,7 @@ impl SessionStream {
             resume_after,
             corr: None,
             object_scope: None,
+            snapshot_watermark: None,
         }
     }
 
@@ -557,6 +569,26 @@ impl SessionStream {
     #[must_use]
     pub fn with_object_scope(mut self, scope: Option<Vec<String>>) -> Self {
         self.object_scope = scope;
+        self
+    }
+
+    /// Pair this session with the connect-time **broadcast watermark** (ADR-RT009).
+    ///
+    /// `watermark` is the engine event sequence (`EnginePublisher::events.sequence()`)
+    /// captured together with the connect snapshot. With it set,
+    /// [`SessionStream::next_delta`] drops every subscribed event whose engine
+    /// `seq <= watermark` — those are already reflected in the snapshot the client
+    /// received, so re-delivering them would be a duplicate (and, for a
+    /// multi-transition object, a transient backward roll). The drop happens
+    /// **before** `issue_seq`, so it leaves no gap in the per-connection sequence
+    /// (resume-by-seq stays intact) and composes with the object-scope filter.
+    ///
+    /// A pure per-client read decision on events already pulled from the bounded
+    /// broadcast: it never blocks, never locks, and never touches the engine
+    /// publish path (invariant #10).
+    #[must_use]
+    pub fn with_snapshot_watermark(mut self, watermark: u64) -> Self {
+        self.snapshot_watermark = Some(watermark);
         self
     }
 
