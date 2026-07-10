@@ -274,3 +274,102 @@ fn steady_state_pacing_prunes_consumed_frames() {
         "steady-state ring must prune consumed frames; retained {retained} of cap {cap}"
     );
 }
+
+#[test]
+fn prune_keeps_the_latched_boundary_frame() {
+    // The prune drops entries STRICTLY older than the latch watermark; the frame
+    // AT the watermark (the one the output clock is currently latched onto) must
+    // be KEPT — an off-by-one that evicted the boundary would make the tile jump
+    // off its held frame the instant the producer publishes again.
+    let s = store();
+    s.publish(10_u32, MediaTime::from_nanos(0));
+    s.publish(20_u32, MediaTime::from_nanos(40_000_000));
+    // Latch frame@40ms -> watermark = 40ms.
+    assert_eq!(
+        s.read_at(MediaTime::from_nanos(40_000_000))
+            .frame()
+            .map(|f| **f),
+        Some(20)
+    );
+    // A further forward publish triggers the prune with watermark = 40ms.
+    s.publish(30_u32, MediaTime::from_nanos(80_000_000));
+    // Re-reading at the latched instant must STILL yield frame@40ms: it sits at
+    // the watermark and must survive the prune (frame@0, strictly older, is gone).
+    assert_eq!(
+        s.read_at(MediaTime::from_nanos(40_000_000))
+            .frame()
+            .map(|f| **f),
+        Some(20),
+        "the frame at the watermark (latched) must survive the prune"
+    );
+}
+
+#[test]
+fn backwards_stamp_resets_the_watermark_so_a_reconnect_is_not_pruned() {
+    // Reconnect / source-generation change (bad inputs are the purpose): a
+    // producer that had been latched far along its timeline (advancing the prune
+    // watermark to 10s) reconnects and re-stamps from a LOW media time. The
+    // re-anchor must RESET the watermark, or the next forward publish would prune
+    // the fresh low-stamped generation as "older than the old 10s latch" and the
+    // tile would go blank after every reconnect.
+    let s = store();
+    s.publish(1_u32, MediaTime::from_nanos(0));
+    s.publish(2_u32, MediaTime::from_nanos(10_000_000_000));
+    let _ = s.read_at(MediaTime::from_nanos(10_000_000_000)); // watermark -> 10s
+                                                              // New generation: a backwards stamp re-anchors at t=0, then a normal forward
+                                                              // publish continues it.
+    s.publish(100_u32, MediaTime::from_nanos(0));
+    s.publish(101_u32, MediaTime::from_nanos(40_000_000));
+    // The re-anchored generation's first frame must survive that forward publish:
+    // a stale (10s) watermark left un-reset would have pruned frame@0.
+    assert_eq!(
+        s.read_at(MediaTime::from_nanos(0)).frame().map(|f| **f),
+        Some(100),
+        "re-anchored generation must survive the next publish (watermark reset)"
+    );
+    assert_eq!(
+        s.read_at(MediaTime::from_nanos(40_000_000))
+            .frame()
+            .map(|f| **f),
+        Some(101)
+    );
+}
+
+#[test]
+fn state_at_alone_bounds_the_ring_for_a_monitored_uncomposited_tile() {
+    // A tile that is monitored (state sampled) but not currently composited never
+    // calls `read_at`, yet its producer keeps publishing. `state_at` must advance
+    // the prune watermark too, so such a tile's ring stays bounded (invariant #9)
+    // instead of filling to RING_CAPACITY.
+    let s = store();
+    let cap = TileStore::<u32>::RING_CAPACITY;
+    let iters = cap.saturating_mul(4);
+    for i in 0..iters {
+        let at = MediaTime::from_nanos(i64::try_from(i).unwrap().saturating_mul(40_000_000));
+        s.publish(u32::try_from(i).unwrap(), at);
+        let _ = s.state_at(at); // monitored, not composited: only state_at is called
+    }
+    let retained = s.retained_frames();
+    assert!(
+        retained <= 4,
+        "state_at must bound the ring too; retained {retained} of cap {cap}"
+    );
+}
+
+#[test]
+fn retained_frames_reports_actual_ring_occupancy() {
+    // Pins the introspection accessor's contract: it reports the TRUE number of
+    // frames held in the media-time ring (the bounded-memory tests above rely on
+    // it). A fresh store holds none; publishing three frames with no read to
+    // advance the watermark retains all three (nothing consumed to prune).
+    let s = store();
+    assert_eq!(s.retained_frames(), 0, "empty ring holds no frames");
+    s.publish(1_u32, MediaTime::from_nanos(0));
+    s.publish(2_u32, MediaTime::from_nanos(40_000_000));
+    s.publish(3_u32, MediaTime::from_nanos(80_000_000));
+    assert_eq!(
+        s.retained_frames(),
+        3,
+        "three published, none consumed -> all three retained"
+    );
+}
