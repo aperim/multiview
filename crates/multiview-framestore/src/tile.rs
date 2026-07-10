@@ -546,3 +546,96 @@ impl<T> TileStore<T> {
         self.ring.load().len()
     }
 }
+
+#[cfg(test)]
+mod cross_generation_watermark_race {
+    //! Regression: a reader holding a *superseded* ring snapshot must not be able
+    //! to corrupt the prune watermark of the generation that replaced it.
+    //!
+    //! The race (found by the ADR-T009 data-plane review): a reader
+    //! ([`read_at`](TileStore::read_at) / [`state_at`](TileStore::state_at))
+    //! *loads* the ring snapshot and *then* advances the prune watermark from the
+    //! frame it selected. If a reconnect (a backwards re-anchor to a fresh, LOW
+    //! media-time generation) lands in between, a reader still holding the OLD,
+    //! HIGH media-time snapshot advances the watermark to an old high value —
+    //! **after** the re-anchor. A watermark keyed on media time then lets the
+    //! next forward publish on the new generation prune that generation's own
+    //! frames as "older than the (stale) watermark", dropping the boundary frame
+    //! the compositor is showing (invariant #2 / #9).
+    //!
+    //! The two barriers force exactly that interleaving deterministically —
+    //! `publish(reconnect)` → stale `latch_and_advance` → `publish(forward)` —
+    //! rather than relying on a flaky stress loop to hit the narrow window.
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    use multiview_core::time::MediaTime;
+
+    use super::{NoSignalPolicy, TileStore, TileThresholds};
+
+    const SEC: i64 = 1_000_000_000;
+    const MS: i64 = 1_000_000;
+
+    #[test]
+    fn stale_reader_cannot_prune_the_reconnected_generation() {
+        // Holds frames forever, so pruning — not the failure ladder — is what
+        // this probes.
+        let s: Arc<TileStore<u32>> = Arc::new(TileStore::new(
+            "t",
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ));
+
+        // Generation G0, stamped HIGH on the media timeline (10s, 11s).
+        s.publish(1_u32, MediaTime::from_nanos(10 * SEC));
+        s.publish(2_u32, MediaTime::from_nanos(11 * SEC));
+
+        let captured = Arc::new(Barrier::new(2)); // reader has loaded the G0 snapshot
+        let reconnected = Arc::new(Barrier::new(2)); // producer has re-anchored to G1
+
+        let reader = {
+            let s = Arc::clone(&s);
+            let captured = Arc::clone(&captured);
+            let reconnected = Arc::clone(&reconnected);
+            thread::spawn(move || {
+                // Load the G0 (high-time) snapshot BEFORE the reconnect — exactly
+                // what a reader does at the top of `read_at`.
+                let g0 = s.ring.load_full();
+                captured.wait();
+                // Wait until the producer has re-anchored to the new LOW
+                // generation, then advance the watermark from the STALE snapshot
+                // (the second half of `read_at`, now a generation behind).
+                reconnected.wait();
+                let _ = s.latch_and_advance(g0.as_slice(), MediaTime::from_nanos(11 * SEC));
+            })
+        };
+
+        // Producer: wait for the reader to capture G0, then re-anchor to a fresh
+        // LOW generation with a backwards stamp at t=0.
+        captured.wait();
+        s.publish(100_u32, MediaTime::from_nanos(0));
+        reconnected.wait();
+        // The stale cross-generation watermark advance must be visible before the
+        // forward publish that would act on it (thread join = happens-before).
+        reader.join().expect("reader thread panicked");
+
+        // The next forward publish on the NEW generation. A media-time watermark
+        // polluted with the stale 11s latch prunes this generation's boundary
+        // frame (frame 100 @ t=0) as "older than 11s".
+        s.publish(101_u32, MediaTime::from_nanos(40 * MS));
+
+        // The reconnected generation's boundary frame MUST survive: a read at its
+        // instant returns frame 100, not the later 101 (nor a slate).
+        assert_eq!(
+            s.read_at(MediaTime::from_nanos(0)).frame().map(|f| **f),
+            Some(100),
+            "a stale cross-generation watermark advance must not prune the reconnected boundary frame"
+        );
+        assert_eq!(
+            s.read_at(MediaTime::from_nanos(40 * MS))
+                .frame()
+                .map(|f| **f),
+            Some(101),
+        );
+    }
+}
