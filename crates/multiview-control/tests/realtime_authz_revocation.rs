@@ -24,14 +24,44 @@ use std::sync::Arc;
 use multiview_control::{
     ApiKeyStore, Principal, RealtimeFrame, ReauthOutcome, Role, SessionStream,
 };
+use multiview_core::time::Rational;
+use multiview_core::wallclock::WallClockRef;
 use multiview_engine::EnginePublisher;
-use multiview_events::{DeviceState, DeviceStatus, Event, FrameKind, ResyncReason, Topic};
+use multiview_events::{
+    AddressFamily, ClockQuality, ClockSource, DeviceDiscovered, DeviceState, DeviceStatus, Event,
+    FrameKind, ResyncReason, TimingStatus, Topic,
+};
 
 type Publisher = EnginePublisher<serde_json::Value, Event>;
 
 /// A `device.status` event scoped (by `object_authz_scope_id`) to `device_id`.
 fn device_status(device_id: &str) -> Event {
     Event::DeviceStatus(DeviceStatus::new(device_id, DeviceState::Online))
+}
+
+/// A `device.discovered` event — untrusted inventory: it carries NO registry id, so
+/// `object_authz_scope_id` returns `None` and it rides the role-gated firehose.
+fn device_discovered(driver: &str) -> Event {
+    Event::DeviceDiscovered(DeviceDiscovered {
+        driver: driver.to_owned(),
+        address: "http://[fd00:db8::42]".to_owned(),
+        family: AddressFamily::Ipv6,
+        name: None,
+    })
+}
+
+/// A `timing.status` event — keys a program/output STREAM id, which no REST read
+/// authorizes, so scoping by `scoped_object_ids` would be the wrong axis: it rides
+/// the role-gated firehose (`object_authz_scope_id` returns `None`).
+fn timing_status(stream_id: &str) -> Event {
+    Event::TimingStatus(TimingStatus {
+        stream_id: stream_id.to_owned(),
+        epoch: WallClockRef::new(1_765_432_100_000_000_000, 900_000, Rational::new(90_000, 1)),
+        link_offset_ns: 0,
+        clock_source: ClockSource::Ptp,
+        clock_quality: ClockQuality::Locked,
+        groups: Vec::new(),
+    })
 }
 
 /// A principal for `key_id` with an explicit role and object scope.
@@ -451,5 +481,56 @@ async fn resync_rebuild_topics_match_the_re_snapshotted_set() {
     assert!(
         !resync.resubscribe.contains(&Topic::Switcher),
         "Switcher is never re-snapshotted; advertising it strands the client's switcher state"
+    );
+}
+
+/// The #211 BOLA-visibility follow-up (task #10): a SCOPED session filters the OBJECT
+/// axis (an out-of-scope `device.status` is dropped) yet still delivers the
+/// non-object-axis events — `device.discovered` (untrusted inventory: NO registry id)
+/// and `timing.status` (keys a program/output STREAM id, the wrong axis for
+/// `scoped_object_ids`) — exactly as an unscoped principal would. This ratifies
+/// `object_authz_scope_id`'s documented decision END-TO-END: a future change that gave
+/// either event a scoping id (accidentally or otherwise) would drop it here for the
+/// scoped session and fail this regression, forcing the scoping call to be revisited.
+#[tokio::test]
+async fn non_object_axis_events_ride_the_firehose_under_object_scope() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let mut session = SessionStream::new(engine.subscribe(), "sess-firehose", None)
+        .with_object_scope(Some(vec!["A".to_owned()]));
+
+    // In-scope device.status (A), OUT-of-scope device.status (B), device.discovered
+    // (no id), timing.status (wrong-axis stream id).
+    let _ = engine.publish_event(device_status("A"));
+    let _ = engine.publish_event(device_status("B"));
+    let _ = engine.publish_event(device_discovered("zowietek"));
+    let _ = engine.publish_event(timing_status("program-main"));
+
+    let delivered = drain(&mut session, 4).await;
+    assert_eq!(
+        delivered.len(),
+        3,
+        "only the out-of-scope device.status B is dropped; the other three ride through"
+    );
+    assert!(
+        delivered.iter().any(|f| matches!(
+            &f.envelope.payload, Event::DeviceStatus(s) if s.device_id == "A")),
+        "in-scope device.status A is delivered (object-axis, in scope)"
+    );
+    assert!(
+        !delivered.iter().any(|f| matches!(
+            &f.envelope.payload, Event::DeviceStatus(s) if s.device_id == "B")),
+        "out-of-scope device.status B is NOT delivered (object-axis filter)"
+    );
+    assert!(
+        delivered
+            .iter()
+            .any(|f| matches!(&f.envelope.payload, Event::DeviceDiscovered(_))),
+        "device.discovered (no registry id) rides the role-gated firehose"
+    );
+    assert!(
+        delivered
+            .iter()
+            .any(|f| matches!(&f.envelope.payload, Event::TimingStatus(_))),
+        "timing.status (wrong-axis stream id) rides the role-gated firehose"
     );
 }
