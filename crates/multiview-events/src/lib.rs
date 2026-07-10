@@ -42,7 +42,7 @@ pub use envelope::{Envelope, FrameKind, SchemaVersion};
 pub use error::{Error, Result};
 pub use event::{
     AchievedSync, AddressFamily, AlarmTransition, Alert, AlertSeverity, AudioLoudness, AudioMeter,
-    CastSessionRemoved, CastSessionStarted, ClockQuality, ClockSource, DeviceAdopted,
+    AuthzScope, CastSessionRemoved, CastSessionStarted, ClockQuality, ClockSource, DeviceAdopted,
     DeviceCapabilities, DeviceDiscovered, DeviceError, DeviceMode, DeviceRemoved, DeviceState,
     DeviceStatus, DeviceStreamRole, DeviceStreamStatus, DeviceSync, DeviceSyncSummary, Event,
     GpuMetrics, GpuVendor, HealthWarning, ImpactClass, InputConnection, InputStreams, JobProgress,

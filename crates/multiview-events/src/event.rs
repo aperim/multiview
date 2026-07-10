@@ -540,13 +540,43 @@ impl WarningCode {
 }
 
 /// An input source connection-state change.
+///
+/// `#[non_exhaustive]` (ADR-W026): construct via [`InputConnection::new`] plus
+/// the [`InputConnection::with_attempt`] builder so a future field never breaks
+/// a caller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct InputConnection {
+    /// The owning input's id (the configured source id) — the object axis this
+    /// lifecycle event is authorized under (ADR-W026). An input's connect/flap
+    /// is the same leak class as its `input.streams` inventory, so a
+    /// cam1-scoped principal must not receive cam2's connection deltas.
+    pub input_id: String,
     /// The new lifecycle state of the source.
     pub state: LifecycleState,
     /// The reconnect attempt counter, if reconnecting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
+}
+
+impl InputConnection {
+    /// Build an `input.connection` event body for `input_id` entering `state`,
+    /// with no reconnect attempt counter.
+    #[must_use]
+    pub fn new(input_id: impl Into<String>, state: LifecycleState) -> Self {
+        Self {
+            input_id: input_id.into(),
+            state,
+            attempt: None,
+        }
+    }
+
+    /// Builder: set the reconnect attempt counter (a reconnect in progress).
+    #[must_use]
+    pub fn with_attempt(mut self, attempt: u32) -> Self {
+        self.attempt = Some(attempt);
+        self
+    }
 }
 
 /// The full elementary-stream inventory an input offers (RT-3, ADR-0034 §9).
@@ -1148,7 +1178,12 @@ pub enum AddressFamily {
 /// `device.discovered`, correlated to the scan via the envelope `corr`
 /// (ADR-RT007). Discovery rows are an **untrusted inventory** requiring
 /// explicit confirm-adopt (ADR-0041 doctrine); they carry no registry id.
+///
+/// `#[non_exhaustive]` (ADR-W026): construct via [`DeviceDiscovered::new`] plus
+/// the [`DeviceDiscovered::with_name`] / [`DeviceDiscovered::with_domain`]
+/// builders so a future field never breaks a caller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DeviceDiscovered {
     /// The candidate driver that recognised the device (e.g. `zowietek`).
     pub driver: String,
@@ -1159,6 +1194,46 @@ pub struct DeviceDiscovered {
     /// The advertised device name, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The discovery **domain** the observing node stamped on this row
+    /// (ADR-W026), sourced solely from that node's operator-declared
+    /// `[discovery] domain` config — **never** from the responder payload, its
+    /// TXT records, or mesh peer identity (a discovered device is untrusted and
+    /// cannot assert its own scope). `None` = the observing node declared no
+    /// domain; a discovery-scoped principal is denied an unlabelled row
+    /// (fail-closed). Under mesh-forwarded discovery the controller stamps this
+    /// from its own registry record of the enrolled node, never from the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+impl DeviceDiscovered {
+    /// Construct a discovery row with no name and no domain (the two optional,
+    /// builder-set fields).
+    #[must_use]
+    pub fn new(driver: String, address: String, family: AddressFamily) -> Self {
+        Self {
+            driver,
+            address,
+            family,
+            name: None,
+            domain: None,
+        }
+    }
+
+    /// Set the advertised device name.
+    #[must_use]
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Stamp the observing node's discovery domain (ADR-W026). The caller must
+    /// pass its own local config value, never a value read off the wire.
+    #[must_use]
+    pub fn with_domain(mut self, domain: String) -> Self {
+        self.domain = Some(domain);
+        self
+    }
 }
 
 /// An ephemeral cast session was started — the `data` body of
@@ -1381,6 +1456,55 @@ pub struct ShedLoad {
     /// time of the event (monotonic for a sustained overload; `0` when the shed
     /// is a ladder move that dropped nothing yet).
     pub dropped: u64,
+}
+
+/// The authorization classification of an [`Event`] for realtime delivery and
+/// REST parity (ADR-W026) — the single, total, wildcard-free scope axis every
+/// consumer routes through.
+///
+/// Deliberately **not** `#[non_exhaustive]`: it is a purely in-tree contract
+/// (never serialized), so adding an axis must break every `match` on it — in
+/// [`Event::authz_scope`] here and in the control-plane `scope_permits`
+/// predicate — until a human classifies the new axis. That compile-time ratchet
+/// is the whole point: it replaces the old fail-open `_ => deliver` wildcard
+/// that silently firehosed every unclassified event. The borrowed `&str`s point
+/// into the event, so classification allocates nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthzScope<'a> {
+    /// Delivered to any authenticated reader (role still gates the topic). An
+    /// explicit, greppable, review-gated firehose declaration — never a
+    /// fallthrough.
+    Public,
+    /// Restricted to a principal whose `scoped_object_ids` allowlist admits this
+    /// object id (BOLA axis, ADR-W005/W025).
+    Object(&'a str),
+    /// Restricted to a principal whose `scoped_output_ids` allowlist admits this
+    /// output id — matched against **plain** entries only (`program:*` entries
+    /// are inert here).
+    Output(&'a str),
+    /// Restricted to a principal whose `scoped_output_ids` allowlist admits
+    /// `program:<id>` — the program-namespaced grant that carries `timing.status`
+    /// without punning the plain output-id namespace (ADR-W026).
+    Program(&'a str),
+    /// Restricted by discovery **domain** (ADR-W026). `Some(label)` is matched
+    /// against `scoped_discovery_domains`; `None` is an *unlabelled* row, which a
+    /// discovery-scoped principal is denied (fail-closed). The policy lives in
+    /// the control-plane predicate; this classifier only reports the label.
+    DiscoveryDomain(Option<&'a str>),
+    /// Restricted by **both** an object id and an output id — the two-axis
+    /// conjunction an event whose REST twin gates both surfaces requires
+    /// (ADR-W026). The predicate admits it iff `scoped_object_ids` admits
+    /// `object` **and** `scoped_output_ids` admits `output` (either axis unset =
+    /// unrestricted on that axis). Carries a head-scoped `salvo.*` — the REST
+    /// twin runs `authorize_object(salvo)` **and** `authorize_output(head)`; a
+    /// head-less recall stays a plain [`AuthzScope::Object`].
+    ObjectAndOutput {
+        /// The object-axis id (matched against `scoped_object_ids`).
+        object: &'a str,
+        /// The output-axis id (matched against `scoped_output_ids`, plain
+        /// entries only).
+        output: &'a str,
+    },
 }
 
 /// The discriminated payload of every frame: control frames and data events.
@@ -1625,6 +1749,121 @@ impl Event {
             Self::CastSessionStarted(_) => "cast.session.started",
             Self::CastSessionRemoved(_) => "cast.session.removed",
             Self::TimingStatus(_) => "timing.status",
+        }
+    }
+
+    /// The authorization scope this event is delivered under (ADR-W026).
+    ///
+    /// This is the single, total classification the realtime delta filter, the
+    /// connect snapshot, and REST parity all consult (via the control-plane
+    /// `scope_permits` predicate). The match is **exhaustive and wildcard-free**
+    /// by design: adding an [`Event`] variant fails compilation here until its
+    /// author classifies it, which kills the old fail-open `_ => deliver`
+    /// firehose at the root. Every [`AuthzScope::Public`] arm carries a one-line
+    /// justification so the firehose is an enumerated, reviewed decision.
+    #[must_use]
+    // The `Public` arms are deliberately split by resource family so each keeps
+    // its own review-gated justification comment (ADR-W026): the firehose must
+    // stay an enumerated, auditable decision, not a merged catch-all.
+    #[allow(clippy::match_same_arms)]
+    pub fn authz_scope(&self) -> AuthzScope<'_> {
+        match self {
+            // Control frames are protocol plumbing, not resource data — public.
+            Self::Hello(_)
+            | Self::Subscribe(_)
+            | Self::Subscribed(_)
+            | Self::Unsubscribe(_)
+            | Self::SetRate(_)
+            | Self::Resume(_)
+            | Self::Resync(_)
+            | Self::Lag(_)
+            | Self::Ping
+            | Self::Pong
+            | Self::Error(_) => AuthzScope::Public,
+
+            // ---- Object-scoped (a REST `authorize_object` read gates the id) ----
+            Self::DeviceStatus(e) => AuthzScope::Object(&e.device_id),
+            Self::DeviceAdopted(e) => AuthzScope::Object(&e.device_id),
+            Self::DeviceRemoved(e) => AuthzScope::Object(&e.device_id),
+            Self::DeviceMode(e) => AuthzScope::Object(&e.device_id),
+            Self::DeviceError(e) => AuthzScope::Object(&e.device_id),
+            Self::DeviceSync(e) => AuthzScope::Object(&e.device_id),
+            Self::CastSessionStarted(e) => AuthzScope::Object(&e.session_id),
+            Self::CastSessionRemoved(e) => AuthzScope::Object(&e.session_id),
+            Self::MediaPlayerState(e) => AuthzScope::Object(&e.player),
+            // A tile bound to an input is object-scoped by that input id; a
+            // placeholder/no-signal tile (`input: None`) has no authorizable
+            // object and stays public (structurally id-less).
+            Self::TileState(t) => t
+                .input
+                .as_deref()
+                .map_or(AuthzScope::Public, AuthzScope::Object),
+
+            // ---- Discovery-domain-scoped (ADR-W026) ----
+            // The observing node's stamped domain; `None` is unlabelled and
+            // denied to a discovery-scoped principal by the predicate.
+            Self::DeviceDiscovered(d) => AuthzScope::DiscoveryDomain(d.domain.as_deref()),
+
+            // ---- Program-scoped (ADR-W026) ----
+            // The outbound presentation epoch, keyed by its program stream id;
+            // delivered to output-scoped principals only via a `program:<id>`
+            // grant.
+            Self::TimingStatus(t) => AuthzScope::Program(&t.stream_id),
+
+            // ---- Output-scoped (ADR-W026) ----
+            // A RIST link's health is an output-sink concern keyed by its
+            // configured source/output id; `cname` leaks peer-hostname topology,
+            // so it must not firehose to an output-scoped principal (REST twin:
+            // rides `Topic::Outputs`).
+            Self::RistLinkStats(e) => AuthzScope::Output(&e.link_id),
+
+            // ---- Object-scoped input lanes (ADR-W026) ----
+            // An input's stream inventory and its connect/flap lifecycle share
+            // the input-id object namespace with `tile.state`; their REST twins
+            // are `authorize_object`-gated. "input cam2 flapping" is the same
+            // leak class to a cam1-scoped principal.
+            Self::InputStreams(e) => AuthzScope::Object(&e.input_id),
+            Self::InputConnection(e) => AuthzScope::Object(&e.input_id),
+
+            // ---- Object+output-scoped salvo lane (ADR-W026) ----
+            // The REST twin gates BOTH axes when a head is addressed
+            // (`authorize_object(salvo)` + `authorize_output(head)`), so a
+            // head-scoped recall is the two-axis conjunction; a head-less
+            // whole-wall recall gates the salvo object only (the REST path skips
+            // `authorize_output` when no head is given).
+            Self::SalvoArmed(e) | Self::SalvoTaken(e) | Self::SalvoCancelled(e) => {
+                e.head.as_deref().map_or_else(
+                    || AuthzScope::Object(&e.salvo),
+                    |head| AuthzScope::ObjectAndOutput {
+                        object: &e.salvo,
+                        output: head,
+                    },
+                )
+            }
+
+            // ---- Public data lanes (preserve the pre-W026 firehose, reviewed) ----
+            // The connect-time tile baseline rides its own `tiles` snapshot path,
+            // not the object axis — public like the rest of the tile lane.
+            Self::TilesSnapshot(_) => AuthzScope::Public,
+            // Whole-program telemetry with no per-tenant object dimension today.
+            Self::AudioMeter(_)
+            | Self::AudioLoudness(_)
+            | Self::SystemMetrics(_)
+            | Self::OutputStatus(_) => AuthzScope::Public,
+            // Operator alert / health / degradation lanes — node-wide signals.
+            Self::AlertRaised(_)
+            | Self::AlertCleared(_)
+            | Self::HealthWarningRaised(_)
+            | Self::HealthWarningCleared(_)
+            | Self::ShedLoad(_) => AuthzScope::Public,
+            // Job progress is correlated by `corr`, not a per-object resource.
+            Self::JobProgress(_) => AuthzScope::Public,
+            // Broadcast monitoring surface — node-wide operator lanes.
+            Self::AlarmRaised(_)
+            | Self::AlarmUpdated(_)
+            | Self::AlarmCleared(_)
+            | Self::AlarmAcked(_)
+            | Self::TallyState(_) => AuthzScope::Public,
         }
     }
 

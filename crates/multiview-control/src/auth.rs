@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
+use multiview_events::AuthzScope;
+
 use crate::error::ControlError;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -115,7 +117,78 @@ pub struct Principal {
     /// confined to a subset of program outputs cannot touch another's
     /// renditions even when its action role would otherwise permit it (per-
     /// output BOLA).
+    ///
+    /// Plain entries authorize [`AuthzScope::Output`]. Entries prefixed with
+    /// `program:` authorize only [`AuthzScope::Program`] and are deliberately
+    /// inert for plain output authorization (ADR-W026), preventing namespace
+    /// punning between a program and an output that share an id.
     pub scoped_output_ids: Option<Vec<String>>,
+    /// Discovery-domain allowlist (ADR-W026), or `None` for all domains,
+    /// including unlabelled rows. `Some([])` sees no discovery inventory;
+    /// `Some(labels)` sees only rows carrying one of those labels. A scoped
+    /// principal is denied an unlabelled (`domain: None`) row — fail-closed so a
+    /// stripped/missing label can never widen visibility.
+    pub scoped_discovery_domains: Option<Vec<String>>,
+}
+
+/// Allocation-free borrowed view of a principal's three authorization axes.
+///
+/// Each `None` axis is unrestricted; `Some([])` denies every resource on that
+/// axis; `Some(entries)` is an exact allowlist. The one fail-closed policy lives
+/// in [`scope_permits`], shared by REST and realtime (ADR-W026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthzScopes<'a> {
+    objects: Option<&'a [String]>,
+    outputs: Option<&'a [String]>,
+    discovery_domains: Option<&'a [String]>,
+}
+
+impl<'a> AuthzScopes<'a> {
+    /// Borrow three owned optional allowlists as one authorization view.
+    ///
+    /// This constructor is used by realtime's session-owned scope state; it
+    /// borrows only and allocates nothing on the event delivery path.
+    #[must_use]
+    pub fn new(
+        objects: Option<&'a [String]>,
+        outputs: Option<&'a [String]>,
+        discovery_domains: Option<&'a [String]>,
+    ) -> Self {
+        Self {
+            objects,
+            outputs,
+            discovery_domains,
+        }
+    }
+
+    /// Whether this view imposes **no** restriction on any axis — the principal
+    /// can see and act on the whole system.
+    ///
+    /// True iff every axis is `None` (unrestricted). Any `Some(_)` axis — even
+    /// `Some([])`, which denies everything on that axis — makes the principal
+    /// restricted and therefore **not** global. This is the single definition of
+    /// "unrestricted across all axes"; whole-system-artifact gating keys off it
+    /// (via [`Principal::is_global`]) so a newly-added axis is covered here in one
+    /// place rather than in a frozen per-axis check (ADR-W026).
+    ///
+    /// The exhaustive `let Self { .. }` destructure below is deliberate and
+    /// load-bearing: it carries **no** `..` rest pattern, so adding a fourth
+    /// scope axis to [`AuthzScopes`] fails to compile *right here* until that
+    /// axis is folded into the predicate. That makes the "covered in one place"
+    /// promise fail-closed **by construction** — a newly-added axis can never
+    /// silently read as global (which would let a principal scoped only on the
+    /// new axis reach whole-system artifacts). Do not "simplify" it back to
+    /// `self.objects.is_none() && …` field access, which would reopen that hole.
+    #[must_use]
+    pub fn is_global(&self) -> bool {
+        // Exhaustive destructure (no `..`): a new axis field breaks the build here.
+        let Self {
+            objects,
+            outputs,
+            discovery_domains,
+        } = self;
+        objects.is_none() && outputs.is_none() && discovery_domains.is_none()
+    }
 }
 
 impl Principal {
@@ -131,11 +204,43 @@ impl Principal {
         self.scoped_output_ids.is_some()
     }
 
+    /// Whether this principal is confined to a discovery-domain allowlist.
+    #[must_use]
+    pub fn is_discovery_scoped(&self) -> bool {
+        self.scoped_discovery_domains.is_some()
+    }
+
+    /// Borrow all three authorization axes as the unified view consumed by
+    /// [`scope_permits`]. No allowlist is cloned or allocated.
+    #[must_use]
+    pub fn scopes(&self) -> AuthzScopes<'_> {
+        AuthzScopes::new(
+            self.scoped_object_ids.as_deref(),
+            self.scoped_output_ids.as_deref(),
+            self.scoped_discovery_domains.as_deref(),
+        )
+    }
+
+    /// Whether this principal is unrestricted on **every** authorization axis
+    /// (object, output, discovery-domain) — i.e. it can see the whole system.
+    ///
+    /// The inverse (restricted on at least one axis) gates whole-system
+    /// artifacts like the config export, support bundle, and the whole-document
+    /// config mutations (revert-to-start / promote): any scoped principal is
+    /// denied outright, because such a document embeds every object / output /
+    /// domain and cannot be meaningfully redacted per-field. Delegates to the
+    /// unified [`AuthzScopes::is_global`] so the axis set lives in one place
+    /// (ADR-W026).
+    #[must_use]
+    pub fn is_global(&self) -> bool {
+        self.scopes().is_global()
+    }
+
     /// The full-access principal used when authentication is **disabled** (an
     /// explicit, opt-in deployment mode for trusted/local networks). It carries
-    /// [`Role::Admin`] and no object/output scoping, so every request is treated
-    /// as a local administrator. Reachable only when the operator turned auth off
-    /// — the default build still requires a verified API key.
+    /// [`Role::Admin`] and no object/output/discovery scoping, so every request is
+    /// treated as a local administrator. Reachable only when the operator turned
+    /// auth off — the default build still requires a verified API key.
     #[must_use]
     pub fn local_admin() -> Self {
         Self {
@@ -143,62 +248,102 @@ impl Principal {
             role: Role::Admin,
             scoped_object_ids: None,
             scoped_output_ids: None,
+            scoped_discovery_domains: None,
         }
+    }
+}
+
+const PROGRAM_SCOPE_PREFIX: &str = "program:";
+
+fn allowlist_permits(allowlist: Option<&[String]>, id: Option<&str>) -> bool {
+    match (allowlist, id) {
+        (None, _) => true,
+        (Some(allowed), Some(id)) => allowed.iter().any(|entry| entry == id),
+        // A scoped principal never receives an unlabelled row: omission cannot
+        // widen visibility (ADR-W026's load-bearing fail-closed rule).
+        (Some(_), None) => false,
+    }
+}
+
+fn output_scope_permits(allowlist: Option<&[String]>, output_id: &str) -> bool {
+    match allowlist {
+        None => true,
+        Some(allowed) => allowed
+            .iter()
+            .any(|entry| !entry.starts_with(PROGRAM_SCOPE_PREFIX) && entry == output_id),
+    }
+}
+
+fn program_scope_permits(allowlist: Option<&[String]>, program_id: &str) -> bool {
+    match allowlist {
+        None => true,
+        Some(allowed) => allowed
+            .iter()
+            .any(|entry| entry.strip_prefix(PROGRAM_SCOPE_PREFIX) == Some(program_id)),
+    }
+}
+
+/// Whether `scopes` permits delivery/access to `scope` (ADR-W026).
+///
+/// This is the one fail-closed, exhaustive rule shared by realtime delivery and
+/// REST authorization. The match has no wildcard and [`AuthzScope`] is
+/// deliberately not `#[non_exhaustive]`, so adding an authorization axis fails
+/// compilation here until its policy is explicit.
+#[must_use]
+pub fn scope_permits(scopes: &AuthzScopes<'_>, scope: AuthzScope<'_>) -> bool {
+    match scope {
+        AuthzScope::Public => true,
+        AuthzScope::Object(id) => allowlist_permits(scopes.objects, Some(id)),
+        AuthzScope::Output(id) => output_scope_permits(scopes.outputs, id),
+        AuthzScope::Program(id) => program_scope_permits(scopes.outputs, id),
+        AuthzScope::DiscoveryDomain(domain) => allowlist_permits(scopes.discovery_domains, domain),
+        AuthzScope::ObjectAndOutput { object, output } => {
+            allowlist_permits(scopes.objects, Some(object))
+                && output_scope_permits(scopes.outputs, output)
+        }
+    }
+}
+
+/// Enforce the unified authorization scope, producing a 403 twin of
+/// [`scope_permits`] for REST handlers.
+///
+/// # Errors
+///
+/// [`ControlError::Forbidden`] if any required axis denies `scope`.
+pub fn authorize_scope(principal: &Principal, scope: AuthzScope<'_>) -> Result<(), ControlError> {
+    if scope_permits(&principal.scopes(), scope) {
+        Ok(())
+    } else {
+        Err(ControlError::Forbidden(format!(
+            "principal {:?} is not authorized for {scope:?}",
+            principal.key_id
+        )))
     }
 }
 
 /// Per-object authorization (BOLA defense, ADR-W005 / OWASP API1).
 ///
-/// Checked on **every** resource id a request addresses — not just the role. A
-/// principal scoped to an explicit object allowlist is denied any id outside it,
-/// even when its role would otherwise permit the action.
+/// Thin REST wrapper over the same [`scope_permits`] rule realtime consumes.
+/// Checked on **every** resource id a request addresses — not just the role.
 ///
 /// # Errors
 ///
-/// [`ControlError::Forbidden`] if the principal is scoped and `object_id` is not
-/// in its allowlist.
+/// [`ControlError::Forbidden`] if the principal's object axis denies `object_id`.
 pub fn authorize_object(principal: &Principal, object_id: &str) -> Result<(), ControlError> {
-    match &principal.scoped_object_ids {
-        None => Ok(()),
-        Some(allowed) => {
-            if allowed.iter().any(|id| id == object_id) {
-                Ok(())
-            } else {
-                Err(ControlError::Forbidden(format!(
-                    "principal {:?} is not authorized for object {object_id:?}",
-                    principal.key_id
-                )))
-            }
-        }
-    }
+    authorize_scope(principal, AuthzScope::Object(object_id))
 }
 
 /// Per-**output** authorization (output-scoped role; per-output BOLA defense).
 ///
-/// The output-scoped operator role is confined to a subset of program outputs
-/// (renditions/heads). This is checked on **every** output id a request
-/// addresses, independently of [`authorize_object`]: a principal confined to an
-/// output allowlist is denied any output id outside it, even when its role would
-/// otherwise permit the action.
+/// Thin REST wrapper over the same [`scope_permits`] rule realtime consumes.
+/// `program:*` grants are inert here: they authorize [`AuthzScope::Program`], not
+/// a plain output with the same id (ADR-W026 namespace separation).
 ///
 /// # Errors
 ///
-/// [`ControlError::Forbidden`] if the principal is output-scoped and `output_id`
-/// is not in its allowlist.
+/// [`ControlError::Forbidden`] if the principal's output axis denies `output_id`.
 pub fn authorize_output(principal: &Principal, output_id: &str) -> Result<(), ControlError> {
-    match &principal.scoped_output_ids {
-        None => Ok(()),
-        Some(allowed) => {
-            if allowed.iter().any(|id| id == output_id) {
-                Ok(())
-            } else {
-                Err(ControlError::Forbidden(format!(
-                    "principal {:?} is not authorized for output {output_id:?}",
-                    principal.key_id
-                )))
-            }
-        }
-    }
+    authorize_scope(principal, AuthzScope::Output(output_id))
 }
 
 /// A registered API key: its non-secret id, the HMAC digest of the secret, and
@@ -400,6 +545,12 @@ impl ApiKeyStore {
     }
 }
 
+/// The reserved key id of the bootstrap **admin** (environment-provisioned,
+/// always unscoped). A config-declared key may never reuse it — see
+/// [`register_config_api_keys`], which rejects the collision rather than let a
+/// declared key silently overwrite the administrator (ADR-W026).
+pub(crate) const BOOTSTRAP_ADMIN_KEY_ID: &str = "admin";
+
 /// Build the control plane's API-key store with a bootstrap **admin** key.
 ///
 /// Secure-by-default access for the management API/UI without shipping a secret
@@ -436,17 +587,104 @@ pub fn provision_admin_keys(admin_secret: Option<String>) -> (ApiKeyStore, Optio
     };
 
     store.register(
-        "admin",
+        BOOTSTRAP_ADMIN_KEY_ID,
         &secret,
         Principal {
-            key_id: "admin".to_owned(),
+            key_id: BOOTSTRAP_ADMIN_KEY_ID.to_owned(),
             role: Role::Admin,
             scoped_object_ids: None,
             scoped_output_ids: None,
+            scoped_discovery_domains: None,
         },
     );
 
     (store, bootstrap_token)
+}
+
+/// Map a config-declared [`multiview_config::ApiKeyRole`] to the control-plane
+/// [`Role`] (ADR-W026). The two enums are kept separate because the dependency
+/// runs control→config, never the reverse.
+///
+/// `ApiKeyRole` carries no `Admin` variant by design — config can never mint an
+/// administrator (admin auth is environment-only), so there is no admin arm to
+/// map. The match stays exhaustive so a new config role compile-forces its
+/// mapping here.
+fn role_from_config(role: multiview_config::ApiKeyRole) -> Role {
+    match role {
+        multiview_config::ApiKeyRole::ReadOnly => Role::ReadOnly,
+        multiview_config::ApiKeyRole::Viewer => Role::Viewer,
+        multiview_config::ApiKeyRole::Operator => Role::Operator,
+    }
+}
+
+/// Build the [`Principal`] a config-declared API key authenticates as (ADR-W026):
+/// its role plus the three scope allowlists, carried verbatim from config.
+#[must_use]
+pub fn principal_from_config(key: &multiview_config::ApiKeyConfig) -> Principal {
+    Principal {
+        key_id: key.key_id.clone(),
+        role: role_from_config(key.role),
+        scoped_object_ids: key.scoped_object_ids.clone(),
+        scoped_output_ids: key.scoped_output_ids.clone(),
+        scoped_discovery_domains: key.scoped_discovery_domains.clone(),
+    }
+}
+
+/// Register every config-declared API key (ADR-W026) into `store`, resolving each
+/// key's secret via `resolve_secret` (the CLI passes an environment reader; tests
+/// inject a map). This is what makes a scoped principal MINTABLE in production —
+/// without it the object/output/discovery axes are a lock with no keyhole.
+///
+/// A key whose `secret_env` is unset or empty is a **hard startup error**, never
+/// a silent skip: an un-authenticatable scoped key is a latent misconfiguration
+/// (the operator declared a confined principal that can never be used), so the
+/// caller surfaces it and refuses to start.
+///
+/// # Errors
+///
+/// Returns the offending key's diagnostic (naming its `secret_env`) when the
+/// secret is unset or empty.
+pub fn register_config_api_keys<R>(
+    store: &mut ApiKeyStore,
+    keys: &[multiview_config::ApiKeyConfig],
+    mut resolve_secret: R,
+) -> Result<(), String>
+where
+    R: FnMut(&str) -> Option<String>,
+{
+    for key in keys {
+        // Fail-closed on a reserved or already-registered id: a config key must
+        // never silently overwrite another key's secret + principal (auth-panel
+        // F3 — a `key_id = "admin"` would otherwise clobber the bootstrap
+        // administrator, a lockout / takeover). The bootstrap admin is
+        // provisioned before this runs, so the already-registered check below
+        // also catches it; the explicit reserved check is order-independent
+        // defense with a precise diagnostic, and also rejects an in-batch
+        // duplicate the moment the first of the pair is registered.
+        if key.key_id == BOOTSTRAP_ADMIN_KEY_ID {
+            return Err(format!(
+                "api.keys[{}]: key_id is reserved for the bootstrap administrator and \
+                 cannot be declared in config",
+                key.key_id
+            ));
+        }
+        if store.principal_for_key(&key.key_id).is_some() {
+            return Err(format!(
+                "api.keys[{}]: key_id is already registered; refusing to overwrite it",
+                key.key_id
+            ));
+        }
+        let secret = resolve_secret(&key.secret_env)
+            .filter(|secret| !secret.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "api.keys[{}]: secret environment variable {:?} is unset or empty",
+                    key.key_id, key.secret_env
+                )
+            })?;
+        store.register(&key.key_id, &secret, principal_from_config(key));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -465,6 +703,173 @@ mod tests {
         assert_eq!(principal.key_id, "admin");
         // A wrong secret is rejected.
         assert!(store.verify("admin.wrong").is_err());
+    }
+
+    // ---- ADR-W026: config-declared scoped API keys ----
+
+    #[test]
+    fn config_key_maps_role_and_all_three_scope_axes() {
+        use multiview_config::{ApiKeyConfig, ApiKeyRole};
+        let key = ApiKeyConfig::new("site-a-op", "ENV_A", ApiKeyRole::Operator)
+            .with_scoped_object_ids(vec!["cam-3".to_owned()])
+            .with_scoped_output_ids(vec!["out-1".to_owned(), "program:main".to_owned()])
+            .with_scoped_discovery_domains(vec!["site-a".to_owned()]);
+        let principal = principal_from_config(&key);
+        assert_eq!(principal.key_id, "site-a-op");
+        assert_eq!(principal.role, Role::Operator);
+        assert_eq!(
+            principal.scoped_object_ids.as_deref(),
+            Some(&["cam-3".to_owned()][..])
+        );
+        assert_eq!(
+            principal.scoped_output_ids.as_deref(),
+            Some(&["out-1".to_owned(), "program:main".to_owned()][..])
+        );
+        assert_eq!(
+            principal.scoped_discovery_domains.as_deref(),
+            Some(&["site-a".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn is_global_is_true_only_when_every_axis_is_unrestricted() {
+        // The single source of truth for whole-system gating (ADR-W026): a view
+        // is global iff EVERY axis is `None`. Any restricted axis — including an
+        // empty `Some([])` allowlist that denies everything on that axis — makes
+        // it non-global. These per-axis assertions lock the predicate's behaviour
+        // so the compile-forced exhaustive destructure in `AuthzScopes::is_global`
+        // is proven behaviour-preserving (the compile-force itself guards the
+        // "new axis" case, which no runtime test can exercise).
+        let obj = vec!["cam-1".to_owned()];
+        let out = vec!["out-1".to_owned()];
+        let dom = vec!["site-a".to_owned()];
+        let empty: Vec<String> = Vec::new();
+
+        // Unrestricted on all three axes -> global.
+        assert!(AuthzScopes::new(None, None, None).is_global());
+
+        // Restricted on exactly ONE axis -> NOT global (each axis independently).
+        assert!(!AuthzScopes::new(Some(obj.as_slice()), None, None).is_global());
+        assert!(!AuthzScopes::new(None, Some(out.as_slice()), None).is_global());
+        assert!(!AuthzScopes::new(None, None, Some(dom.as_slice())).is_global());
+
+        // An empty allowlist is a restriction (denies everything on that axis),
+        // not the absence of one — still NOT global, on every axis.
+        assert!(!AuthzScopes::new(Some(empty.as_slice()), None, None).is_global());
+        assert!(!AuthzScopes::new(None, Some(empty.as_slice()), None).is_global());
+        assert!(!AuthzScopes::new(None, None, Some(empty.as_slice())).is_global());
+    }
+
+    #[test]
+    fn principal_is_global_delegates_to_the_unified_scope_view() {
+        // `Principal::is_global` forwards to `AuthzScopes::is_global`; confirm the
+        // delegation so whole-system gating (config export / revert / promote)
+        // measures a principal against the one shared definition, not a private
+        // per-axis copy that could drift.
+        let unscoped = Principal {
+            key_id: "op".to_owned(),
+            role: Role::Operator,
+            scoped_object_ids: None,
+            scoped_output_ids: None,
+            scoped_discovery_domains: None,
+        };
+        assert!(unscoped.is_global());
+
+        // Scoped on a single axis (discovery-domain only) -> not global, so it is
+        // denied every whole-system artifact.
+        let discovery_only = Principal {
+            key_id: "disco".to_owned(),
+            role: Role::Operator,
+            scoped_object_ids: None,
+            scoped_output_ids: None,
+            scoped_discovery_domains: Some(vec!["site-a".to_owned()]),
+        };
+        assert!(!discovery_only.is_global());
+    }
+
+    #[test]
+    fn register_config_api_keys_registers_and_authenticates() {
+        use multiview_config::{ApiKeyConfig, ApiKeyRole};
+        let mut store = ApiKeyStore::new(b"pepper".to_vec());
+        let keys = vec![ApiKeyConfig::new("k1", "ENV_K1", ApiKeyRole::Viewer)];
+        register_config_api_keys(&mut store, &keys, |name| {
+            (name == "ENV_K1").then(|| "the-secret".to_owned())
+        })
+        .expect("registration succeeds when the secret env is present");
+        let principal = store
+            .verify("k1.the-secret")
+            .expect("the registered key authenticates");
+        assert_eq!(principal.role, Role::Viewer);
+    }
+
+    #[test]
+    fn register_config_api_keys_errors_on_missing_secret() {
+        use multiview_config::{ApiKeyConfig, ApiKeyRole};
+        let mut store = ApiKeyStore::new(b"pepper".to_vec());
+        let keys = vec![ApiKeyConfig::new("k1", "ENV_MISSING", ApiKeyRole::Operator)];
+        // A scoped key whose secret env is unset is a HARD startup error, never a
+        // silent no-op (an un-authenticatable key is a latent misconfiguration).
+        let err = register_config_api_keys(&mut store, &keys, |_| None)
+            .expect_err("a missing secret env is a startup error");
+        assert!(
+            err.contains("ENV_MISSING"),
+            "the error names the missing env var: {err}"
+        );
+    }
+
+    #[test]
+    fn register_config_api_keys_refuses_to_overwrite_the_bootstrap_admin() {
+        use multiview_config::{ApiKeyConfig, ApiKeyRole};
+        // The bootstrap admin (key_id "admin") is provisioned first; a config
+        // `[[api.keys]]` reusing that reserved id must be a HARD startup error,
+        // never a silent HashMap clobber that swaps the admin's secret +
+        // principal (lockout / privilege takeover — auth-panel F3).
+        let (mut store, _) = provision_admin_keys(Some("admin-secret".to_owned()));
+        let keys = vec![ApiKeyConfig::new(
+            "admin",
+            "ENV_ADMIN",
+            ApiKeyRole::Operator,
+        )];
+        let err = register_config_api_keys(&mut store, &keys, |_| Some("attacker".to_owned()))
+            .expect_err("a config key colliding with the reserved admin id must be rejected");
+        assert!(
+            err.contains("admin"),
+            "the error names the reserved/colliding key id: {err}"
+        );
+        // The bootstrap admin is untouched: its original secret still
+        // authenticates as Admin, and the attacker's secret does NOT.
+        let principal = store
+            .verify("admin.admin-secret")
+            .expect("the bootstrap admin secret still authenticates");
+        assert_eq!(principal.role, Role::Admin);
+        assert!(
+            store.verify("admin.attacker").is_err(),
+            "the config key's secret must NOT have overwritten the admin"
+        );
+    }
+
+    #[test]
+    fn register_config_api_keys_refuses_a_duplicate_of_an_already_registered_id() {
+        use multiview_config::{ApiKeyConfig, ApiKeyRole};
+        // Fail-closed on ANY collision with an already-registered id, not just
+        // the reserved admin: the first registration wins and a second silent
+        // clobber is refused (register_config_api_keys is independently
+        // fail-closed, not reliant on the caller having validated).
+        let mut store = ApiKeyStore::new(b"pepper".to_vec());
+        let keys = vec![
+            ApiKeyConfig::new("dup", "ENV_A", ApiKeyRole::Viewer),
+            ApiKeyConfig::new("dup", "ENV_B", ApiKeyRole::Operator),
+        ];
+        let err = register_config_api_keys(&mut store, &keys, |name| match name {
+            "ENV_A" => Some("secret-a".to_owned()),
+            "ENV_B" => Some("secret-b".to_owned()),
+            _ => None,
+        })
+        .expect_err("a second key reusing an already-registered id must be rejected");
+        assert!(
+            err.contains("dup"),
+            "the error names the colliding id: {err}"
+        );
     }
 
     #[test]

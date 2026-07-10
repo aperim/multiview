@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod api;
 pub mod audio;
 pub mod device;
 pub mod diff;
@@ -58,6 +59,7 @@ use multiview_core::layout::{
 };
 use multiview_core::stream::StreamKind as CoreStreamKind;
 
+pub use api::{ApiConfig, ApiKeyConfig, ApiKeyRole};
 use audio::PROGRAM_TRACK as PROGRAM_TRACK_NAME;
 pub use audio::{
     AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioCapability, OutputAudioMode,
@@ -265,6 +267,12 @@ pub struct MultiviewConfig {
     /// serves the API + docs (+ web UI) alongside the engine; absent ⇒ headless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<ControlConfig>,
+    /// Config-declared API keys (ADR-W026): scoped, non-admin principals minted
+    /// declaratively (secrets via `secret_env`, never inlined). Absent ⇒ only the
+    /// bootstrap admin (env token) exists. Registered at startup by
+    /// `multiview-cli`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<ApiConfig>,
     /// The shared WebRTC transport endpoint section (ADR-0048 §9): the single
     /// dual-stack UDP media socket every WebRTC role multiplexes onto — WHIP
     /// ingest (ADR-T014), WHEP preview, WHEP output viewers and the
@@ -444,6 +452,7 @@ impl MultiviewConfig {
         self.validate_devices()?;
         self.validate_sync_groups()?;
         self.validate_discovery()?;
+        self.validate_api()?;
         self.validate_control()?;
         self.validate_webrtc()?;
         self.validate_system()?;
@@ -481,6 +490,16 @@ impl MultiviewConfig {
     fn validate_discovery(&self) -> Result<(), ConfigError> {
         match &self.discovery {
             Some(discovery) => discovery.validate(),
+            None => Ok(()),
+        }
+    }
+
+    /// Validate the `[api]` config-declared API keys (ADR-W026): unique key ids,
+    /// a `secret_env` per key, well-formed `program:` output grants, and
+    /// DNS-label discovery domains ([`ApiConfig::validate`]).
+    fn validate_api(&self) -> Result<(), ConfigError> {
+        match &self.api {
+            Some(api) => api.validate(),
             None => Ok(()),
         }
     }

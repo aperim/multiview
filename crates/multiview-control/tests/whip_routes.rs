@@ -137,6 +137,7 @@ fn router_with_whip(whip: Arc<FakeWhip>) -> axum::Router {
                 role,
                 scoped_object_ids: None,
                 scoped_output_ids: None,
+                scoped_discovery_domains: None,
             },
         );
     }

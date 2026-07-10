@@ -11,10 +11,14 @@
 use std::sync::Arc;
 
 use multiview_control::{DeviceStatusRegistry, SessionStream};
+use multiview_core::time::Rational;
+use multiview_core::wallclock::WallClockRef;
 use multiview_engine::EnginePublisher;
 use multiview_events::{
-    Alert, AlertSeverity, CastSessionStarted, DeviceState, DeviceStatus, Event, FrameKind,
-    InputConnection, LifecycleState, MediaPlayerEvent, MediaPlayerState, TileState, Topic,
+    AddressFamily, Alert, AlertSeverity, CastSessionStarted, ClockQuality, ClockSource,
+    DeviceDiscovered, DeviceState, DeviceStatus, Event, FrameKind, InputConnection, LifecycleState,
+    MediaPlayerEvent, MediaPlayerState, RistLinkRole, RistLinkStats, TileState, TimingStatus,
+    Topic,
 };
 
 type Publisher = EnginePublisher<serde_json::Value, Event>;
@@ -67,6 +71,52 @@ fn tile_state(input: Option<&str>) -> Event {
     })
 }
 
+/// A `rist.link.stats` event — scoped (by `authz_scope`) to output `link_id`.
+fn rist_link_stats(link_id: &str) -> Event {
+    Event::RistLinkStats(RistLinkStats {
+        link_id: link_id.to_owned(),
+        role: RistLinkRole::Sender,
+        flow_id: 1,
+        cname: "peer.invalid".to_owned(),
+        peer_count: 1,
+        rtt_ms: 10,
+        quality: 100.0,
+        bandwidth_bps: 1_000_000,
+        retry_bandwidth_bps: 0,
+        sent: 1,
+        received: 0,
+        retransmitted: 0,
+        lost: 0,
+        recovered: 0,
+        since: 0,
+    })
+}
+
+/// A `timing.status` event — scoped (by `authz_scope`) to program `stream_id`.
+fn timing_status(stream_id: &str) -> Event {
+    Event::TimingStatus(TimingStatus {
+        stream_id: stream_id.to_owned(),
+        epoch: WallClockRef::new(0, 0, Rational::new(90_000, 1)),
+        link_offset_ns: 0,
+        clock_source: ClockSource::System,
+        clock_quality: ClockQuality::Locked,
+        groups: vec![],
+    })
+}
+
+/// A `device.discovered` event stamped with `domain` (or unlabelled when `None`).
+fn device_discovered(domain: Option<&str>) -> Event {
+    let mut row = DeviceDiscovered::new(
+        "zowietek".to_owned(),
+        "http://[fd00:db8::42]".to_owned(),
+        AddressFamily::Ipv6,
+    );
+    if let Some(domain) = domain {
+        row = row.with_domain(domain.to_owned());
+    }
+    Event::DeviceDiscovered(row)
+}
+
 #[tokio::test]
 async fn snapshot_precedes_deltas_with_monotonic_connection_seq() {
     let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
@@ -83,10 +133,10 @@ async fn snapshot_precedes_deltas_with_monotonic_connection_seq() {
     // Engine publishes two events; the session emits them as deltas with
     // strictly increasing per-connection seqs (1, 2) on their topics.
     engine.publish_event(alert("a"));
-    engine.publish_event(Event::InputConnection(InputConnection {
-        state: LifecycleState::Live,
-        attempt: None,
-    }));
+    engine.publish_event(Event::InputConnection(InputConnection::new(
+        "input:cam1",
+        LifecycleState::Live,
+    )));
 
     let d1 = session
         .next_delta()
@@ -301,6 +351,120 @@ async fn scoped_session_filters_device_snapshot_frames_to_the_allowlist() {
     let frames = unscoped.devices_snapshot_frames(&registry, 0);
     let ids: Vec<String> = frames.iter().map(delta_device_id).collect();
     assert_eq!(ids, vec!["dev-mine".to_owned(), "dev-other".to_owned()]);
+}
+
+// ---- ADR-W026 output / program / discovery-domain axis parity ----------
+// The realtime delta filter routes every event's `authz_scope()` through the
+// SAME `scope_permits` predicate REST uses, so the firehose the pre-W026
+// `_ => None` classifier delivered to scoped principals is closed.
+
+/// An OUTPUT-scoped session drops a `rist.link.stats` for an out-of-scope output
+/// (its `cname` leaks peer topology) and a `timing.status` for an un-granted
+/// program, and delivers the in-scope link plus the `program:`-granted timing —
+/// the realtime twin of REST output/program authorization.
+#[tokio::test]
+async fn output_scoped_session_filters_rist_and_timing_by_output_and_program() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let mut session = SessionStream::new(engine.subscribe(), "sess-out", None).with_scopes(
+        None,
+        Some(vec!["out-a".to_owned(), "program:main".to_owned()]),
+        None,
+    );
+
+    engine.publish_event(rist_link_stats("out-b")); // out-of-scope output
+    engine.publish_event(rist_link_stats("out-a")); // in-scope output
+    engine.publish_event(timing_status("other")); // un-granted program
+    engine.publish_event(timing_status("main")); // program:main granted
+    engine.publish_event(alert("global")); // public
+
+    // Out-of-scope output rist stats dropped (no seq gap).
+    assert_eq!(session.next_delta().await.unwrap(), None);
+    let d = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("in-scope output rist stats delivered");
+    assert!(matches!(&d.envelope.payload, Event::RistLinkStats(s) if s.link_id == "out-a"));
+    // Un-granted program timing dropped.
+    assert_eq!(session.next_delta().await.unwrap(), None);
+    let d = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("program:main-granted timing delivered");
+    assert!(matches!(&d.envelope.payload, Event::TimingStatus(t) if t.stream_id == "main"));
+    let d = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("public alert delivered regardless of scope");
+    assert!(matches!(&d.envelope.payload, Event::AlertRaised(_)));
+}
+
+/// A DISCOVERY-scoped session drops a `device.discovered` row for another domain
+/// AND an unlabelled row (fail-closed), and delivers only its own domain's rows.
+#[tokio::test]
+async fn discovery_scoped_session_filters_device_discovered_by_domain() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let mut session = SessionStream::new(engine.subscribe(), "sess-disc", None).with_scopes(
+        None,
+        None,
+        Some(vec!["site-a".to_owned()]),
+    );
+
+    engine.publish_event(device_discovered(Some("site-b"))); // other domain
+    engine.publish_event(device_discovered(None)); // unlabelled — fail-closed
+    engine.publish_event(device_discovered(Some("site-a"))); // in-domain
+    engine.publish_event(alert("global")); // public
+
+    assert_eq!(session.next_delta().await.unwrap(), None);
+    assert_eq!(session.next_delta().await.unwrap(), None);
+    let d = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("in-domain discovery row delivered");
+    assert!(
+        matches!(&d.envelope.payload, Event::DeviceDiscovered(x) if x.domain.as_deref() == Some("site-a"))
+    );
+    let d = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("public alert delivered");
+    assert!(matches!(&d.envelope.payload, Event::AlertRaised(_)));
+}
+
+/// An UNSCOPED session still receives every new-axis event — including an
+/// unlabelled discovery row — so the filter never over-restricts the default
+/// admin/operator/viewer (regression against the pre-W026 firehose behavior).
+#[tokio::test]
+async fn unscoped_session_delivers_new_axis_events() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let mut session = SessionStream::new(engine.subscribe(), "sess-unscoped-new", None);
+
+    engine.publish_event(rist_link_stats("out-x"));
+    engine.publish_event(timing_status("prog-x"));
+    engine.publish_event(device_discovered(None));
+
+    let d = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("rist delivered to unscoped");
+    assert!(matches!(&d.envelope.payload, Event::RistLinkStats(_)));
+    let d = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("timing delivered to unscoped");
+    assert!(matches!(&d.envelope.payload, Event::TimingStatus(_)));
+    let d = session
+        .next_delta()
+        .await
+        .unwrap()
+        .expect("unlabelled discovery delivered to unscoped");
+    assert!(matches!(&d.envelope.payload, Event::DeviceDiscovered(_)));
 }
 
 /// A scoped session drops `media.player_state` (player id) and `tile.state`

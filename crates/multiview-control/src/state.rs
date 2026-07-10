@@ -1683,11 +1683,12 @@ impl AppState {
         Ok(crate::auth::Principal {
             key_id: claims.sub,
             role,
-            // JWT principals are not object/output scoped here; per-object and
-            // per-output BOLA guards still run and pass (unscoped). A deployment
-            // mapping JWT claims to scopes would populate these.
+            // JWT principals are not object/output/discovery scoped here; every
+            // axis guard still runs and passes (unscoped). A deployment mapping
+            // JWT claims to scopes would populate these.
             scoped_object_ids: None,
             scoped_output_ids: None,
+            scoped_discovery_domains: None,
         })
     }
 }

@@ -35,11 +35,11 @@ use axum::response::{IntoResponse, Response};
 use multiview_core::time::MediaTime;
 use multiview_engine::{EventSubscription, RecvError, SeqEvent, TryRecvError};
 use multiview_events::{
-    DeviceStatus, Envelope, Event, FrameKind, Hello, MediaPlayerState, OutputRunState, Resync,
-    ResyncReason, SalvoPhase, SchemaVersion, Seq, TileSnapshotEntry, TilesSnapshot, Topic,
+    AuthzScope, DeviceStatus, Envelope, Event, FrameKind, Hello, MediaPlayerState, OutputRunState,
+    Resync, ResyncReason, SalvoPhase, SchemaVersion, Seq, TileSnapshotEntry, TilesSnapshot, Topic,
 };
 
-use crate::auth::{Action, ApiKeyStore, Principal, Role};
+use crate::auth::{scope_permits, Action, ApiKeyStore, AuthzScopes, Principal, Role};
 use crate::command::{Command, MediaTransportVerb, OperationId};
 use crate::devices::DeviceStatusRegistry;
 use crate::state::{AppState, EngineStateSnapshot};
@@ -567,14 +567,25 @@ pub struct SessionStream {
     /// (e.g. the existing transport-only tests) no `corr` is stamped.
     corr: Option<Arc<CorrRegistry>>,
     /// The connecting principal's object-id allowlist (BOLA, ADR-W005/ADR-W025),
-    /// or [`None`] for an unscoped principal that sees every object. When set,
-    /// the stream is filtered to a read-side projection: a delta whose event
-    /// scopes to a Devices-domain object id outside the allowlist is dropped, and
-    /// the connect-time device snapshot skips out-of-scope ids — by parity with
-    /// `GET /{id}` returning `403` out of scope, so a scoped client cannot
-    /// enumerate objects it could not read. Pure per-client read filtering: it
-    /// never blocks and never touches the engine publish path (invariant #10).
-    object_scope: Option<Vec<String>>,
+    /// or [`None`] for an unscoped principal that sees every object. Part of the
+    /// per-session [`AuthzScopes`] view the read filter routes every event's
+    /// [`Event::authz_scope`] through via [`scope_permits`] — identical to REST.
+    scoped_object_ids: Option<Vec<String>>,
+    /// The connecting principal's output-id allowlist (per-output BOLA + the
+    /// `program:`-namespaced timing grant, ADR-W026), or [`None`] for unrestricted.
+    scoped_output_ids: Option<Vec<String>>,
+    /// The connecting principal's discovery-domain allowlist (ADR-W026), or
+    /// [`None`] for unrestricted (sees all rows including unlabelled). A scoped
+    /// principal is denied unlabelled rows (fail-closed) — enforced by
+    /// [`scope_permits`], not here.
+    ///
+    /// Together these three axes are the read-side projection: a delta whose
+    /// [`Event::authz_scope`] the principal's [`AuthzScopes`] does not permit is
+    /// dropped, and the connect snapshot skips out-of-scope ids — by parity with
+    /// `GET /{id}` returning `403`, so a scoped client cannot enumerate what it
+    /// could not read. Pure per-client read filtering: never blocks, never
+    /// touches the engine publish path (invariant #10).
+    scoped_discovery_domains: Option<Vec<String>>,
     /// The connect-time **broadcast watermark** (ADR-RT009): the engine event
     /// sequence (`EnginePublisher::events.sequence()`) captured together with the
     /// connect snapshot, or [`None`] for a session with no snapshot pairing (the
@@ -590,9 +601,9 @@ pub struct SessionStream {
     /// whose authorization is fixed for its lifetime (an unscoped local-admin, a
     /// JWT principal, or a transport-only test). When set,
     /// [`SessionStream::reauthorize`] re-resolves the current principal on an
-    /// authorization-generation change and updates
-    /// [`object_scope`](Self::object_scope) in place — so the read filter honors a
-    /// mid-session scope change without a reconnect. Sampling the generation is a
+    /// authorization-generation change and updates all three scope axes in place
+    /// — so the read filter honors a mid-session scope change without a
+    /// reconnect. Sampling the generation is a
     /// wait-free atomic load; the re-resolve takes only a control-plane read lock
     /// the engine never holds (invariant #10).
     live_authz: Option<LiveAuthz>,
@@ -616,7 +627,9 @@ impl SessionStream {
             snapshot_sent: false,
             resume_after,
             corr: None,
-            object_scope: None,
+            scoped_object_ids: None,
+            scoped_output_ids: None,
+            scoped_discovery_domains: None,
             snapshot_watermark: None,
             live_authz: None,
         }
@@ -641,12 +654,47 @@ impl SessionStream {
     /// `Some(allowlist)` filters the stream to a read-side projection (a
     /// Devices-domain delta or connect snapshot for an object outside the
     /// allowlist is dropped), `None` (an unscoped admin/operator/viewer) leaves
-    /// the stream unfiltered. A pure per-client read decision — never blocks, and
-    /// never touches the engine publish path (invariant #10).
+    /// the stream unfiltered on the object axis. A pure per-client read decision —
+    /// never blocks, never touches the engine publish path (invariant #10).
+    ///
+    /// This sets only the object axis (the output/discovery axes stay unset); use
+    /// [`with_scopes`](Self::with_scopes) to confine all three at once.
     #[must_use]
     pub fn with_object_scope(mut self, scope: Option<Vec<String>>) -> Self {
-        self.object_scope = scope;
+        self.scoped_object_ids = scope;
         self
+    }
+
+    /// Confine this session to the connecting principal's full three-axis scope
+    /// (object + output + discovery-domain, ADR-W026).
+    ///
+    /// Each axis mirrors the same-named [`Principal`] field: `Some(allowlist)`
+    /// filters, `None` is unrestricted on that axis. The read filter routes every
+    /// event's [`Event::authz_scope`] through [`scope_permits`] against these
+    /// three, so realtime and REST cannot fork authorization semantics. A pure
+    /// per-client read decision — never blocks, never touches the engine publish
+    /// path (invariant #10).
+    #[must_use]
+    pub fn with_scopes(
+        mut self,
+        objects: Option<Vec<String>>,
+        outputs: Option<Vec<String>>,
+        discovery_domains: Option<Vec<String>>,
+    ) -> Self {
+        self.scoped_object_ids = objects;
+        self.scoped_output_ids = outputs;
+        self.scoped_discovery_domains = discovery_domains;
+        self
+    }
+
+    /// Borrow this session's three authorization axes as the unified view the
+    /// shared [`scope_permits`] predicate consumes. Allocates nothing.
+    fn scopes(&self) -> AuthzScopes<'_> {
+        AuthzScopes::new(
+            self.scoped_object_ids.as_deref(),
+            self.scoped_output_ids.as_deref(),
+            self.scoped_discovery_domains.as_deref(),
+        )
     }
 
     /// Pair this session with the connect-time **broadcast watermark** (ADR-RT009).
@@ -747,8 +795,9 @@ impl SessionStream {
     /// engine, no back-pressure on the publish path (invariant #10).
     ///
     /// * key revoked / role can no longer [`Action::Read`] → [`ReauthOutcome::Disconnect`].
-    /// * object scope changed (narrow, widen, or `None`↔`Some`) → the new scope is
-    ///   adopted in place and [`ReauthOutcome::ScopeChanged`] is returned.
+    /// * any scope axis changed — object, output, or discovery-domain (narrow,
+    ///   widen, or `None`↔`Some`) → the new scope is adopted in place and
+    ///   [`ReauthOutcome::ScopeChanged`] is returned (ADR-W026).
     /// * otherwise (role adopted, scope unchanged) → [`ReauthOutcome::Unchanged`].
     pub fn reauthorize(&mut self) -> ReauthOutcome {
         // Fast path: sample the generation and, only on a change, re-resolve —
@@ -775,13 +824,21 @@ impl SessionStream {
                 if let Some(live) = self.live_authz.as_mut() {
                     live.role = principal.role;
                 }
-                if self.object_scope == principal.scoped_object_ids {
-                    ReauthOutcome::Unchanged
-                } else {
+                // Compare ALL THREE authorization axes (ADR-W026): an output- or
+                // discovery-only re-scope must propagate to the live stream too —
+                // the pre-W026 object-only comparison left those axes dead.
+                let changed = self.scoped_object_ids != principal.scoped_object_ids
+                    || self.scoped_output_ids != principal.scoped_output_ids
+                    || self.scoped_discovery_domains != principal.scoped_discovery_domains;
+                if changed {
                     // Adopt the new scope in place; the read filter and the
                     // re-snapshot the transport now emits both honor it.
-                    self.object_scope = principal.scoped_object_ids;
+                    self.scoped_object_ids = principal.scoped_object_ids;
+                    self.scoped_output_ids = principal.scoped_output_ids;
+                    self.scoped_discovery_domains = principal.scoped_discovery_domains;
                     ReauthOutcome::ScopeChanged
+                } else {
+                    ReauthOutcome::Unchanged
                 }
             }
             // The key is gone (revoked), or the re-resolved role can no longer read
@@ -884,8 +941,8 @@ impl SessionStream {
     ) -> Option<RealtimeFrame> {
         let mut tiles = tiles_from_engine_snapshot(snapshot)?;
         // BOLA visibility (ADR-W005/ADR-W025): drop snapshot tiles bound to an
-        // out-of-scope input — the same per-object axis the `tile.state` delta
-        // is gated on ([`object_authz_scope_id`]) and `get_input_streams`
+        // out-of-scope input — the same object axis the `tile.state` delta is
+        // gated on (its `authz_scope()` is `Object(input)`) and `get_input_streams`
         // authorizes. A placeholder tile (`input: None`) carries no object id, so
         // it is retained; a no-op for an unscoped principal. Mirrors
         // `devices_snapshot_frames`.
@@ -957,7 +1014,7 @@ impl SessionStream {
         // Filter to the principal's in-scope devices (BOLA visibility,
         // ADR-W005/ADR-W025): the connect snapshot must not leak an out-of-scope
         // device that the deltas then hide. An unscoped principal keeps every
-        // device (the filter is a no-op for `object_scope == None`). The in-scope
+        // device (the filter is a no-op for an unscoped principal). The in-scope
         // statuses are collected first (ending the immutable `self` borrow the
         // filter needs) before mapping through `device_status_frame`, which takes
         // `&mut self` to issue per-connection seqs.
@@ -1105,16 +1162,18 @@ impl SessionStream {
                 return None;
             }
         }
-        // Per-object visibility (BOLA, ADR-W005/ADR-W025): a scoped principal
-        // receives a Devices-domain OBJECT delta (device.* / cast.session.*)
-        // only when its scope id is in the allowlist — by parity with
-        // `GET /{id}` 403'ing an out-of-scope id. Checked BEFORE `issue_seq` so a
-        // dropped out-of-scope delta leaves no gap in the per-connection seq
-        // sequence (exactly like the resume/conflated skips above). The firehose
-        // (no object scope: tiles/alerts/audio, and `device.discovered` /
-        // `timing.status`, which are not `authorize_object`-gated objects) is
-        // gated only by the connect-time role, never by object scope.
-        if !self.event_in_object_scope(&seq_event.event) {
+        // Per-scope visibility (BOLA + ADR-W026): a scoped principal receives an
+        // event only when its three-axis `AuthzScopes` permits the event's
+        // `authz_scope()` — the SAME `scope_permits` predicate REST authorization
+        // routes through, so the two surfaces cannot fork. Covers the object axis
+        // (device.* / cast.session.* / tile / media-player), the output axis
+        // (rist.link.stats), the program axis (timing.status), and the discovery
+        // axis (device.discovered) uniformly; a `Public` event (tiles/alerts/audio,
+        // control frames) is always delivered, gated only by the connect-time
+        // role. Checked BEFORE `issue_seq` so a dropped out-of-scope delta leaves
+        // no gap in the per-connection seq sequence (exactly like the
+        // resume/conflated skips above).
+        if !self.event_in_scope(&seq_event.event) {
             return None;
         }
         let seq = self.issue_seq();
@@ -1152,35 +1211,27 @@ impl SessionStream {
         })
     }
 
-    /// Whether the connecting principal's object scope permits delivering this
-    /// event (BOLA visibility, ADR-W005/ADR-W025).
+    /// Whether the connecting principal's scope permits delivering this event
+    /// (BOLA visibility across all axes, ADR-W005/ADR-W025/ADR-W026).
     ///
-    /// `true` (deliver) when the session is unscoped, when the event carries no
-    /// per-object authorization id ([`object_authz_scope_id`] is [`None`] — the
-    /// role-gated firehose), or when the event's object id is in the allowlist.
-    /// `false` (drop) only for a scoped session and an out-of-scope object id. A
-    /// pure read predicate — no lock, no await, never touches the engine publish
-    /// path (invariant #10).
-    fn event_in_object_scope(&self, event: &Event) -> bool {
-        let Some(allowed) = self.object_scope.as_ref() else {
-            return true;
-        };
-        match object_authz_scope_id(event) {
-            None => true,
-            Some(id) => allowed.iter().any(|a| a == id),
-        }
+    /// Routes the event's [`Event::authz_scope`] through the shared
+    /// [`scope_permits`] predicate against the session's three-axis
+    /// [`AuthzScopes`] — the exact rule REST authorization uses, so the stream
+    /// never delivers something the principal could not read via REST. A pure
+    /// borrowed-match read predicate over small allowlists: no lock, no await, no
+    /// allocation, never touches the engine publish path (invariant #10).
+    fn event_in_scope(&self, event: &Event) -> bool {
+        scope_permits(&self.scopes(), event.authz_scope())
     }
 
     /// Whether an object `id` is visible to this session's principal (BOLA
     /// visibility, ADR-W005/ADR-W025): `true` when unscoped or when `id` is in
-    /// the allowlist. Used to filter the connect-time snapshot frames (device
-    /// status by device id, tiles by bound input id), mirroring the per-delta
-    /// [`event_in_object_scope`](Self::event_in_object_scope).
+    /// the object allowlist. Used to filter the connect-time snapshot frames
+    /// (device status by device id, tiles by bound input id) through the SAME
+    /// [`scope_permits`] rule as the per-delta [`event_in_scope`](Self::event_in_scope),
+    /// so the snapshot and delta filters cannot fork.
     fn id_in_object_scope(&self, id: &str) -> bool {
-        match self.object_scope.as_ref() {
-            None => true,
-            Some(allowed) => allowed.iter().any(|a| a == id),
-        }
+        scope_permits(&self.scopes(), AuthzScope::Object(id))
     }
 }
 
@@ -1230,49 +1281,15 @@ pub fn event_scope_id(event: &Event) -> Option<String> {
     }
 }
 
-/// The **object id** an event addresses for per-object authorization (BOLA
-/// visibility, ADR-W005/ADR-W025), or [`None`] when the event carries no id a
-/// scoped principal is checked against.
-///
-/// This is the realtime mirror of the REST `authorize_object` axis: it returns
-/// `Some(id)` for exactly the events whose id a scoped principal is gated on by
-/// the matching per-object read handler — so the stream never delivers an
-/// object the principal could not individually GET. It is intentionally
-/// NARROWER than [`event_scope_id`] (which keys ALL events by their envelope id
-/// for topic narrowing, including non-object axes).
-///
-/// Covered (each id is an `authorize_object` axis on the matching REST read):
-/// * `device.*` lifecycle/status events — the device resource id (`get_device`).
-/// * `cast.session.*` membership events — the session id (`get_cast_session`).
-/// * `media.player_state` — the player id (`get_player`/`play`/`pause` all
-///   `authorize_object(&player_id)`; `MediaPlayerEvent.player` is that id).
-/// * `tile.state` WHEN it carries a bound input — the input id
-///   (`get_input_streams` `authorize_object`s it); a placeholder tile with no
-///   input has no object to authorize and falls through to [`None`].
-///
-/// NOT covered ([`None`] — delivered, gated only by the connect-time role):
-/// * `TimingStatus` (a program/output stream id) — no REST read authorizes a
-///   stream id, so filtering by `scoped_object_ids` would be wrong-axis.
-/// * `DeviceDiscovered` has no registry id yet (untrusted inventory).
-#[must_use]
-fn object_authz_scope_id(event: &Event) -> Option<&str> {
-    match event {
-        Event::DeviceStatus(status) => Some(status.device_id.as_str()),
-        Event::DeviceAdopted(adopted) => Some(adopted.device_id.as_str()),
-        Event::DeviceRemoved(removed) => Some(removed.device_id.as_str()),
-        Event::DeviceMode(mode) => Some(mode.device_id.as_str()),
-        Event::DeviceError(error) => Some(error.device_id.as_str()),
-        Event::DeviceSync(sync) => Some(sync.device_id.as_str()),
-        Event::CastSessionStarted(started) => Some(started.session_id.as_str()),
-        Event::CastSessionRemoved(removed) => Some(removed.session_id.as_str()),
-        Event::MediaPlayerState(player) => Some(player.player.as_str()),
-        // Only a tile bound to an input carries an authorizable object id; a
-        // placeholder/no-signal tile (`input: None`) has none — `as_deref()`
-        // yields `None` and it rides the role-gated firehose.
-        Event::TileState(tile) => tile.input.as_deref(),
-        _ => None,
-    }
-}
+// The per-event authorization classification formerly computed here
+// (`object_authz_scope_id`) is replaced by the total, wildcard-free
+// `Event::authz_scope()` in `multiview-events` (ADR-W026): the realtime filter
+// now routes it through the shared `scope_permits` predicate (see
+// `SessionStream::event_in_scope`), which covers the object, output, program,
+// and discovery axes instead of the object axis alone. Adding an `Event` variant
+// now fails compilation in the events crate until it is classified — the
+// `_ => None` firehose that silently delivered every unclassified event to
+// scoped principals is gone.
 
 /// Whether the connect-time snapshot reproduces this event's current value as a
 /// same-topic snapshot frame (ADR-RT009) — the ONLY class the connect watermark
@@ -1560,9 +1577,18 @@ fn install_live_reauth(
         key_id,
         role,
         scoped_object_ids,
-        ..
+        scoped_output_ids,
+        scoped_discovery_domains,
     } = principal;
-    let session = session.with_object_scope(scoped_object_ids);
+    // Carry ALL THREE authorization axes into the live session (ADR-W026): the
+    // pre-W026 destructure dropped output + discovery via `..`, so those axes
+    // were dead on the realtime stream even though the connecting principal
+    // carried them.
+    let session = session.with_scopes(
+        scoped_object_ids,
+        scoped_output_ids,
+        scoped_discovery_domains,
+    );
     // `live_baseline` is `Some` exactly for store-managed API-key principals
     // (`resolve_principal`), carrying the generation captured at auth. Install the
     // live-authz handle UNCONDITIONALLY for them — even if the key was already
@@ -2032,12 +2058,11 @@ mod topic_routing_tests {
                 group: "lobby-wall".to_owned(),
                 change: SyncChange::Left,
             }),
-            Event::DeviceDiscovered(DeviceDiscovered {
-                driver: "zowietek".to_owned(),
-                address: "http://[fd00:db8::42]".to_owned(),
-                family: AddressFamily::Ipv6,
-                name: None,
-            }),
+            Event::DeviceDiscovered(DeviceDiscovered::new(
+                "zowietek".to_owned(),
+                "http://[fd00:db8::42]".to_owned(),
+                AddressFamily::Ipv6,
+            )),
             Event::TimingStatus(TimingStatus {
                 stream_id: "prog-main".to_owned(),
                 epoch: WallClockRef::new(0, 0, Rational::new(90_000, 1)),
@@ -2092,12 +2117,11 @@ mod topic_routing_tests {
 
         // A discovery row has no registry id yet — it is scoped by `corr`
         // (the scan operation), never by a fabricated id.
-        let discovered = Event::DeviceDiscovered(DeviceDiscovered {
-            driver: "zowietek".to_owned(),
-            address: "http://[fd00:db8::42]".to_owned(),
-            family: AddressFamily::Ipv6,
-            name: None,
-        });
+        let discovered = Event::DeviceDiscovered(DeviceDiscovered::new(
+            "zowietek".to_owned(),
+            "http://[fd00:db8::42]".to_owned(),
+            AddressFamily::Ipv6,
+        ));
         assert_eq!(event_scope_id(&discovered), None);
     }
 }
@@ -2276,24 +2300,23 @@ mod object_authz_scope_tests {
     //! never delivers an object a principal could not individually GET.
     #![allow(clippy::unwrap_used, clippy::panic)]
 
-    use super::object_authz_scope_id;
     use multiview_events::{
-        DeviceState, DeviceStatus, Event, LifecycleState, MediaPlayerEvent, MediaPlayerState,
-        TileState,
+        AuthzScope, DeviceState, DeviceStatus, Event, LifecycleState, MediaPlayerEvent,
+        MediaPlayerState, TileState,
     };
 
     /// A media player is object-scoped on REST (`get_player`/`play`/`pause` all
     /// `authorize_object(&player_id)`), and `MediaPlayerEvent.player` IS that
-    /// same id, so the realtime axis MUST expose it — else a scoped principal
-    /// denied `GET /media/players/{id}` still streams that player's transport
-    /// transitions over `media.player_state` (a BOLA enumeration leak).
+    /// same id, so `authz_scope()` MUST classify it `Object(player)` — else a
+    /// scoped principal denied `GET /media/players/{id}` still streams that
+    /// player's transport transitions over `media.player_state` (a BOLA leak).
     #[test]
     fn media_player_state_is_object_scoped_by_player() {
         let event =
             Event::MediaPlayerState(MediaPlayerEvent::new("vt-2", MediaPlayerState::Cued, 0));
         assert_eq!(
-            object_authz_scope_id(&event),
-            Some("vt-2"),
+            event.authz_scope(),
+            AuthzScope::Object("vt-2"),
             "media.player_state must scope by the authorize_object player id (BOLA)"
         );
     }
@@ -2311,14 +2334,14 @@ mod object_authz_scope_tests {
             trigger: "nosignal_timeout".to_owned(),
         });
         assert_eq!(
-            object_authz_scope_id(&event),
-            Some("cam-7"),
+            event.authz_scope(),
+            AuthzScope::Object("cam-7"),
             "tile.state must scope by the authorize_object input id when one is bound (BOLA)"
         );
     }
 
     /// A placeholder tile with no bound input carries no object id — it has
-    /// nothing to authorize, so it stays on the role-gated firehose ([`None`]).
+    /// nothing to authorize, so it stays on the role-gated firehose (`Public`).
     #[test]
     fn tile_state_without_an_input_carries_no_object_id() {
         let event = Event::TileState(TileState {
@@ -2327,13 +2350,13 @@ mod object_authz_scope_tests {
             input: None,
             trigger: "placeholder".to_owned(),
         });
-        assert_eq!(object_authz_scope_id(&event), None);
+        assert_eq!(event.authz_scope(), AuthzScope::Public);
     }
 
-    /// The device axis the helper already covered must be preserved.
+    /// The device axis the classifier already covered must be preserved.
     #[test]
     fn device_object_axis_is_preserved() {
         let device = Event::DeviceStatus(DeviceStatus::new("dev-a", DeviceState::Online));
-        assert_eq!(object_authz_scope_id(&device), Some("dev-a"));
+        assert_eq!(device.authz_scope(), AuthzScope::Object("dev-a"));
     }
 }

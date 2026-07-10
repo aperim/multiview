@@ -733,6 +733,11 @@ pub(crate) async fn revert_to_start(
     idem: IdempotencyKey,
 ) -> ControlResult<(StatusCode, Json<RevertToStartBody>)> {
     principal.role.require(Action::Write)?;
+    // Whole-system authorization runs FIRST — before the boot-model lookup,
+    // idempotency reservation, config composition, or any command submit:
+    // revert-to-start rewrites the ENTIRE running document across all objects,
+    // so a principal scoped on ANY axis is denied outright (ADR-W026, the same
+    // guard the config export uses). A no-op for an unscoped operator.
     crate::routes::require_unscoped_for_whole_system(&principal)?;
     let Some(model) = state.boot_model.clone() else {
         return Err(ControlError::Conflict(
@@ -938,6 +943,10 @@ pub(crate) async fn promote_to_boot(
     idem: IdempotencyKey,
 ) -> ControlResult<Json<PromoteBody>> {
     principal.role.require(Action::Write)?;
+    // Whole-system authorization runs FIRST — before the boot-model lookup,
+    // idempotency reservation, config composition, or the boot-file write:
+    // promote rewrites the ENTIRE boot document, so a principal scoped on ANY
+    // axis is denied outright (ADR-W026). A no-op for an unscoped operator.
     crate::routes::require_unscoped_for_whole_system(&principal)?;
     let Some(model) = state.boot_model.clone() else {
         return Err(ControlError::Conflict(

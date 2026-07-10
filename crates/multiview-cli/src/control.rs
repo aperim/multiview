@@ -141,7 +141,7 @@ where
     let admin_secret = std::env::var("MULTIVIEW_CONTROL_TOKEN")
         .ok()
         .filter(|s| !s.is_empty());
-    let (api_keys, bootstrap_token) = provision_admin_keys(admin_secret);
+    let (mut api_keys, bootstrap_token) = provision_admin_keys(admin_secret);
     if let Some(token) = bootstrap_token {
         tracing::warn!(
             token = %token,
@@ -151,6 +151,25 @@ where
         );
     } else {
         tracing::info!("control admin key provisioned from MULTIVIEW_CONTROL_TOKEN");
+    }
+
+    // Config-declared scoped API keys (ADR-W026): register every `[[api.keys]]`
+    // beside the bootstrap admin so the object/output/discovery authorization
+    // axes have live principals. Each secret is read from the env var named by
+    // `secret_env` (never inlined — rule 34); a key whose secret env is unset is
+    // a hard startup error (an un-authenticatable scoped key is a latent
+    // misconfiguration). The bootstrap admin above is unchanged and unscoped.
+    if let Some(api) = &config.api {
+        multiview_control::auth::register_config_api_keys(&mut api_keys, &api.keys, |name| {
+            std::env::var(name).ok()
+        })
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if !api.keys.is_empty() {
+            tracing::info!(
+                count = api.keys.len(),
+                "registered config-declared scoped API keys ([[api.keys]], ADR-W026)"
+            );
+        }
     }
 
     // Optional, explicit, opt-in auth-disable for trusted/local deployments.
