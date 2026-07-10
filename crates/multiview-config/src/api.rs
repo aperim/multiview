@@ -36,11 +36,13 @@ pub const PROGRAM_SCOPE_PREFIX: &str = "program:";
 /// The coarse role a config-declared API key authenticates as.
 ///
 /// Mirrors the control-plane `Role` (which this crate cannot depend on — the
-/// dependency runs control→config, never the reverse); `multiview-cli` maps this
-/// to `multiview_control::auth::Role` at registration.
+/// dependency runs control→config, never the reverse); `multiview-control` maps
+/// this to `Role` at registration. Deliberately **not** `#[non_exhaustive]`:
+/// the role set is small and closed, and the control-plane mapping must stay an
+/// exhaustive match so adding a role compile-forces its authorization handling
+/// (mirrors `Role`, which is also exhaustive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum ApiKeyRole {
     /// Strictly read-only floor (below [`ApiKeyRole::Viewer`]).
     ReadOnly,

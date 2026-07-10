@@ -556,6 +556,67 @@ pub fn provision_admin_keys(admin_secret: Option<String>) -> (ApiKeyStore, Optio
     (store, bootstrap_token)
 }
 
+/// Map a config-declared [`multiview_config::ApiKeyRole`] to the control-plane
+/// [`Role`] (ADR-W026). The two enums are kept separate because the dependency
+/// runs control→config, never the reverse.
+fn role_from_config(role: multiview_config::ApiKeyRole) -> Role {
+    match role {
+        multiview_config::ApiKeyRole::ReadOnly => Role::ReadOnly,
+        multiview_config::ApiKeyRole::Viewer => Role::Viewer,
+        multiview_config::ApiKeyRole::Operator => Role::Operator,
+        multiview_config::ApiKeyRole::Admin => Role::Admin,
+    }
+}
+
+/// Build the [`Principal`] a config-declared API key authenticates as (ADR-W026):
+/// its role plus the three scope allowlists, carried verbatim from config.
+#[must_use]
+pub fn principal_from_config(key: &multiview_config::ApiKeyConfig) -> Principal {
+    Principal {
+        key_id: key.key_id.clone(),
+        role: role_from_config(key.role),
+        scoped_object_ids: key.scoped_object_ids.clone(),
+        scoped_output_ids: key.scoped_output_ids.clone(),
+        scoped_discovery_domains: key.scoped_discovery_domains.clone(),
+    }
+}
+
+/// Register every config-declared API key (ADR-W026) into `store`, resolving each
+/// key's secret via `resolve_secret` (the CLI passes an environment reader; tests
+/// inject a map). This is what makes a scoped principal MINTABLE in production —
+/// without it the object/output/discovery axes are a lock with no keyhole.
+///
+/// A key whose `secret_env` is unset or empty is a **hard startup error**, never
+/// a silent skip: an un-authenticatable scoped key is a latent misconfiguration
+/// (the operator declared a confined principal that can never be used), so the
+/// caller surfaces it and refuses to start.
+///
+/// # Errors
+///
+/// Returns the offending key's diagnostic (naming its `secret_env`) when the
+/// secret is unset or empty.
+pub fn register_config_api_keys<R>(
+    store: &mut ApiKeyStore,
+    keys: &[multiview_config::ApiKeyConfig],
+    mut resolve_secret: R,
+) -> Result<(), String>
+where
+    R: FnMut(&str) -> Option<String>,
+{
+    for key in keys {
+        let secret = resolve_secret(&key.secret_env)
+            .filter(|secret| !secret.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "api.keys[{}]: secret environment variable {:?} is unset or empty",
+                    key.key_id, key.secret_env
+                )
+            })?;
+        store.register(&key.key_id, &secret, principal_from_config(key));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
