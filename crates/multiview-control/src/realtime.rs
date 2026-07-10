@@ -685,11 +685,30 @@ impl SessionStream {
     /// generation bump (self-healing — connect itself resolves current authz).
     #[must_use]
     pub fn with_live_reauth(
-        mut self,
+        self,
         store: Arc<ApiKeyStore>,
         key_id: impl Into<String>,
         role: Role,
     ) -> Self {
+        // Convenience: baseline the handle at the CURRENT generation (the caller has
+        // resolved current authz at build time). The transports use
+        // [`with_live_reauth_at`] with the generation captured at connect-auth, so a
+        // change racing the connect handshake is caught (ADR-RT010).
+        let generation = store.generation();
+        self.with_live_reauth_at(store, key_id, role, generation)
+    }
+
+    /// Wire live re-authorization with an explicit **baseline generation**
+    /// (ADR-RT010) — the store authorization generation captured at connect-auth.
+    #[must_use]
+    pub fn with_live_reauth_at(
+        mut self,
+        store: Arc<ApiKeyStore>,
+        key_id: impl Into<String>,
+        role: Role,
+        baseline_generation: u64,
+    ) -> Self {
+        let _ = baseline_generation;
         let generation = store.generation();
         self.live_authz = Some(LiveAuthz {
             store,
@@ -698,6 +717,15 @@ impl SessionStream {
             generation,
         });
         self
+    }
+
+    /// The role currently adopted by live re-authorization (ADR-RT010), or [`None`]
+    /// for a session without a live-authz handle. Reflects the latest role
+    /// [`reauthorize`](Self::reauthorize) resolved, so a mid-session role change is
+    /// observable.
+    #[must_use]
+    pub fn live_role(&self) -> Option<Role> {
+        self.live_authz.as_ref().map(|live| live.role)
     }
 
     /// Re-resolve the session's authorization if it changed since the last check

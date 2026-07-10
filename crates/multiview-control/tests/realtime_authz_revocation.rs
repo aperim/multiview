@@ -170,6 +170,14 @@ async fn reading_role_downgrade_is_adopted_without_disconnect() {
         ReauthOutcome::Unchanged,
         "a still-reading downgrade with unchanged scope keeps the session alive"
     );
+    // ADR-RT010: the downgraded role is OBSERVABLY adopted (not merely re-resolved
+    // then discarded) — the session's live role reflects Viewer after the downgrade.
+    // Guards against the adoption `live.role = principal.role` being silently dropped.
+    assert_eq!(
+        session.live_role(),
+        Some(Role::Viewer),
+        "the re-resolved (downgraded) role is adopted into the session's live-authz handle"
+    );
 
     // The stream still flows for the (now Viewer) reader.
     let _ = engine.publish_event(device_status("anything"));
@@ -342,5 +350,96 @@ fn store_mutators_bump_the_generation_and_reresolve() {
         store.generation(),
         g2,
         "a no-op mutation must not bump the generation"
+    );
+}
+
+/// CONNECT-RACE (ADR-RT010, panel critical finding): a key revoked in the window
+/// BETWEEN connect-authentication (when the baseline generation is captured) and
+/// the live-authz handle being installed must still be caught. Modelling the
+/// transport wiring: `resolve_principal` captures `baseline` at auth, then a revoke
+/// lands, then `with_live_reauth_at` installs the handle with that baseline. The
+/// first `reauthorize` MUST observe the window revoke and disconnect — never
+/// silently retain the pre-revocation authorization forever.
+#[tokio::test]
+async fn revoke_racing_connect_is_caught_not_retained() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let store = store_with("k1", "secret", principal("k1", Role::Operator, None));
+
+    // Connect-auth captures the baseline generation here…
+    let baseline = store.generation();
+    // …then the key is revoked in the connect window, before the handle installs.
+    assert!(store.revoke("k1"), "revoke removes the key");
+
+    let mut session = SessionStream::new(engine.subscribe(), "sess-race-revoke", None)
+        .with_live_reauth_at(Arc::clone(&store), "k1", Role::Operator, baseline);
+
+    assert_eq!(
+        session.reauthorize(),
+        ReauthOutcome::Disconnect,
+        "a key revoked between auth and install must disconnect, not retain access"
+    );
+}
+
+/// CONNECT-RACE, re-scope variant (ADR-RT010): a scope NARROWED in the window
+/// between connect-auth and install must be adopted on the first re-resolution, not
+/// stranded at the connect-time (wider) scope. The baseline captured at auth makes
+/// the window mutation observable as a generation advance.
+#[tokio::test]
+async fn rescope_racing_connect_is_adopted_not_stale() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let store = store_with(
+        "k1",
+        "secret",
+        principal("k1", Role::Operator, Some(vec!["A".to_owned(), "B".to_owned()])),
+    );
+
+    let baseline = store.generation();
+    // Narrow to [A] in the connect window, after the baseline is captured.
+    assert!(store.set_principal(
+        "k1",
+        principal("k1", Role::Operator, Some(vec!["A".to_owned()]))
+    ));
+
+    let mut session = SessionStream::new(engine.subscribe(), "sess-race-scope", None)
+        // The connect-time scope the client authenticated with (wider).
+        .with_object_scope(Some(vec!["A".to_owned(), "B".to_owned()]))
+        .with_live_reauth_at(Arc::clone(&store), "k1", Role::Operator, baseline);
+
+    assert_eq!(
+        session.reauthorize(),
+        ReauthOutcome::ScopeChanged,
+        "a scope narrowed in the connect window must be adopted on first re-resolution"
+    );
+    // And the adopted scope is the narrowed [A]: an out-of-scope B is now filtered.
+    let _ = engine.publish_event(device_status("B"));
+    assert!(
+        drain(&mut session, 1).await.is_empty(),
+        "out-of-scope B is filtered once the window re-scope is adopted"
+    );
+}
+
+/// The `$resync` rebuild directive must name EXACTLY the topics
+/// `build_resync_frames` actually re-snapshots (tiles + devices). Switcher is
+/// neither object-authz-scoped nor re-snapshotted at connect or on resync, so
+/// advertising it would tell a rebuild-not-merge client to CLEAR switcher state it
+/// then never receives back — stranding it. Regression for the panel's protocol gap.
+#[tokio::test]
+async fn resync_rebuild_topics_match_the_re_snapshotted_set() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let mut session = SessionStream::new(engine.subscribe(), "sess-resync", None);
+
+    let frame = session.resync_frame(0);
+    let Event::Resync(resync) = &frame.envelope.payload else {
+        panic!("resync_frame builds a Resync event");
+    };
+    assert_eq!(resync.reason, ResyncReason::AuthzChanged);
+    assert_eq!(
+        resync.resubscribe,
+        vec![Topic::Tiles, Topic::Devices],
+        "resubscribe names exactly the re-snapshotted topics"
+    );
+    assert!(
+        !resync.resubscribe.contains(&Topic::Switcher),
+        "Switcher is never re-snapshotted; advertising it strands the client's switcher state"
     );
 }
