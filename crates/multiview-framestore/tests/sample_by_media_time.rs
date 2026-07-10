@@ -305,27 +305,31 @@ fn prune_keeps_the_latched_boundary_frame() {
 }
 
 #[test]
-fn backwards_stamp_resets_the_watermark_so_a_reconnect_is_not_pruned() {
+fn backwards_stamp_reanchors_so_a_reconnect_is_not_pruned() {
     // Reconnect / source-generation change (bad inputs are the purpose): a
     // producer that had been latched far along its timeline (advancing the prune
-    // watermark to 10s) reconnects and re-stamps from a LOW media time. The
-    // re-anchor must RESET the watermark, or the next forward publish would prune
-    // the fresh low-stamped generation as "older than the old 10s latch" and the
-    // tile would go blank after every reconnect.
+    // watermark) reconnects and re-stamps from a LOW media time. The watermark is
+    // keyed on the tile-global publish `seq`, and the re-anchored generation's
+    // frames carry strictly higher `seq`s than the old generation — so the old
+    // latch can never prune the fresh low-stamped frames and the tile does not go
+    // blank after a reconnect. (A media-time watermark would have pruned frame@0
+    // as "older than the 10s latch"; keying on the monotonic publish seq is what
+    // prevents that, including under the cross-generation read/reconnect race —
+    // see `tile::cross_generation_watermark_race`.)
     let s = store();
     s.publish(1_u32, MediaTime::from_nanos(0));
     s.publish(2_u32, MediaTime::from_nanos(10_000_000_000));
-    let _ = s.read_at(MediaTime::from_nanos(10_000_000_000)); // watermark -> 10s
+    let _ = s.read_at(MediaTime::from_nanos(10_000_000_000)); // watermark -> seq of frame@10s
                                                               // New generation: a backwards stamp re-anchors at t=0, then a normal forward
                                                               // publish continues it.
     s.publish(100_u32, MediaTime::from_nanos(0));
     s.publish(101_u32, MediaTime::from_nanos(40_000_000));
     // The re-anchored generation's first frame must survive that forward publish:
-    // a stale (10s) watermark left un-reset would have pruned frame@0.
+    // its seq outranks the old 10s latch, so the prune keeps it.
     assert_eq!(
         s.read_at(MediaTime::from_nanos(0)).frame().map(|f| **f),
         Some(100),
-        "re-anchored generation must survive the next publish (watermark reset)"
+        "re-anchored generation must survive the next publish (seq outranks the old latch)"
     );
     assert_eq!(
         s.read_at(MediaTime::from_nanos(40_000_000))
