@@ -170,9 +170,24 @@ impl<'a> AuthzScopes<'a> {
     /// "unrestricted across all axes"; whole-system-artifact gating keys off it
     /// (via [`Principal::is_global`]) so a newly-added axis is covered here in one
     /// place rather than in a frozen per-axis check (ADR-W026).
+    ///
+    /// The exhaustive `let Self { .. }` destructure below is deliberate and
+    /// load-bearing: it carries **no** `..` rest pattern, so adding a fourth
+    /// scope axis to [`AuthzScopes`] fails to compile *right here* until that
+    /// axis is folded into the predicate. That makes the "covered in one place"
+    /// promise fail-closed **by construction** — a newly-added axis can never
+    /// silently read as global (which would let a principal scoped only on the
+    /// new axis reach whole-system artifacts). Do not "simplify" it back to
+    /// `self.objects.is_none() && …` field access, which would reopen that hole.
     #[must_use]
     pub fn is_global(&self) -> bool {
-        self.objects.is_none() && self.outputs.is_none() && self.discovery_domains.is_none()
+        // Exhaustive destructure (no `..`): a new axis field breaks the build here.
+        let Self {
+            objects,
+            outputs,
+            discovery_domains,
+        } = self;
+        objects.is_none() && outputs.is_none() && discovery_domains.is_none()
     }
 }
 
@@ -714,6 +729,62 @@ mod tests {
             principal.scoped_discovery_domains.as_deref(),
             Some(&["site-a".to_owned()][..])
         );
+    }
+
+    #[test]
+    fn is_global_is_true_only_when_every_axis_is_unrestricted() {
+        // The single source of truth for whole-system gating (ADR-W026): a view
+        // is global iff EVERY axis is `None`. Any restricted axis — including an
+        // empty `Some([])` allowlist that denies everything on that axis — makes
+        // it non-global. These per-axis assertions lock the predicate's behaviour
+        // so the compile-forced exhaustive destructure in `AuthzScopes::is_global`
+        // is proven behaviour-preserving (the compile-force itself guards the
+        // "new axis" case, which no runtime test can exercise).
+        let obj = vec!["cam-1".to_owned()];
+        let out = vec!["out-1".to_owned()];
+        let dom = vec!["site-a".to_owned()];
+        let empty: Vec<String> = Vec::new();
+
+        // Unrestricted on all three axes -> global.
+        assert!(AuthzScopes::new(None, None, None).is_global());
+
+        // Restricted on exactly ONE axis -> NOT global (each axis independently).
+        assert!(!AuthzScopes::new(Some(obj.as_slice()), None, None).is_global());
+        assert!(!AuthzScopes::new(None, Some(out.as_slice()), None).is_global());
+        assert!(!AuthzScopes::new(None, None, Some(dom.as_slice())).is_global());
+
+        // An empty allowlist is a restriction (denies everything on that axis),
+        // not the absence of one — still NOT global, on every axis.
+        assert!(!AuthzScopes::new(Some(empty.as_slice()), None, None).is_global());
+        assert!(!AuthzScopes::new(None, Some(empty.as_slice()), None).is_global());
+        assert!(!AuthzScopes::new(None, None, Some(empty.as_slice())).is_global());
+    }
+
+    #[test]
+    fn principal_is_global_delegates_to_the_unified_scope_view() {
+        // `Principal::is_global` forwards to `AuthzScopes::is_global`; confirm the
+        // delegation so whole-system gating (config export / revert / promote)
+        // measures a principal against the one shared definition, not a private
+        // per-axis copy that could drift.
+        let unscoped = Principal {
+            key_id: "op".to_owned(),
+            role: Role::Operator,
+            scoped_object_ids: None,
+            scoped_output_ids: None,
+            scoped_discovery_domains: None,
+        };
+        assert!(unscoped.is_global());
+
+        // Scoped on a single axis (discovery-domain only) -> not global, so it is
+        // denied every whole-system artifact.
+        let discovery_only = Principal {
+            key_id: "disco".to_owned(),
+            role: Role::Operator,
+            scoped_object_ids: None,
+            scoped_output_ids: None,
+            scoped_discovery_domains: Some(vec!["site-a".to_owned()]),
+        };
+        assert!(!discovery_only.is_global());
     }
 
     #[test]
