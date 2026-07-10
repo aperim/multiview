@@ -285,7 +285,10 @@ pub(crate) async fn list_discovered(
     // cannot enumerate out-of-domain inventory it could not receive on the
     // stream. List-filtering (not 403) matches the #211 convention: no existence
     // oracle (ADR-W005).
-    Ok(Json(visible_discovery_rows(&principal, state.discovery.snapshot())))
+    Ok(Json(visible_discovery_rows(
+        &principal,
+        state.discovery.snapshot(),
+    )))
 }
 
 /// Filter a discovery inventory snapshot to the rows `principal` may see
@@ -322,8 +325,7 @@ mod discovery_scope_tests {
             role: Role::Operator,
             scoped_object_ids: None,
             scoped_output_ids: None,
-            scoped_discovery_domains: domains
-                .map(|d| d.into_iter().map(str::to_owned).collect()),
+            scoped_discovery_domains: domains.map(|d| d.into_iter().map(str::to_owned).collect()),
         }
     }
 

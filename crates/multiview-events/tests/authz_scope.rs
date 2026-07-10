@@ -275,8 +275,9 @@ fn salvo_armed_with_head_is_object_and_output() {
 
 #[test]
 fn salvo_cancelled_with_head_is_object_and_output() {
-    let e =
-        Event::SalvoCancelled(SalvoEvent::new("preset-a", SalvoPhase::Cancelled).with_head("out-2"));
+    let e = Event::SalvoCancelled(
+        SalvoEvent::new("preset-a", SalvoPhase::Cancelled).with_head("out-2"),
+    );
     assert_eq!(
         e.authz_scope(),
         AuthzScope::ObjectAndOutput {

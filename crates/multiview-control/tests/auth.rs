@@ -25,7 +25,7 @@ fn api_key_verify_accepts_correct_secret_and_rejects_wrong() {
             role: Role::Operator,
             scoped_object_ids: None,
             scoped_output_ids: None,
-        scoped_discovery_domains: None,
+            scoped_discovery_domains: None,
         },
     );
 

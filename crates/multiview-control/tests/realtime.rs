@@ -10,14 +10,15 @@
 
 use std::sync::Arc;
 
+use multiview_control::{DeviceStatusRegistry, SessionStream};
 use multiview_core::time::Rational;
 use multiview_core::wallclock::WallClockRef;
-use multiview_control::{DeviceStatusRegistry, SessionStream};
 use multiview_engine::EnginePublisher;
 use multiview_events::{
     AddressFamily, Alert, AlertSeverity, CastSessionStarted, ClockQuality, ClockSource,
     DeviceDiscovered, DeviceState, DeviceStatus, Event, FrameKind, InputConnection, LifecycleState,
-    MediaPlayerEvent, MediaPlayerState, RistLinkRole, RistLinkStats, TileState, TimingStatus, Topic,
+    MediaPlayerEvent, MediaPlayerState, RistLinkRole, RistLinkStats, TileState, TimingStatus,
+    Topic,
 };
 
 type Publisher = EnginePublisher<serde_json::Value, Event>;
@@ -405,8 +406,11 @@ async fn output_scoped_session_filters_rist_and_timing_by_output_and_program() {
 #[tokio::test]
 async fn discovery_scoped_session_filters_device_discovered_by_domain() {
     let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
-    let mut session = SessionStream::new(engine.subscribe(), "sess-disc", None)
-        .with_scopes(None, None, Some(vec!["site-a".to_owned()]));
+    let mut session = SessionStream::new(engine.subscribe(), "sess-disc", None).with_scopes(
+        None,
+        None,
+        Some(vec!["site-a".to_owned()]),
+    );
 
     engine.publish_event(device_discovered(Some("site-b"))); // other domain
     engine.publish_event(device_discovered(None)); // unlabelled — fail-closed
@@ -420,7 +424,9 @@ async fn discovery_scoped_session_filters_device_discovered_by_domain() {
         .await
         .unwrap()
         .expect("in-domain discovery row delivered");
-    assert!(matches!(&d.envelope.payload, Event::DeviceDiscovered(x) if x.domain.as_deref() == Some("site-a")));
+    assert!(
+        matches!(&d.envelope.payload, Event::DeviceDiscovered(x) if x.domain.as_deref() == Some("site-a"))
+    );
     let d = session
         .next_delta()
         .await

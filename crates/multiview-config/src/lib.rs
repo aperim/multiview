@@ -59,6 +59,7 @@ use multiview_core::layout::{
 };
 use multiview_core::stream::StreamKind as CoreStreamKind;
 
+pub use api::{ApiConfig, ApiKeyConfig, ApiKeyRole};
 use audio::PROGRAM_TRACK as PROGRAM_TRACK_NAME;
 pub use audio::{
     AudioChannels, AudioRoute, AudioRouting, OutputAudio, OutputAudioCapability, OutputAudioMode,
@@ -66,7 +67,6 @@ pub use audio::{
 };
 pub use device::{Device, DeviceAuth, DeviceDisplay, DeviceDriver, DisplayAssign, ReconnectPolicy};
 pub use diff::{ConfigDiff, OverlayChange, SourceChange};
-pub use api::{ApiConfig, ApiKeyConfig, ApiKeyRole};
 pub use discovery::DiscoveryConfig;
 pub use error::ConfigError;
 pub use failover::{default_failover_slate, FailoverSlate};

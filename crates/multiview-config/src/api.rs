@@ -88,11 +88,7 @@ pub struct ApiKeyConfig {
 impl ApiKeyConfig {
     /// Build an unscoped key of `role` whose secret is read from `secret_env`.
     #[must_use]
-    pub fn new(
-        key_id: impl Into<String>,
-        secret_env: impl Into<String>,
-        role: ApiKeyRole,
-    ) -> Self {
+    pub fn new(key_id: impl Into<String>, secret_env: impl Into<String>, role: ApiKeyRole) -> Self {
         Self {
             key_id: key_id.into(),
             secret_env: secret_env.into(),
@@ -313,6 +309,7 @@ mod tests {
                 .with_scoped_output_ids(vec!["out-1".to_owned(), "program:main".to_owned()])
                 .with_scoped_discovery_domains(vec!["site-a".to_owned()])],
         };
-        cfg.validate().expect("a fully-scoped, well-formed key validates");
+        cfg.validate()
+            .expect("a fully-scoped, well-formed key validates");
     }
 }

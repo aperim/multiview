@@ -40,29 +40,53 @@ fn public_is_always_permitted() {
 #[test]
 fn object_axis_none_sees_all_some_is_allowlist() {
     let unscoped = principal(None, None, None);
-    assert!(scope_permits(&unscoped.scopes(), AuthzScope::Object("cam-3")));
+    assert!(scope_permits(
+        &unscoped.scopes(),
+        AuthzScope::Object("cam-3")
+    ));
 
     let scoped = principal(Some(vec!["cam-3"]), None, None);
     assert!(scope_permits(&scoped.scopes(), AuthzScope::Object("cam-3")));
-    assert!(!scope_permits(&scoped.scopes(), AuthzScope::Object("cam-9")));
+    assert!(!scope_permits(
+        &scoped.scopes(),
+        AuthzScope::Object("cam-9")
+    ));
 
     let closed = principal(Some(vec![]), None, None);
-    assert!(!scope_permits(&closed.scopes(), AuthzScope::Object("cam-3")));
+    assert!(!scope_permits(
+        &closed.scopes(),
+        AuthzScope::Object("cam-3")
+    ));
 }
 
 #[test]
 fn discovery_domain_fail_closed_on_unlabelled() {
     let scoped = principal(None, None, Some(vec!["site-a"]));
-    assert!(scope_permits(&scoped.scopes(), AuthzScope::DiscoveryDomain(Some("site-a"))));
-    assert!(!scope_permits(&scoped.scopes(), AuthzScope::DiscoveryDomain(Some("site-b"))));
+    assert!(scope_permits(
+        &scoped.scopes(),
+        AuthzScope::DiscoveryDomain(Some("site-a"))
+    ));
+    assert!(!scope_permits(
+        &scoped.scopes(),
+        AuthzScope::DiscoveryDomain(Some("site-b"))
+    ));
     // The load-bearing fail-closed rule: a scoped principal never sees an
     // unlabelled row.
-    assert!(!scope_permits(&scoped.scopes(), AuthzScope::DiscoveryDomain(None)));
+    assert!(!scope_permits(
+        &scoped.scopes(),
+        AuthzScope::DiscoveryDomain(None)
+    ));
 
     // Unscoped principals see everything, including unlabelled rows (compat).
     let unscoped = principal(None, None, None);
-    assert!(scope_permits(&unscoped.scopes(), AuthzScope::DiscoveryDomain(None)));
-    assert!(scope_permits(&unscoped.scopes(), AuthzScope::DiscoveryDomain(Some("site-x"))));
+    assert!(scope_permits(
+        &unscoped.scopes(),
+        AuthzScope::DiscoveryDomain(None)
+    ));
+    assert!(scope_permits(
+        &unscoped.scopes(),
+        AuthzScope::DiscoveryDomain(Some("site-x"))
+    ));
 }
 
 #[test]
@@ -70,28 +94,42 @@ fn program_grant_is_namespaced_and_does_not_pun_output() {
     // A key granted `program:main` (only) receives timing for `main` but has NO
     // authority over an output literally named `main`.
     let timing_only = principal(None, Some(vec!["program:main"]), None);
-    assert!(scope_permits(&timing_only.scopes(), AuthzScope::Program("main")));
-    assert!(!scope_permits(&timing_only.scopes(), AuthzScope::Output("main")));
+    assert!(scope_permits(
+        &timing_only.scopes(),
+        AuthzScope::Program("main")
+    ));
+    assert!(!scope_permits(
+        &timing_only.scopes(),
+        AuthzScope::Output("main")
+    ));
 
     // Conversely, a key granted the plain output `main` gets that output but NOT
     // the program timing epoch (must add `program:main` explicitly).
     let output_only = principal(None, Some(vec!["main"]), None);
-    assert!(scope_permits(&output_only.scopes(), AuthzScope::Output("main")));
-    assert!(!scope_permits(&output_only.scopes(), AuthzScope::Program("main")));
+    assert!(scope_permits(
+        &output_only.scopes(),
+        AuthzScope::Output("main")
+    ));
+    assert!(!scope_permits(
+        &output_only.scopes(),
+        AuthzScope::Program("main")
+    ));
 
     // Output-unscoped sees both.
     let unscoped = principal(None, None, None);
-    assert!(scope_permits(&unscoped.scopes(), AuthzScope::Program("main")));
-    assert!(scope_permits(&unscoped.scopes(), AuthzScope::Output("main")));
+    assert!(scope_permits(
+        &unscoped.scopes(),
+        AuthzScope::Program("main")
+    ));
+    assert!(scope_permits(
+        &unscoped.scopes(),
+        AuthzScope::Output("main")
+    ));
 }
 
 #[test]
 fn object_and_output_is_a_conjunction() {
-    let both = principal(
-        Some(vec!["preset-a"]),
-        Some(vec!["out-1"]),
-        None,
-    );
+    let both = principal(Some(vec!["preset-a"]), Some(vec!["out-1"]), None);
     let salvo = AuthzScope::ObjectAndOutput {
         object: "preset-a",
         output: "out-1",
@@ -100,18 +138,10 @@ fn object_and_output_is_a_conjunction() {
 
     // Either mismatch denies; a single-axis check would under-gate this event
     // against its REST twin (`authorize_object` AND `authorize_output`).
-    let wrong_object = principal(
-        Some(vec!["preset-b"]),
-        Some(vec!["out-1"]),
-        None,
-    );
+    let wrong_object = principal(Some(vec!["preset-b"]), Some(vec!["out-1"]), None);
     assert!(!scope_permits(&wrong_object.scopes(), salvo));
 
-    let wrong_output = principal(
-        Some(vec!["preset-a"]),
-        Some(vec!["out-2"]),
-        None,
-    );
+    let wrong_output = principal(Some(vec!["preset-a"]), Some(vec!["out-2"]), None);
     assert!(!scope_permits(&wrong_output.scopes(), salvo));
 
     // Unset on one axis is unrestricted only on THAT axis; the other still gates.

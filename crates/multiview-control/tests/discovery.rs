@@ -118,9 +118,19 @@ fn primary_address_prefers_ipv6() {
 #[test]
 fn inventory_dedups_by_key_latest_wins() {
     let inv = DiscoveryInventory::new(8);
-    inv.upsert(DiscoveredService::from_raw(&raw_ndi(), None, far_future(), None));
+    inv.upsert(DiscoveredService::from_raw(
+        &raw_ndi(),
+        None,
+        far_future(),
+        None,
+    ));
     // A second sighting of the SAME service (same key) replaces, not duplicates.
-    inv.upsert(DiscoveredService::from_raw(&raw_ndi(), None, far_future(), None));
+    inv.upsert(DiscoveredService::from_raw(
+        &raw_ndi(),
+        None,
+        far_future(),
+        None,
+    ));
     assert_eq!(inv.snapshot().len(), 1);
 }
 

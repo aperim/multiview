@@ -1052,7 +1052,8 @@ mod tests {
         // A responder that advertises a `domain` TXT cannot self-label: from_raw
         // never reads the domain from the wire.
         let mut raw = raw_ndi();
-        raw.txt.push(("domain".to_owned(), "attacker-site".to_owned()));
+        raw.txt
+            .push(("domain".to_owned(), "attacker-site".to_owned()));
         let spoofed = DiscoveredService::from_raw(&raw, None, now, None);
         assert_eq!(
             spoofed.domain, None,

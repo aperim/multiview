@@ -224,18 +224,18 @@ fn allowlist_permits(allowlist: Option<&[String]>, id: Option<&str>) -> bool {
 fn output_scope_permits(allowlist: Option<&[String]>, output_id: &str) -> bool {
     match allowlist {
         None => true,
-        Some(allowed) => allowed.iter().any(|entry| {
-            !entry.starts_with(PROGRAM_SCOPE_PREFIX) && entry == output_id
-        }),
+        Some(allowed) => allowed
+            .iter()
+            .any(|entry| !entry.starts_with(PROGRAM_SCOPE_PREFIX) && entry == output_id),
     }
 }
 
 fn program_scope_permits(allowlist: Option<&[String]>, program_id: &str) -> bool {
     match allowlist {
         None => true,
-        Some(allowed) => allowed.iter().any(|entry| {
-            entry.strip_prefix(PROGRAM_SCOPE_PREFIX) == Some(program_id)
-        }),
+        Some(allowed) => allowed
+            .iter()
+            .any(|entry| entry.strip_prefix(PROGRAM_SCOPE_PREFIX) == Some(program_id)),
     }
 }
 
@@ -252,9 +252,7 @@ pub fn scope_permits(scopes: &AuthzScopes<'_>, scope: AuthzScope<'_>) -> bool {
         AuthzScope::Object(id) => allowlist_permits(scopes.objects, Some(id)),
         AuthzScope::Output(id) => output_scope_permits(scopes.outputs, id),
         AuthzScope::Program(id) => program_scope_permits(scopes.outputs, id),
-        AuthzScope::DiscoveryDomain(domain) => {
-            allowlist_permits(scopes.discovery_domains, domain)
-        }
+        AuthzScope::DiscoveryDomain(domain) => allowlist_permits(scopes.discovery_domains, domain),
         AuthzScope::ObjectAndOutput { object, output } => {
             allowlist_permits(scopes.objects, Some(object))
                 && output_scope_permits(scopes.outputs, output)
@@ -268,10 +266,7 @@ pub fn scope_permits(scopes: &AuthzScopes<'_>, scope: AuthzScope<'_>) -> bool {
 /// # Errors
 ///
 /// [`ControlError::Forbidden`] if any required axis denies `scope`.
-pub fn authorize_scope(
-    principal: &Principal,
-    scope: AuthzScope<'_>,
-) -> Result<(), ControlError> {
+pub fn authorize_scope(principal: &Principal, scope: AuthzScope<'_>) -> Result<(), ControlError> {
     if scope_permits(&principal.scopes(), scope) {
         Ok(())
     } else {
