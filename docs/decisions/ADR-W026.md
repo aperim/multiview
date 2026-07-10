@@ -155,3 +155,65 @@ API-reachable + operator-settable through the config-as-code resource
 None of the deferred items weakens the enforcement: an out-of-scope principal
 cannot receive an out-of-domain/out-of-output event on the stream, cannot read it
 via `/discovery/devices`, and cannot spend the scan budget.
+
+## Auth-panel follow-up (as-built)
+
+The rule-21 cross-vendor auth panel on the delivered lane raised nine findings.
+Three were confirmed defects on the new config/auth surface and are fixed in this
+lane (RED→GREEN, separate commits); the rest are dispositioned with rationale.
+
+**Fixed:**
+
+- **Whole-system authorization spans every axis (SEC-10).**
+  `require_unscoped_for_whole_system` denies a principal scoped on the object,
+  output, **or** discovery-domain axis — keyed off the unified
+  `AuthzScopes::is_global` / `Principal::is_global` predicate (unrestricted iff
+  every axis is `None`), not a frozen per-axis check, so a new axis is covered in
+  one place. The guard is also installed on the two whole-system config
+  **mutations** that previously omitted it entirely (`revert-to-start`,
+  `promote`) — each rewrites the entire running/boot document across all objects
+  — and runs **first**, before the boot-model lookup, idempotency reservation,
+  config composition, command submit, or boot-file write, so a scoped principal
+  is denied (403) before any side effect or disclosure. (`redact_device_refs_in_body`
+  keeps its object-scope check: device refs are objects, a distinct concern.)
+- **Config cannot mint an administrator (F2).** `ApiKeyRole` carries no `Admin`
+  variant: admin authentication is environment-only (the bootstrap
+  `MULTIVIEW_CONTROL_TOKEN`, always unscoped), so a `[[api.keys]]` declaring
+  `role = "admin"` is structurally unrepresentable and fails to parse
+  (fail-closed). The bootstrap admin builds `Role::Admin` directly, never through
+  `ApiKeyRole`, so `role_from_config` drops its admin arm and stays exhaustive.
+- **Config keys cannot clobber the bootstrap admin (F3).**
+  `register_config_api_keys` fails closed on a reserved (`admin`) or
+  already-registered `key_id` — a HARD startup error, never a silent HashMap
+  overwrite of an existing key's secret + principal (lockout / takeover). The
+  reserved id is the shared `BOOTSTRAP_ADMIN_KEY_ID` constant.
+- **Empty object grants rejected (F5).** `ApiConfig::validate()` rejects an empty
+  `scoped_object_ids` entry, at parity with the existing output-grant check.
+
+**Dispositioned (no code change; verified):**
+
+- **`TilesSnapshot` classified `Public` (F1)** — correct by construction, not a
+  leak. Its only producer is the per-session connect snapshot
+  (`SessionStream::tiles_snapshot_frame`), which retains tiles by
+  `id_in_object_scope` before send; `Tiles` is excluded from the resume ring, so
+  nothing rides it unfiltered. The live tile **deltas** (`tile.state`) are
+  `Object`-scoped through `scope_permits`. A whole-collection snapshot cannot be a
+  single `AuthzScope::Object`, so `Public` + construction-time filtering is the
+  correct model.
+- **`InputConnection.input_id` required, no `serde(default)` (F4)** — safe.
+  `multiview-mesh` carries no `multiview_events::Event` and never
+  `InputConnection`; realtime events are ephemeral (live snapshot + delta over an
+  in-memory resume ring), never persisted or sent cross-version, so there is no
+  mixed-version wire to break.
+- **Colon reservation in `scoped_output_ids` (F6)** — only the `program:` prefix
+  needs reserving, and it is: `validate()` rejects a bare `program:`, and
+  `scope_permits` filters `program:` entries out of plain-output authorization.
+  A generic `:`-bearing entry is either a valid plain-output grant or inert — it
+  can only ever authorize an output whose id it matches exactly, never pun the
+  timing namespace. The `main` vs `program:main` pun is fully closed by the prefix
+  separation, which fails closed (a timing grant can never confer plain-output
+  authority).
+- **Allowlist scan bound (F7)** — the allowlists are operator-authored config
+  parsed once at startup (not attacker input); an over-large list fails slow at
+  boot, never a runtime DoS. No fixed cap is imposed because it would
+  over-restrict a legitimately large deployment (e.g. hundreds of scoped objects).

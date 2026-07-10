@@ -29,7 +29,7 @@ is referenced by an **environment-variable name** — never inlined (rule 34):
 [[api.keys]]
 key_id = "site-a-operator"
 secret_env = "MULTIVIEW_KEY_SITE_A"        # the env var holding the secret
-role = "operator"                          # read_only | viewer | operator | admin
+role = "operator"                          # read_only | viewer | operator (NO admin)
 scoped_object_ids = ["cam-3"]              # optional; absent = unscoped on axis
 scoped_output_ids = ["out-1", "program:main"]
 scoped_discovery_domains = ["site-a"]
@@ -47,7 +47,13 @@ multiview run --config multiview.toml
 - A key whose `secret_env` is **unset or empty** is a **hard startup error** (an
   un-authenticatable scoped key is a latent misconfiguration) — the daemon
   refuses to start and names the missing variable.
-- `key_id`s must be unique; a bare `program:` grant (no program id) is rejected.
+- `key_id`s must be unique; a bare `program:` grant (no program id) is rejected;
+  an **empty** entry in any scope allowlist is rejected.
+- There is **no `admin` role** for config keys — admin authentication is
+  environment-only (the bootstrap `MULTIVIEW_CONTROL_TOKEN`, always unscoped), so
+  config-as-code can never mint an administrator. Reusing the reserved `key_id =
+  "admin"` (or any already-registered id) is a **hard startup error**, never a
+  silent overwrite of the bootstrap admin.
 
 ## The three scope axes (what each confines)
 
