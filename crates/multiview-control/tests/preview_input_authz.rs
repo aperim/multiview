@@ -57,7 +57,10 @@ impl PreviewProvider for SpyPreview {
     }
 
     fn input_jpeg(&self, id: &str, _quality: u8) -> Option<Vec<u8>> {
-        self.queried.lock().expect("queried lock").push(id.to_owned());
+        self.queried
+            .lock()
+            .expect("queried lock")
+            .push(id.to_owned());
         Some(vec![0xff, 0xd8, 0xff])
     }
 
@@ -75,7 +78,11 @@ async fn scoped_principal_is_denied_an_out_of_scope_input_still() {
     let h = harness_with(move |s| s.with_preview(spy));
 
     // The scoped operator (object scope = "scoped-layout") asks for cam-1's still.
-    let resp = send(&h.router, get("/api/v1/preview/inputs/cam-1.jpg", SCOPED_TOKEN)).await;
+    let resp = send(
+        &h.router,
+        get("/api/v1/preview/inputs/cam-1.jpg", SCOPED_TOKEN),
+    )
+    .await;
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,

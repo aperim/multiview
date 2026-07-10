@@ -182,8 +182,12 @@ async fn scoped_principal_sees_only_in_scope_object_logs() {
         Some("cnn"),
         "out of scope",
     ));
-    h.logs
-        .push(record_kind(2, Some(LogResourceKind::Program), None, "program"));
+    h.logs.push(record_kind(
+        2,
+        Some(LogResourceKind::Program),
+        None,
+        "program",
+    ));
     h.logs.push(record_kind(3, None, None, "unattributed"));
 
     let resp = send(&h.router, get("/api/v1/logs", SCOPED_TOKEN)).await;
@@ -214,8 +218,12 @@ async fn output_scoped_principal_filters_by_the_output_axis() {
         Some("wall-2"),
         "out of scope output",
     ));
-    h.logs
-        .push(record_kind(2, Some(LogResourceKind::Program), None, "program"));
+    h.logs.push(record_kind(
+        2,
+        Some(LogResourceKind::Program),
+        None,
+        "program",
+    ));
 
     let resp = send(&h.router, get("/api/v1/logs", OUTPUT_SCOPED_TOKEN)).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -232,8 +240,12 @@ async fn output_scoped_principal_filters_by_the_output_axis() {
 #[tokio::test]
 async fn explicit_out_of_scope_resource_id_query_is_forbidden() {
     let h = harness();
-    h.logs
-        .push(record_kind(0, Some(LogResourceKind::Source), Some("cnn"), "cnn"));
+    h.logs.push(record_kind(
+        0,
+        Some(LogResourceKind::Source),
+        Some("cnn"),
+        "cnn",
+    ));
     // A per-object probe for an out-of-scope id is denied, exactly as a
     // single-object GET of that id would be.
     let resp = send(
@@ -250,11 +262,7 @@ async fn ambiguous_resource_id_query_without_kind_fails_closed() {
     let h = harness();
     // No `kind`: the id is ambiguous across the object and output axes, so a
     // scoped principal must clear BOTH — an out-of-scope object id is denied.
-    let resp = send(
-        &h.router,
-        get("/api/v1/logs?resource_id=cnn", SCOPED_TOKEN),
-    )
-    .await;
+    let resp = send(&h.router, get("/api/v1/logs?resource_id=cnn", SCOPED_TOKEN)).await;
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
@@ -286,8 +294,12 @@ async fn explicit_in_scope_resource_id_query_is_allowed() {
 #[tokio::test]
 async fn unscoped_operator_sees_every_record_including_program_and_unattributed() {
     let h = harness();
-    h.logs
-        .push(record_kind(0, Some(LogResourceKind::Source), Some("cnn"), "s"));
+    h.logs.push(record_kind(
+        0,
+        Some(LogResourceKind::Source),
+        Some("cnn"),
+        "s",
+    ));
     h.logs
         .push(record_kind(1, Some(LogResourceKind::Program), None, "p"));
     h.logs.push(record_kind(2, None, None, "u"));

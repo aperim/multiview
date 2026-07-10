@@ -350,7 +350,11 @@ async fn input_focus_is_denied_for_an_out_of_scope_object() {
     // scoped-key is object-scoped to "scoped-layout"; cam-1 is out of scope.
     let resp = send(
         &router,
-        post_sdp("/api/v1/preview/inputs/cam-1/whep", SCOPED_TOKEN, H264_OFFER),
+        post_sdp(
+            "/api/v1/preview/inputs/cam-1/whep",
+            SCOPED_TOKEN,
+            H264_OFFER,
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);

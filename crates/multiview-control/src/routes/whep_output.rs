@@ -75,27 +75,25 @@ fn resolve_auth(state: &AppState, headers: &HeaderMap) -> WhepOutputAuth {
 /// down an output outside its allowlist. The per-output token path (a bearer that
 /// is not an API key) is unaffected.
 ///
-/// Runs BEFORE the provider is touched, so a denial has zero side effect, and
-/// returns the `403 /problems/forbidden` response for an out-of-scope API key.
-/// `Ok(())` for the token path, an in-scope key, or auth-disabled mode.
+/// Runs BEFORE the provider is touched, so a denial has zero side effect.
+/// Returns `Some(403 /problems/forbidden)` for an out-of-scope API key, and
+/// `None` for the token path, an in-scope key, or auth-disabled mode.
 fn authorize_api_key_scope(
     state: &AppState,
     auth: &WhepOutputAuth,
     output_id: &str,
-) -> Result<(), Response> {
+) -> Option<Response> {
     if state.auth_disabled {
-        return Ok(());
+        return None;
     }
-    let Some(bearer) = auth.bearer.as_deref() else {
-        return Ok(());
-    };
-    let Ok(principal) = state.api_keys.verify(bearer) else {
-        // Not a control-plane API key: the per-output token path, which the
-        // provider authorizes against the output's own token.
-        return Ok(());
-    };
+    let bearer = auth.bearer.as_deref()?;
+    // A bearer that does not verify as an API key is the per-output token path —
+    // the provider authorizes it against the output's own token; leave it alone.
+    let principal = state.api_keys.verify(bearer).ok()?;
+    // It IS a control-plane API key: it must be in output scope for this output.
     crate::auth::authorize_output(&principal, output_id)
-        .map_err(|_| whep_reject_response(output_id, WhepOutputReject::Forbidden))
+        .err()
+        .map(|_| whep_reject_response(output_id, WhepOutputReject::Forbidden))
 }
 
 /// Map a [`WhepOutputReject`] onto its RFC 9457 `application/problem+json`
@@ -217,7 +215,7 @@ pub(crate) async fn whep_view(
     // Per-output authz on the API-key path (BOLA, SEC-08): a scoped key may view
     // only outputs within its output allowlist. The per-output token path is
     // unaffected; this runs before the transport (zero side effect).
-    if let Err(denied) = authorize_api_key_scope(&state, &auth, &output_id) {
+    if let Some(denied) = authorize_api_key_scope(&state, &auth, &output_id) {
         return denied;
     }
     match state.whep_output.negotiate(&output_id, offer, &auth) {
@@ -286,7 +284,7 @@ pub(crate) async fn whep_delete(
     // down only sessions on outputs within its output allowlist. The provider's
     // release does not re-check authorization, so this route guard is what makes
     // a denied teardown a 403 with zero side effect.
-    if let Err(denied) = authorize_api_key_scope(&state, &auth, &output_id) {
+    if let Some(denied) = authorize_api_key_scope(&state, &auth, &output_id) {
         return denied;
     }
     if state.whep_output.release(&output_id, &session_id, &auth) {

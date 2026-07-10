@@ -433,7 +433,10 @@ async fn scoped_view_key_is_denied_tearing_down_an_out_of_scope_session() {
     let del = Request::builder()
         .method("DELETE")
         .uri(&location)
-        .header(header::AUTHORIZATION, format!("Bearer {OUTPUT_SCOPED_TOKEN}"))
+        .header(
+            header::AUTHORIZATION,
+            format!("Bearer {OUTPUT_SCOPED_TOKEN}"),
+        )
         .body(Body::empty())
         .unwrap();
     let resp = send(&router, del).await;
@@ -469,5 +472,9 @@ async fn scoped_view_key_may_tear_down_its_in_scope_session() {
         .unwrap();
     let resp = send(&router, del).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(whep.active_sessions(), 0, "the in-scope viewer session is freed");
+    assert_eq!(
+        whep.active_sessions(),
+        0,
+        "the in-scope viewer session is freed"
+    );
 }

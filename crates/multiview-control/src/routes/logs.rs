@@ -139,17 +139,15 @@ fn authorize_log_resource(
         Some(LogResourceKind::Output) => {
             crate::auth::authorize_output(principal, resource_id)?;
         }
-        Some(LogResourceKind::Program) => {
-            crate::routes::require_unscoped_for_whole_system(principal)?;
-        }
         // No kind: ambiguous across the object AND output axes — require both so a
         // principal scoped on either cannot probe the other's id space.
         None => {
             crate::auth::authorize_object(principal, resource_id)?;
             crate::auth::authorize_output(principal, resource_id)?;
         }
-        // A future resource kind (the enum is `#[non_exhaustive]`): fail closed —
-        // an unclassified probe is allowed only to an unrestricted principal.
+        // Program (whole-system), or a future/unknown kind (the enum is
+        // `#[non_exhaustive]`): allowed only to an unrestricted principal — fail
+        // closed for a scoped one.
         Some(_) => {
             crate::routes::require_unscoped_for_whole_system(principal)?;
         }
