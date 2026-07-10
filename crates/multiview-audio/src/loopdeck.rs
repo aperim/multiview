@@ -680,12 +680,15 @@ impl LoopDeck {
                     continue;
                 }
                 if abs >= seam {
-                    // The exit fade-out tail: the loop's head sample at the lap
-                    // position, cosine-faded to silence over `xfade`. The seam is a
-                    // lap boundary (`(seam − phase) mod L == 0`), so this fades body[0].
+                    // The exit fade-out tail: the CONTINUING loop content at this
+                    // absolute frame (the same in-lap position the loop would play),
+                    // cosine-faded to silence over `xfade`. Advancing the position —
+                    // rather than holding the seam frame — fades the real ongoing
+                    // waveform, so a tonal/ramped clip exits click-free (ADR-T019).
                     let j = to_usize(abs - seam);
                     let g = exit_gain(j, self.xfade);
-                    self.write_loop_frame(out, f, lap_pos_at(seam, phase, l), channels, Some(g));
+                    let m = to_usize(abs.saturating_sub(phase) % l);
+                    self.write_loop_frame(out, f, m, channels, Some(g));
                     continue;
                 }
             }
@@ -727,18 +730,6 @@ impl LoopDeck {
             }
         }
     }
-}
-
-/// The phase-relative in-lap position of the loop's head at absolute frame `seam` —
-/// i.e. the in-lap index the exit tail fades from — `(seam − phase) mod L`. The exit
-/// seam is a lap boundary (`(seam − phase) mod L == 0`), so the head it fades is the
-/// segment head (returns `0`); kept as a function so the exit tail reads the right
-/// body frames even if a future caller anchors the exit off a non-boundary.
-fn lap_pos_at(seam: u64, phase: u64, l: u64) -> usize {
-    if l == 0 {
-        return 0;
-    }
-    to_usize(seam.saturating_sub(phase) % l)
 }
 
 /// The cosine exit-tail gain at fade frame `j ∈ [0, xfade)`: `1 → 0` so the bus
