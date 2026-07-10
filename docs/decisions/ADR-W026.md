@@ -35,10 +35,13 @@ pub enum AuthzScope<'a> {
     Output(&'a str),                   // vs scoped_output_ids (plain entries only)
     Program(&'a str),                  // vs scoped_output_ids "program:<id>" entries
     DiscoveryDomain(Option<&'a str>),  // vs scoped_discovery_domains; None label = fail-closed
+    ObjectAndOutput { object: &'a str, output: &'a str }, // conjunction: permit_object && permit_output
 }
 ```
 
 Adding an `Event` variant now fails compilation at the point of definition until its author classifies it — the firehose generator is removed, not patched. An in-crate golden-table test constructs a sample of every variant and asserts its classification.
+
+**Folded leak set (cross-vendor review).** The exhaustive classifier initially re-drafted four object/output-bearing events as `Public`, re-ratifying the pre-W026 firehose. Corrected classifications: `RistLinkStats → Output(link_id)` (cname leaks peer topology); `InputStreams → Object(input_id)`; `InputConnection → Object(input_id)` (a new required `input_id` field was added — the event carried no id and was un-scopable); `Salvo{Armed,Taken,Cancelled} → ObjectAndOutput{salvo, head}` when head-scoped, else `Object(salvo)`. The `ObjectAndOutput` conjunction is the faithful twin of the salvo REST handler, which runs `authorize_object(salvo)` **and** `authorize_output(head)`; a most-restrictive single-axis scope would under-gate it.
 
 **`multiview-control/src/auth.rs` — Principal + the one predicate:** `Principal` gains `scoped_discovery_domains: Option<Vec<String>>` (None = all domains incl. unlabelled rows — the compat default; `Some([])` = sees no inventory; `Some(list)` = only listed domains, unlabelled rows DENIED). Plus `is_discovery_scoped()`, and `AuthzScopes { objects, outputs, discovery_domains }` cloned out via `Principal::scopes()`. The single fail-closed rule, encoded once in `allowlist_permits` (`(None,_)=>true`, `(Some(list),Some(l))=>contains`, `(Some(_),None)=>false`) and `scope_permits(&AuthzScopes, AuthzScope)` (exhaustive; Output filters out `program:` entries, Program matches only `program:`-stripped entries). `authorize_object`/`authorize_output` become thin wrappers over `authorize_scope` so REST and realtime cannot fork semantics. No `Default` on `Principal` — the compiler enumerates every construction site (~26 literals, mechanical `None`).
 
@@ -110,3 +113,45 @@ Verified gap: **no key CRUD exists for any axis** — shipping enforcement witho
 2. **`TimingStatus.groups` delivered whole to `program:main` grantees** — cross-group sync topology beyond the grantee's outputs. Accepted for v1 (explicit operator opt-in); follow-up is per-session `groups` redaction.
 3. **Classification authority is now cross-crate.** A future REST handler can gate a resource while the events-crate table says `Public`. Mitigated by the control-crate parity test + mandatory justification comments on `Public` arms — review-dependent.
 4. **Tightening masquerades as breakage.** Newly-scoped keys on unlabelled nodes see empty discovery; output-scoped keys lose the epoch. Mitigated by whoami scope observability, the UI empty-state warning, and the release-note remedies.
+
+## Implementation status (as-built)
+
+**Delivered + gated in this lane** — the enforcement spine is complete end-to-end:
+`Event::authz_scope()` (exhaustive, wildcard-free, incl. the folded leak set +
+`ObjectAndOutput`); `DeviceDiscovered.domain` + `InputConnection.input_id` wire
+fields; the shared fail-closed `scope_permits`/`authorize_scope` predicate with
+the `program:` namespace + composite conjunction; `Principal.scoped_discovery_domains`;
+the realtime delta **and** connect-snapshot filters routed through `scope_permits`
+across all axes, with RT010 carrying all three axes into live sessions;
+`[[api.keys]]` config + validation and cli startup registration (scoped keys are
+**mintable**); the `GET /discovery/devices` domain filter + `POST /scan` gate
+(REST twins of the stream filter); domain stamped from local config through the
+single scan origin; regenerated OpenAPI/AsyncAPI + web types. Full TDD (RED→GREEN
+per step); `cargo test --workspace`, workspace clippy `-D warnings`, and web
+lint/build green.
+
+**Deferred follow-ups (tracked, not silently dropped).** These are additional
+management/observability surfaces on *other* resources; the discovery-scope axis
+itself is fully enforced without them, and both new config knobs are already
+API-reachable + operator-settable through the config-as-code resource
+(`/config` import/export/apply):
+
+1. **Mesh redaction** — `/mesh/peers` node-level gate + `/mesh/status` peer-field
+   redaction for out-of-domain discovery-scoped principals. Defense-in-depth on
+   the mesh resource (owned by the mesh lane); the discovery *inventory* leak is
+   closed by the `/discovery/devices` filter.
+2. **`GET /api/v1/auth/keys`** (admin read of key metadata + scopes) and the
+   **whoami** scope extension on `GET /api/v1/account` — observability so a
+   confined key can see why its view is empty.
+3. **Dedicated web UI controls** — a Settings → API Keys panel, a "Discovery
+   domain" settings field with empty-state warning, and a discovery-inventory
+   Domain column. The web *client* already integrates the new API surface (green
+   build); these are named typed panels layered on top.
+4. **Live file-watch key re-registration** — an `[[api.keys]]` change is surfaced
+   by the config diff and applies on restart; a hot re-apply path (diff →
+   register/revoke/set_principal, RT010 generation bump) is the follow-up. The
+   RT010 machinery it would drive is already in place and tested.
+
+None of the deferred items weakens the enforcement: an out-of-scope principal
+cannot receive an out-of-domain/out-of-output event on the stream, cannot read it
+via `/discovery/devices`, and cannot spend the scan budget.
