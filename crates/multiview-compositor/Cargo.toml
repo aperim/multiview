@@ -28,16 +28,16 @@ tracing = { workspace = true }
 # `metal` (macOS). Each backend crate is internally target-gated, so listing
 # all three is portable; `std` + `wgsl` are required for the native runtime and
 # the WGSL front-end.
-wgpu = { version = "29", default-features = false, features = [
+wgpu = { version = "30", default-features = false, features = [
   "std",
   "wgsl",
   "vulkan",
   "gles",
   "metal",
 ], optional = true }
-pollster = { version = "0.4", optional = true }
+pollster = { version = "1.0", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
-naga = { version = "29", features = ["wgsl-in"], optional = true }
+naga = { version = "30", features = ["wgsl-in"], optional = true }
 
 # Overlay TEXT-ENGINE stack — pulled in ONLY by the off-by-default `overlay`
 # feature so the default build stays pure-Rust and cargo-deny clean. All four
