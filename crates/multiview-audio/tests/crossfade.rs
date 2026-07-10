@@ -663,3 +663,117 @@ fn a_reused_slot_rejects_a_stale_route_point() {
     mixer.route_to_program(fresh, 0.5);
     assert_eq!(mixer.program_gain(fresh), Some(0.5));
 }
+
+// ---------------------------------------------------------------------------
+// Overlapping cross-fades: each outgoing strip retires independently and every
+// reclaimed slot is reused (storage stays at the concurrent high-water).
+// ---------------------------------------------------------------------------
+
+/// OVERLAPPING FADES — starting a second/third `repoint_crossfade` while an
+/// earlier outgoing strip is STILL FADING (before it retires) must keep every
+/// outgoing strip independent: each retires on its own tick when its ramp
+/// completes, and every retired slot is reclaimed and reused. Physical storage
+/// must stay at the concurrent high-water (the channel + `OVERLAP` simultaneous
+/// outgoing strips), never the total number of fades ever run. A leak would grow
+/// storage past the high-water; a shared/aliased slot would fail to return the
+/// live count to 1 or skip an intermediate count on the way down.
+#[test]
+fn overlapping_crossfades_retire_independently_and_reuse_slots() {
+    const OVERLAP: usize = 3; // simultaneous in-flight outgoing strips
+    const ROUNDS: usize = 4; // repeated to prove reuse (no growth)
+
+    let fmt = stereo();
+    let mut bus = ProgramBus::new(fmt, Rational::new(25, 1)); // 1920 samples/tick
+                                                              // A long ramp (6 tick blocks) so an outgoing strip is still mid-fade
+                                                              // (0 < frames_done < ramp) while the next fades start one tick apart — the
+                                                              // fades genuinely overlap, and equal ramps + one-tick-apart starts make the
+                                                              // outgoing strips complete on distinct ticks (staggered retirement).
+    let ramp = 6 * 1920;
+
+    let seed = || -> Arc<AudioStore> {
+        let store = Arc::new(AudioStore::new(fmt, 96_000));
+        store
+            .publish(&AudioBlock::from_interleaved(fmt, vec![0.25f32; 8_000 * 2]).unwrap())
+            .unwrap();
+        store
+    };
+
+    let point = bus.add_source("prog", seed(), 1.0);
+    assert_eq!(bus.live_strip_count(), 1);
+
+    // The concurrent high-water: the channel + OVERLAP simultaneous outgoing
+    // strips. Storage must never exceed this, however many rounds run.
+    let high_water = OVERLAP + 1;
+    let mut peak_slots = bus.mixer_slot_count();
+
+    for round in 0..ROUNDS {
+        // Start OVERLAP cross-fades one tick apart, so each earlier outgoing strip
+        // is genuinely mid-fade when the next starts.
+        for k in 0..OVERLAP {
+            bus.repoint_crossfade(point, seed(), ramp).unwrap();
+            peak_slots = peak_slots.max(bus.mixer_slot_count());
+            if k + 1 < OVERLAP {
+                // Advance the in-flight fades by one tick block — well short of the
+                // 6-block ramp, so nothing retires yet.
+                let _ = bus.tick();
+                peak_slots = peak_slots.max(bus.mixer_slot_count());
+            }
+        }
+
+        // All OVERLAP outgoing strips coexist with the channel now.
+        assert_eq!(
+            bus.live_strip_count(),
+            high_water,
+            "round {round}: the channel + all {OVERLAP} overlapping outgoing strips \
+             must be live at once"
+        );
+        assert_eq!(
+            bus.mixer_slot_count(),
+            high_water,
+            "round {round}: physical storage is exactly the concurrent high-water"
+        );
+
+        // Tick to completion, recording the live-strip trajectory. Because the
+        // strips started one tick apart with equal ramps they retire on distinct
+        // ticks, so the count must pass through every intermediate value down to 1
+        // — independent, not all-at-once, retirement.
+        let mut observed = vec![bus.live_strip_count()];
+        let mut ticks = 0;
+        while bus.live_strip_count() > 1 {
+            let _ = bus.tick();
+            peak_slots = peak_slots.max(bus.mixer_slot_count());
+            observed.push(bus.live_strip_count());
+            ticks += 1;
+            assert!(
+                ticks < 128,
+                "round {round}: every overlapping outgoing strip must retire within a \
+                 bounded number of ticks (stuck at {} live)",
+                bus.live_strip_count()
+            );
+        }
+        for expected in 1..=high_water {
+            assert!(
+                observed.contains(&expected),
+                "round {round}: the live count must pass through {expected} as the \
+                 overlapping fades retire one at a time (independent retirement); \
+                 observed {observed:?}"
+            );
+        }
+        assert_eq!(
+            bus.live_strip_count(),
+            1,
+            "round {round}: after completion only the channel remains live"
+        );
+    }
+
+    // REUSE — across every round storage stayed at the concurrent high-water: the
+    // OVERLAP retired slots were reclaimed and reused each round, never leaked. A
+    // leak would make this `ROUNDS * OVERLAP + 1`, not `OVERLAP + 1`.
+    assert_eq!(
+        peak_slots, high_water,
+        "physical storage must stay at the concurrent high-water ({high_water}) \
+         across {ROUNDS} rounds of {OVERLAP} overlapping fades — reused slots, not a \
+         leaked strip per fade"
+    );
+    assert_eq!(bus.mixer_slot_count(), high_water);
+}
