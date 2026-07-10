@@ -994,9 +994,11 @@ mod net {
 }
 
 /// SSRF dial-path regression tests (SEC-02, CWE-918) for the real reqwest
-/// transport: prove the client refuses a loopback / alt-encoded-loopback dial
-/// target on the **actual connect path** — a real TCP listener is stood up and
-/// must never accept a connection.
+/// transport, exercised on the **actual connect path** with a real
+/// `TcpListener`: a blocked target (loopback / alt-encoded loopback / a name
+/// resolving to loopback) must never reach the listener, while an ALLOWED target
+/// (a routable interface IP) DOES — so the refusals fail because the screen
+/// blocks, not because the transport is inert.
 ///
 /// A prior guard screened only DNS *names* (a custom reqwest resolver), but
 /// reqwest dials an IP-literal / alt-encoded URL (`http://2130706433/` =
@@ -1012,7 +1014,7 @@ mod dial_screen_tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use std::io::ErrorKind;
-    use std::net::TcpListener;
+    use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1021,14 +1023,17 @@ mod dial_screen_tests {
 
     use super::{ReqwestTransport, RpcVerb, ZowietekTransport};
 
-    /// Drive the real transport at `url` and report whether the loopback
-    /// `listener` ever accepted a connection. The screen refuses before any
-    /// socket opens, so the listener stays idle; a build that (regressibly)
-    /// succeeds still gets a POST attempt so a bypass would land on the socket.
-    fn loopback_reached(url: &str, listener: &TcpListener) -> bool {
-        // The non-breaking default policy: LAN is dialable, loopback is NEVER —
-        // so the refusal here is the unconditional never-legit floor, not an
-        // allowlist decision.
+    /// Drive the real screened transport (built with the non-breaking
+    /// `allow_lan()` policy) at `url` and report whether `listener` ever accepted
+    /// a connection. For a blocked target the screen refuses before any socket
+    /// opens, so the listener stays idle; for an allowed target the POST opens the
+    /// socket and the connection lands on the backlog. Either way a single
+    /// non-blocking `accept` distinguishes the two.
+    fn transport_reaches(url: &str, listener: &TcpListener) -> bool {
+        // The non-breaking default policy: allowlistable LAN (private/ULA/carrier)
+        // is dialable; the never-legit ranges (loopback/link-local/…) are refused
+        // unconditionally — so a refusal is the never-legit floor and a reach is a
+        // genuinely allowed dial, not an allowlist quirk.
         let policy = Arc::new(DialPolicy::allow_lan());
         if let Ok(transport) = ReqwestTransport::new(url, Duration::from_millis(500), policy) {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -1047,15 +1052,51 @@ mod dial_screen_tests {
         !matches!(listener.accept(), Err(e) if e.kind() == ErrorKind::WouldBlock)
     }
 
-    /// Bind a loopback listener that never `accept`s on its own, returning it and
-    /// its ephemeral port.
-    fn idle_loopback_listener() -> (TcpListener, u16) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+    /// Discover a routable, non-loopback local interface IP — an address the OS
+    /// routes to and, being assigned to a local interface, a listener can bind and
+    /// a dial to it loops back locally. A `UdpSocket::connect` to a documentation
+    /// address (RFC 5737 TEST-NET-1 / RFC 3849) sends **no** packet; it only makes
+    /// the kernel pick the source interface it would dial from, which `local_addr`
+    /// reveals. That address is a routable unicast IP — private/ULA (allowlistable,
+    /// so `allow_lan()` permits it) or globally routable (unblocked) — never
+    /// loopback or link-local, i.e. an *allowed* dial target. Every CI runner and
+    /// dev host has such an interface.
+    fn routable_interface_ip() -> Option<IpAddr> {
+        // IPv4 (192.0.2.0/24) first, then IPv6 (2001:db8::/32) for a v6-only host.
+        for (bind, probe) in [
+            ("0.0.0.0:0", "192.0.2.1:80"),
+            ("[::]:0", "[2001:db8::1]:80"),
+        ] {
+            let Ok(sock) = UdpSocket::bind(bind) else {
+                continue;
+            };
+            if sock.connect(probe).is_err() {
+                continue;
+            }
+            if let Ok(local) = sock.local_addr() {
+                let ip = local.ip();
+                if !ip.is_loopback() && !ip.is_unspecified() {
+                    return Some(ip);
+                }
+            }
+        }
+        None
+    }
+
+    /// Bind an idle (never-`accept`ing, non-blocking) listener on `ip:0`,
+    /// returning it and its ephemeral port.
+    fn idle_listener_on(ip: IpAddr) -> (TcpListener, u16) {
+        let listener = TcpListener::bind((ip, 0)).expect("bind idle listener");
         listener
             .set_nonblocking(true)
             .expect("listener set_nonblocking");
         let port = listener.local_addr().expect("listener local_addr").port();
         (listener, port)
+    }
+
+    /// Bind an idle loopback listener that never `accept`s on its own.
+    fn idle_loopback_listener() -> (TcpListener, u16) {
+        idle_listener_on(IpAddr::V4(Ipv4Addr::LOCALHOST))
     }
 
     #[test]
@@ -1064,7 +1105,7 @@ mod dial_screen_tests {
         // A plain loopback literal: reqwest dials 127.0.0.1 directly (no resolver
         // hop), so a name-only screen misses it. It must be refused.
         assert!(
-            !loopback_reached(&format!("http://127.0.0.1:{port}/"), &listener),
+            !transport_reaches(&format!("http://127.0.0.1:{port}/"), &listener),
             "loopback literal dial reached the listener (SSRF screen bypassed)"
         );
     }
@@ -1078,7 +1119,7 @@ mod dial_screen_tests {
         // config-load literal screen misses it — the dial-time screen must catch
         // it on the canonical parsed IP.
         assert!(
-            !loopback_reached(&format!("http://2130706433:{port}/"), &listener),
+            !transport_reaches(&format!("http://2130706433:{port}/"), &listener),
             "alt-encoded (decimal) loopback dial reached the listener (SSRF screen bypassed)"
         );
     }
@@ -1097,26 +1138,26 @@ mod dial_screen_tests {
         // (unlike IP literals), so this proves the resolver screen is wired in and
         // defeats a name that answers with an internal address (DNS-rebind).
         assert!(
-            !loopback_reached(&format!("http://localhost:{port}/"), &listener),
+            !transport_reaches(&format!("http://localhost:{port}/"), &listener),
             "named-host (localhost -> loopback) dial reached the listener (resolver screen bypassed)"
         );
     }
 
-    /// Positive control: prove the idle listener + the non-blocking `accept` that
-    /// [`loopback_reached`] relies on actually detect a real connection. Without
-    /// it, the three `!loopback_reached` assertions above could pass *vacuously* —
+    /// Detection control: prove the idle listener + the non-blocking `accept` that
+    /// [`transport_reaches`] relies on actually detect a real connection. Without
+    /// it, the three `!transport_reaches` refusals above could pass *vacuously* —
     /// a listener whose `accept` never reported a connection would read as "dial
     /// blocked" even with the screen removed. A raw `TcpStream::connect` (no
     /// screen) lands on the backlog, and the same non-blocking `accept` the screen
     /// tests use must see it.
     ///
-    /// A fully-screened-transport-reaches-a-listener control is architecturally
-    /// impossible here: [`screen_ip`](multiview_config::device::net_guard::screen_ip)
-    /// refuses loopback — the only address CI can reliably bind a listener on —
-    /// *unconditionally*, before any allowlist is consulted. So this detection
-    /// control, plus `refuses_named_host_resolving_to_loopback_before_connecting`
-    /// (which builds the real transport and dials through the resolver), together
-    /// prove the screen tests are non-vacuous.
+    /// This isolates the accept machinery; that a fully-screened transport DOES
+    /// reach an allowed listener is proven separately by
+    /// `screened_transport_reaches_an_allowed_interface_ip`. Only *loopback* is
+    /// refused unconditionally by
+    /// [`screen_ip`](multiview_config::device::net_guard::screen_ip) — not every
+    /// bindable address — so a routable interface IP is an allowed, reachable
+    /// target.
     #[test]
     fn the_non_blocking_accept_detects_a_real_connection() {
         let (listener, port) = idle_loopback_listener();
@@ -1126,6 +1167,37 @@ mod dial_screen_tests {
         assert!(
             !matches!(listener.accept(), Err(e) if e.kind() == ErrorKind::WouldBlock),
             "the non-blocking accept must detect a real connection (else the screen tests are vacuous)"
+        );
+    }
+
+    /// Positive control (the panel-asked shape): the SAME real `ReqwestTransport`,
+    /// under the SAME `allow_lan()` screen the refusal tests use, DOES reach a
+    /// listener bound to an ALLOWED target — proving the three `!transport_reaches`
+    /// refusals fail because the screen BLOCKS the target, not because the
+    /// transport is inert (a `post` that never dialled would pass every refusal
+    /// too, and the detection control above only proves the `accept` side is live).
+    ///
+    /// Loopback cannot be the allowed target — `screen_ip` refuses it
+    /// unconditionally — but a routable non-loopback **interface** IP can: it is
+    /// private/ULA (allowlistable, so `allow_lan()` permits it) or globally
+    /// routable (unblocked), and being assigned to a local interface a dial to it
+    /// loops back to a listener bound there. If a regression makes `post` stop
+    /// dialling, ONLY this test goes red; the refusal tests stay green.
+    #[test]
+    fn screened_transport_reaches_an_allowed_interface_ip() {
+        // Fail loud (never a silent skip, rule 19) if the host has no routable
+        // non-loopback interface — that is a networkless environment, not a pass.
+        let ip = routable_interface_ip()
+            .expect("a routable non-loopback interface to bind an allowed dial target on");
+        let (listener, port) = idle_listener_on(ip);
+        let url = match ip {
+            IpAddr::V6(v6) => format!("http://[{v6}]:{port}/"),
+            IpAddr::V4(v4) => format!("http://{v4}:{port}/"),
+        };
+        assert!(
+            transport_reaches(&url, &listener),
+            "the screened transport did NOT reach an allowed interface-IP listener \
+             ({url}) — a refusal test could be passing on an inert transport"
         );
     }
 }
