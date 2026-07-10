@@ -690,6 +690,68 @@ fn stop_then_vamp_recues_to_head_distinct_from_pause_resume() {
 // 6. Property tests — period integrity + both seam-correlation regimes.
 // ----------------------------------------------------------------------------
 
+/// `SplitMix64` — a strong finalizing mixer used to derive well-distributed,
+/// mutually-independent sub-seeds for the ensemble below. Unlike `seed ^ (i·k)`,
+/// its avalanche breaks the linear relationship the content xorshift would otherwise
+/// preserve between sub-seeds, so the realizations it seeds are effectively
+/// independent (verified empirically — see `decorrelated_seam_power_ratio_mean`).
+fn splitmix64(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// One decorrelated-content realization's seam-power ratio: the mean per-frame
+/// stereo power over the `xfade`-frame crossfade seam, divided by the nominal
+/// `2·a²`. Content is ±`a` decorrelated noise seeded by `seed`. For a constant-power
+/// crossfade of decorrelated content the expected ratio is exactly 1, but a single
+/// realization's estimate has relative SD ≈ 0.50/√xfade (it averages only `xfade`
+/// frames), so at small `xfade` one draw is a noisy estimate — see
+/// [`decorrelated_seam_power_ratio_mean`].
+fn decorrelated_seam_power_ratio(loop_frames: usize, xfade: usize, seed: u64) -> f64 {
+    let a = 0.35f32;
+    let nominal = 2.0 * f64::from(a) * f64::from(a);
+    let mut state = seed | 1;
+    let n = (loop_frames + xfade) * 2;
+    let mut decoded = vec![0.0f32; n];
+    for slot in &mut decoded {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *slot = if state & 1 == 0 { a } else { -a };
+    }
+    let deck = LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).unwrap();
+    let out = drain_at(&deck, 0, loop_frames * 2, loop_frames);
+    let power = frame_power(&out);
+    let seam = &power[loop_frames..loop_frames + xfade];
+    seam.iter().sum::<f64>() / xfade as f64 / nominal
+}
+
+/// The seam-power ratio averaged over `k` independent decorrelated realizations,
+/// each seeded by a `splitmix64`-mixed sub-seed of `seed` (whose avalanche makes the
+/// realizations effectively independent — a plain `seed ^ i·k` would stay linearly
+/// related through the content xorshift and not decorrelate). The single-realization
+/// SD ≈ 0.50/√xfade shrinks ≈1/√k with the ensemble size (measured, no floor), so the
+/// callers' `k = ⌈512/xfade⌉` (xfade·k ≥ 512) makes the tight ±20% band a measured
+/// ~7σ bound at every `xfade` — testing the *expected* power preservation instead of
+/// one high-variance small-`xfade` draw. Independence + the margin are verified
+/// empirically by `ensemble_mean_variance_shrinks_with_k`.
+fn decorrelated_seam_power_ratio_mean(
+    loop_frames: usize,
+    xfade: usize,
+    seed: u64,
+    k: usize,
+) -> f64 {
+    (0..k)
+        .map(|i| {
+            let s = splitmix64(seed.wrapping_add(i as u64));
+            decorrelated_seam_power_ratio(loop_frames, xfade, s)
+        })
+        .sum::<f64>()
+        / k as f64
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
@@ -742,27 +804,103 @@ proptest! {
         seed in any::<u64>(),
     ) {
         let xfade = xfade_req.min(loop_frames / 2).max(1);
-        let a = 0.35f32;
-        let channels = 2usize;
-        let mut state = seed | 1;
-        let n = (loop_frames + xfade) * channels;
-        let mut decoded = vec![0.0f32; n];
-        for slot in &mut decoded {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            *slot = if state & 1 == 0 { a } else { -a };
-        }
-        let deck = LoopDeck::with_segment(stereo(), &decoded, loop_frames, xfade).unwrap();
-        let out = drain_at(&deck, 0, loop_frames * 2, loop_frames);
-        let power = frame_power(&out);
-        let nominal = 2.0 * f64::from(a) * f64::from(a);
-        let seam = &power[loop_frames..loop_frames + xfade];
-        let avg: f64 = seam.iter().sum::<f64>() / xfade as f64;
-        let ratio = avg / nominal;
+        // Estimate the EXPECTED seam power over enough independent realizations that
+        // the ±20% band is a robust ≥6σ bound even at tiny xfade. A single small-xfade
+        // seam averages only `xfade` frames of ±a noise (single-realization SD ≈
+        // 0.50/√xfade ≈ 0.17 at xfade=8), so a per-draw ±20% band failed on correct
+        // code — the flake this fixes (task #16). Averaging k `splitmix64`-seeded
+        // realizations shrinks the SD ≈1/√k with no floor (measured — see
+        // `ensemble_mean_variance_shrinks_with_k`); k = ⌈512/xfade⌉ gives a measured
+        // ~7σ margin at the worst case (xfade=8). Tests the real property: the
+        // crossfade preserves power in expectation for decorrelated content.
+        let k = 512usize.div_ceil(xfade).max(1);
+        let ratio = decorrelated_seam_power_ratio_mean(loop_frames, xfade, seed, k);
         prop_assert!(
             (0.80..=1.20).contains(&ratio),
-            "decorrelated seam power ratio {} out of band (xfade {})", ratio, xfade
+            "decorrelated seam power ratio {ratio} out of band (xfade {xfade}, k {k})"
+        );
+    }
+}
+
+/// Regression for the estimator-variance flake fix (task #16): the exact
+/// counterexample that tripped the old per-realization ±20% band —
+/// `loop_frames=1091, xfade=11, seed=4320260872143147964`, whose single-draw ratio
+/// is ≈1.259 — is comfortably in band once the ratio is estimated over enough
+/// realizations. Proves the failure was small-`xfade` estimator variance (SD ≈
+/// 0.50/√xfade ≈ 0.15 at xfade 11), NOT a power bug: the *expected* seam power is flat.
+#[test]
+fn decorrelated_seam_power_is_flat_at_the_reproduced_counterexample() {
+    let (loop_frames, xfade_req, seed) = (1091usize, 11usize, 4_320_260_872_143_147_964u64);
+    let xfade = xfade_req.min(loop_frames / 2).max(1);
+    // The single draw that tripped the old per-realization band is genuinely a
+    // high-variance ~1.26 outlier — a small-`xfade` estimate of a quantity whose
+    // expectation is 1.0 — reproduced here with the exact failing seed.
+    let single = decorrelated_seam_power_ratio(loop_frames, xfade, seed);
+    assert!(
+        single > 1.20,
+        "the reproduced single-draw ratio is the >1.20 outlier the old band caught (got {single})"
+    );
+    // The expected seam power — averaged over enough realizations — is within ±20%.
+    let k = 512usize.div_ceil(xfade).max(1);
+    let mean = decorrelated_seam_power_ratio_mean(loop_frames, xfade, seed, k);
+    assert!(
+        (0.80..=1.20).contains(&mean),
+        "expected decorrelated seam power is flat (mean {mean} over {k} realizations)"
+    );
+}
+
+/// Establishes the fix's premise (addressing the #232 review): averaging over `k`
+/// `splitmix64`-seeded realizations shrinks the seam-power estimator's SD ≈1/√k, so
+/// the ±20% band is a ≥6σ bound at the worst-case small `xfade` — and it holds across
+/// loop lengths (the estimator variance is a function of `xfade`, not length). A gross
+/// loss of shrinkage (e.g. degenerate/identical sub-seeds) would leave `sd_ens ≈
+/// sd_single` and fail the assertions. Deterministic (fixed base seeds).
+#[test]
+fn ensemble_mean_variance_shrinks_with_k() {
+    let bases = 200u64;
+    let stats = |vals: &[f64]| -> (f64, f64) {
+        let n = vals.len() as f64;
+        let mean = vals.iter().sum::<f64>() / n;
+        let var = vals.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+        (mean, var.max(0.0).sqrt())
+    };
+    // Worst case is the smallest `xfade` (largest single-realization SD ≈ 0.50/√xfade);
+    // two loop lengths confirm the margin does not depend on loop length. Base seeds
+    // are `splitmix64`-mixed so the ~200-sample variance estimate itself is unbiased
+    // (sequential bases would be as correlated as the sub-seeds this test guards).
+    for &(loop_frames, xfade) in &[(191usize, 8usize), (523usize, 8usize)] {
+        let k = 512usize.div_ceil(xfade).max(1); // = 64 → xfade·k = 512
+        let single: Vec<f64> = (0..bases)
+            .map(|b| decorrelated_seam_power_ratio(loop_frames, xfade, splitmix64(b ^ 0xABCD)))
+            .collect();
+        let ensemble: Vec<f64> = (0..bases)
+            .map(|b| {
+                decorrelated_seam_power_ratio_mean(loop_frames, xfade, splitmix64(b ^ 0xF00D), k)
+            })
+            .collect();
+        let (_, sd_single) = stats(&single);
+        let (mean_ens, sd_ens) = stats(&ensemble);
+        let sigma_margin = 0.20 / sd_ens;
+        println!(
+            "loop={loop_frames} xfade={xfade} k={k}: sd_single={sd_single:.4} \
+             sd_ens={sd_ens:.4} mean_ens={mean_ens:.4} => {sigma_margin:.1}sigma"
+        );
+        // Unbiased (estimates the true ratio 1.0); tolerance is >>the ~0.003 sampling SE.
+        assert!(
+            (mean_ens - 1.0).abs() < 0.04,
+            "ensemble mean ≈ 1 (got {mean_ens})"
+        );
+        // ≈1/√k shrinkage (k=64 ⇒ √64=8): the ensemble SD falls well below the
+        // single-realization SD. A degenerate/near-identical ensemble would not.
+        assert!(
+            sd_ens < sd_single * 0.30,
+            "ensemble SD must shrink at loop={loop_frames} (single {sd_single:.4}, ens {sd_ens:.4})"
+        );
+        // The property's own k gives a measured ~7σ margin; require the ensemble here
+        // to clear a comfortable ≥5σ (loose enough to never flake on the estimate).
+        assert!(
+            sigma_margin >= 5.0,
+            "±20% must be ≥5σ at loop={loop_frames} (σ={sd_ens:.4}, margin {sigma_margin:.1})"
         );
     }
 }
