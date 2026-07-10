@@ -66,3 +66,45 @@ pub trait MeshTransport {
     /// [`MeshError::Transport`] if the transport could not be polled.
     fn poll_received(&self) -> Result<Vec<ReceivedAnnouncement>, MeshError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{reassemble_txt, CHUNK_COUNT_KEY, MAX_CHUNKS};
+
+    #[test]
+    fn reassembly_rejects_hostile_count_before_reading_chunks() {
+        let count = 1_000_000_000_000_usize.to_string();
+        let wire = reassemble_txt(|key| match key {
+            CHUNK_COUNT_KEY => Some(count.as_str()),
+            _ => panic!("over-limit input must be rejected before reading chunks"),
+        });
+
+        assert_eq!(wire, None);
+    }
+
+    #[test]
+    fn reassembly_accepts_exact_maximum_chunk_count() {
+        let mut properties = HashMap::new();
+        properties.insert(CHUNK_COUNT_KEY.to_owned(), MAX_CHUNKS.to_string());
+        for index in 0..MAX_CHUNKS {
+            properties.insert(format!("p{index}"), "x".to_owned());
+        }
+
+        let wire = reassemble_txt(|key| properties.get(key).map(String::as_str));
+
+        assert_eq!(wire, Some(vec![b'x'; MAX_CHUNKS]));
+    }
+
+    #[test]
+    fn reassembly_rejects_one_chunk_over_maximum() {
+        let count = (MAX_CHUNKS + 1).to_string();
+        let wire = reassemble_txt(|key| match key {
+            CHUNK_COUNT_KEY => Some(count.as_str()),
+            _ => panic!("over-limit input must be rejected before reading chunks"),
+        });
+
+        assert_eq!(wire, None);
+    }
+}
