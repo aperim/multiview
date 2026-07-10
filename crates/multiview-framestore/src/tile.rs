@@ -300,6 +300,11 @@ impl<T> TileStore<T> {
                 Vec::with_capacity(1)
             } else {
                 let mut kept = Vec::clone(current);
+                // Keep every entry at-or-after the watermark; drop ONLY those
+                // stamped strictly before it. The latched frame sits exactly at
+                // the watermark (a reader `fetch_max`'d it to its own `at`), so
+                // `>=` retains it — the boundary frame the compositor is still
+                // showing is never pruned, only strictly-consumed past frames.
                 kept.retain(|e| e.at.as_nanos() >= watermark);
                 kept
             };
@@ -373,6 +378,32 @@ impl<T> TileStore<T> {
         }
     }
 
+    /// Latch onto the ring frame nearest-but-not-after `now` and advance the
+    /// prune watermark to it. **The single point at which any reader selects a
+    /// frame from the ring** — [`read_at`](TileStore::read_at) and
+    /// [`state_at`](TileStore::state_at) both route through it, and any future
+    /// reader (e.g. a wired-up degradation sampler) MUST too.
+    ///
+    /// Fusing selection with the watermark advance is what makes
+    /// [`publish_arc`](TileStore::publish_arc)'s prune correct *by
+    /// construction*: the producer drops only entries stamped **strictly
+    /// before** the watermark, so the frame this method selects — recorded into
+    /// the watermark by the `fetch_max` before it is returned — can never be
+    /// pruned out from under the caller. A reader physically cannot obtain a
+    /// ring frame without first protecting it. Monotone `fetch_max`: output
+    /// `now` is non-decreasing (invariant #1/#3), so the watermark only moves
+    /// forward and never regresses or over-prunes.
+    fn latch_and_advance<'r>(
+        &self,
+        ring: &'r [RingEntry<T>],
+        now: MediaTime,
+    ) -> Option<(&'r RingEntry<T>, SourceState)> {
+        let (selected, state) = latch_and_classify(ring, now, self.thresholds)?;
+        self.latch_watermark_ns
+            .fetch_max(selected.at.as_nanos(), Ordering::Relaxed);
+        Some((selected, state))
+    }
+
     /// The tile's [`SourceState`] for the frame the output clock is **latched
     /// onto** at output media time `now` (streaming-gotchas §1).
     ///
@@ -392,15 +423,11 @@ impl<T> TileStore<T> {
     #[must_use]
     pub fn state_at(&self, now: MediaTime) -> SourceState {
         let ring = self.ring.load();
-        match latch_and_classify(&ring, now, self.thresholds) {
-            Some((selected, state)) => {
-                // Advance the prune watermark too, so a tile that is monitored
-                // (state sampled) but not currently composited still bounds its
-                // ring. Monotone `fetch_max` — see [`read_at`](TileStore::read_at).
-                self.latch_watermark_ns
-                    .fetch_max(selected.at.as_nanos(), Ordering::Relaxed);
-                state
-            }
+        // Route through `latch_and_advance` so a monitored-but-not-composited
+        // tile (state sampled, never `read_at`) still advances the watermark and
+        // bounds its ring — and so selection can never skip the watermark.
+        match self.latch_and_advance(&ring, now) {
+            Some((_selected, state)) => state,
             None => SourceState::NoSignal,
         }
     }
@@ -467,15 +494,14 @@ impl<T> TileStore<T> {
     #[must_use]
     pub fn read_at(&self, now: MediaTime) -> TileRead<T> {
         let ring = self.ring.load();
-        let Some((selected, state)) = latch_and_classify(&ring, now, self.thresholds) else {
+        // Selecting the latched frame also advances the prune watermark (see
+        // `latch_and_advance`), so the producer's next publish can drop consumed
+        // past frames (invariant #9) without ever dropping this one. The only new
+        // per-tick cost on the read path is that one relaxed-atomic `fetch_max` —
+        // no lock, no allocation.
+        let Some((selected, state)) = self.latch_and_advance(&ring, now) else {
             return TileRead::NoSignal;
         };
-        // Record how far the output clock has advanced so the producer's next
-        // publish can prune consumed past frames (invariant #9). Monotone
-        // `fetch_max`: the watermark only moves forward, so it can never prune a
-        // frame a later read still needs (output `now` is monotone).
-        self.latch_watermark_ns
-            .fetch_max(selected.at.as_nanos(), Ordering::Relaxed);
         let frame = Arc::clone(&selected.frame);
         match state {
             SourceState::Live => TileRead::Fresh { frame },
