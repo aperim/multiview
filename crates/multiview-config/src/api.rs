@@ -312,4 +312,53 @@ mod tests {
         cfg.validate()
             .expect("a fully-scoped, well-formed key validates");
     }
+
+    #[test]
+    fn config_cannot_mint_an_admin_key() {
+        // MINT INVARIANT (ADR-W026, auth-panel F2): admin authentication is
+        // environment-only (the bootstrap `MULTIVIEW_CONTROL_TOKEN`, always
+        // unscoped). Config-as-code mints only NON-admin keys, so `ApiKeyRole`
+        // carries no `admin` variant at all — a `[[keys]]` declaring
+        // `role = "admin"` is structurally unrepresentable and fails to parse
+        // (fail-closed), so config can never silently mint a full-or-scoped
+        // administrator.
+        let toml = r#"
+            [[keys]]
+            key_id = "sneaky-admin"
+            secret_env = "ENV_SNEAKY"
+            role = "admin"
+        "#;
+        let parsed: Result<ApiConfig, _> = toml::from_str(toml);
+        assert!(
+            parsed.is_err(),
+            "a config-declared key must not be able to authenticate as admin"
+        );
+
+        // The non-admin roles remain config-mintable (the guard does not
+        // over-restrict): every role the control plane maps still parses.
+        for role in ["read_only", "viewer", "operator"] {
+            let toml = format!(
+                "[[keys]]\nkey_id = \"k\"\nsecret_env = \"ENV_K\"\nrole = \"{role}\"\n"
+            );
+            let parsed: Result<ApiConfig, _> = toml::from_str(&toml);
+            assert!(
+                parsed.is_ok(),
+                "the non-admin role {role:?} must remain config-mintable"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_object_grant_is_rejected() {
+        // Auth-panel F5: an empty object-id entry is as meaningless as an empty
+        // output grant, and — unchecked — would silently widen the object axis.
+        // It must be rejected, at parity with `scoped_output_ids`.
+        let cfg = ApiConfig {
+            keys: vec![key("k", "ENV").with_scoped_object_ids(vec![String::new()])],
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "an empty scoped_object_ids entry must be rejected"
+        );
+    }
 }
