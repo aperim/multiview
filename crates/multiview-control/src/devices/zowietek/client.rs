@@ -939,3 +939,88 @@ mod net {
         }
     }
 }
+
+/// SSRF dial-path regression tests (SEC-02, CWE-918) for the real reqwest
+/// transport: prove the client refuses a loopback / alt-encoded-loopback dial
+/// target on the **actual connect path** — a real TCP listener is stood up and
+/// must never accept a connection.
+///
+/// A prior guard screened only DNS *names* (a custom reqwest resolver), but
+/// reqwest dials an IP-literal / alt-encoded URL (`http://2130706433/` =
+/// `127.0.0.1`) **without invoking the resolver**, so those bypassed the screen
+/// and reached loopback / the cloud-metadata endpoint. These tests exercise the
+/// bytes-on-the-wire path a name-only screen cannot see.
+#[cfg(all(test, feature = "zowietek"))]
+mod dial_screen_tests {
+    use std::io::ErrorKind;
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use multiview_config::device::net_guard::DialPolicy;
+    use serde_json::json;
+
+    use super::{ReqwestTransport, RpcVerb, ZowietekTransport};
+
+    /// Drive the real transport at `url` and report whether the loopback
+    /// `listener` ever accepted a connection. The screen refuses before any
+    /// socket opens, so the listener stays idle; a build that (regressibly)
+    /// succeeds still gets a POST attempt so a bypass would land on the socket.
+    fn loopback_reached(url: &str, listener: &TcpListener) -> bool {
+        // The non-breaking default policy: LAN is dialable, loopback is NEVER —
+        // so the refusal here is the unconditional never-legit floor, not an
+        // allowlist decision.
+        let policy = Arc::new(DialPolicy::allow_lan());
+        if let Ok(transport) = ReqwestTransport::new(url, Duration::from_millis(500), policy) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime");
+            let body = json!({ "group": "account", "opt": "login_account", "data": {} });
+            // Ignore the outcome: on a bypass it is the socket landing on the
+            // listener that fails the test, not the POST's return value (a
+            // connect that hangs maps to Dropped, not an error).
+            let _ = rt.block_on(transport.post("system", RpcVerb::SetInfo, &body));
+        }
+        // Any connection reqwest opened is queued on the listener's backlog by
+        // now (the TCP handshake completes at connect time, before the POST
+        // times out), so a single non-blocking accept detects a bypass.
+        !matches!(listener.accept(), Err(e) if e.kind() == ErrorKind::WouldBlock)
+    }
+
+    /// Bind a loopback listener that never `accept`s on its own, returning it and
+    /// its ephemeral port.
+    fn idle_loopback_listener() -> (TcpListener, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        listener
+            .set_nonblocking(true)
+            .expect("listener set_nonblocking");
+        let port = listener.local_addr().expect("listener local_addr").port();
+        (listener, port)
+    }
+
+    #[test]
+    fn refuses_loopback_literal_before_connecting() {
+        let (listener, port) = idle_loopback_listener();
+        // A plain loopback literal: reqwest dials 127.0.0.1 directly (no resolver
+        // hop), so a name-only screen misses it. It must be refused.
+        assert!(
+            !loopback_reached(&format!("http://127.0.0.1:{port}/"), &listener),
+            "loopback literal dial reached the listener (SSRF screen bypassed)"
+        );
+    }
+
+    #[test]
+    fn refuses_alt_encoded_loopback_before_connecting() {
+        let (listener, port) = idle_loopback_listener();
+        // `2130706433` is the 32-bit decimal form of 127.0.0.1: the WHATWG `url`
+        // parser reqwest uses normalizes it to the loopback literal and dials it
+        // directly. Rust's `IpAddr` parser does NOT recognize this form, so the
+        // config-load literal screen misses it — the dial-time screen must catch
+        // it on the canonical parsed IP.
+        assert!(
+            !loopback_reached(&format!("http://2130706433:{port}/"), &listener),
+            "alt-encoded (decimal) loopback dial reached the listener (SSRF screen bypassed)"
+        );
+    }
+}
