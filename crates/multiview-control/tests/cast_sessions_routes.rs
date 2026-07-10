@@ -202,6 +202,76 @@ async fn start_with_a_bad_address_is_a_validation_problem() {
 }
 
 #[tokio::test]
+async fn start_rejects_ssrf_dial_targets_before_spawn() {
+    // SEC-04 (CWE-918): the cast session actor dials `address` (TCP+TLS). A
+    // Write-role principal must not be able to point it at loopback, the cloud
+    // metadata endpoint, or an internal LAN host — the resolved IP is screened
+    // (default-deny), which also defeats DNS-rebind. Rejection is a 422 raised
+    // BEFORE any side effect: no session record, no actor spawn.
+    let h = cast_harness();
+    let rejected = [
+        "169.254.169.254:8009",    // cloud-metadata IMDS
+        "127.0.0.1:8009",          // loopback
+        "169.254.42.1:8009",       // link-local
+        "[::1]:8009",              // IPv6 loopback
+        "[fe80::1]:8009",          // IPv6 link-local
+        "[::ffff:127.0.0.1]:8009", // IPv4-mapped loopback bypass
+        "10.0.0.8:8009",           // RFC1918
+        "172.16.0.8:8009",
+        "192.168.0.8:8009",
+        "[fd00::8]:8009", // ULA
+    ];
+
+    for address in rejected {
+        let resp = send(
+            &h.router,
+            post_json(
+                "/api/v1/cast/sessions",
+                OPERATOR_TOKEN,
+                &serde_json::json!({ "address": address }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "SSRF-capable cast dial target {address:?} must fail before actor spawn"
+        );
+    }
+
+    // The rejected starts left nothing behind.
+    let resp = send(&h.router, get("/api/v1/cast/sessions", OPERATOR_TOKEN)).await;
+    let list = body_json(resp).await;
+    assert!(
+        list.as_array().expect("an array").is_empty(),
+        "a rejected SSRF start records no session"
+    );
+}
+
+#[tokio::test]
+async fn start_accepts_public_dial_targets() {
+    // Public / documentation IP literals (the suite's public stand-ins) reach
+    // the normal start path.
+    for address in ["198.51.100.8:8009", "[2001:db8::8]:8009"] {
+        let h = cast_harness();
+        let resp = send(
+            &h.router,
+            post_json(
+                "/api/v1/cast/sessions",
+                OPERATOR_TOKEN,
+                &serde_json::json!({ "address": address }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "public cast dial target {address:?} must be accepted"
+        );
+    }
+}
+
+#[tokio::test]
 async fn start_without_a_cast_driver_build_is_a_conflict() {
     // The default harness: no cast factory installed (the default registry's
     // no-op factory) — the route reports the missing live driver honestly
