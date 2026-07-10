@@ -69,6 +69,7 @@ pub mod decode;
 pub mod error;
 pub mod filter;
 pub mod format;
+pub mod loopdeck;
 pub mod loudness;
 pub mod loudnorm;
 pub mod meterdata;
@@ -88,6 +89,7 @@ pub use correlation::{CorrelationMeter, GonioPoint, SurroundDownmix};
 pub use decode::{meter_file, AudioFileDecoder, DecodedBlock};
 pub use error::{AudioError, Result};
 pub use format::{AudioBlock, AudioFormat, ChannelLayout};
+pub use loopdeck::{LoopDeck, LoopDeckError, DEFAULT_CROSSFADE_FRAMES};
 pub use loudness::LoudnessMeter;
 pub use loudnorm::{
     LoudnessTarget, LoudnormProcessor, DEFAULT_TRUE_PEAK_CEILING_DBTP, LIVE_TOLERANCE_LU,

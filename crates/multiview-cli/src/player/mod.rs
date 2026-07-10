@@ -37,10 +37,12 @@
 //! non-negotiable (a decoder-state hazard independent of the stamping
 //! timeline).
 
+mod control;
 mod handle;
 mod mailbox;
 mod transport;
 
+pub use control::{AudioTransport, PlayerControl, PlayerControlBus};
 pub use handle::PlayerHandle;
 pub use mailbox::{TransportMailbox, TransportVerb};
 pub use transport::{

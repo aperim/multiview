@@ -283,3 +283,5 @@ Decisions from the 2026-06-13 operator feature-request intake (all **Proposed**)
 - [ADR-0094](ADR-0094.md) — Subtitle layer enable/disable in the layout editor + per-output subtitle selection
 - [ADR-T016](ADR-T016.md) — Layered consumption offsets: universal input + per-output/per-layout/per-switcher overrides
 - [ADR-T017](ADR-T017.md) — A/V offset semantics: muxed vs separate feeds, independent audio/video, bounded realization
+- [ADR-T018](ADR-T018.md) — Output clock holds wall-clock cadence under overload (drop/repeat-to-cadence)
+- [ADR-T019](ADR-T019.md) — Media-player audio-on-loop: sample-exact buffer-and-replay loop deck with an equal-power seam crossfade, sample-locked to the video wrap

@@ -1655,6 +1655,13 @@ pub struct Pipeline {
     /// Built only for `bars` synthetic sources; empty when this run did not opt
     /// into program audio.
     tone_ingest_plans: Vec<crate::audio::ToneIngestPlan>,
+    /// Media-player channel **audio loop** plans (ADR-T019): how to prime + loop
+    /// each player's embedded audio onto the program bus on the same wrap instant
+    /// as the video. The drive starts one player-audio loop thread per plan,
+    /// writing into that player's [`Self::audio_stores`] entry (routed onto the bus
+    /// like any source's audio). Built only for media players whose default asset
+    /// declares a vamp window; empty when this run did not opt into program audio.
+    player_audio_ingest_plans: Vec<crate::audio::PlayerAudioPlan>,
     /// The fixed canvas color (ADR-C001 SDR BT.709 limited).
     canvas_color: CanvasColor,
     /// The "no signal" slate composited for tiles with no usable frame.
@@ -2059,6 +2066,15 @@ impl Pipeline {
             stores.insert(id, store);
         }
         ingest_plans.extend(media_player_boot.plans);
+        // ADR-T019: register each rolling player's `AudioStore` (so the program-bus
+        // routing below picks it up at unity gain, like any source's audio) and
+        // collect its audio loop plan (spawned in `drive_streaming`). A player with
+        // a silent asset still gets a store; its deck primes empty → it rides
+        // silence (no special-casing — exactly as a silent source does).
+        let player_audio_ingest_plans = media_player_boot.audio_plans;
+        for (id, audio_store) in media_player_boot.audio_stores {
+            audio_stores.insert(id, audio_store);
+        }
 
         // WHIP ingest wiring (ADR-T014, `webrtc-native`): one shared publisher
         // rendezvous registry the control plane's WhipProvider writes to and each
@@ -2208,6 +2224,7 @@ impl Pipeline {
             audio_stores,
             audio_ingest_plans,
             tone_ingest_plans,
+            player_audio_ingest_plans,
             inventories,
             #[cfg(feature = "overlay")]
             caption_stores,
@@ -2936,6 +2953,26 @@ impl Pipeline {
         } else {
             Vec::new()
         };
+        // Media-player channels with embedded audio (ADR-T019): each loops its
+        // asset's vamp-segment audio onto the program bus on the same wrap instant
+        // as the video. Spawned ONLY when this run opted into program audio (else no
+        // `ProgramBus` consumes the store). Each pairs the player's audio plan with
+        // its `AudioStore` (already routed onto the bus below).
+        let player_audio_plans: Vec<(
+            crate::audio::PlayerAudioPlan,
+            Arc<multiview_audio::store::AudioStore>,
+        )> = if self.encode_cfg.audio.is_some() {
+            std::mem::take(&mut self.player_audio_ingest_plans)
+                .into_iter()
+                .filter_map(|plan| {
+                    self.audio_stores
+                        .get(&plan.id)
+                        .map(|store| (plan, Arc::clone(store)))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         // The supervisor registers every producer's per-thread stop flag in the
         // run's shared registry (ADR-W018) — the video decode thread under `{id}`,
         // its audio/tone/caption companions under `{id}/<role>` — so a live
@@ -2944,6 +2981,7 @@ impl Pipeline {
             plans,
             audio_plans,
             tone_plans,
+            player_audio_plans,
             caption_plans,
             &self.stop_registry,
         );
@@ -5421,6 +5459,11 @@ impl IngestSupervisor {
     /// #10). The audio thread is the peer of the video decode thread: it decodes
     /// the SAME source's audio (its own libav context) into the source's
     /// `AudioStore`, which the program bus samples.
+    // A sequence of near-identical per-role spawn loops (video / audio / tone /
+    // player-audio / captions), each registering a stop flag + ExitGuard and
+    // pushing a producer handle: clearer kept whole than split across five helpers
+    // that would each take the registry + the producers vec.
+    #[allow(clippy::too_many_lines)]
     fn start(
         plans: Vec<IngestPlan>,
         audio_plans: Vec<(
@@ -5431,6 +5474,13 @@ impl IngestSupervisor {
             crate::audio::ToneIngestPlan,
             Arc<multiview_audio::store::AudioStore>,
         )>,
+        // Media-player channels whose loaded asset has audio (ADR-T019): each
+        // loops its embedded audio on its own thread onto the program bus, on the
+        // same wrap instant as the video. Empty when no player carries audio.
+        player_audio_plans: Vec<(
+            crate::audio::PlayerAudioPlan,
+            Arc<multiview_audio::store::AudioStore>,
+        )>,
         caption_plans: Vec<crate::captions::CaptionPlan>,
         registry: &crate::live_sources::StopRegistry,
     ) -> Self {
@@ -5439,6 +5489,7 @@ impl IngestSupervisor {
                 .len()
                 .saturating_add(audio_plans.len())
                 .saturating_add(tone_plans.len())
+                .saturating_add(player_audio_plans.len())
                 .saturating_add(caption_plans.len()),
         );
         for plan in plans {
@@ -5546,6 +5597,45 @@ impl IngestSupervisor {
                     // is best-effort and never gates the output clock (invariant #1).
                     tracing::error!(error = %e, source = %id, "could not spawn tone publish thread");
                 }
+            }
+        }
+        // Media-player channels with embedded audio (ADR-T019): each loops its
+        // asset's `[vamp_in, vamp_out)` audio onto the program bus on the same wrap
+        // instant as the video. Spawned exactly like the per-source audio decode
+        // threads, registered under the derived `{id}/player-audio` key (ADR-W018).
+        // The driver is `ffmpeg`-gated (it decodes the asset); without `ffmpeg` a
+        // player carries no audio and rides silence (consistent with every other
+        // decode path), so the plan is consumed (`stop`/store dropped) but no thread
+        // spawns.
+        for (plan, store) in player_audio_plans {
+            let stop = Arc::new(AtomicBool::new(false));
+            let id = plan.id.clone();
+            let exited =
+                crate::live_sources::register_stop(registry, &format!("{id}/player-audio"), &stop);
+            let exit_guard = crate::live_sources::ExitGuard::new(&exited);
+            let thread_stop = Arc::clone(&stop);
+            #[cfg(feature = "ffmpeg")]
+            {
+                let builder =
+                    std::thread::Builder::new().name(format!("multiview-player-audio-{id}"));
+                match builder.spawn(move || {
+                    let _exit = exit_guard;
+                    crate::audio::player_audio_loop(&plan, &store, &thread_stop);
+                }) {
+                    Ok(handle) => producers.push((stop, handle)),
+                    Err(e) => {
+                        // A player-audio thread that cannot spawn is logged and
+                        // skipped: its channel loops video normally and rides audio
+                        // silence (best-effort — invariant #1; never gates output).
+                        tracing::error!(error = %e, player = %id, "could not spawn media-player audio loop thread");
+                    }
+                }
+            }
+            #[cfg(not(feature = "ffmpeg"))]
+            {
+                // No decode without `ffmpeg`: drop the guard (flips `exited`) and the
+                // store; the player rides audio silence.
+                let _ = (exit_guard, thread_stop, store);
             }
         }
         for plan in caption_plans {
@@ -7413,6 +7503,14 @@ struct MediaPlayerBoot {
     plans: Vec<IngestPlan>,
     stores: Vec<(String, Arc<TileStore<Nv12Image>>)>,
     mailboxes: std::collections::HashMap<String, Arc<crate::player::TransportMailbox>>,
+    /// Per-player **audio** stores (ADR-T019): a player with a rolling asset gets
+    /// an `AudioStore` the program bus routes (so its looped audio joins the mix);
+    /// the `player_audio_loop` thread fills it. Empty for an idle player.
+    audio_stores: Vec<(String, Arc<multiview_audio::store::AudioStore>)>,
+    /// Per-player audio loop plans (ADR-T019): how to prime + loop each rolling
+    /// player's embedded audio, carrying the SAME vamp geometry + mailbox the video
+    /// uses so audio wraps on the same instant. One per rolling player.
+    audio_plans: Vec<crate::audio::PlayerAudioPlan>,
 }
 
 /// Build the boot-time media-player channels from `config.media_players`
@@ -7445,6 +7543,8 @@ fn build_media_player_boot(
         plans: Vec::new(),
         stores: Vec::new(),
         mailboxes: std::collections::HashMap::new(),
+        audio_stores: Vec::new(),
+        audio_plans: Vec::new(),
     };
     let library = config.media_library.as_ref();
     let root = library.and_then(|l| l.root.as_deref());
@@ -7500,6 +7600,9 @@ fn build_media_player_boot(
             Some(r) => std::path::Path::new(r).join(&asset.path),
             None => std::path::PathBuf::from(&asset.path),
         };
+        // The libav-openable audio location (the SAME media as the video; the audio
+        // peer opens its own `!Send` libav context) for the player audio loop.
+        let audio_location = path.to_string_lossy().into_owned();
 
         let (tile_w, tile_h) = cell_pixel_size(layout, &player.id)
             .unwrap_or((config.canvas.width, config.canvas.height));
@@ -7516,6 +7619,26 @@ fn build_media_player_boot(
             player.loop_default,
             mailbox,
         );
+
+        // ADR-T019 §1: this rolling player gets an `AudioStore` (routed onto the
+        // bus like any source) + an audio loop plan carrying the SAME vamp geometry
+        // AND the SAME `PlayerControlBus` the video handle publishes to — so the
+        // audio rail samples the video's authoritative transport state and wraps/
+        // exits on the same instant by construction. A silent asset rides silence
+        // (the deck primes empty).
+        let audio_control_bus = Arc::clone(&handle.control_bus);
+        let audio_store = crate::audio::new_store();
+        boot.audio_stores
+            .push((player.id.clone(), Arc::clone(&audio_store)));
+        boot.audio_plans.push(crate::audio::PlayerAudioPlan {
+            id: player.id.clone(),
+            location: audio_location,
+            vamp_in_frames: geometry.vamp_in(),
+            vamp_out_frames: geometry.vamp_out(),
+            cadence: geometry.cadence(),
+            output_cadence: cadence,
+            control_bus: audio_control_bus,
+        });
 
         boot.stores.push((player.id.clone(), Arc::clone(&store)));
         boot.plans.push(IngestPlan {
@@ -9375,6 +9498,21 @@ fn stream_player(
     // the start frame and is reset by a wrap seek; advances 1:1 with decoded
     // frames otherwise.
     let mut source_frame = start_frame;
+    // ADR-T019 §1/§2 (single-authority transport coupling): the video rail is the
+    // SOLE mailbox consumer and PUBLISHES its applied transport state to the
+    // wait-free `control_bus` the audio rail samples. `last_published_at` tracks the
+    // video's most recent output media-time; `armed_anchor` LATCHES that time at the
+    // edge the exit is armed (stable while armed — the audio arms at the SAME
+    // boundary, with no per-frame churn — MAJOR-5); `last_audio_control` is the last
+    // `(AudioTransport, exit_armed, anchor)` published, so the bus is bumped only on
+    // a real change (including a CHANGED anchor — a re-arm).
+    let mut last_published_at = multiview_core::time::MediaTime::ZERO;
+    let mut armed_anchor: Option<multiview_core::time::MediaTime> = None;
+    let mut last_audio_control: Option<(
+        crate::player::AudioTransport,
+        bool,
+        Option<multiview_core::time::MediaTime>,
+    )> = None;
     // A pending **frame-accurate seek target**: when `Some(t)`, the decoder has
     // just been seeked to a keyframe at-or-before `t` (libav seeks land on a
     // keyframe ≤ target), so the loop **decodes-and-discards** every frame whose
@@ -9463,6 +9601,26 @@ fn stream_player(
             }
         }
 
+        // ADR-T019 §1/§2: after applying the drained verbs, publish the player's
+        // authoritative transport state to the audio rail's control bus — but only
+        // when it actually changed (the bus is wait-free and cheap, but bumping the
+        // generation needlessly would make the audio re-apply each block). LATCH the
+        // exit anchor at the edge the exit is armed (the video's then-current output
+        // media-time), so it is stable while armed (no per-frame churn) yet a re-arm
+        // at a different boundary updates it and re-reaches the deck (MAJOR-5).
+        armed_anchor = if player.exit_armed() {
+            // Latch on the false→true edge; hold the latched value while it stays armed.
+            Some(armed_anchor.unwrap_or(last_published_at))
+        } else {
+            None
+        };
+        publish_audio_control(
+            handle,
+            player.state(),
+            armed_anchor.unwrap_or(last_published_at),
+            &mut last_audio_control,
+        );
+
         // Pull every frame the decoder currently has, deciding per frame.
         while let Some(decoded) = decoder.receive_frame().map_err(|e| e.to_string())? {
             // Establish the asset's PTS origin from the very first decoded frame
@@ -9512,6 +9670,10 @@ fn stream_player(
                     let image = Arc::new(image);
                     last_image = Some(Arc::clone(&image));
                     plan.store.publish_arc(image, at);
+                    // Track the video's output media-time for the audio exit anchor
+                    // (ADR-T019 §1): the audio arms its exit at the next vamp
+                    // boundary at-or-after this same media-time.
+                    last_published_at = at;
                     source_frame = source_frame.saturating_add(1);
                     produced_this_lap = produced_this_lap.saturating_add(1);
                 }
@@ -9627,6 +9789,199 @@ fn stream_player(
             }
             Err(other) => return Err(other.to_string()),
         }
+    }
+}
+
+/// Publish the video player's authoritative transport state to the audio rail's
+/// wait-free control bus (ADR-T019 §1), but only when it changed since the last
+/// publish (so the audio re-applies on a real transition, not every frame). Maps
+/// the video [`MediaPlayerState`] onto the audio-rail subset
+/// ([`AudioTransport`](crate::player::AudioTransport)): publishing/vamping →
+/// `Vamping` (carrying the exit anchor when an exit is armed); paused/held/cued/
+/// loading → `Paused`; stopped (re-cued) → `Stopped`; the EOF terminals settle to
+/// `Paused` (the audio bus contributes silence while the video tile holds its
+/// terminal frame). The exit anchor is the video's most recent output media-time,
+/// so the audio arms at the SAME next-vamp boundary the video reaches.
+fn publish_audio_control(
+    handle: &crate::player::PlayerHandle,
+    state: crate::player::MediaPlayerState,
+    armed_anchor: multiview_core::time::MediaTime,
+    last: &mut Option<(
+        crate::player::AudioTransport,
+        bool,
+        Option<multiview_core::time::MediaTime>,
+    )>,
+) {
+    use crate::player::{AudioTransport, EofPolicy, MediaPlayerState};
+    use multiview_core::time::MediaTime;
+    // (audio_state, exit_armed, exit_anchor). For a forever-loop the audio vamps
+    // with no exit; for an armed vamp exit the audio arms at the video's LATCHED
+    // arm anchor (`armed_anchor`, stable while armed — the SAME next boundary); for a
+    // one-shot `Playing` (non-`Loop` policy) the audio arms at ZERO so it settles to
+    // silence after the first lap (mirroring the video playing `[in,out)` once then
+    // holding its terminal frame). The video's re-cue state (`Cued`, where
+    // `MediaPlayer::stop()` lands) maps to `Stopped` (an audio RE-CUE), distinct from
+    // a genuine `Paused` (hold-in-place) — MAJOR-4.
+    let loops_forever = matches!(handle.eof_policy, EofPolicy::Loop);
+    let (audio_state, exit_armed, anchor) = match state {
+        MediaPlayerState::Playing if loops_forever => (AudioTransport::Vamping, false, None),
+        MediaPlayerState::Playing => (AudioTransport::Vamping, true, Some(MediaTime::ZERO)),
+        MediaPlayerState::Vamping { exit_armed: true } => {
+            (AudioTransport::Vamping, true, Some(armed_anchor))
+        }
+        MediaPlayerState::Vamping { exit_armed: false } => (AudioTransport::Vamping, false, None),
+        // The video re-cue (Cued) → an audio re-cue (Stopped), not pause.
+        MediaPlayerState::Cued => (AudioTransport::Stopped, false, None),
+        MediaPlayerState::Paused
+        | MediaPlayerState::Holding
+        | MediaPlayerState::Black
+        | MediaPlayerState::Idle
+        | MediaPlayerState::Loading
+        | MediaPlayerState::Ended => (AudioTransport::Paused, false, None),
+    };
+    // Suppress on the FULL (state, exit_armed, anchor) triple so a CHANGED arm anchor
+    // (a re-arm / move-exit at a different boundary) always reaches the deck even
+    // when (state, exit_armed) is unchanged (MAJOR-5) — while an unchanged control is
+    // still suppressed (no per-frame generation churn, because `armed_anchor` is
+    // latched at the arm edge by the caller, not re-sampled every frame).
+    let key = (audio_state, exit_armed, anchor);
+    if *last == Some(key) {
+        return;
+    }
+    *last = Some(key);
+    handle.control_bus.publish(audio_state, anchor);
+}
+
+#[cfg(test)]
+mod publish_audio_control_tests {
+    //! MAJOR-5 (ADR-T019 §2): a CHANGED exit-arm anchor must always reach the audio
+    //! rail even when `(audio_state, exit_armed)` is unchanged — the round-2
+    //! suppression keyed only on `(audio_state, exit_armed)` and dropped a re-arm at
+    //! a different boundary. The fix suppresses only on the FULL `(state,
+    //! exit_armed, anchor)` triple. Also pins MAJOR-4: a re-cue (`Cued`) maps to
+    //! `AudioTransport::Stopped` (re-cue), not `Paused`.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use std::sync::Arc;
+
+    use multiview_core::time::{MediaTime, Rational};
+
+    use super::publish_audio_control;
+    use crate::player::{
+        AudioTransport, EofPolicy, MediaPlayerState, PlayerHandle, PlayoutGeometry,
+        TransportMailbox,
+    };
+
+    fn handle(eof: EofPolicy) -> PlayerHandle {
+        // A 1 s vamp window at 48 fps (in=0,out=48,vamp 0..48) — geometry irrelevant
+        // to the suppression logic, only valid construction matters.
+        let geometry = PlayoutGeometry::new(0, 48, 0, 48, Rational::new(48, 1)).unwrap();
+        PlayerHandle::new(
+            "p".to_owned(),
+            geometry,
+            eof,
+            true,
+            Arc::new(TransportMailbox::new()),
+        )
+    }
+
+    /// A re-published armed-vamp-exit with a CHANGED anchor (a re-arm / move-exit at
+    /// a different boundary) must bump the bus generation — it is NOT suppressed by
+    /// the `(Vamping, exit_armed=true)` tuple repeating.
+    #[test]
+    fn a_changed_arm_anchor_propagates_even_when_state_is_unchanged() {
+        let handle = handle(EofPolicy::Loop);
+        let mut last = None;
+
+        // First arm at anchor A1.
+        let a1 = MediaTime::from_nanos(1_000_000_000);
+        publish_audio_control(
+            &handle,
+            MediaPlayerState::Vamping { exit_armed: true },
+            a1,
+            &mut last,
+        );
+        let after_first = handle.control_bus.load();
+        assert_eq!(after_first.state, AudioTransport::Vamping);
+        assert_eq!(
+            after_first.exit_arm_anchor,
+            Some(a1),
+            "the first arm publishes anchor A1"
+        );
+        let gen1 = after_first.generation;
+
+        // Re-arm at a DIFFERENT anchor A2, SAME (state, exit_armed). Must publish.
+        let a2 = MediaTime::from_nanos(3_000_000_000);
+        publish_audio_control(
+            &handle,
+            MediaPlayerState::Vamping { exit_armed: true },
+            a2,
+            &mut last,
+        );
+        let after_second = handle.control_bus.load();
+        assert!(
+            after_second.generation > gen1,
+            "a changed arm anchor must bump the generation (not be suppressed) — MAJOR-5"
+        );
+        assert_eq!(
+            after_second.exit_arm_anchor,
+            Some(a2),
+            "the changed anchor A2 must reach the bus"
+        );
+    }
+
+    /// An UNCHANGED control (same state, same anchor) is suppressed — no needless
+    /// per-frame generation churn (the other half of the MAJOR-5 contract).
+    #[test]
+    fn an_unchanged_control_is_suppressed() {
+        let handle = handle(EofPolicy::Loop);
+        let mut last = None;
+        let a = MediaTime::from_nanos(1_000_000_000);
+        publish_audio_control(
+            &handle,
+            MediaPlayerState::Vamping { exit_armed: true },
+            a,
+            &mut last,
+        );
+        let gen1 = handle.control_bus.load().generation;
+        // Same state + same anchor again: suppressed.
+        publish_audio_control(
+            &handle,
+            MediaPlayerState::Vamping { exit_armed: true },
+            a,
+            &mut last,
+        );
+        assert_eq!(
+            handle.control_bus.load().generation,
+            gen1,
+            "an unchanged control must be suppressed (no per-frame churn)"
+        );
+    }
+
+    /// MAJOR-4: the video's re-cue state (`Cued`, where `MediaPlayer::stop()` lands)
+    /// maps to `AudioTransport::Stopped` (re-cue), NOT `Paused` (hold-in-place).
+    #[test]
+    fn cued_maps_to_stopped_not_paused() {
+        let handle = handle(EofPolicy::Loop);
+        let mut last = None;
+        publish_audio_control(&handle, MediaPlayerState::Cued, MediaTime::ZERO, &mut last);
+        assert_eq!(
+            handle.control_bus.load().state,
+            AudioTransport::Stopped,
+            "the video re-cue (Cued) must route to an audio re-cue (Stopped), not pause (MAJOR-4)"
+        );
+        // Paused/Holding still map to Paused (hold).
+        let mut last2 = None;
+        publish_audio_control(
+            &handle,
+            MediaPlayerState::Paused,
+            MediaTime::ZERO,
+            &mut last2,
+        );
+        assert_eq!(
+            handle.control_bus.load().state,
+            AudioTransport::Paused,
+            "an actual pause still maps to Paused (hold position)"
+        );
     }
 }
 
@@ -11749,8 +12104,14 @@ segment_ms = 1000
         .expect("rtsp ingest plan");
 
         let registry = stop_registry();
-        let supervisor =
-            IngestSupervisor::start(vec![plan], Vec::new(), Vec::new(), Vec::new(), &registry);
+        let supervisor = IngestSupervisor::start(
+            vec![plan],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            &registry,
+        );
         let flag = registry
             .lock()
             .expect("registry")
@@ -11776,8 +12137,14 @@ segment_ms = 1000
             live: true,
         };
         let registry = stop_registry();
-        let supervisor =
-            IngestSupervisor::start(Vec::new(), Vec::new(), Vec::new(), vec![plan], &registry);
+        let supervisor = IngestSupervisor::start(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![plan],
+            &registry,
+        );
         let flag = registry
             .lock()
             .expect("registry")
@@ -12872,6 +13239,43 @@ loop_default = true
             panic!("expected a Path location for the player's asset");
         };
         assert_eq!(p.to_str().unwrap(), "/srv/media/opener.ts");
+
+        // ADR-T019: the rolling player ALSO gets an audio store + audio loop plan
+        // (so its embedded audio joins the program bus on the same wrap instant),
+        // carrying the SAME vamp geometry as the video and the SAME asset path.
+        assert_eq!(
+            boot.audio_stores.len(),
+            1,
+            "the rolling player gets an audio store"
+        );
+        assert_eq!(boot.audio_stores[0].0, "vt-1");
+        assert_eq!(
+            boot.audio_plans.len(),
+            1,
+            "the rolling player gets an audio loop plan"
+        );
+        let ap = &boot.audio_plans[0];
+        assert_eq!(ap.id, "vt-1");
+        assert_eq!(
+            ap.location, "/srv/media/opener.ts",
+            "audio decodes the SAME asset as the video"
+        );
+        assert_eq!(
+            ap.vamp_in_frames, 10,
+            "audio loops the SAME vamp window as the video"
+        );
+        assert_eq!(ap.vamp_out_frames, 90);
+        assert_eq!(
+            ap.cadence, cadence,
+            "audio uses the asset cadence for the frame→sample map"
+        );
+        // ADR-T019 §1: the audio plan shares the SAME `PlayerControlBus` Arc as the
+        // video handle — the single authority that makes the rails wrap/exit on the
+        // same instant by construction (not a second destructive mailbox drain).
+        assert!(
+            std::sync::Arc::ptr_eq(&ap.control_bus, &handle.control_bus),
+            "the audio rail follows the video handle's control bus (same Arc)"
+        );
     }
 
     #[test]
@@ -12888,6 +13292,16 @@ loop_default = true
         assert!(
             boot.mailboxes.contains_key("vt-1"),
             "an idle player still registers its mailbox"
+        );
+        // An idle player contributes no audio store/plan either (ADR-T019): nothing
+        // to loop until a load command binds an asset (probe-at-load is post-MVP).
+        assert!(
+            boot.audio_stores.is_empty(),
+            "an idle player has no audio store"
+        );
+        assert!(
+            boot.audio_plans.is_empty(),
+            "an idle player has no audio loop plan"
         );
     }
 }
