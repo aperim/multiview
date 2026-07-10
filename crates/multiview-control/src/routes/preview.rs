@@ -185,6 +185,39 @@ fn whep_reject_response(scope: &WhepScope, reject: WhepReject) -> Response {
     }
 }
 
+/// Per-scope authorization for a WHEP focus (BOLA, SEC-06/07 / ADR-W005/W026).
+///
+/// A focus session exposes the live pixels of exactly one entity, so opening or
+/// releasing one must be authorized on that entity's axis — the same per-object /
+/// per-output checks the REST twins use, enforced HERE at the route layer because
+/// the [`crate::preview::WhepProvider`] seam is codec-only and never sees a
+/// [`Principal`]:
+///
+/// * [`WhepScope::Input`] → the object (source) axis ([`crate::auth::authorize_object`]).
+/// * [`WhepScope::Output`] → the output (rendition) axis ([`crate::auth::authorize_output`]).
+/// * [`WhepScope::Program`] → the whole composited canvas, which embeds every
+///   object and output, so only an unrestricted principal may focus it
+///   ([`crate::routes::require_unscoped_for_whole_system`]).
+///
+/// The match carries no wildcard, so a newly-added [`WhepScope`] variant
+/// compile-forces its authorization policy here rather than silently defaulting
+/// to allow.
+///
+/// # Errors
+///
+/// [`crate::error::ControlError::Forbidden`] if the principal's relevant scope
+/// axis denies the focus.
+fn authorize_whep_scope(
+    principal: &Principal,
+    scope: &WhepScope,
+) -> Result<(), crate::error::ControlError> {
+    match scope {
+        WhepScope::Program => crate::routes::require_unscoped_for_whole_system(principal),
+        WhepScope::Input(id) => crate::auth::authorize_object(principal, id),
+        WhepScope::Output(id) => crate::auth::authorize_output(principal, id),
+    }
+}
+
 /// Negotiate a WHEP focus session for `scope` from an SDP `offer` body.
 ///
 /// Shared by the program / input / output `POST …/whep` handlers. Opening a
@@ -204,6 +237,12 @@ fn negotiate_whep(
     offer: &str,
 ) -> Response {
     if let Err(err) = principal.role.require(Action::Write) {
+        return err.into_response();
+    }
+    // Per-scope authz (BOLA, SEC-06/07): the focus exposes one entity's live
+    // pixels, so authorize the scope's axis BEFORE negotiating — a denial never
+    // reaches the transport (zero side effect).
+    if let Err(err) = authorize_whep_scope(principal, scope) {
         return err.into_response();
     }
     match state.whep.negotiate(scope, offer) {
@@ -247,6 +286,11 @@ fn release_whep(
     session_id: &str,
 ) -> Response {
     if let Err(err) = principal.role.require(Action::Write) {
+        return err.into_response();
+    }
+    // Per-scope authz (BOLA, SEC-06/07): a teardown is scoped exactly like an
+    // open — a principal may release only a focus on an entity within its scope.
+    if let Err(err) = authorize_whep_scope(principal, scope) {
         return err.into_response();
     }
     if state.whep.release(scope, session_id) {
