@@ -699,7 +699,17 @@ impl SessionStream {
     }
 
     /// Wire live re-authorization with an explicit **baseline generation**
-    /// (ADR-RT010) — the store authorization generation captured at connect-auth.
+    /// captured at connect-authentication (ADR-RT010).
+    ///
+    /// `baseline_generation` is the store's authorization generation sampled at the
+    /// moment the connecting principal was resolved (`resolve_principal`), *before*
+    /// the handle is installed. Because it is captured at-or-before the principal
+    /// read, a revoke or re-scope landing in the connect window — between auth and
+    /// install — leaves `store.generation() > baseline`, so the first
+    /// [`reauthorize`](Self::reauthorize) re-resolves and honors it (disconnect on
+    /// revoke, adopt on re-scope). This closes the connect-race a fresh build-time
+    /// sample would miss (it would capture the post-mutation generation with the
+    /// pre-mutation principal, and never re-resolve).
     #[must_use]
     pub fn with_live_reauth_at(
         mut self,
@@ -708,13 +718,11 @@ impl SessionStream {
         role: Role,
         baseline_generation: u64,
     ) -> Self {
-        let _ = baseline_generation;
-        let generation = store.generation();
         self.live_authz = Some(LiveAuthz {
             store,
             key_id: key_id.into(),
             role,
-            generation,
+            generation: baseline_generation,
         });
         self
     }
@@ -777,9 +785,10 @@ impl SessionStream {
                 }
             }
             // The key is gone (revoked), or the re-resolved role can no longer read
-            // the realtime firehose — the mirror of the connect-time read gate. No
-            // current role fails `Read`, so this is the revocation path plus a
-            // forward-compatible guard for a future non-reading role.
+            // the realtime firehose. Since EVERY current role permits `Action::Read`,
+            // the role-can't-read arm is currently UNREACHABLE (untested by
+            // construction) — a forward-compatible guard for a future non-reading
+            // role; in practice this is exclusively the key-revocation path.
             _ => ReauthOutcome::Disconnect,
         }
     }
@@ -788,11 +797,15 @@ impl SessionStream {
     /// **rebuild** (not merge) the object-bearing topics after a mid-session scope
     /// change (ADR-RT010, [`ReauthOutcome::ScopeChanged`]).
     ///
-    /// It names every topic that can carry an object-authz-scoped object
-    /// ([`Topic::Tiles`], [`Topic::Devices`], [`Topic::Switcher`]), so the client
-    /// drops ALL now-hidden cached objects on them; the transport then re-sends the
-    /// connect snapshot set under the new scope, so the client rebuilds to exactly
-    /// what a fresh connect under the new scope would show. Reason
+    /// It names exactly the topics `build_resync_frames` re-snapshots
+    /// ([`Topic::Tiles`], [`Topic::Devices`]). `Switcher` is deliberately EXCLUDED:
+    /// it is neither object-authz-scoped (the scope filter is Devices-domain) nor
+    /// re-snapshotted at connect or on resync, so listing it would tell a
+    /// rebuild-not-merge client to clear switcher state it never receives back —
+    /// stranding it. The client drops now-hidden cached objects on the listed
+    /// topics; the transport then re-sends the connect snapshot set under the new
+    /// scope, so the client rebuilds to exactly what a fresh connect under the new
+    /// scope would show. Reason
     /// [`ResyncReason::AuthzChanged`] distinguishes it from a replay-ring miss. Like
     /// the other snapshot frames it goes through `issue_seq`, so the per-connection
     /// seq stays gapless (resume-by-seq intact).
@@ -805,7 +818,7 @@ impl SessionStream {
             MediaTime::from_nanos(i64::try_from(snapshot_seq).unwrap_or(i64::MAX)),
             Event::Resync(Resync {
                 reason: ResyncReason::AuthzChanged,
-                resubscribe: vec![Topic::Tiles, Topic::Devices, Topic::Switcher],
+                resubscribe: vec![Topic::Tiles, Topic::Devices],
             }),
         );
         RealtimeFrame {
@@ -1392,7 +1405,7 @@ pub async fn ws_handler(
     // axum's `WebSocketUpgrade` extractor runs — an unauthenticated request is a
     // `401`/`403` `problem+json`, never pre-empted by the upgrade extractor's
     // `426` on a request without the upgrade handshake.
-    RealtimeViewer(principal): RealtimeViewer,
+    RealtimeViewer(principal, live_baseline): RealtimeViewer,
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -1400,7 +1413,9 @@ pub async fn ws_handler(
     // read-side projection of only its in-scope device/cast objects (BOLA
     // visibility, ADR-W005/ADR-W025) AND re-resolves live if its authorization is
     // narrowed/revoked mid-session (ADR-RT010). An unscoped principal sees all.
-    ws.on_upgrade(move |socket| run_ws_session(socket, state, principal))
+    // `live_baseline` is the auth-time authorization generation (store keys only),
+    // threaded so a change racing the upgrade is caught by the first reauthorize.
+    ws.on_upgrade(move |socket| run_ws_session(socket, state, principal, live_baseline))
 }
 
 /// A pre-upgrade auth gate for the realtime transports.
@@ -1411,7 +1426,12 @@ pub async fn ws_handler(
 /// authentication strictly precede the upgrade. So an unauthenticated /
 /// under-privileged client always gets a debuggable `401`/`403` HTTP response,
 /// not a `426` from the upgrade extractor (nor a silently-closed socket).
-pub struct RealtimeViewer(pub Principal);
+///
+/// Carries the resolved [`Principal`] and its live-reauth baseline generation
+/// (`Some` for store-managed API keys, `None` otherwise; ADR-RT010) captured at
+/// authentication, so the session installs live re-authorization against the
+/// connect-time generation and catches a change racing the handshake.
+pub struct RealtimeViewer(pub Principal, pub Option<u64>);
 
 impl FromRequestParts<AppState> for RealtimeViewer {
     type Rejection = Response;
@@ -1426,13 +1446,14 @@ impl FromRequestParts<AppState> for RealtimeViewer {
             .await
             .ok()
             .and_then(|q| q.0.access_token);
-        let principal = resolve_principal(state, &parts.headers, access_token.as_deref())
-            .map_err(IntoResponse::into_response)?;
+        let (principal, live_baseline) =
+            resolve_principal(state, &parts.headers, access_token.as_deref())
+                .map_err(IntoResponse::into_response)?;
         principal
             .role
             .require(Action::Read)
             .map_err(IntoResponse::into_response)?;
-        Ok(Self(principal))
+        Ok(Self(principal, live_baseline))
     }
 }
 
@@ -1447,27 +1468,44 @@ pub struct AccessTokenQuery {
 
 /// Resolve a [`Principal`] from the `Authorization` header (API key, then JWT) or,
 /// failing that, the `access_token` query parameter (the browser WS/SSE path).
+///
+/// Returns the principal and its **live-reauth baseline** (ADR-RT010): `Some(gen)`
+/// — the store authorization generation captured *before* the store lookup — for a
+/// store-managed API-key principal (revocable/re-scopable), or `None` for a
+/// local-admin (auth disabled) or JWT principal, which are not store-revocable.
+/// Capturing the generation before the lookup makes a revoke/re-scope racing the
+/// connect handshake observable to the first `reauthorize` (it advances past the
+/// baseline), closing the connect-race.
 fn resolve_principal(
     state: &AppState,
     headers: &HeaderMap,
     access_token: Option<&str>,
-) -> Result<Principal, crate::error::ControlError> {
+) -> Result<(Principal, Option<u64>), crate::error::ControlError> {
     // Auth disabled (explicit trusted-network mode): the realtime stream is open
-    // as a local admin, matching the REST `Principal` extractor.
+    // as a local admin, matching the REST `Principal` extractor. Not store-managed,
+    // so no live-authz baseline.
     if state.auth_disabled {
-        return Ok(Principal::local_admin());
+        return Ok((Principal::local_admin(), None));
     }
+    // Capture the store's authorization generation BEFORE resolving a store key
+    // (ADR-RT010 connect-race). Generation is monotonic, so a baseline captured here
+    // is never newer than the generation consistent with whatever principal the
+    // verify below reads — a too-old baseline only forces a harmless redundant first
+    // re-resolve; a too-new one would mask a window change (the defect this fixes).
+    let baseline = state.api_keys.generation();
     let header = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
     if let Ok(principal) = state.api_keys.verify_authorization(header) {
-        return Ok(principal);
+        return Ok((principal, Some(baseline)));
     }
+    // JWT principals are not in the API-key store (revocation is a separate denylist,
+    // future work): no live-authz baseline.
     if let Some(Ok(principal)) = state.authenticate_jwt(header) {
-        return Ok(principal);
+        return Ok((principal, None));
     }
     if let Some(token) = access_token {
-        return state.api_keys.verify(token);
+        return state.api_keys.verify(token).map(|p| (p, Some(baseline)));
     }
     Err(crate::error::ControlError::Unauthenticated)
 }
@@ -1505,14 +1543,18 @@ pub async fn auth_status_handler(
 /// Install live re-authorization on `session` **iff** the principal is a
 /// store-managed API key (ADR-RT010).
 ///
-/// Local-admin (auth disabled) and JWT principals have no [`ApiKeyStore`] entry —
-/// `principal_for_key` is [`None`] — so they are not store-revocable and keep their
-/// connect-time authorization (a JWT denylist is separate future work). Consumes
-/// the `Principal` (its `key_id`/`role` move into the session's live-authz handle).
+/// `live_baseline` (from [`resolve_principal`]) is `Some(generation)` for a
+/// store-managed API-key principal and `None` for a local-admin (auth disabled) or
+/// JWT principal — which are not store-revocable and keep their connect-time
+/// authorization (a JWT denylist is separate future work). The handle is installed
+/// for every store key, so even a key revoked in the connect window disconnects on
+/// the first re-resolution. Consumes the `Principal` (its `key_id`/`role` move into
+/// the session's live-authz handle).
 fn install_live_reauth(
     session: SessionStream,
     state: &AppState,
     principal: Principal,
+    live_baseline: Option<u64>,
 ) -> SessionStream {
     let Principal {
         key_id,
@@ -1521,10 +1563,20 @@ fn install_live_reauth(
         ..
     } = principal;
     let session = session.with_object_scope(scoped_object_ids);
-    if state.api_keys.principal_for_key(&key_id).is_some() {
-        session.with_live_reauth(Arc::clone(&state.api_keys), key_id, role)
-    } else {
-        session
+    // `live_baseline` is `Some` exactly for store-managed API-key principals
+    // (`resolve_principal`), carrying the generation captured at auth. Install the
+    // live-authz handle UNCONDITIONALLY for them — even if the key was already
+    // revoked in the connect window (`principal_for_key` would now be `None`) — so
+    // the connect-race gate / first reauthorize disconnects. The old racy
+    // `principal_for_key(&key_id).is_some()` re-probe conflated "revoked store key"
+    // with "not a store key" and silently skipped the handle, stranding a
+    // revoked-in-window session authorized forever. Local-admin and JWT principals
+    // (`None`) are not store-revocable and keep their connect-time authorization.
+    match live_baseline {
+        Some(baseline) => {
+            session.with_live_reauth_at(Arc::clone(&state.api_keys), key_id, role, baseline)
+        }
+        None => session,
     }
 }
 
@@ -1569,7 +1621,12 @@ fn forbidden_close_frame() -> CloseFrame {
 /// (BOLA visibility, ADR-W005/ADR-W025) and, for a store-managed API key, its
 /// authorization is re-resolved live so a mid-session narrow/widen/revoke takes
 /// effect without a reconnect (ADR-RT010).
-async fn run_ws_session(mut socket: WebSocket, state: AppState, principal: Principal) {
+async fn run_ws_session(
+    mut socket: WebSocket,
+    state: AppState,
+    principal: Principal,
+    live_baseline: Option<u64>,
+) {
     let sub = state.engine.subscribe();
     let session_id = uuid_session_id();
     // Capture the broadcast watermark BETWEEN subscribing and reading the snapshot
@@ -1585,7 +1642,22 @@ async fn run_ws_session(mut socket: WebSocket, state: AppState, principal: Princ
         .with_corr_registry(Arc::clone(&state.corr))
         .with_snapshot_watermark(watermark);
     // Carry the object scope + wire live re-authorization for store-managed keys.
-    let mut session = install_live_reauth(session, &state, principal);
+    let mut session = install_live_reauth(session, &state, principal, live_baseline);
+
+    // Connect-race gate (ADR-RT010): re-resolve against the auth-time generation
+    // BEFORE any snapshot is sent, so a revoke/re-scope that landed in the connect
+    // window is honored with no leak — a revoked key closes immediately (no
+    // snapshot), a re-scope adopts the new scope so the snapshot below is filtered
+    // to it. Wait-free unless the generation advanced (invariant #10).
+    match session.reauthorize() {
+        ReauthOutcome::Disconnect => {
+            let _ = socket
+                .send(Message::Close(Some(forbidden_close_frame())))
+                .await;
+            return;
+        }
+        ReauthOutcome::Unchanged | ReauthOutcome::ScopeChanged => {}
+    }
 
     let hello = session.snapshot_frame(snapshot_seq);
     if !ws_send_frame(&mut socket, &hello).await {
@@ -1676,10 +1748,11 @@ pub async fn sse_handler(
     headers: HeaderMap,
     Query(auth): Query<AccessTokenQuery>,
 ) -> Response {
-    let principal = match resolve_principal(&state, &headers, auth.access_token.as_deref()) {
-        Ok(principal) => principal,
-        Err(err) => return err.into_response(),
-    };
+    let (principal, live_baseline) =
+        match resolve_principal(&state, &headers, auth.access_token.as_deref()) {
+            Ok(resolved) => resolved,
+            Err(err) => return err.into_response(),
+        };
     if let Err(err) = principal.role.require(Action::Read) {
         return err.into_response();
     }
@@ -1701,7 +1774,16 @@ pub async fn sse_handler(
     let session = SessionStream::new(sub, session_id, None)
         .with_corr_registry(Arc::clone(&state.corr))
         .with_snapshot_watermark(watermark);
-    let mut session = install_live_reauth(session, &state, principal);
+    let mut session = install_live_reauth(session, &state, principal, live_baseline);
+
+    // Connect-race gate (ADR-RT010): re-resolve against the auth-time generation
+    // before the stream sends any snapshot — a revoke in the connect window ends the
+    // request with a 403 (no snapshot leak); a re-scope is adopted in place so the
+    // snapshot below is filtered to the new scope.
+    if session.reauthorize() == ReauthOutcome::Disconnect {
+        return crate::error::ControlError::Forbidden("authorization revoked".to_owned())
+            .into_response();
+    }
 
     let stream = async_stream::stream! {
         let hello = session.snapshot_frame(snapshot_seq);

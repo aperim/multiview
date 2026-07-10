@@ -221,11 +221,17 @@ async fn scope_narrowing_emits_a_resync_rebuild_directive() {
                 ResyncReason::AuthzChanged,
                 "the resync reason distinguishes an authz change from a replay eviction"
             );
-            // Every topic that can carry an object-authz-scoped object must be
-            // rebuilt, so the client drops ALL now-hidden cached objects.
+            // The rebuild set is exactly the re-snapshotted topics (tiles +
+            // devices), so the client drops now-hidden cached objects on them.
+            // Switcher is NOT listed: it is never re-snapshotted, so advertising it
+            // would strand the client's switcher state on a rebuild-not-merge (the
+            // protocol gap the #231 panel flagged).
             assert!(r.resubscribe.contains(&Topic::Tiles));
             assert!(r.resubscribe.contains(&Topic::Devices));
-            assert!(r.resubscribe.contains(&Topic::Switcher));
+            assert!(
+                !r.resubscribe.contains(&Topic::Switcher),
+                "Switcher is never re-snapshotted; it must not be in the rebuild set"
+            );
         }
         other => panic!("expected an $resync directive, got {other:?}"),
     }
@@ -390,7 +396,11 @@ async fn rescope_racing_connect_is_adopted_not_stale() {
     let store = store_with(
         "k1",
         "secret",
-        principal("k1", Role::Operator, Some(vec!["A".to_owned(), "B".to_owned()])),
+        principal(
+            "k1",
+            Role::Operator,
+            Some(vec!["A".to_owned(), "B".to_owned()]),
+        ),
     );
 
     let baseline = store.generation();

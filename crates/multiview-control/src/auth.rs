@@ -283,9 +283,15 @@ impl ApiKeyStore {
     pub fn register(&mut self, key_id: impl Into<String>, secret: &str, principal: Principal) {
         let key_id = key_id.into();
         let digest = self.digest(secret);
-        if let Ok(keys) = self.keys.get_mut() {
-            keys.insert(key_id, KeyRecord { digest, principal });
-        }
+        // Recover a poisoned lock rather than silently dropping the insert (rule 37,
+        // no swallowed errors): the map is only ever replaced/mutated wholesale, so a
+        // recovered guard never yields a wrong answer — consistent with `read_keys`/
+        // `write_keys`. `&mut self` means no other guard is live; recovery just keeps
+        // registration total instead of losing the key on a prior-panic poison.
+        self.keys
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key_id, KeyRecord { digest, principal });
     }
 
     /// Verify a presented `Bearer` token of the form `<key_id>.<secret>`.
