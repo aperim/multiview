@@ -108,7 +108,7 @@ pub trait MeshTransport {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{reassemble_txt, CHUNK_COUNT_KEY, MAX_CHUNKS};
+    use super::{reassemble_txt, CHUNK_BYTES, CHUNK_COUNT_KEY, MAX_CHUNKS};
 
     #[test]
     fn reassembly_rejects_hostile_count_before_reading_chunks() {
@@ -162,6 +162,105 @@ mod tests {
         assert!(
             !looked_up_chunk.get(),
             "one-over-maximum must be rejected before reading any chunk"
+        );
+    }
+
+    /// A maximal *legitimate* announce still reassembles well under the
+    /// `MAX_CHUNKS` cap — the bound rejects only oversized/malicious TXT input,
+    /// never real traffic (the residual headroom check for the #236 alloc-bound
+    /// fix, so a genuine announcement is never silently dropped by the guard).
+    ///
+    /// The only variable-length fields in an `AnnouncePayload` are `digests` and
+    /// the fixed 64-byte Ed25519 `signature`. The digest set mirrors the machine's
+    /// fingerprint: `multiview-licence` models exactly five `ComponentKind`s
+    /// (board/cpu/nic/disk/gpu), scored one-per-kind, so a canonical announce
+    /// carries ~5 salted digests. This over-provisions by an order of magnitude —
+    /// 64 distinct salted component digests, far beyond any real multiviewer host —
+    /// so a pass proves the cap leaves ample headroom for legitimate announcements.
+    #[test]
+    fn max_legitimate_announce_reassembles_within_chunk_cap() {
+        use chrono::{DateTime, Utc};
+        use multiview_licence::EnforcementLevel;
+
+        use crate::announce::{AnnouncePayload, EntitlementSummary, SaltedDigest};
+        use crate::peer::PEER_DIGEST_LEN;
+        use crate::ClaimState;
+
+        // An order-of-magnitude over-provision of the ~5-kind canonical digest set.
+        const MAX_REALISTIC_DIGESTS: usize = 64;
+
+        // `AnnouncePayload::to_wire` is serde_json, which encodes each `[u8; 32]`
+        // digest and the 64-byte signature as a JSON array of DECIMAL integers, so
+        // a `0xFF` byte serialises to its widest three-digit form ("255"). Filling
+        // every byte with `0xFF` makes the measured size a STRICT UPPER BOUND on any
+        // real (random-valued) payload of the same shape, and keeps the byte-exact
+        // chunk count deterministic (no RNG near a chunk boundary).
+        let digests = vec![SaltedDigest::new([0xFF; PEER_DIGEST_LEN]); MAX_REALISTIC_DIGESTS];
+        // Widest-serialising fixed fields too: kebab-case `claim_state` "unclaimed"
+        // and `level` "block-new-instance", full-nanosecond RFC3339 lease bounds.
+        let granted =
+            DateTime::<Utc>::from_timestamp(1_700_000_000, 123_456_789).expect("valid instant");
+        let expires =
+            DateTime::<Utc>::from_timestamp(1_800_000_000, 987_654_321).expect("valid instant");
+        let entitlement =
+            EntitlementSummary::new(EnforcementLevel::BlockNewInstance, granted, expires);
+        let payload = AnnouncePayload {
+            protocol_version: u16::MAX,
+            digests,
+            claim_state: ClaimState::Unclaimed,
+            entitlement,
+            // A real Ed25519 signature is exactly 64 bytes; `0xFF` maximises each
+            // byte's JSON width. A size fixture, not a valid signature — `to_wire`
+            // serialises, it does not verify.
+            signature: vec![0xFF; ed25519_dalek::Signature::BYTE_SIZE],
+        };
+
+        let wire = payload.to_wire().expect("a well-formed payload serialises");
+
+        // The publish side splits the wire into `CHUNK_BYTES`-sized chunks (mirrors
+        // `MdnsService::announce`: `wire.chunks(CHUNK_BYTES)` → the `c` count).
+        let chunks: Vec<&[u8]> = wire.chunks(CHUNK_BYTES).collect();
+        let chunk_count = chunks.len();
+
+        // 1) The cap must ACCEPT a maximal legitimate announce.
+        assert!(
+            chunk_count <= MAX_CHUNKS,
+            "a maximal legitimate announce ({MAX_REALISTIC_DIGESTS} digests, {} wire \
+             bytes) needs {chunk_count} chunks but the cap is {MAX_CHUNKS} — the bound \
+             is too tight for real traffic (REAL FINDING: raise MAX_CHUNKS, do not \
+             shrink this test)",
+            wire.len(),
+        );
+        // 2) ...with substantial headroom: even this ~10x over-provision must leave
+        //    at least a quarter of the chunk budget free (a real host carries ~5
+        //    digests ≈ a handful of chunks).
+        let headroom = MAX_CHUNKS.saturating_sub(chunk_count);
+        assert!(
+            headroom >= MAX_CHUNKS / 4,
+            "a maximal legitimate announce needs {chunk_count}/{MAX_CHUNKS} chunks — \
+             only {headroom} free; the cap is set too close to legitimate traffic"
+        );
+
+        // 3) End-to-end: the real reassembly guard accepts it and losslessly
+        //    reconstructs the wire (proving the bound never drops a legit announce),
+        //    and the bytes decode back to the same payload.
+        let mut properties: HashMap<String, String> = HashMap::new();
+        properties.insert(CHUNK_COUNT_KEY.to_owned(), chunk_count.to_string());
+        for (index, chunk) in chunks.iter().enumerate() {
+            let text =
+                std::str::from_utf8(chunk).expect("announce JSON is ASCII — never splits a char");
+            properties.insert(format!("p{index}"), text.to_owned());
+        }
+        let reassembled = reassemble_txt(|key| properties.get(key).map(String::as_str))
+            .expect("the guard accepts a legitimate announce within the cap");
+        assert_eq!(
+            reassembled, wire,
+            "the reassembly guard must losslessly reassemble a maximal legitimate announce"
+        );
+        let decoded = AnnouncePayload::from_wire(&reassembled).expect("reassembled bytes decode");
+        assert_eq!(
+            decoded, payload,
+            "a maximal legitimate announce round-trips through chunk reassembly"
         );
     }
 }
