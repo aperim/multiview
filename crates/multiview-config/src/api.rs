@@ -35,12 +35,16 @@ pub const PROGRAM_SCOPE_PREFIX: &str = "program:";
 
 /// The coarse role a config-declared API key authenticates as.
 ///
-/// Mirrors the control-plane `Role` (which this crate cannot depend on — the
-/// dependency runs control→config, never the reverse); `multiview-control` maps
-/// this to `Role` at registration. Deliberately **not** `#[non_exhaustive]`:
-/// the role set is small and closed, and the control-plane mapping must stay an
-/// exhaustive match so adding a role compile-forces its authorization handling
-/// (mirrors `Role`, which is also exhaustive).
+/// A **non-admin subset** of the control-plane `Role` (which this crate cannot
+/// depend on — the dependency runs control→config, never the reverse);
+/// `multiview-control` maps this to `Role` at registration. There is
+/// deliberately **no** `admin` variant: admin authentication is environment-only
+/// (the bootstrap `MULTIVIEW_CONTROL_TOKEN`, always unscoped), so config-as-code
+/// can never mint an administrator — a `[[api.keys]]` declaring `role = "admin"`
+/// is structurally unrepresentable and fails to parse (the mint invariant,
+/// ADR-W026). Deliberately **not** `#[non_exhaustive]`: the role set is small and
+/// closed, and the control-plane mapping must stay an exhaustive match so adding
+/// a role compile-forces its authorization handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiKeyRole {
@@ -50,8 +54,6 @@ pub enum ApiKeyRole {
     Viewer,
     /// Day-to-day operations (start/stop/swap, edit layouts).
     Operator,
-    /// Full control, including managing API keys and destructive actions.
-    Admin,
 }
 
 /// One config-declared API key (ADR-W026).
@@ -161,6 +163,16 @@ impl ApiConfig {
                      the secret (never inline a secret)",
                     key.key_id
                 )));
+            }
+            if let Some(objects) = &key.scoped_object_ids {
+                for entry in objects {
+                    if entry.is_empty() {
+                        return Err(ConfigError::Validation(format!(
+                            "api.keys[{}].scoped_object_ids: an entry must not be empty",
+                            key.key_id
+                        )));
+                    }
+                }
             }
             if let Some(outputs) = &key.scoped_output_ids {
                 for entry in outputs {

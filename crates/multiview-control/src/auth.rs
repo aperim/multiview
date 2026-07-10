@@ -589,12 +589,16 @@ pub fn provision_admin_keys(admin_secret: Option<String>) -> (ApiKeyStore, Optio
 /// Map a config-declared [`multiview_config::ApiKeyRole`] to the control-plane
 /// [`Role`] (ADR-W026). The two enums are kept separate because the dependency
 /// runs control→config, never the reverse.
+///
+/// `ApiKeyRole` carries no `Admin` variant by design — config can never mint an
+/// administrator (admin auth is environment-only), so there is no admin arm to
+/// map. The match stays exhaustive so a new config role compile-forces its
+/// mapping here.
 fn role_from_config(role: multiview_config::ApiKeyRole) -> Role {
     match role {
         multiview_config::ApiKeyRole::ReadOnly => Role::ReadOnly,
         multiview_config::ApiKeyRole::Viewer => Role::Viewer,
         multiview_config::ApiKeyRole::Operator => Role::Operator,
-        multiview_config::ApiKeyRole::Admin => Role::Admin,
     }
 }
 
