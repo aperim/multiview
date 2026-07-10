@@ -130,6 +130,7 @@ fn router_with_whep(whep: Arc<FakeWhep>) -> axum::Router {
                 role,
                 scoped_object_ids: None,
                 scoped_output_ids: None,
+                scoped_discovery_domains: None,
             },
         );
     }

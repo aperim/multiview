@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
+use multiview_events::AuthzScope;
+
 use crate::error::ControlError;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -115,7 +117,49 @@ pub struct Principal {
     /// confined to a subset of program outputs cannot touch another's
     /// renditions even when its action role would otherwise permit it (per-
     /// output BOLA).
+    ///
+    /// Plain entries authorize [`AuthzScope::Output`]. Entries prefixed with
+    /// `program:` authorize only [`AuthzScope::Program`] and are deliberately
+    /// inert for plain output authorization (ADR-W026), preventing namespace
+    /// punning between a program and an output that share an id.
     pub scoped_output_ids: Option<Vec<String>>,
+    /// Discovery-domain allowlist (ADR-W026), or `None` for all domains,
+    /// including unlabelled rows. `Some([])` sees no discovery inventory;
+    /// `Some(labels)` sees only rows carrying one of those labels. A scoped
+    /// principal is denied an unlabelled (`domain: None`) row — fail-closed so a
+    /// stripped/missing label can never widen visibility.
+    pub scoped_discovery_domains: Option<Vec<String>>,
+}
+
+/// Allocation-free borrowed view of a principal's three authorization axes.
+///
+/// Each `None` axis is unrestricted; `Some([])` denies every resource on that
+/// axis; `Some(entries)` is an exact allowlist. The one fail-closed policy lives
+/// in [`scope_permits`], shared by REST and realtime (ADR-W026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthzScopes<'a> {
+    objects: Option<&'a [String]>,
+    outputs: Option<&'a [String]>,
+    discovery_domains: Option<&'a [String]>,
+}
+
+impl<'a> AuthzScopes<'a> {
+    /// Borrow three owned optional allowlists as one authorization view.
+    ///
+    /// This constructor is used by realtime's session-owned scope state; it
+    /// borrows only and allocates nothing on the event delivery path.
+    #[must_use]
+    pub fn new(
+        objects: Option<&'a [String]>,
+        outputs: Option<&'a [String]>,
+        discovery_domains: Option<&'a [String]>,
+    ) -> Self {
+        Self {
+            objects,
+            outputs,
+            discovery_domains,
+        }
+    }
 }
 
 impl Principal {
@@ -131,11 +175,28 @@ impl Principal {
         self.scoped_output_ids.is_some()
     }
 
+    /// Whether this principal is confined to a discovery-domain allowlist.
+    #[must_use]
+    pub fn is_discovery_scoped(&self) -> bool {
+        self.scoped_discovery_domains.is_some()
+    }
+
+    /// Borrow all three authorization axes as the unified view consumed by
+    /// [`scope_permits`]. No allowlist is cloned or allocated.
+    #[must_use]
+    pub fn scopes(&self) -> AuthzScopes<'_> {
+        AuthzScopes::new(
+            self.scoped_object_ids.as_deref(),
+            self.scoped_output_ids.as_deref(),
+            self.scoped_discovery_domains.as_deref(),
+        )
+    }
+
     /// The full-access principal used when authentication is **disabled** (an
     /// explicit, opt-in deployment mode for trusted/local networks). It carries
-    /// [`Role::Admin`] and no object/output scoping, so every request is treated
-    /// as a local administrator. Reachable only when the operator turned auth off
-    /// — the default build still requires a verified API key.
+    /// [`Role::Admin`] and no object/output/discovery scoping, so every request is
+    /// treated as a local administrator. Reachable only when the operator turned
+    /// auth off — the default build still requires a verified API key.
     #[must_use]
     pub fn local_admin() -> Self {
         Self {
@@ -143,62 +204,107 @@ impl Principal {
             role: Role::Admin,
             scoped_object_ids: None,
             scoped_output_ids: None,
+            scoped_discovery_domains: None,
         }
+    }
+}
+
+const PROGRAM_SCOPE_PREFIX: &str = "program:";
+
+fn allowlist_permits(allowlist: Option<&[String]>, id: Option<&str>) -> bool {
+    match (allowlist, id) {
+        (None, _) => true,
+        (Some(allowed), Some(id)) => allowed.iter().any(|entry| entry == id),
+        // A scoped principal never receives an unlabelled row: omission cannot
+        // widen visibility (ADR-W026's load-bearing fail-closed rule).
+        (Some(_), None) => false,
+    }
+}
+
+fn output_scope_permits(allowlist: Option<&[String]>, output_id: &str) -> bool {
+    match allowlist {
+        None => true,
+        Some(allowed) => allowed.iter().any(|entry| {
+            !entry.starts_with(PROGRAM_SCOPE_PREFIX) && entry == output_id
+        }),
+    }
+}
+
+fn program_scope_permits(allowlist: Option<&[String]>, program_id: &str) -> bool {
+    match allowlist {
+        None => true,
+        Some(allowed) => allowed.iter().any(|entry| {
+            entry.strip_prefix(PROGRAM_SCOPE_PREFIX) == Some(program_id)
+        }),
+    }
+}
+
+/// Whether `scopes` permits delivery/access to `scope` (ADR-W026).
+///
+/// This is the one fail-closed, exhaustive rule shared by realtime delivery and
+/// REST authorization. The match has no wildcard and [`AuthzScope`] is
+/// deliberately not `#[non_exhaustive]`, so adding an authorization axis fails
+/// compilation here until its policy is explicit.
+#[must_use]
+pub fn scope_permits(scopes: &AuthzScopes<'_>, scope: AuthzScope<'_>) -> bool {
+    match scope {
+        AuthzScope::Public => true,
+        AuthzScope::Object(id) => allowlist_permits(scopes.objects, Some(id)),
+        AuthzScope::Output(id) => output_scope_permits(scopes.outputs, id),
+        AuthzScope::Program(id) => program_scope_permits(scopes.outputs, id),
+        AuthzScope::DiscoveryDomain(domain) => {
+            allowlist_permits(scopes.discovery_domains, domain)
+        }
+        AuthzScope::ObjectAndOutput { object, output } => {
+            allowlist_permits(scopes.objects, Some(object))
+                && output_scope_permits(scopes.outputs, output)
+        }
+    }
+}
+
+/// Enforce the unified authorization scope, producing a 403 twin of
+/// [`scope_permits`] for REST handlers.
+///
+/// # Errors
+///
+/// [`ControlError::Forbidden`] if any required axis denies `scope`.
+pub fn authorize_scope(
+    principal: &Principal,
+    scope: AuthzScope<'_>,
+) -> Result<(), ControlError> {
+    if scope_permits(&principal.scopes(), scope) {
+        Ok(())
+    } else {
+        Err(ControlError::Forbidden(format!(
+            "principal {:?} is not authorized for {scope:?}",
+            principal.key_id
+        )))
     }
 }
 
 /// Per-object authorization (BOLA defense, ADR-W005 / OWASP API1).
 ///
-/// Checked on **every** resource id a request addresses — not just the role. A
-/// principal scoped to an explicit object allowlist is denied any id outside it,
-/// even when its role would otherwise permit the action.
+/// Thin REST wrapper over the same [`scope_permits`] rule realtime consumes.
+/// Checked on **every** resource id a request addresses — not just the role.
 ///
 /// # Errors
 ///
-/// [`ControlError::Forbidden`] if the principal is scoped and `object_id` is not
-/// in its allowlist.
+/// [`ControlError::Forbidden`] if the principal's object axis denies `object_id`.
 pub fn authorize_object(principal: &Principal, object_id: &str) -> Result<(), ControlError> {
-    match &principal.scoped_object_ids {
-        None => Ok(()),
-        Some(allowed) => {
-            if allowed.iter().any(|id| id == object_id) {
-                Ok(())
-            } else {
-                Err(ControlError::Forbidden(format!(
-                    "principal {:?} is not authorized for object {object_id:?}",
-                    principal.key_id
-                )))
-            }
-        }
-    }
+    authorize_scope(principal, AuthzScope::Object(object_id))
 }
 
 /// Per-**output** authorization (output-scoped role; per-output BOLA defense).
 ///
-/// The output-scoped operator role is confined to a subset of program outputs
-/// (renditions/heads). This is checked on **every** output id a request
-/// addresses, independently of [`authorize_object`]: a principal confined to an
-/// output allowlist is denied any output id outside it, even when its role would
-/// otherwise permit the action.
+/// Thin REST wrapper over the same [`scope_permits`] rule realtime consumes.
+/// `program:*` grants are inert here: they authorize [`AuthzScope::Program`], not
+/// a plain output with the same id (ADR-W026 namespace separation).
 ///
 /// # Errors
 ///
-/// [`ControlError::Forbidden`] if the principal is output-scoped and `output_id`
-/// is not in its allowlist.
+/// [`ControlError::Forbidden`] if the principal's output axis denies `output_id`.
 pub fn authorize_output(principal: &Principal, output_id: &str) -> Result<(), ControlError> {
-    match &principal.scoped_output_ids {
-        None => Ok(()),
-        Some(allowed) => {
-            if allowed.iter().any(|id| id == output_id) {
-                Ok(())
-            } else {
-                Err(ControlError::Forbidden(format!(
-                    "principal {:?} is not authorized for output {output_id:?}",
-                    principal.key_id
-                )))
-            }
-        }
-    }
+    authorize_scope(principal, AuthzScope::Output(output_id))
 }
 
 /// A registered API key: its non-secret id, the HMAC digest of the secret, and
@@ -443,6 +549,7 @@ pub fn provision_admin_keys(admin_secret: Option<String>) -> (ApiKeyStore, Optio
             role: Role::Admin,
             scoped_object_ids: None,
             scoped_output_ids: None,
+            scoped_discovery_domains: None,
         },
     );
 

@@ -88,6 +88,7 @@ pub fn seeded_keys() -> ApiKeyStore {
             role: Role::Admin,
             scoped_object_ids: None,
             scoped_output_ids: None,
+            scoped_discovery_domains: None,
         },
     );
     keys.register(
@@ -98,6 +99,7 @@ pub fn seeded_keys() -> ApiKeyStore {
             role: Role::Operator,
             scoped_object_ids: None,
             scoped_output_ids: None,
+            scoped_discovery_domains: None,
         },
     );
     keys.register(
@@ -108,6 +110,7 @@ pub fn seeded_keys() -> ApiKeyStore {
             role: Role::Viewer,
             scoped_object_ids: None,
             scoped_output_ids: None,
+            scoped_discovery_domains: None,
         },
     );
     keys.register(
@@ -118,6 +121,7 @@ pub fn seeded_keys() -> ApiKeyStore {
             role: Role::Operator,
             scoped_object_ids: Some(vec!["scoped-layout".to_owned()]),
             scoped_output_ids: None,
+            scoped_discovery_domains: None,
         },
     );
     keys.register(
@@ -128,6 +132,7 @@ pub fn seeded_keys() -> ApiKeyStore {
             role: Role::Operator,
             scoped_object_ids: None,
             scoped_output_ids: Some(vec!["wall-1".to_owned()]),
+            scoped_discovery_domains: None,
         },
     );
     keys.register(
@@ -141,6 +146,7 @@ pub fn seeded_keys() -> ApiKeyStore {
                 "dev-savable".to_owned(),
             ]),
             scoped_output_ids: None,
+            scoped_discovery_domains: None,
         },
     );
     keys

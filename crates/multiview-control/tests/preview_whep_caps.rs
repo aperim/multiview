@@ -104,6 +104,7 @@ fn router_with_caps(inner: Arc<UncappedWhep>, caps: FocusCaps) -> axum::Router {
                 role,
                 scoped_object_ids: None,
                 scoped_output_ids: None,
+                scoped_discovery_domains: None,
             },
         );
     }

@@ -68,6 +68,7 @@ fn router(whep: Option<std::sync::Arc<dyn WhepProvider>>) -> axum::Router {
                 role,
                 scoped_object_ids: None,
                 scoped_output_ids: None,
+                scoped_discovery_domains: None,
             },
         );
     }

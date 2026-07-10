@@ -41,6 +41,7 @@ fn principal(key_id: &str, role: Role, scope: Option<Vec<String>>) -> Principal 
         role,
         scoped_object_ids: scope,
         scoped_output_ids: None,
+        scoped_discovery_domains: None,
     }
 }
 
