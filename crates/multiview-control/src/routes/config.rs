@@ -185,6 +185,13 @@ pub(crate) async fn export_config(
     use axum::response::IntoResponse;
 
     principal.role.require(Action::Read)?;
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): the export is a
+    // whole-system desired-state document — every device, every `device_ref`,
+    // every sync-group member id. An object-scoped principal must not obtain it
+    // (it would disclose every object outside its allowlist wholesale); the same
+    // gate the support bundle uses. Unscoped admin/operator/viewer are
+    // unaffected.
+    crate::routes::require_unscoped_for_whole_system(&principal)?;
 
     let document = compose_export_document(&state)?;
     let config: multiview_config::MultiviewConfig = serde_path_to_error::deserialize(document)

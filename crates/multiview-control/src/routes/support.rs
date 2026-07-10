@@ -349,6 +349,15 @@ pub(crate) async fn compose(
     if let Err(err) = principal.role.require(Action::Write) {
         return err.into_response();
     }
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): a support bundle's `config`
+    // section embeds the WHOLE config — every device id / `device_ref` /
+    // sync-group member (redacted only for secrets/URLs, not ids). Like the config
+    // export, an OBJECT-scoped principal must not compose one (it would disclose
+    // every object outside its allowlist wholesale); the bundle is confined to a
+    // principal that can see the whole system. Unscoped principals are unaffected.
+    if let Err(err) = crate::routes::require_unscoped_for_whole_system(&principal) {
+        return err.into_response();
+    }
     if !eligible(&state) {
         return not_entitled();
     }
@@ -406,6 +415,14 @@ pub(crate) async fn get_bundle(
     Path(id): Path<String>,
 ) -> Response {
     if let Err(err) = principal.role.require(Action::Read) {
+        return err.into_response();
+    }
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): the bundle preview embeds
+    // the whole config (every device id / ref / member); an object-scoped
+    // principal must not read it — defence in depth alongside the compose guard,
+    // so it cannot read even an admin-composed bundle. Unscoped principals are
+    // unaffected.
+    if let Err(err) = crate::routes::require_unscoped_for_whole_system(&principal) {
         return err.into_response();
     }
     if !eligible(&state) {

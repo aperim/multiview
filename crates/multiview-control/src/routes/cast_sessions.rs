@@ -343,10 +343,17 @@ pub(crate) async fn list_cast_sessions(
     principal: Principal,
 ) -> ControlResult<Json<Vec<CastSessionDoc>>> {
     principal.role.require(Action::Read)?;
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): a scoped principal sees
+    // ONLY its allowlisted sessions — by parity with `GET /{id}` 403'ing an
+    // out-of-scope id, an unfiltered collection would let it enumerate (and read
+    // the address/media-URL of) sessions it cannot fetch. The same
+    // `authorize_object` predicate the per-object handlers use; an unscoped
+    // principal (admin/unrestricted operator) keeps every row.
     let sessions = state
         .cast_sessions
         .list()
         .into_iter()
+        .filter(|record| crate::auth::authorize_object(&principal, &record.id).is_ok())
         .map(|record| doc(&state, record))
         .collect();
     Ok(Json(sessions))

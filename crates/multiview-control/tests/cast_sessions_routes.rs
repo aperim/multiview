@@ -515,6 +515,68 @@ async fn save_allows_a_scoped_principal_to_promote_its_own_session() {
     assert_eq!(device["body"]["driver"], "cast");
 }
 
+/// BOLA enumeration (OWASP API1, conventions §H / ADR-W005 / ADR-W025): the
+/// session COLLECTION read must filter to the principal's object allowlist, by
+/// parity with `GET /{id}` returning `403` for an out-of-scope session. A scoped
+/// operator that lists sessions must see ONLY its allowlisted rows — never enumerate
+/// (and read the address/media-URL of) sessions it cannot `GET`.
+///
+/// `SCOPED_TOKEN` is an operator scoped to `["scoped-layout"]`. Two sessions are
+/// seeded directly into the store under KNOWN ids (start mints uuids): one named
+/// `scoped-layout` (IN the allowlist) and one `cast-session-other` (OUT). The
+/// scoped list must contain exactly the in-scope row.
+#[tokio::test]
+async fn list_filters_sessions_to_the_scoped_allowlist() {
+    let h = harness_with(|state| {
+        // In-scope: the scoped principal's allowlist names this exact id.
+        state.cast_sessions.insert(CastSessionRecord {
+            id: "scoped-layout".to_owned(),
+            name: Some("Mine".to_owned()),
+            address: "[2001:db8::20]:8009".to_owned(),
+            output: "out-a".to_owned(),
+            media_url: "http://192.0.2.7:8080/hls/out-a/a.m3u8".to_owned(),
+            started_unix_ns: None,
+        });
+        // Out-of-scope: another tenant's session — the scoped principal must not
+        // enumerate it.
+        state.cast_sessions.insert(CastSessionRecord {
+            id: "cast-session-other".to_owned(),
+            name: Some("Theirs".to_owned()),
+            address: "[2001:db8::99]:8009".to_owned(),
+            output: "out-b".to_owned(),
+            media_url: "http://192.0.2.7:8080/hls/out-b/b.m3u8".to_owned(),
+            started_unix_ns: None,
+        });
+        state.with_cast_delivery(delivery())
+    });
+
+    // The scoped operator lists: only its in-scope session is visible.
+    let resp = send(&h.router, get("/api/v1/cast/sessions", SCOPED_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = body_json(resp).await;
+    let ids: Vec<&str> = list
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|row| row["id"].as_str().expect("a session id"))
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["scoped-layout"],
+        "a scoped principal must see ONLY its allowlisted session, never enumerate others (BOLA)"
+    );
+
+    // An unscoped admin sees BOTH (the filter does not over-restrict).
+    let resp = send(&h.router, get("/api/v1/cast/sessions", ADMIN_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = body_json(resp).await;
+    assert_eq!(
+        list.as_array().expect("an array").len(),
+        2,
+        "an unscoped admin still sees every session"
+    );
+}
+
 #[tokio::test]
 async fn volume_dispatches_to_the_running_session() {
     let h = cast_harness();

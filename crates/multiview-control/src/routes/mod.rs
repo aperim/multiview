@@ -144,11 +144,17 @@ async fn list_layouts(
     principal: Principal,
 ) -> ControlResult<Json<Vec<Layout>>> {
     principal.role.require(Action::Read)?;
+    // Per-object ROW visibility (BOLA, ADR-W005/ADR-W025): a layout is gated by
+    // its OWN id (`get_layout` 403s an out-of-scope id), so the list must drop
+    // rows outside the allowlist — exactly as `list_devices` does. A layout
+    // carries no embedded device_ref, so the row filter alone is complete; it is
+    // a no-op for an unscoped principal.
     let layouts = state
         .repository
         .list_layouts()?
         .into_iter()
         .map(|v| v.layout)
+        .filter(|layout| crate::auth::authorize_object(&principal, &layout.id).is_ok())
         .collect();
     Ok(Json(layouts))
 }
@@ -387,6 +393,108 @@ pub(crate) fn submit_accepted_body(
             })
         }
     }
+}
+
+/// Redact embedded **managed-device id** references from a resource `body` that a
+/// scoped principal is not authorized to see (BOLA visibility, ADR-W005/ADR-W025).
+///
+/// Some config objects carry a managed device id in a *field* rather than being a
+/// device collection: a device-projected source/output via `device_ref`
+/// (ADR-M009), and a sync group's `members[].device` (ADR-M010). The resource
+/// itself is gated by its own id, so an in-scope principal still sees the row —
+/// but an **out-of-scope device id embedded in it would leak the device's
+/// existence**, exactly the enumeration a single-device `GET` would `403`. So for
+/// an object-scoped principal this drops any such reference whose device is
+/// outside the allowlist:
+///
+/// * top-level `body.device_ref` (source/output) — the key is removed.
+/// * each `body.members[].device` (sync group) — the key is removed from that
+///   member object (the member entry and its `offset_ms` stay; only the hidden
+///   device id is dropped).
+///
+/// An **unscoped** principal (`scoped_object_ids: None`, the default
+/// admin/operator/viewer) is a no-op — every reference is shown unchanged. This
+/// is a pure read-side projection on the response body; it never mutates the
+/// stored resource.
+pub(crate) fn redact_out_of_scope_device_refs(
+    principal: &Principal,
+    resource: &mut crate::resource_store::Resource,
+) {
+    redact_device_refs_in_body(principal, &mut resource.body);
+}
+
+/// Redact embedded out-of-scope managed-device id references **in a body
+/// [`serde_json::Value`]** for a scoped principal (BOLA visibility,
+/// ADR-W005/ADR-W025) — the shape-level core of
+/// [`redact_out_of_scope_device_refs`].
+///
+/// Operates directly on a JSON body so it serves both a wrapped
+/// [`Resource`](crate::resource_store::Resource) (the live source/output/
+/// sync-group reads) and a bare body value (an **audit `detail`**, which carries
+/// the full resource body on an Update). Drops, when the referenced device is
+/// outside the allowlist:
+///
+/// * top-level `device_ref` (source/output) — the key is removed.
+/// * each `members[].device` (sync group) — the key is removed from that member.
+///
+/// An **unscoped** principal is a no-op. A `body` that is not a JSON object (or
+/// carries neither key) is left unchanged.
+pub(crate) fn redact_device_refs_in_body(principal: &Principal, body: &mut serde_json::Value) {
+    // Unscoped principals see everything: nothing to redact (fast path).
+    if !principal.is_scoped() {
+        return;
+    }
+    let out_of_scope =
+        |device_id: &str| crate::auth::authorize_object(principal, device_id).is_err();
+
+    // Source/output device-projection link.
+    if let Some(serde_json::Value::String(device_id)) = body.get("device_ref") {
+        if out_of_scope(device_id) {
+            if let Some(map) = body.as_object_mut() {
+                map.remove("device_ref");
+            }
+        }
+    }
+
+    // Sync-group member device ids.
+    if let Some(serde_json::Value::Array(members)) = body.get_mut("members") {
+        for member in members.iter_mut() {
+            let leaks = matches!(
+                member.get("device"),
+                Some(serde_json::Value::String(device_id)) if out_of_scope(device_id)
+            );
+            if leaks {
+                if let Some(member_map) = member.as_object_mut() {
+                    member_map.remove("device");
+                }
+            }
+        }
+    }
+}
+
+/// Deny a request that exposes a **whole-system** artifact to an object-scoped
+/// principal (BOLA wholesale-enumeration defense, ADR-W005/ADR-W025).
+///
+/// Some responses aggregate the entire desired-state — the config export and the
+/// support bundle both embed *every* device id, `device_ref`, and sync-group
+/// member id in one document. Per-field redaction cannot apply (a scope-filtered
+/// config is not a valid runnable document), so an object-scoped principal
+/// (`scoped_object_ids: Some`) is denied outright: such artifacts are confined to
+/// a principal that can see the whole system. An **unscoped** principal (the
+/// default admin/operator/viewer) is allowed — this is a no-op for it.
+///
+/// # Errors
+///
+/// [`ControlError::Forbidden`] if the principal is object-scoped.
+pub(crate) fn require_unscoped_for_whole_system(principal: &Principal) -> Result<(), ControlError> {
+    if principal.is_scoped() {
+        return Err(ControlError::Forbidden(format!(
+            "principal {:?} is object-scoped and may not access a whole-system artifact \
+             (it would disclose objects outside its allowlist)",
+            principal.key_id
+        )));
+    }
+    Ok(())
 }
 
 /// The exact operator/portal copy the Conspect startup gate (S1) refuses a NEW

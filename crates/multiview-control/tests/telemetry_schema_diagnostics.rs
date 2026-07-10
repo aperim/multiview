@@ -25,7 +25,10 @@ mod support;
 
 use axum::http::StatusCode;
 use multiview_control::openapi::ApiDoc;
-use support::{body_json, get, harness_with, post_json, put_json, send, ADMIN_TOKEN};
+use support::{
+    body_json, get, harness_with, post_json, put_json, send, ADMIN_TOKEN, OPERATOR_TOKEN,
+    SCOPED_TOKEN,
+};
 
 /// The published telemetry schema lists what is sent and — load-bearing — what is
 /// NEVER sent. The never-sent list is pinned so a "tidy" cannot silently leak a
@@ -160,6 +163,78 @@ async fn snapshot_rides_202_then_ready_and_carries_no_media() {
             "the diagnostics bundle must never carry {forbidden_key}"
         );
     }
+}
+
+/// BOLA wholesale-enumeration leak (OWASP API1, ADR-W005/ADR-W025): the
+/// diagnostics snapshot ALWAYS composes the `Config` section — the whole config,
+/// every device id / `device_ref` / sync-group member, redacted only for
+/// secrets/URLs (not ids). An OBJECT-scoped principal must not compose or read
+/// it, exactly like the config export + support bundle (it would disclose every
+/// object outside its allowlist wholesale).
+///
+/// `SCOPED_TOKEN` is an Operator scoped to `["scoped-layout"]` — only the new
+/// whole-system scope guard can deny it (it has the Write/Read role).
+#[tokio::test]
+async fn scoped_principal_cannot_request_or_read_a_diagnostics_snapshot() {
+    let h = harness_with(|s| s);
+
+    // Compose (POST) is forbidden for a scoped principal.
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/diagnostics/snapshot",
+            SCOPED_TOKEN,
+            &serde_json::json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a scoped principal must not request a whole-system diagnostics snapshot (BOLA)"
+    );
+
+    // Reading a snapshot composed by an unscoped admin is also forbidden.
+    let compose = send(
+        &h.router,
+        post_json(
+            "/api/v1/diagnostics/snapshot",
+            ADMIN_TOKEN,
+            &serde_json::json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(compose.status(), StatusCode::ACCEPTED);
+    let snapshot_id = body_json(compose).await["snapshot_id"]
+        .as_str()
+        .expect("202 returns a snapshot_id")
+        .to_owned();
+    let resp = send(
+        &h.router,
+        get(&format!("/api/v1/diagnostics/{snapshot_id}"), SCOPED_TOKEN),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a scoped principal must not read a whole-system diagnostics snapshot"
+    );
+
+    // An unscoped operator may still request one (no over-restriction).
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/diagnostics/snapshot",
+            OPERATOR_TOKEN,
+            &serde_json::json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::ACCEPTED,
+        "an unscoped operator may still request a diagnostics snapshot"
+    );
 }
 
 /// A `GET /api/v1/diagnostics/{id}` for an unknown id is a 404 RFC-9457 problem,

@@ -151,11 +151,17 @@ pub(crate) async fn list_overlays(
     principal: Principal,
 ) -> ControlResult<Json<Vec<Resource>>> {
     principal.role.require(Action::Read)?;
+    // Per-object ROW visibility (BOLA, ADR-W005/ADR-W025): an overlay is gated by
+    // its OWN id (`get_overlay` 403s an out-of-scope id), so the list must drop
+    // rows outside the allowlist — exactly as `list_devices` does. An overlay
+    // carries no embedded device_ref, so the row filter alone is complete; it is
+    // a no-op for an unscoped principal.
     let overlays = state
         .overlays
         .list()?
         .into_iter()
         .map(|v| v.resource)
+        .filter(|resource| crate::auth::authorize_object(&principal, &resource.id).is_ok())
         .collect();
     Ok(Json(overlays))
 }

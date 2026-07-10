@@ -350,6 +350,15 @@ pub(crate) async fn request_snapshot(
     if let Err(err) = principal.role.require(Action::Write) {
         return err.into_response();
     }
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): the snapshot ALWAYS
+    // composes the whole config (every device id / `device_ref` / sync-group
+    // member, redacted only for secrets/URLs, not ids), so — like the config
+    // export + support bundle — an OBJECT-scoped principal must not compose one
+    // (it would disclose every object outside its allowlist wholesale). Unscoped
+    // principals are unaffected.
+    if let Err(err) = crate::routes::require_unscoped_for_whole_system(&principal) {
+        return err.into_response();
+    }
     // The §4.2 bundle: logs + engine state from the consent-independent local
     // retention buffer + the REDACTED config — composed by the shared #111
     // context-pack composer so this snapshot and the support-ticket context-pack
@@ -422,6 +431,13 @@ pub(crate) async fn get_snapshot(
     Path(id): Path<String>,
 ) -> Response {
     if let Err(err) = principal.role.require(Action::Read) {
+        return err.into_response();
+    }
+    // Per-object visibility (BOLA, ADR-W005/ADR-W025): the snapshot embeds the
+    // whole config (every device id / ref / member); an object-scoped principal
+    // must not read it — defence in depth alongside the request guard. Unscoped
+    // principals are unaffected.
+    if let Err(err) = crate::routes::require_unscoped_for_whole_system(&principal) {
         return err.into_response();
     }
     match state.diagnostics_snapshots.get(&id) {
