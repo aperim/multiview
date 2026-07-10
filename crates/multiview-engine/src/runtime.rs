@@ -69,8 +69,10 @@ pub const MAX_REPEATS_PER_TICK: u32 = 120;
 /// a normal one-tick wait is intentionally split into ~2-5 of these sleeps —
 /// cheap (each step is an allocation-free timer registration) and what keeps
 /// shutdown prompt on an unreachable deadline (ADR-T018, the fix for the CI
-/// ~37-min "hang"). It never delays a tick: the deadline is re-checked each
-/// step, so the wait ends the instant the clock reaches it.
+/// ~37-min "hang"). The cap adds no delay of its own: each step sleeps
+/// `min(remaining, cap)`, so the final step is sized to the exact time left and
+/// the wait ends once the clock reaches the deadline — as with a single uncapped
+/// sleep, subject only to the tokio timer's normal wake latency.
 const PACER_STOP_POLL: Duration = Duration::from_millis(10);
 
 /// How the runtime waits for a tick's wall-clock deadline.
@@ -133,7 +135,8 @@ impl Pacer for RealtimePacer {
             // interval rather than only after the (possibly far) deadline. The
             // cap is below every tick period, so a normal one-tick wait is
             // deliberately split into ~2-5 short sleeps (see PACER_STOP_POLL);
-            // the deadline is re-checked each pass, so it never delays a tick.
+            // each sleeps min(remaining, cap), so the final step is sized to the
+            // exact time left and the cap adds no delay of its own.
             let poll_cap = u64::try_from(PACER_STOP_POLL.as_nanos()).unwrap_or(u64::MAX);
             tokio::time::sleep(Duration::from_nanos(nanos.min(poll_cap))).await;
         }
