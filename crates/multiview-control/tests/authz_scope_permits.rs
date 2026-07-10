@@ -11,7 +11,7 @@
 //! keeps a timing grant from punning the plain output-id namespace.
 
 use multiview_control::auth::{
-    authorize_object, authorize_output, authorize_scope, scope_permits, AuthzScopes, Principal, Role,
+    authorize_object, authorize_output, authorize_scope, scope_permits, Principal, Role,
 };
 use multiview_events::AuthzScope;
 
