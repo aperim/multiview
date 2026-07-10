@@ -217,6 +217,21 @@ impl AudioStore {
         self.window.load().samples.len() / channels
     }
 
+    /// The **allocated capacity** (in frames) of the current window's backing
+    /// buffer — the size of the last transient allocation a publish made, which
+    /// [`publish_at`](AudioStore::publish_at) bounds to `capacity_frames` by
+    /// applying drop-oldest *before* it allocates. This exposes the transient the
+    /// live length ([`buffered_frames`](AudioStore::buffered_frames)) hides:
+    /// `Vec::drain` shifts elements but never reclaims capacity, so an
+    /// over-allocated union span would remain visible here even after the
+    /// post-merge clamp. For the bounded-memory regression test (inv #2/#5/#9).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn window_backing_capacity_frames(&self) -> usize {
+        let channels = self.format.channel_count().max(1);
+        self.window.load().samples.capacity() / channels
+    }
+
     /// The reader's current **absolute** frame position — the next absolute
     /// frame index [`read`](AudioStore::read) will return. The cursor lives in
     /// the same absolute coordinate space as the writer's `base_frame`/head, so

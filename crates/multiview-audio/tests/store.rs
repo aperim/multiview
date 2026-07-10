@@ -353,6 +353,102 @@ fn publish_at_is_bounded_drop_oldest() {
     );
 }
 
+/// REGRESSION (inv #2/#5/#9 — bounded memory): a late/reordered `publish_at`
+/// whose absolute index lands far BELOW the live head must not allocate a
+/// transient buffer wider than the store capacity. In production the RTP-audio
+/// rebaser (`crates/multiview-input/src/rtp_audio.rs`,
+/// `DEFAULT_DISCONTINUITY_FRAMES = 480_000` = 10 s) only re-anchors on jumps
+/// LARGER than its discontinuity threshold, so a reordered packet up to ~10 s
+/// behind the head is written at its true index — while the store capacity
+/// (`STORE_CAPACITY_FRAMES = 96_000` = 2 s) is far smaller. Allocating the full
+/// `[min(base, at), max(head, block_end))` union span (~10 s) *before* the
+/// drop-oldest clamp is a per-packet zero+memcpy CPU-amplification vector and
+/// violates "queues drop, never grow". The backing allocation must stay bounded
+/// by ~capacity, not the discontinuity span.
+///
+/// Observable without a global allocator (the crate is `unsafe_code = forbid`):
+/// `Vec::drain` shifts survivors down but never reclaims capacity, so an
+/// over-allocated union span stays visible via `window_backing_capacity_frames`
+/// even after the post-merge clamp shrinks the *length* back to capacity.
+#[test]
+fn publish_at_reordered_far_below_head_allocates_bounded() {
+    // Production-equivalent constants (STORE_CAPACITY_FRAMES / DEFAULT_DISCONTINUITY_FRAMES).
+    // Frame counters stay `usize`; convert to the absolute-index `i64` only at the
+    // `publish_at`/`seek_to` boundary (via `try_from`), so the arithmetic is
+    // sign/truncation-clean.
+    let cap = 96_000usize; // 2 s @ 48 kHz — the shipping store capacity
+    let disc = 480_000usize; // 10 s — the rebaser's re-anchor threshold
+    let block = 4_800usize; // one ~100 ms block
+    let store = AudioStore::new(stereo(), cap);
+
+    // Warm the store to a high live head by publishing contiguous blocks — this
+    // advances the base to `head - cap` WITHOUT ever over-allocating (each step's
+    // union span is at most cap + one block). Sample value at absolute frame `f`,
+    // channel `c`, is `2*f + c`, so a contiguous read is a clean ramp.
+    let head = disc + cap; // 576_000
+    let mut frame = 0usize;
+    while frame < head {
+        store
+            .publish_at(i64::try_from(frame).unwrap(), &ramp(frame * 2, block))
+            .unwrap();
+        frame += block;
+    }
+    let base = head - cap; // 480_000 — the surviving window is [base, head)
+    assert_eq!(
+        store.read_cursor(),
+        0,
+        "the climb must not move the read cursor"
+    );
+
+    // A reordered packet arrives ~10 s (just under the discontinuity threshold, so
+    // the rebaser does NOT re-anchor) below the head — far below the surviving
+    // window, so it is dropped-oldest. Distinct marker values, so a wrongly-retained
+    // packet would corrupt the ramp check below.
+    let late_at = head - disc + 1; // 96_001 — ~10 s behind head, above frame 0
+    assert!(
+        late_at < base,
+        "the reordered packet must land below the window"
+    );
+    store
+        .publish_at(i64::try_from(late_at).unwrap(), &ramp(9_000_000, block))
+        .unwrap();
+
+    // 1) THE regression assertion: the TRANSIENT backing allocation is bounded by
+    //    ~capacity, NOT the ~10 s union span. With the defect the buffer is
+    //    allocated at `head - late_at` (~480_000) frames and `drain` never returns
+    //    that capacity, so it stays ~10 s wide.
+    let backing = store.window_backing_capacity_frames();
+    assert!(
+        backing <= cap + block,
+        "publish_at over-allocated the transient: backing {backing} frames > \
+         capacity {cap} + one block {block} — the union span was allocated before \
+         the drop-oldest clamp (inv #2/#5/#9 bounded-memory regression)"
+    );
+
+    // 2) The final window length stays bounded (drop-oldest) — a sanity check that
+    //    holds both before and after the fix.
+    assert!(
+        store.buffered_frames() <= cap,
+        "final window exceeded capacity: {} > {cap}",
+        store.buffered_frames()
+    );
+
+    // 3) Behaviour preserved: the reordered too-old packet is DROPPED and the warm
+    //    window survives intact — the bound must not corrupt or lose in-window
+    //    audio. The whole surviving window reads back as the contiguous ramp.
+    store.seek_to(i64::try_from(base).unwrap());
+    let out = store.read(cap);
+    let first = 2 * base; // sample value at (base, channel 0)
+    for (k, &v) in out.interleaved().iter().enumerate() {
+        assert_eq!(
+            v,
+            (first + k) as f32,
+            "surviving warm audio corrupted at sample {k} (a dropped/reordered \
+             packet must not disturb the in-window ramp)"
+        );
+    }
+}
+
 /// A format mismatch is rejected (the same contract as `publish`).
 #[test]
 fn publish_at_rejects_format_mismatch() {
