@@ -71,6 +71,24 @@ export interface AudioMeter {
   readonly track: number;
 }
 
+/** Data body of `cast.session.removed`: an ephemeral cast session was removed — stopped (the receiver STOP that clears the TV) or promoted to a saved device (playback continues under the promoted device id). */
+export interface CastSessionRemoved {
+  /** The runtime session id that was removed. */
+  readonly session_id: string;
+}
+
+/** Data body of `cast.session.started`: an ephemeral cast session was started (session-list membership changed). The session's live state rides the conflated `device.status` lane keyed by the same session id. */
+export interface CastSessionStarted {
+  /** The device authority dialled (`host[:port]`, IPv6 bracketed). */
+  readonly address: string;
+  /** The operator-facing name, if given. */
+  readonly name?: string;
+  /** The output id whose HLS rendition the session casts. */
+  readonly output: string;
+  /** The runtime session id (`cast-session-…`, UUID-fresh per start). */
+  readonly session_id: string;
+}
+
 /** Data body of `device.adopted`: a device was adopted into the registry. */
 export interface DeviceAdopted {
   /** The registry device id. */
@@ -102,6 +120,8 @@ export interface DeviceCapabilities {
 export interface DeviceDiscovered {
   /** The management endpoint (URL/host; IPv6 literals bracketed). */
   readonly address: string;
+  /** The discovery domain the observing node stamped on this row (ADR-W026), sourced solely from that node's operator-declared `[discovery] domain` config — never from the responder payload or TXT records. Absent when the observing node declared no domain; a discovery-scoped principal is then denied the row (fail-closed). */
+  readonly domain?: string;
   /** The candidate driver that recognised the device. */
   readonly driver: string;
   /** Address family — IPv6-first; IPv4 results are labelled legacy. */
@@ -268,6 +288,8 @@ export type ImpactClass = "cp" | "c1" | "c2" | "dev";
 export interface InputConnection {
   /** Reconnect attempt counter, if reconnecting. */
   readonly attempt?: number;
+  /** The owning input's id (the configured source id) — the object axis this lifecycle event is authorized under (ADR-W026). */
+  readonly input_id: string;
   readonly state: LifecycleState;
 }
 
@@ -381,8 +403,8 @@ export interface Resync {
   readonly resubscribe: readonly string[];
 }
 
-/** Why a $resync was issued. */
-export type ResyncReason = "seq_evicted" | "unknown_session" | "session_expired";
+/** Why a $resync was issued (the client must rebuild, not merge). The first three are unrecoverable resume gaps; `authz_changed` is a mid-session authorization change (object scope narrowed/widened) on an intact connection (ADR-RT010). */
+export type ResyncReason = "seq_evicted" | "unknown_session" | "session_expired" | "authz_changed";
 
 /** Data body of `salvo.armed`, `salvo.taken`, `salvo.cancelled`. */
 export interface SalvoEvent {

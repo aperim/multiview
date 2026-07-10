@@ -10237,6 +10237,13 @@
           "last_seen_unix_ns"
         ],
         "properties": {
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The discovery **domain** the observing node stamped on this row\n(ADR-W026) — sourced solely from the node's operator-declared\n`[discovery] domain` config, **never** from the responder payload, TXT\nrecords, or mesh peer identity. `None` = the observing node declared no\ndomain; a discovery-scoped principal is denied an unlabelled row\n(fail-closed). Event (`device.discovered`) and this REST row are stamped\nfrom the one config value so they can never disagree."
+          },
           "driver_kind": {
             "$ref": "#/components/schemas/DiscoveryDriverKind",
             "description": "The inferred driver family."

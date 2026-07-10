@@ -805,6 +805,10 @@
             "description": "The management endpoint (URL/host; IPv6 literals bracketed).",
             "type": "string"
           },
+          "domain": {
+            "description": "The discovery domain the observing node stamped on this row (ADR-W026), sourced solely from that node's operator-declared `[discovery] domain` config — never from the responder payload or TXT records. Absent when the observing node declared no domain; a discovery-scoped principal is then denied the row (fail-closed).",
+            "type": "string"
+          },
           "driver": {
             "description": "The candidate driver that recognised the device.",
             "type": "string"
@@ -1244,11 +1248,16 @@
             "format": "uint32",
             "type": "integer"
           },
+          "input_id": {
+            "description": "The owning input's id (the configured source id) — the object axis this lifecycle event is authorized under (ADR-W026).",
+            "type": "string"
+          },
           "state": {
             "$ref": "#/components/schemas/LifecycleState"
           }
         },
         "required": [
+          "input_id",
           "state"
         ],
         "type": "object"
