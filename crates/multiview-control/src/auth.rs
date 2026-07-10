@@ -16,6 +16,8 @@
 //! This is scaffolding: the cookie-session + CSRF path for the browser UI is
 //! out of scope here; API-key + RBAC + per-object authz is the tested surface.
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{PoisonError, RwLock};
 
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -214,10 +216,22 @@ struct KeyRecord {
 /// the client identifies which key it holds — but the comparison of the secret
 /// itself is constant-time regardless. The HMAC key (a server pepper) binds the
 /// digests to this deployment.
-#[derive(Debug, Clone)]
+///
+/// The key map is **interior-mutable** (`RwLock`) so a key's authorization can be
+/// revoked or re-scoped at runtime (ADR-RT010): [`revoke`](Self::revoke) and
+/// [`set_principal`](Self::set_principal) mutate it behind the write lock and bump
+/// a wait-free [`generation`](Self::generation) counter, which established realtime
+/// sessions sample to re-resolve their authorization mid-session
+/// ([`principal_for_key`](Self::principal_for_key)). The store is control-plane
+/// only — the engine never touches it, so the lock and counter cannot affect the
+/// output path (invariant #10). It is not [`Clone`]; share it via [`std::sync::Arc`].
+#[derive(Debug)]
 pub struct ApiKeyStore {
     pepper: Vec<u8>,
-    keys: HashMap<String, KeyRecord>,
+    keys: RwLock<HashMap<String, KeyRecord>>,
+    /// Bumped on every authorization mutation (revoke / re-scope / role change);
+    /// a realtime session that observes a higher value re-resolves its principal.
+    generation: AtomicU64,
 }
 
 impl ApiKeyStore {
@@ -226,8 +240,24 @@ impl ApiKeyStore {
     pub fn new(pepper: impl Into<Vec<u8>>) -> Self {
         Self {
             pepper: pepper.into(),
-            keys: HashMap::new(),
+            keys: RwLock::new(HashMap::new()),
+            generation: AtomicU64::new(0),
         }
+    }
+
+    /// Read-lock the key map, recovering the guard if a writer poisoned it. The
+    /// writers only insert/remove/reassign whole `KeyRecord` values under the write
+    /// lock, so a recovered guard exposes a well-formed (if possibly mid-edit) map —
+    /// never a torn value — which is safe to read for verification / re-resolution
+    /// and keeps the read path panic-free (safety rule 3, hot-path no-`unwrap`).
+    fn read_keys(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, KeyRecord>> {
+        self.keys.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Write-lock the key map, recovering a poisoned guard for the same reason as
+    /// [`read_keys`](Self::read_keys).
+    fn write_keys(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, KeyRecord>> {
+        self.keys.write().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Compute the HMAC-SHA256 digest of a secret under this store's pepper.
@@ -245,10 +275,25 @@ impl ApiKeyStore {
     }
 
     /// Register an API key for `principal`, computing and storing its digest.
+    ///
+    /// Construction-time API: `&mut self` gives exclusive access, so it uses
+    /// `RwLock::get_mut` (no lock taken) and does **not** bump the generation —
+    /// keys are registered before the store is shared and any session exists. The
+    /// runtime authorization mutators are [`revoke`](Self::revoke) /
+    /// [`set_principal`](Self::set_principal).
     pub fn register(&mut self, key_id: impl Into<String>, secret: &str, principal: Principal) {
         let key_id = key_id.into();
         let digest = self.digest(secret);
-        self.keys.insert(key_id, KeyRecord { digest, principal });
+        // Recover a poisoned lock rather than silently dropping the insert (rule 37,
+        // no swallowed errors). The writers only insert/remove/reassign whole
+        // `KeyRecord` values, so a guard poisoned by an unrelated prior panic still
+        // exposes a well-formed map — recovering keeps registration total and
+        // panic-free (safety rule 3), consistent with `read_keys`/`write_keys`.
+        // `&mut self` means no other guard is live.
+        self.keys
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key_id, KeyRecord { digest, principal });
     }
 
     /// Verify a presented `Bearer` token of the form `<key_id>.<secret>`.
@@ -263,7 +308,8 @@ impl ApiKeyStore {
     /// is unknown, or the secret's digest does not match.
     pub fn verify(&self, token: &str) -> Result<Principal, ControlError> {
         let (key_id, secret) = token.split_once('.').ok_or(ControlError::Unauthenticated)?;
-        let record = self.keys.get(key_id).ok_or(ControlError::Unauthenticated)?;
+        let keys = self.read_keys();
+        let record = keys.get(key_id).ok_or(ControlError::Unauthenticated)?;
         let presented = self.digest(secret);
         // Constant-time comparison: `ct_eq` returns a `Choice`; only accept on a
         // true bit. Lengths match (both are SHA-256 outputs) but `ct_eq` is
@@ -273,6 +319,64 @@ impl ApiKeyStore {
         } else {
             Err(ControlError::Unauthenticated)
         }
+    }
+
+    /// The current authorization **generation**.
+    ///
+    /// A wait-free `Acquire` load, bumped by every runtime authorization mutation
+    /// ([`revoke`](Self::revoke) / [`set_principal`](Self::set_principal)). An
+    /// established realtime session captures this at connect and re-resolves its
+    /// principal whenever it observes a higher value (ADR-RT010). No lock, never
+    /// touches the engine (invariant #10).
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Re-resolve the **current** [`Principal`] for a previously-issued `key_id`,
+    /// or [`None`] if the key has been revoked.
+    ///
+    /// This is the realtime re-authorization primitive (ADR-RT010): a session that
+    /// authenticated at connect looks up its own `key_id` to pick up a mid-session
+    /// role/scope change, or to learn it was revoked. Takes only the read lock
+    /// (control-plane only; the engine never holds it).
+    #[must_use]
+    pub fn principal_for_key(&self, key_id: &str) -> Option<Principal> {
+        self.read_keys().get(key_id).map(|r| r.principal.clone())
+    }
+
+    /// Revoke an API key: it stops authenticating and every live realtime session
+    /// bound to it re-resolves to "revoked" and disconnects (ADR-RT010).
+    ///
+    /// Bumps the [`generation`](Self::generation) **while holding the write lock**,
+    /// so any session that observes the new generation is guaranteed to read the
+    /// removed entry. Returns whether a key was actually removed; revoking an
+    /// unknown key is a no-op and does **not** bump the generation.
+    pub fn revoke(&self, key_id: &str) -> bool {
+        let mut keys = self.write_keys();
+        let removed = keys.remove(key_id).is_some();
+        if removed {
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
+        removed
+    }
+
+    /// Replace an existing key's authorization (role and/or object/output scope),
+    /// keeping its secret digest so the same bearer token keeps authenticating with
+    /// the new authorization (ADR-RT010) — models an admin re-scoping or
+    /// downgrading a key.
+    ///
+    /// Bumps the [`generation`](Self::generation) **while holding the write lock**.
+    /// Returns whether the key existed; setting an unknown key is a no-op and does
+    /// **not** bump the generation (register the key first).
+    pub fn set_principal(&self, key_id: &str, principal: Principal) -> bool {
+        let mut keys = self.write_keys();
+        let Some(record) = keys.get_mut(key_id) else {
+            return false;
+        };
+        record.principal = principal;
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        true
     }
 
     /// Extract and verify a principal from an HTTP `Authorization` header value.

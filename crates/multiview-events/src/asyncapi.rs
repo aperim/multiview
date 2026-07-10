@@ -2083,8 +2083,8 @@ fn resume_schema() -> Value {
 fn resync_reason_schema() -> Value {
     json!({
         "type": "string",
-        "description": "Why a $resync was issued.",
-        "enum": ["seq_evicted", "unknown_session", "session_expired"]
+        "description": "Why a $resync was issued (the client must rebuild, not merge). The first three are unrecoverable resume gaps; `authz_changed` is a mid-session authorization change (object scope narrowed/widened) on an intact connection (ADR-RT010).",
+        "enum": ["seq_evicted", "unknown_session", "session_expired", "authz_changed"]
     })
 }
 
