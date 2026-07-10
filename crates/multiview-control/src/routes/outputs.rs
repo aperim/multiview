@@ -63,6 +63,7 @@ pub(crate) async fn list_outputs(
         .map(|v| {
             let mut resource = v.resource;
             crate::routes::redact_out_of_scope_device_refs(&principal, &mut resource);
+            crate::support_bundle::redact_inline_secrets_for_read(&principal, &mut resource.body);
             resource
         })
         .collect();
@@ -98,6 +99,7 @@ pub(crate) async fn get_output(
     // link must not leak a device id the principal could not `GET`. No-op when
     // unscoped.
     crate::routes::redact_out_of_scope_device_refs(&principal, &mut versioned.resource);
+    crate::support_bundle::redact_inline_secrets_for_read(&principal, &mut versioned.resource.body);
     Ok(output_response(StatusCode::OK, &versioned))
 }
 

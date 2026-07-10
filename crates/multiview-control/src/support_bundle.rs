@@ -399,10 +399,31 @@ fn key_is_secret_reference(key: &str) -> bool {
 /// or adversarial document is fully scrubbed. Returns the redacted document.
 #[must_use]
 pub fn redact_config_for_export(value: &serde_json::Value) -> serde_json::Value {
+    // The export signature borrows the stored document and must return an owned
+    // copy, so exactly one clone is inherent here; redaction is then the single
+    // shared in-place pass — no second full-document rebuild.
+    let mut owned = value.clone();
+    redact_inline_secrets_in_place(&mut owned);
+    owned
+}
+
+/// The shared in-place core behind [`redact_config_for_export`] and
+/// [`redact_inline_secrets_for_read`]: walk `value` and replace every **inline
+/// cleartext** secret scalar with [`EXPORT_REDACTED_SENTINEL`], mutating the tree
+/// in place so a caller that already owns a response copy pays no second
+/// allocation of the whole document.
+///
+/// An inline secret is a scalar (string/number/bool) under a key [`key_is_secret`]
+/// classifies that is **not** a [`key_is_secret_reference`] pointer. A secret-named
+/// *object*/*array*/`null` is not itself the secret, so the walk recurses to keep
+/// its shape and still scrub any nested inline secret; transport URLs and
+/// `secret_ref` pointers are preserved (config-as-code needs them). The walk is
+/// total over arbitrary nesting, so a deeply-nested or adversarial document is
+/// fully scrubbed.
+fn redact_inline_secrets_in_place(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
-            let mut redacted = serde_json::Map::with_capacity(map.len());
-            for (key, child) in map {
+            for (key, child) in map.iter_mut() {
                 let is_inline_secret = key_is_secret(key)
                     && !key_is_secret_reference(key)
                     && !matches!(
@@ -413,24 +434,40 @@ pub fn redact_config_for_export(value: &serde_json::Value) -> serde_json::Value 
                     );
                 if is_inline_secret {
                     // An inline cleartext secret (a scalar under a secret-named
-                    // key): replace the value, keep the key.
-                    redacted.insert(
-                        key.clone(),
-                        serde_json::Value::String(EXPORT_REDACTED_SENTINEL.to_owned()),
-                    );
+                    // key): replace the value in place, keep the key.
+                    *child = serde_json::Value::String(EXPORT_REDACTED_SENTINEL.to_owned());
                 } else {
                     // A non-secret key, a `secret_ref` pointer, or a structured
                     // holder under a secret-named key: recurse so the shape survives
                     // and any nested inline secret is still scrubbed.
-                    redacted.insert(key.clone(), redact_config_for_export(child));
+                    redact_inline_secrets_in_place(child);
                 }
             }
-            serde_json::Value::Object(redacted)
         }
         serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(redact_config_for_export).collect())
+            for item in items.iter_mut() {
+                redact_inline_secrets_in_place(item);
+            }
         }
-        other => other.clone(),
+        // A scalar under a non-secret key (or at the top level) is kept verbatim.
+        _ => {}
+    }
+}
+
+/// Mask inline cleartext secrets in a REST response view for a non-admin
+/// principal, using the same structurally-preserving policy as config export.
+///
+/// The caller passes an owned response copy; this mutates that view **in place**
+/// (no second document clone) and never the stored document. An
+/// [`crate::auth::Role::Admin`] principal keeps the original value for operational
+/// access. Every less-privileged role receives [`EXPORT_REDACTED_SENTINEL`] in each
+/// inline-secret field.
+pub(crate) fn redact_inline_secrets_for_read(
+    principal: &crate::auth::Principal,
+    value: &mut serde_json::Value,
+) {
+    if principal.role != crate::auth::Role::Admin {
+        redact_inline_secrets_in_place(value);
     }
 }
 
