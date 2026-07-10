@@ -174,6 +174,21 @@ pub struct TileStore<T> {
     /// (not an `Arc` cell) so a reader observes it lock-free with no allocation
     /// and no extra reclamation machinery alongside the frame slot.
     last_frame_at_ns: AtomicI64,
+    /// The media instant of the frame the output clock last **latched** onto
+    /// (via [`read_at`](TileStore::read_at) / [`state_at`](TileStore::state_at)),
+    /// as raw nanoseconds, or [`NEVER_PUBLISHED`] until the first latch. Output
+    /// `now` is monotonic (invariant #1/#3), so no reader will ever again select
+    /// a ring entry stamped *before* this watermark — [`publish_arc`] prunes
+    /// those consumed past frames so the ring collapses to the latched frame plus
+    /// any decode-ahead future, instead of a full [`RING_CAPACITY`] backlog of
+    /// dead frames (invariant #9). Advanced with a monotonic `fetch_max` so it
+    /// can never regress and never over-prune, even if `read_at` and `state_at`
+    /// observe slightly different instants within a tick (both run on the single
+    /// output-clock thread, so `now` is non-decreasing across them).
+    ///
+    /// [`RING_CAPACITY`]: TileStore::RING_CAPACITY
+    /// [`publish_arc`]: TileStore::publish_arc
+    latch_watermark_ns: AtomicI64,
     /// A bounded, media-time-ordered ring of recently-published frames, used by
     /// [`read_at`](TileStore::read_at) to latch the frame nearest-but-not-after
     /// the output clock's instant (streaming-gotchas §1). Stored as a snapshot
@@ -213,6 +228,7 @@ impl<T> TileStore<T> {
             thresholds,
             policy,
             last_frame_at_ns: AtomicI64::new(NEVER_PUBLISHED),
+            latch_watermark_ns: AtomicI64::new(NEVER_PUBLISHED),
             ring: ArcSwap::from_pointee(Vec::new()),
         }
     }
@@ -258,16 +274,38 @@ impl<T> TileStore<T> {
         // after reconnect) re-anchors the ring on itself rather than leaving a
         // stale future-stamped frame ahead of it, so sampling cannot get stuck
         // pointing past the new content.
+        //
+        // Publishes are single-writer per tile (one actor per source), so the
+        // tail observed here is stable against other writers; only the lock-free
+        // readers touch the ring concurrently, and they never mutate it.
+        let backwards = self.ring.load().last().is_some_and(|tail| at < tail.at);
+        if backwards {
+            // A new source generation: the previous timeline's latch watermark no
+            // longer bounds anything on the fresh timeline, so reset it — the new
+            // frame must not be pruned before a reader has latched onto it.
+            self.latch_watermark_ns
+                .store(NEVER_PUBLISHED, Ordering::Relaxed);
+        }
+        // Frames the output clock has already advanced past are dead weight
+        // (invariant #9): output `now` is monotone, so nothing stamped strictly
+        // before the latch watermark is ever selected again. Pruning them holds
+        // the ring at the latched frame + any decode-ahead future rather than a
+        // full RING_CAPACITY backlog. This runs inside the existing O(capacity)
+        // copy-on-write on the sampled input thread — never on the output clock.
+        let watermark = self.latch_watermark_ns.load(Ordering::Relaxed);
         let entry = RingEntry { at, frame };
         self.ring.rcu(|current| {
             let mut next: Vec<RingEntry<T>> = if current.last().is_some_and(|tail| at < tail.at) {
                 // Backwards stamp: discard the now-superseded future and restart.
                 Vec::with_capacity(1)
             } else {
-                Vec::clone(current)
+                let mut kept = Vec::clone(current);
+                kept.retain(|e| e.at.as_nanos() >= watermark);
+                kept
             };
             next.push(entry.clone());
-            // Drop the oldest entries beyond the bounded capacity.
+            // Hard ceiling (drop-oldest) bounds the worst case: a stalled output
+            // clock that stops advancing the watermark while the producer runs on.
             let overflow = next.len().saturating_sub(Self::RING_CAPACITY);
             if overflow > 0 {
                 next.drain(0..overflow);
@@ -354,8 +392,17 @@ impl<T> TileStore<T> {
     #[must_use]
     pub fn state_at(&self, now: MediaTime) -> SourceState {
         let ring = self.ring.load();
-        latch_and_classify(&ring, now, self.thresholds)
-            .map_or(SourceState::NoSignal, |(_, state)| state)
+        match latch_and_classify(&ring, now, self.thresholds) {
+            Some((selected, state)) => {
+                // Advance the prune watermark too, so a tile that is monitored
+                // (state sampled) but not currently composited still bounds its
+                // ring. Monotone `fetch_max` — see [`read_at`](TileStore::read_at).
+                self.latch_watermark_ns
+                    .fetch_max(selected.at.as_nanos(), Ordering::Relaxed);
+                state
+            }
+            None => SourceState::NoSignal,
+        }
     }
 
     /// Read the tile on an output tick at instant `now`.
@@ -423,6 +470,12 @@ impl<T> TileStore<T> {
         let Some((selected, state)) = latch_and_classify(&ring, now, self.thresholds) else {
             return TileRead::NoSignal;
         };
+        // Record how far the output clock has advanced so the producer's next
+        // publish can prune consumed past frames (invariant #9). Monotone
+        // `fetch_max`: the watermark only moves forward, so it can never prune a
+        // frame a later read still needs (output `now` is monotone).
+        self.latch_watermark_ns
+            .fetch_max(selected.at.as_nanos(), Ordering::Relaxed);
         let frame = Arc::clone(&selected.frame);
         match state {
             SourceState::Live => TileRead::Fresh { frame },
