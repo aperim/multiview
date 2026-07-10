@@ -46,6 +46,11 @@ pub const OUTPUT_SCOPED_TOKEN: &str = "out-scoped-key.out-scoped-secret-mno";
 /// session into that device passes both per-object authorizations (proving the
 /// save guard does not over-restrict a properly-scoped principal).
 pub const CAST_SAVE_SCOPED_TOKEN: &str = "cast-save-key.cast-save-secret-pqr";
+/// An operator scoped to a single discovery **domain** (`site-a`) and nothing
+/// else (no object/output scope) for the discovery-domain BOLA axis (ADR-W026).
+/// Used by the whole-system guard tests: a principal restricted on the discovery
+/// axis alone must still be denied whole-system artifacts.
+pub const DISCOVERY_SCOPED_TOKEN: &str = "disco-scoped-key.disco-scoped-secret-stu";
 
 /// A fixed, deterministic acknowledgement timestamp used in tests.
 pub const ACK_NANOS: i64 = 1_700_000_000_000_000_000;
@@ -147,6 +152,17 @@ pub fn seeded_keys() -> ApiKeyStore {
             ]),
             scoped_output_ids: None,
             scoped_discovery_domains: None,
+        },
+    );
+    keys.register(
+        "disco-scoped-key",
+        "disco-scoped-secret-stu",
+        Principal {
+            key_id: "disco-scoped-key".to_owned(),
+            role: Role::Operator,
+            scoped_object_ids: None,
+            scoped_output_ids: None,
+            scoped_discovery_domains: Some(vec!["site-a".to_owned()]),
         },
     );
     keys

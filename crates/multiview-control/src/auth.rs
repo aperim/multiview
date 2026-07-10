@@ -687,6 +687,54 @@ mod tests {
     }
 
     #[test]
+    fn register_config_api_keys_refuses_to_overwrite_the_bootstrap_admin() {
+        use multiview_config::{ApiKeyConfig, ApiKeyRole};
+        // The bootstrap admin (key_id "admin") is provisioned first; a config
+        // `[[api.keys]]` reusing that reserved id must be a HARD startup error,
+        // never a silent HashMap clobber that swaps the admin's secret +
+        // principal (lockout / privilege takeover — auth-panel F3).
+        let (mut store, _) = provision_admin_keys(Some("admin-secret".to_owned()));
+        let keys = vec![ApiKeyConfig::new("admin", "ENV_ADMIN", ApiKeyRole::Operator)];
+        let err = register_config_api_keys(&mut store, &keys, |_| Some("attacker".to_owned()))
+            .expect_err("a config key colliding with the reserved admin id must be rejected");
+        assert!(
+            err.contains("admin"),
+            "the error names the reserved/colliding key id: {err}"
+        );
+        // The bootstrap admin is untouched: its original secret still
+        // authenticates as Admin, and the attacker's secret does NOT.
+        let principal = store
+            .verify("admin.admin-secret")
+            .expect("the bootstrap admin secret still authenticates");
+        assert_eq!(principal.role, Role::Admin);
+        assert!(
+            store.verify("admin.attacker").is_err(),
+            "the config key's secret must NOT have overwritten the admin"
+        );
+    }
+
+    #[test]
+    fn register_config_api_keys_refuses_a_duplicate_of_an_already_registered_id() {
+        use multiview_config::{ApiKeyConfig, ApiKeyRole};
+        // Fail-closed on ANY collision with an already-registered id, not just
+        // the reserved admin: the first registration wins and a second silent
+        // clobber is refused (register_config_api_keys is independently
+        // fail-closed, not reliant on the caller having validated).
+        let mut store = ApiKeyStore::new(b"pepper".to_vec());
+        let keys = vec![
+            ApiKeyConfig::new("dup", "ENV_A", ApiKeyRole::Viewer),
+            ApiKeyConfig::new("dup", "ENV_B", ApiKeyRole::Operator),
+        ];
+        let err = register_config_api_keys(&mut store, &keys, |name| match name {
+            "ENV_A" => Some("secret-a".to_owned()),
+            "ENV_B" => Some("secret-b".to_owned()),
+            _ => None,
+        })
+        .expect_err("a second key reusing an already-registered id must be rejected");
+        assert!(err.contains("dup"), "the error names the colliding id: {err}");
+    }
+
+    #[test]
     fn generated_bootstrap_token_is_returned_and_authenticates() {
         let (store, bootstrap) = provision_admin_keys(None);
         // A full bearer token is surfaced for first access.
