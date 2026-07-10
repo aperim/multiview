@@ -168,6 +168,7 @@ impl ConfigDiff {
             devices: running_devices,
             sync_groups: running_sync_groups,
             control: running_control,
+            api: running_api,
             placement: running_placement,
             audio: running_audio,
             routing: running_routing,
@@ -193,6 +194,7 @@ impl ConfigDiff {
             devices: next_devices,
             sync_groups: next_sync_groups,
             control: next_control,
+            api: next_api,
             placement: next_placement,
             audio: next_audio,
             routing: next_routing,
@@ -224,7 +226,7 @@ impl ConfigDiff {
         let media_changed = running_media_library != next_media_library
             || running_media_players != next_media_players;
         let mut changed_sections = BTreeSet::new();
-        let sectioned: [(&'static str, bool); 18] = [
+        let sectioned: [(&'static str, bool); 19] = [
             (
                 "schema_version",
                 running_schema_version != next_schema_version,
@@ -242,6 +244,12 @@ impl ConfigDiff {
             ("probes", running_probes != next_probes),
             ("audio", running_audio != next_audio),
             ("control", running_control != next_control),
+            // Config-declared API keys (ADR-W026). A changed section: keys are
+            // registered at startup, and a live re-registration path (file-watch
+            // diff → register/revoke/set_principal, RT010 generation bump) is a
+            // follow-up — so a change here is surfaced (never silently dropped),
+            // classified restart-pending by the apply layer until that path lands.
+            ("api", running_api != next_api),
             ("placement", running_placement != next_placement),
             ("salvos", running_salvos != next_salvos),
             (
