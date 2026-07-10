@@ -624,12 +624,15 @@ pub struct AppState {
     /// derived and the cast-session routes refuse with an honest `409`.
     /// Read-only control-plane state (invariant #10).
     pub cast_delivery: Option<Arc<CastDelivery>>,
-    /// The outbound-dial SSRF allowlist (SEC-02/SEC-04, CWE-918): the operator
-    /// CIDRs (`control.device_dial_allow`) that re-enable internal ranges for
-    /// the managed-device poller and Cast session actor to dial. The secure
-    /// default ([`DialPolicy::deny_internal`](multiview_config::device::net_guard::DialPolicy::deny_internal))
-    /// allows only globally-routable hosts; the binary widens it from config.
-    /// Read-only control-plane state (invariant #10).
+    /// The outbound-dial SSRF policy (SEC-02/SEC-04, CWE-918) the managed-device
+    /// poller and Cast session actor screen each resolved dial IP against. The
+    /// non-breaking default
+    /// ([`DialPolicy::allow_lan`](multiview_config::device::net_guard::DialPolicy::allow_lan))
+    /// keeps a self-hosted appliance reaching its LAN devices (private/ULA/carrier
+    /// dialable) while the never-legitimate ranges (loopback, link-local incl. the
+    /// cloud-metadata IP, unspecified, multicast/broadcast) stay blocked; an
+    /// operator `control.device_dial_allow` allowlist tightens the dial to its own
+    /// device subnet(s). Read-only control-plane state (invariant #10).
     pub dial_policy: Arc<multiview_config::device::net_guard::DialPolicy>,
     /// The runtime store of **ephemeral** cast sessions (DEV-D2, ADR-M011):
     /// runtime-only records that never enter the devices store, so a config
@@ -917,9 +920,10 @@ impl AppState {
             device_drivers: Arc::new(DeviceDriverRegistry::new()),
             device_pollers: Arc::new(DevicePollerRegistry::new()),
             cast_delivery: None,
-            // Secure default: dial only globally-routable hosts. The binary
-            // widens this from `control.device_dial_allow` (SEC-02/SEC-04).
-            dial_policy: Arc::new(multiview_config::device::net_guard::DialPolicy::deny_internal()),
+            // Non-breaking default: LAN devices (private/ULA/carrier) stay
+            // dialable, never-legitimate ranges stay blocked. An operator
+            // `control.device_dial_allow` allowlist tightens it (SEC-02/SEC-04).
+            dial_policy: Arc::new(multiview_config::device::net_guard::DialPolicy::allow_lan()),
             cast_sessions: Arc::new(CastSessionStore::new()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),

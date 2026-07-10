@@ -207,9 +207,10 @@ where
     // registry carries no cast member.
     let delivery = cast_delivery(config);
 
-    // The outbound-dial SSRF allowlist (SEC-02/SEC-04, CWE-918): default-deny
-    // every internal range, widened by the operator's dial allowlist.
-    let dial_policy = device_dial_policy();
+    // The outbound-dial SSRF policy (SEC-02/SEC-04, CWE-918): the non-breaking
+    // LAN default, tightened by the operator's `control.device_dial_allow`
+    // allowlist (or the legacy env var).
+    let dial_policy = device_dial_policy(config.control.as_ref());
 
     let mut state = AppState::new(
         publisher,
@@ -438,15 +439,48 @@ fn device_poller_registry(
     Arc::new(multiview_control::devices::DevicePollerRegistry::new())
 }
 
-/// Build the outbound-dial SSRF allowlist (SEC-02/SEC-04, CWE-918) from the
-/// `MULTIVIEW_DEVICE_DIAL_ALLOW` environment variable — a comma/whitespace-
-/// separated list of CIDRs (e.g. `"192.168.0.0/16, fd00:db8::/32"`) an operator
-/// opts back in so managed devices on those LAN ranges remain reachable under
-/// the default-deny dial screen. Unset (or empty) ⇒ deny every internal range:
-/// only globally-routable hosts are dialled. An unparseable entry logs a warning
-/// and falls back to deny-all (fail-closed) rather than dialling wide.
-fn device_dial_policy() -> Arc<multiview_config::device::net_guard::DialPolicy> {
+/// Build the outbound-dial SSRF policy (SEC-02/SEC-04, CWE-918) an operator sets
+/// to **tighten** the dial to their own device subnet(s) — a list of CIDRs (e.g.
+/// `["192.168.0.0/16", "fd00:db8::/32"]`).
+///
+/// Precedence: the validated [`control.device_dial_allow`](multiview_config::ControlConfig::device_dial_allow)
+/// config field is the config-as-code home for the allowlist; the
+/// `MULTIVIEW_DEVICE_DIAL_ALLOW` env var (comma/whitespace-separated) is the
+/// legacy source, kept as a fallback during the migration off it. Absent from
+/// both ⇒ the non-breaking default: LAN devices (private/ULA/carrier) stay
+/// dialable while the never-legitimate ranges (loopback, link-local incl. the
+/// cloud-metadata IP, unspecified, multicast/broadcast) stay blocked. An
+/// unparseable entry logs a warning and falls back — fail-closed — to denying
+/// every allowlistable range (globally-routable hosts only), never silently
+/// widening back to the LAN default the operator was tightening away from.
+fn device_dial_policy(
+    control: Option<&multiview_config::ControlConfig>,
+) -> Arc<multiview_config::device::net_guard::DialPolicy> {
     use multiview_config::device::net_guard::DialPolicy;
+
+    // The config field wins when present (it is validated at config load).
+    if let Some(cidrs) = control.and_then(|c| c.device_dial_allow.as_deref()) {
+        let policy = match DialPolicy::from_cidrs(cidrs.iter().map(String::as_str)) {
+            Ok(policy) => {
+                tracing::info!(
+                    entries = cidrs.len(),
+                    "device-dial allowlist loaded from control.device_dial_allow"
+                );
+                policy
+            }
+            // Rejected already at config load; fail closed here too rather than
+            // dialling wide, in case an unvalidated config ever reaches this.
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "control.device_dial_allow has an invalid CIDR; denying all internal \
+                     dial targets (only globally-routable hosts are dialled)"
+                );
+                DialPolicy::deny_all_allowlistable()
+            }
+        };
+        return Arc::new(policy);
+    }
 
     let policy = match std::env::var("MULTIVIEW_DEVICE_DIAL_ALLOW") {
         Ok(raw) if !raw.trim().is_empty() => {
@@ -469,11 +503,11 @@ fn device_dial_policy() -> Arc<multiview_config::device::net_guard::DialPolicy> 
                         "MULTIVIEW_DEVICE_DIAL_ALLOW has an invalid CIDR; denying all internal \
                          dial targets (only globally-routable hosts are dialled)"
                     );
-                    DialPolicy::deny_internal()
+                    DialPolicy::deny_all_allowlistable()
                 }
             }
         }
-        _ => DialPolicy::deny_internal(),
+        _ => DialPolicy::allow_lan(),
     };
     Arc::new(policy)
 }

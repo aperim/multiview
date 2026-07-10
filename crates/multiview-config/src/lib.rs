@@ -158,6 +158,21 @@ pub struct ControlConfig {
     /// are refused).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_media_base: Option<String>,
+    /// The outbound-dial SSRF allowlist (SEC-02/SEC-04, CWE-918, ADR-M013): the
+    /// operator CIDRs the managed-device poller and Cast session actor lock their
+    /// outbound dial to. IPv6-first (e.g. `["fd00:db8::/32", "192.168.0.0/16"]`);
+    /// a bare IP is a `/32` (IPv4) or `/128` (IPv6) host route.
+    ///
+    /// **Absent** ⇒ the non-breaking default: LAN devices (private/ULA/carrier)
+    /// stay dialable while the never-legitimate ranges (loopback, link-local incl.
+    /// the cloud-metadata IP, unspecified, multicast/broadcast) stay blocked.
+    /// **Set** ⇒ *tightens* the dial — an allowlistable target is reachable only
+    /// inside one of these CIDRs (the recommended SEC-04 hardening); an empty list
+    /// denies every allowlistable range (globally-routable hosts only). Each entry
+    /// is validated as a CIDR by [`MultiviewConfig::validate`], so a typo fails at
+    /// config load (fail-closed) rather than silently widening the screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_dial_allow: Option<Vec<String>>,
 }
 
 /// Process-wide system settings.
@@ -755,6 +770,16 @@ impl MultiviewConfig {
                          URL (Cast receivers fetch HLS over HTTP)"
                     )));
                 }
+            }
+            if let Some(cidrs) = &control.device_dial_allow {
+                // Build the dial policy purely to validate every CIDR — a typo
+                // must fail at config load (fail-closed), not be silently ignored
+                // and leave the dial screen wider than the operator intended
+                // (SEC-02/SEC-04, ADR-M013). This is the same parser the runtime
+                // dial policy is built from.
+                crate::device::net_guard::DialPolicy::from_cidrs(cidrs).map_err(|e| {
+                    ConfigError::Validation(format!("control.device_dial_allow: {e}"))
+                })?;
             }
         }
         Ok(())

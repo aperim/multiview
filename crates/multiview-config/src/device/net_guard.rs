@@ -21,11 +21,17 @@
 //!    LAN, so whether its private address may be dialled is a runtime policy
 //!    decision, not a config-syntax one.
 //! 2. **Dial time ([`screen_ip`] / [`screen_resolved`])** — screens the
-//!    **resolved** IP against a strict default-deny of every internal range,
-//!    minus an operator [`DialPolicy`] allowlist. Screening the resolved IP (not
-//!    the hostname) is the only way to defeat DNS-rebind: a public name that
-//!    answers with a private/loopback address is rejected once resolved. The
-//!    caller then dials the vetted IP it screened.
+//!    **resolved** IP against the [`DialPolicy`]. The default is **non-breaking**
+//!    (a self-hosted LAN appliance keeps reaching its devices out of the box):
+//!    every *allowlistable* range (private/ULA/carrier) is dialable, while the
+//!    never-legitimate ranges (loopback, link-local incl. IMDS, unspecified,
+//!    multicast/broadcast) are **always** blocked — no default and no operator
+//!    allowlist re-enables them. An operator allowlist **tightens** the dial to
+//!    its own device subnet(s). Screening the resolved IP (not the hostname) is
+//!    the only way to defeat DNS-rebind: a public name that answers with a
+//!    loopback/metadata address is rejected once resolved, unconditionally; with
+//!    an allowlist set, a rebind to any out-of-subnet private range is caught
+//!    too. The caller then dials the vetted IP it screened.
 //!
 //! IPv6-first (ADR-0042): bracketed IPv6 URL/authority literals are handled, and
 //! IPv4-mapped IPv6 (`::ffff:a.b.c.d`) is unwrapped before classification so it
@@ -150,26 +156,55 @@ impl std::fmt::Display for BlockClass {
     }
 }
 
-/// The operator dial allowlist: the internal CIDRs a deployment opts back in so
-/// its LAN devices remain reachable under the default-deny screen.
+/// The outbound-dial policy: whether an *allowlistable* (private/ULA/carrier)
+/// resolved IP may be dialled. The never-legitimate ranges are refused
+/// regardless — see [`BlockClass::allowlistable`].
 ///
-/// The default ([`DialPolicy::deny_internal`]) allows nothing internal — every
-/// non-global address is refused. [`DialPolicy::from_cidrs`] builds a policy
-/// from `control.device_dial_allow`.
+/// The default ([`DialPolicy::default`] / [`DialPolicy::allow_lan`]) is
+/// **non-breaking**: `allow` is [`None`], so every allowlistable LAN range is
+/// dialable and a self-hosted appliance keeps reaching its devices out of the
+/// box. [`DialPolicy::from_cidrs`] — built from `control.device_dial_allow` —
+/// sets `allow` to `Some(cidrs)`, which **tightens** the dial: an allowlistable
+/// IP is then reachable only inside one of those CIDRs (locking the dial to the
+/// real device subnet closes the authenticated internal-dial vector, SEC-04).
+/// `Some([])` (an empty allowlist) denies every allowlistable range — the
+/// strictest lock-down.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DialPolicy {
-    allow: Vec<IpNet>,
+    /// `None` ⇒ allow every allowlistable range (the non-breaking default);
+    /// `Some(cidrs)` ⇒ allow an allowlistable IP only inside one of `cidrs`.
+    allow: Option<Vec<IpNet>>,
 }
 
 impl DialPolicy {
-    /// A policy that allows no internal range — the secure default.
+    /// The non-breaking default: allow every allowlistable (private/ULA/carrier)
+    /// LAN range, while the never-legitimate ranges stay blocked. Equivalent to
+    /// [`DialPolicy::default`].
     #[must_use]
-    pub fn deny_internal() -> Self {
-        Self { allow: Vec::new() }
+    pub fn allow_lan() -> Self {
+        Self { allow: None }
+    }
+
+    /// The strictest lock-down: deny every allowlistable (private/ULA/carrier)
+    /// range too, dialling only globally-routable hosts. Equivalent to an empty
+    /// operator allowlist (`Some([])`).
+    ///
+    /// This is the fail-closed fallback when an operator-supplied allowlist
+    /// cannot be parsed: an operator who asked to *tighten* the dial is never
+    /// silently widened back to the LAN default (which would ignore their
+    /// tightening intent). The never-legitimate ranges are refused by
+    /// [`screen_ip`] regardless.
+    #[must_use]
+    pub fn deny_all_allowlistable() -> Self {
+        Self {
+            allow: Some(Vec::new()),
+        }
     }
 
     /// Build a policy from operator-declared CIDR strings (e.g.
-    /// `["192.168.0.0/16", "fd00:db8::/32"]`).
+    /// `["192.168.0.0/16", "fd00:db8::/32"]`) that **tightens** the dial: an
+    /// allowlistable IP is dialable only inside one of these CIDRs. An empty
+    /// list denies every allowlistable range (the strictest lock-down).
     ///
     /// A bare IP with no prefix length is accepted as a `/32` (IPv4) or `/128`
     /// (IPv6) host route.
@@ -194,19 +229,19 @@ impl DialPolicy {
                 })?;
             allow.push(net);
         }
-        Ok(Self { allow })
+        Ok(Self { allow: Some(allow) })
     }
 
-    /// Whether `ip` is inside an allowlisted CIDR.
+    /// Whether `ip` is permitted by the allowlist: the non-breaking default
+    /// ([`None`]) permits any allowlistable range; a set allowlist permits only
+    /// the CIDRs it lists. Never-legitimate ranges are refused by [`screen_ip`]
+    /// before this is consulted, so this governs only allowlistable ranges.
     #[must_use]
     pub fn allows(&self, ip: IpAddr) -> bool {
-        self.allow.iter().any(|net| net.contains(&ip))
-    }
-
-    /// Whether the allowlist is empty (the secure default).
-    #[must_use]
-    pub fn is_deny_all(&self) -> bool {
-        self.allow.is_empty()
+        match &self.allow {
+            None => true,
+            Some(nets) => nets.iter().any(|net| net.contains(&ip)),
+        }
     }
 }
 
