@@ -373,3 +373,42 @@ fn retained_frames_reports_actual_ring_occupancy() {
         "three published, none consumed -> all three retained"
     );
 }
+
+#[test]
+fn equal_timestamp_publish_stays_forward_and_still_prunes() {
+    // An equal media-time stamp (a duplicate, or a monotonic-guard-clamped PTS)
+    // is NOT a discontinuity: it must be treated as a forward publish, so it
+    // keeps pruning consumed frames and does NOT reset the watermark the way a
+    // genuine backwards (re-anchor) stamp does. If `at == tail` re-anchored, a
+    // duplicate stamp would defeat pruning and let the ring re-accumulate the
+    // frames the output clock already passed.
+    let s = store();
+    s.publish(1_u32, MediaTime::from_nanos(0));
+    s.publish(2_u32, MediaTime::from_nanos(40_000_000));
+    s.publish(3_u32, MediaTime::from_nanos(80_000_000));
+    // Advance the latch watermark to 80ms (the newest instant).
+    assert_eq!(
+        s.read_at(MediaTime::from_nanos(80_000_000))
+            .frame()
+            .map(|f| **f),
+        Some(3)
+    );
+    // Publish a fourth frame stamped at the SAME instant as the tail (80ms).
+    s.publish(4_u32, MediaTime::from_nanos(80_000_000));
+    // Forward semantics: the watermark still pruned the consumed frames (@0, @40)
+    // — only the two @80ms frames remain, not all four (which is what a spurious
+    // re-anchor on `==` would leave).
+    assert_eq!(
+        s.retained_frames(),
+        2,
+        "equal-stamp publish must stay forward (keep pruning), not re-anchor"
+    );
+    // Newest-wins at the shared instant.
+    assert_eq!(
+        s.read_at(MediaTime::from_nanos(80_000_000))
+            .frame()
+            .map(|f| **f),
+        Some(4),
+        "the newer frame at the shared instant wins"
+    );
+}
