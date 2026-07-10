@@ -1316,8 +1316,12 @@ fn input_connection_schema() -> Value {
     json!({
         "type": "object",
         "description": "Data body of the `input.connection` event.",
-        "required": ["state"],
+        "required": ["input_id", "state"],
         "properties": {
+            "input_id": {
+                "type": "string",
+                "description": "The owning input's id (the configured source id) — the object axis this lifecycle event is authorized under (ADR-W026)."
+            },
             "state": { "$ref": "#/components/schemas/LifecycleState" },
             "attempt": {
                 "type": "integer",

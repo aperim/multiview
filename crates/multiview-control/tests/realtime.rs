@@ -83,10 +83,10 @@ async fn snapshot_precedes_deltas_with_monotonic_connection_seq() {
     // Engine publishes two events; the session emits them as deltas with
     // strictly increasing per-connection seqs (1, 2) on their topics.
     engine.publish_event(alert("a"));
-    engine.publish_event(Event::InputConnection(InputConnection {
-        state: LifecycleState::Live,
-        attempt: None,
-    }));
+    engine.publish_event(Event::InputConnection(InputConnection::new(
+        "input:cam1",
+        LifecycleState::Live,
+    )));
 
     let d1 = session
         .next_delta()

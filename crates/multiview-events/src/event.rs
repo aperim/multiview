@@ -540,13 +540,43 @@ impl WarningCode {
 }
 
 /// An input source connection-state change.
+///
+/// `#[non_exhaustive]` (ADR-W026): construct via [`InputConnection::new`] plus
+/// the [`InputConnection::with_attempt`] builder so a future field never breaks
+/// a caller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct InputConnection {
+    /// The owning input's id (the configured source id) — the object axis this
+    /// lifecycle event is authorized under (ADR-W026). An input's connect/flap
+    /// is the same leak class as its `input.streams` inventory, so a
+    /// cam1-scoped principal must not receive cam2's connection deltas.
+    pub input_id: String,
     /// The new lifecycle state of the source.
     pub state: LifecycleState,
     /// The reconnect attempt counter, if reconnecting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u32>,
+}
+
+impl InputConnection {
+    /// Build an `input.connection` event body for `input_id` entering `state`,
+    /// with no reconnect attempt counter.
+    #[must_use]
+    pub fn new(input_id: impl Into<String>, state: LifecycleState) -> Self {
+        Self {
+            input_id: input_id.into(),
+            state,
+            attempt: None,
+        }
+    }
+
+    /// Builder: set the reconnect attempt counter (a reconnect in progress).
+    #[must_use]
+    pub fn with_attempt(mut self, attempt: u32) -> Self {
+        self.attempt = Some(attempt);
+        self
+    }
 }
 
 /// The full elementary-stream inventory an input offers (RT-3, ADR-0034 §9).
@@ -1461,6 +1491,20 @@ pub enum AuthzScope<'a> {
     /// discovery-scoped principal is denied (fail-closed). The policy lives in
     /// the control-plane predicate; this classifier only reports the label.
     DiscoveryDomain(Option<&'a str>),
+    /// Restricted by **both** an object id and an output id — the two-axis
+    /// conjunction an event whose REST twin gates both surfaces requires
+    /// (ADR-W026). The predicate admits it iff `scoped_object_ids` admits
+    /// `object` **and** `scoped_output_ids` admits `output` (either axis unset =
+    /// unrestricted on that axis). Carries a head-scoped `salvo.*` — the REST
+    /// twin runs `authorize_object(salvo)` **and** `authorize_output(head)`; a
+    /// head-less recall stays a plain [`AuthzScope::Object`].
+    ObjectAndOutput {
+        /// The object-axis id (matched against `scoped_object_ids`).
+        object: &'a str,
+        /// The output-axis id (matched against `scoped_output_ids`, plain
+        /// entries only).
+        output: &'a str,
+    },
 }
 
 /// The discriminated payload of every frame: control frames and data events.
@@ -1766,6 +1810,37 @@ impl Event {
             // grant.
             Self::TimingStatus(t) => AuthzScope::Program(&t.stream_id),
 
+            // ---- Output-scoped (ADR-W026) ----
+            // A RIST link's health is an output-sink concern keyed by its
+            // configured source/output id; `cname` leaks peer-hostname topology,
+            // so it must not firehose to an output-scoped principal (REST twin:
+            // rides `Topic::Outputs`).
+            Self::RistLinkStats(e) => AuthzScope::Output(&e.link_id),
+
+            // ---- Object-scoped input lanes (ADR-W026) ----
+            // An input's stream inventory and its connect/flap lifecycle share
+            // the input-id object namespace with `tile.state`; their REST twins
+            // are `authorize_object`-gated. "input cam2 flapping" is the same
+            // leak class to a cam1-scoped principal.
+            Self::InputStreams(e) => AuthzScope::Object(&e.input_id),
+            Self::InputConnection(e) => AuthzScope::Object(&e.input_id),
+
+            // ---- Object+output-scoped salvo lane (ADR-W026) ----
+            // The REST twin gates BOTH axes when a head is addressed
+            // (`authorize_object(salvo)` + `authorize_output(head)`), so a
+            // head-scoped recall is the two-axis conjunction; a head-less
+            // whole-wall recall gates the salvo object only (the REST path skips
+            // `authorize_output` when no head is given).
+            Self::SalvoArmed(e) | Self::SalvoTaken(e) | Self::SalvoCancelled(e) => {
+                e.head.as_deref().map_or_else(
+                    || AuthzScope::Object(&e.salvo),
+                    |head| AuthzScope::ObjectAndOutput {
+                        object: &e.salvo,
+                        output: head,
+                    },
+                )
+            }
+
             // ---- Public data lanes (preserve the pre-W026 firehose, reviewed) ----
             // The connect-time tile baseline rides its own `tiles` snapshot path,
             // not the object axis — public like the rest of the tile lane.
@@ -1774,27 +1849,21 @@ impl Event {
             Self::AudioMeter(_)
             | Self::AudioLoudness(_)
             | Self::SystemMetrics(_)
-            | Self::OutputStatus(_)
-            | Self::RistLinkStats(_) => AuthzScope::Public,
+            | Self::OutputStatus(_) => AuthzScope::Public,
             // Operator alert / health / degradation lanes — node-wide signals.
             Self::AlertRaised(_)
             | Self::AlertCleared(_)
             | Self::HealthWarningRaised(_)
             | Self::HealthWarningCleared(_)
             | Self::ShedLoad(_) => AuthzScope::Public,
-            // Input/job lanes — no per-object authz axis in the current model.
-            Self::InputConnection(_) | Self::InputStreams(_) | Self::JobProgress(_) => {
-                AuthzScope::Public
-            }
-            // Broadcast monitoring/control surface — node-wide operator lanes.
+            // Job progress is correlated by `corr`, not a per-object resource.
+            Self::JobProgress(_) => AuthzScope::Public,
+            // Broadcast monitoring surface — node-wide operator lanes.
             Self::AlarmRaised(_)
             | Self::AlarmUpdated(_)
             | Self::AlarmCleared(_)
             | Self::AlarmAcked(_)
-            | Self::TallyState(_)
-            | Self::SalvoArmed(_)
-            | Self::SalvoTaken(_)
-            | Self::SalvoCancelled(_) => AuthzScope::Public,
+            | Self::TallyState(_) => AuthzScope::Public,
         }
     }
 
