@@ -187,12 +187,16 @@ the AsyncAPI spec is regenerated (`cargo xtask gen-asyncapi`).
   bump: `resolve_principal` captures the authorization generation *before* it
   resolves the key and threads it as the session's live-authz baseline (`Some` for
   store keys, `None` for local-admin/JWT), and both transports run a pre-snapshot
-  `reauthorize` gate — so a revoke or re-scope landing between auth and handle-install
-  disconnects (no snapshot leak) or adopts the new scope before the first snapshot,
-  rather than being retained until an unrelated future mutation. Installing the
-  live-authz handle for **every** store key (not a racy `principal_for_key().is_some()`
-  re-probe) is what lets a revoked-in-window key disconnect instead of being mistaken
-  for a non-store principal.
+  `reauthorize` gate — so a revoke or re-scope landing in the auth→install window
+  disconnects (before any snapshot) or adopts the new scope for the first snapshot,
+  rather than being retained until an unrelated future mutation. A change landing in
+  the sub-tick window *after* the gate but before the snapshot send is caught by the
+  first pump iteration — the same bounded latency the per-delta re-check gives the
+  steady stream; fully closing that residual would require holding the store lock
+  across the socket send, which invariant #10 forbids. Installing the live-authz
+  handle for **every** store key (not a racy `principal_for_key().is_some()` re-probe)
+  is what lets a revoked-in-window key disconnect instead of being mistaken for a
+  non-store principal.
 - **Scope for now:** revocation covers store-managed API keys. Auth-disabled
   (`local_admin`) principals are unscoped admins with nothing to revoke; JWT
   principals are re-minted per request from the external token and are not

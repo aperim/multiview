@@ -245,10 +245,11 @@ impl ApiKeyStore {
         }
     }
 
-    /// Read-lock the key map, recovering the guard if a writer panicked mid-mutation
-    /// (a poisoned lock never yields a wrong answer here — the map is only ever
-    /// replaced wholesale under the write lock — so recovering is safe and keeps the
-    /// read path panic-free, per the hot-path no-`unwrap` rule).
+    /// Read-lock the key map, recovering the guard if a writer poisoned it. The
+    /// writers only insert/remove/reassign whole `KeyRecord` values under the write
+    /// lock, so a recovered guard exposes a well-formed (if possibly mid-edit) map —
+    /// never a torn value — which is safe to read for verification / re-resolution
+    /// and keeps the read path panic-free (safety rule 3, hot-path no-`unwrap`).
     fn read_keys(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, KeyRecord>> {
         self.keys.read().unwrap_or_else(PoisonError::into_inner)
     }
@@ -284,10 +285,11 @@ impl ApiKeyStore {
         let key_id = key_id.into();
         let digest = self.digest(secret);
         // Recover a poisoned lock rather than silently dropping the insert (rule 37,
-        // no swallowed errors): the map is only ever replaced/mutated wholesale, so a
-        // recovered guard never yields a wrong answer — consistent with `read_keys`/
-        // `write_keys`. `&mut self` means no other guard is live; recovery just keeps
-        // registration total instead of losing the key on a prior-panic poison.
+        // no swallowed errors). The writers only insert/remove/reassign whole
+        // `KeyRecord` values, so a guard poisoned by an unrelated prior panic still
+        // exposes a well-formed map — recovering keeps registration total and
+        // panic-free (safety rule 3), consistent with `read_keys`/`write_keys`.
+        // `&mut self` means no other guard is live.
         self.keys
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)

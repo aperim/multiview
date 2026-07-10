@@ -1645,12 +1645,18 @@ async fn run_ws_session(
     let mut session = install_live_reauth(session, &state, principal, live_baseline);
 
     // Connect-race gate (ADR-RT010): re-resolve against the auth-time generation
-    // BEFORE any snapshot is sent, so a revoke/re-scope that landed in the connect
-    // window is honored with no leak — a revoked key closes immediately (no
-    // snapshot), a re-scope adopts the new scope so the snapshot below is filtered
-    // to it. Wait-free unless the generation advanced (invariant #10).
+    // BEFORE building the snapshot, so a revoke/re-scope that landed in the
+    // auth→install window is honored up front — a revoked key closes here (no
+    // snapshot at all), a re-scope adopts the new scope so the snapshot below is
+    // filtered to it. A change landing in the sub-tick window AFTER this gate is
+    // caught by the first pump iteration below — the same bounded latency the
+    // per-delta re-check gives the steady-state stream. Fully closing that residual
+    // window would require holding the store lock across the socket send, which
+    // invariant #10 forbids, so bounded-latency is the correct guarantee here.
     match session.reauthorize() {
         ReauthOutcome::Disconnect => {
+            // The socket is being torn down; a failed close-frame send only means the
+            // peer already went away, so the send result is intentionally ignored.
             let _ = socket
                 .send(Message::Close(Some(forbidden_close_frame())))
                 .await;
@@ -1777,9 +1783,11 @@ pub async fn sse_handler(
     let mut session = install_live_reauth(session, &state, principal, live_baseline);
 
     // Connect-race gate (ADR-RT010): re-resolve against the auth-time generation
-    // before the stream sends any snapshot — a revoke in the connect window ends the
-    // request with a 403 (no snapshot leak); a re-scope is adopted in place so the
-    // snapshot below is filtered to the new scope.
+    // before the stream builds any snapshot — a revoke that landed in the auth→install
+    // window ends the request with a 403 (no snapshot); a re-scope is adopted so the
+    // snapshot is filtered to the new scope. A change landing after this gate is caught
+    // by the first pump iteration (bounded latency; a fully atomic authz+snapshot would
+    // need a lock across the send, which invariant #10 forbids).
     if session.reauthorize() == ReauthOutcome::Disconnect {
         return crate::error::ControlError::Forbidden("authorization revoked".to_owned())
             .into_response();
