@@ -108,6 +108,15 @@ pub(crate) async fn scan_devices(
 
     let zowietek = state.discovery_config.zowietek_service_type.clone();
     let domain = state.discovery_config.domain.clone();
+    // Discovery-domain gate (ADR-W026): a principal that could not SEE this
+    // node's discovery inventory (its domain is outside the principal's
+    // allowlist, or the node is unlabelled and the principal is discovery-scoped)
+    // may not spend the single-flight scan budget or correlate scan activity via
+    // the 202 window. The REST twin of the `device.discovered` stream filter.
+    crate::auth::authorize_scope(
+        &principal,
+        multiview_events::AuthzScope::DiscoveryDomain(domain.as_deref()),
+    )?;
     let service_types = scan_service_types(
         zowietek.as_deref(),
         &state.discovery_config.extra_service_types,
@@ -270,5 +279,93 @@ pub(crate) async fn list_discovered(
     principal: Principal,
 ) -> ControlResult<Json<Vec<DiscoveredService>>> {
     principal.role.require(Action::Read)?;
-    Ok(Json(state.discovery.snapshot()))
+    // Discovery-domain visibility (ADR-W026): a discovery-scoped principal sees
+    // only rows in its domain and NEVER an unlabelled row (fail-closed) — the
+    // REST twin of the realtime `device.discovered` filter, so a scoped client
+    // cannot enumerate out-of-domain inventory it could not receive on the
+    // stream. List-filtering (not 403) matches the #211 convention: no existence
+    // oracle (ADR-W005).
+    Ok(Json(visible_discovery_rows(&principal, state.discovery.snapshot())))
+}
+
+/// Filter a discovery inventory snapshot to the rows `principal` may see
+/// (ADR-W026): each row is gated on the discovery-domain axis via the shared
+/// [`scope_permits`](crate::auth::scope_permits) predicate, so REST and the
+/// realtime `device.discovered` filter cannot fork. An unscoped principal keeps
+/// every row; a discovery-scoped one keeps only its labelled domains.
+pub(crate) fn visible_discovery_rows(
+    principal: &Principal,
+    rows: Vec<DiscoveredService>,
+) -> Vec<DiscoveredService> {
+    let scopes = principal.scopes();
+    rows.into_iter()
+        .filter(|row| {
+            crate::auth::scope_permits(
+                &scopes,
+                multiview_events::AuthzScope::DiscoveryDomain(row.domain.as_deref()),
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod discovery_scope_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::visible_discovery_rows;
+    use crate::auth::{Principal, Role};
+    use crate::devices::discovery::{DiscoveredService, RawDiscoveredService};
+    use std::time::{Duration, Instant};
+
+    fn principal(domains: Option<Vec<&str>>) -> Principal {
+        Principal {
+            key_id: "k".to_owned(),
+            role: Role::Operator,
+            scoped_object_ids: None,
+            scoped_output_ids: None,
+            scoped_discovery_domains: domains
+                .map(|d| d.into_iter().map(str::to_owned).collect()),
+        }
+    }
+
+    fn row(domain: Option<&str>) -> DiscoveredService {
+        let raw = RawDiscoveredService::new(
+            "_ndi._tcp.local.".to_owned(),
+            format!("row-{}", domain.unwrap_or("unlabelled")),
+            "host.local.".to_owned(),
+            5961,
+            vec![],
+            vec![],
+        );
+        DiscoveredService::from_raw(
+            &raw,
+            None,
+            Instant::now() + Duration::from_secs(60),
+            domain.map(str::to_owned),
+        )
+    }
+
+    #[test]
+    fn unscoped_principal_sees_every_row_including_unlabelled() {
+        let rows = vec![row(Some("site-a")), row(Some("site-b")), row(None)];
+        assert_eq!(visible_discovery_rows(&principal(None), rows).len(), 3);
+    }
+
+    #[test]
+    fn discovery_scoped_principal_sees_only_its_domain_never_unlabelled() {
+        let rows = vec![row(Some("site-a")), row(Some("site-b")), row(None)];
+        let visible = visible_discovery_rows(&principal(Some(vec!["site-a"])), rows);
+        let domains: Vec<Option<String>> = visible.iter().map(|r| r.domain.clone()).collect();
+        assert_eq!(
+            domains,
+            vec![Some("site-a".to_owned())],
+            "a discovery-scoped principal sees only its own domain — never another's, \
+             never an unlabelled row (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn empty_domain_allowlist_sees_nothing() {
+        let rows = vec![row(Some("site-a")), row(None)];
+        assert!(visible_discovery_rows(&principal(Some(vec![])), rows).is_empty());
+    }
 }
