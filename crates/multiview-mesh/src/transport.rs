@@ -13,9 +13,25 @@
 use crate::announce::AnnouncePayload;
 use crate::error::MeshError;
 
+/// The TXT property key holding the chunk count.
+#[cfg(any(feature = "mdns", test))]
+pub(crate) const CHUNK_COUNT_KEY: &str = "c";
+
+/// The maximum bytes in a chunk emitted by the mesh announcer.
+#[cfg(any(feature = "mdns", test))]
+pub(crate) const CHUNK_BYTES: usize = 200;
+
+/// The maximum accepted chunk count (12.8 KiB at [`CHUNK_BYTES`] per chunk).
+///
+/// A legitimate announcement carries a small set of 32-byte salted hardware
+/// digests plus compact entitlement metadata. Sixty-four chunks leave substantial
+/// protocol headroom while bounding allocation and work from untrusted TXT input.
+#[cfg(any(feature = "mdns", test))]
+pub(crate) const MAX_CHUNKS: usize = 64;
+
 /// A received mesh announcement from the transport: the raw wire bytes of a
-/// peer's TXT-record payload. The logic decodes + verifies it; the transport
-/// never interprets it.
+/// peer's TXT-record payload. The transport never interprets it; consumers decode
+/// it into the untrusted discovered-peer inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceivedAnnouncement {
@@ -39,6 +55,27 @@ impl ReceivedAnnouncement {
     pub fn decode(&self) -> Result<AnnouncePayload, MeshError> {
         AnnouncePayload::from_wire(&self.wire)
     }
+}
+
+/// Reassemble numbered TXT chunks through a transport-specific property lookup.
+///
+/// The attacker-controlled count is capped before allocation or chunk lookup.
+#[cfg(any(feature = "mdns", test))]
+pub(crate) fn reassemble_txt<'a>(
+    mut property: impl FnMut(&str) -> Option<&'a str>,
+) -> Option<Vec<u8>> {
+    let count: usize = property(CHUNK_COUNT_KEY)?.parse().ok()?;
+    if count > MAX_CHUNKS {
+        return None;
+    }
+    let capacity = count.checked_mul(CHUNK_BYTES)?;
+    let mut wire = Vec::with_capacity(capacity);
+    for index in 0..count {
+        let key = format!("p{index}");
+        let chunk = property(&key)?;
+        wire.extend_from_slice(chunk.as_bytes());
+    }
+    Some(wire)
 }
 
 /// The transport seam: publish this machine's announcement, and report observed
