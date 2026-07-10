@@ -150,7 +150,7 @@ pub use preview::{
     SharedWhep, WhepAnswer, WhepProvider, WhepReject, WhepScope,
 };
 pub use problem::{Problem, PROBLEM_JSON};
-pub use realtime::{CorrKey, CorrRegistry, RealtimeFrame, SessionStream};
+pub use realtime::{CorrKey, CorrRegistry, RealtimeFrame, ReauthOutcome, SessionStream};
 pub use repository::{InMemoryRepository, Layout, LayoutInput, Repository, VersionedLayout};
 pub use resource_store::{
     DeviceKind, InMemoryDeviceStore, InMemoryMediaPlayerStore, InMemoryOutputStore,

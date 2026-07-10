@@ -21,7 +21,9 @@
 
 use std::sync::Arc;
 
-use multiview_control::{ApiKeyStore, Principal, ReauthOutcome, RealtimeFrame, Role, SessionStream};
+use multiview_control::{
+    ApiKeyStore, Principal, RealtimeFrame, ReauthOutcome, Role, SessionStream,
+};
 use multiview_engine::EnginePublisher;
 use multiview_events::{DeviceState, DeviceStatus, Event, FrameKind, ResyncReason, Topic};
 
@@ -95,7 +97,10 @@ async fn scope_revocation_stops_delivering_the_revoked_object() {
 
     // Mid-session: an admin narrows the principal's scope to `[B]` — `A` revoked.
     assert!(
-        store.set_principal("k1", principal("k1", Role::Operator, Some(vec!["B".to_owned()]))),
+        store.set_principal(
+            "k1",
+            principal("k1", Role::Operator, Some(vec!["B".to_owned()]))
+        ),
         "set_principal updates an existing key"
     );
 
@@ -310,7 +315,9 @@ fn store_mutators_bump_the_generation_and_reresolve() {
         Some(Role::Viewer)
     );
     assert_eq!(
-        store.principal_for_key("k1").and_then(|p| p.scoped_object_ids),
+        store
+            .principal_for_key("k1")
+            .and_then(|p| p.scoped_object_ids),
         Some(vec![])
     );
     assert!(

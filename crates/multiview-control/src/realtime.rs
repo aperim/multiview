@@ -24,24 +24,37 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, Query, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use multiview_core::time::MediaTime;
-use multiview_engine::{EventSubscription, RecvError, TryRecvError};
+use multiview_engine::{EventSubscription, RecvError, SeqEvent, TryRecvError};
 use multiview_events::{
-    DeviceStatus, Envelope, Event, FrameKind, Hello, MediaPlayerState, OutputRunState, SalvoPhase,
-    SchemaVersion, Seq, TileSnapshotEntry, TilesSnapshot, Topic,
+    DeviceStatus, Envelope, Event, FrameKind, Hello, MediaPlayerState, OutputRunState, Resync,
+    ResyncReason, SalvoPhase, SchemaVersion, Seq, TileSnapshotEntry, TilesSnapshot, Topic,
 };
 
-use crate::auth::{Action, Principal};
+use crate::auth::{Action, ApiKeyStore, Principal, Role};
 use crate::command::{Command, MediaTransportVerb, OperationId};
 use crate::devices::DeviceStatusRegistry;
 use crate::state::{AppState, EngineStateSnapshot};
+
+/// How often an otherwise-idle realtime session re-samples the authorization
+/// generation (ADR-RT010). On an active stream re-authorization is effectively
+/// immediate (checked before projecting every delta); this timer bounds the
+/// worst-case revocation latency on a stream with no traffic. Tunable against the
+/// per-session idle-wakeup cost.
+const REAUTH_TICK: Duration = Duration::from_secs(5);
+
+/// The WebSocket close code for a forbidden/revoked authorization (RFC 6455
+/// private-use range; reserved as "forbidden scope" by ADR-RT005 §12). Sent when a
+/// live session's principal loses read access mid-session (ADR-RT010).
+const WS_CLOSE_FORBIDDEN: u16 = 4403;
 
 /// The session heartbeat interval advertised in `$hello`.
 const HEARTBEAT_MS: u32 = 15_000;
@@ -480,6 +493,59 @@ impl RealtimeFrame {
     }
 }
 
+/// The outcome of a live re-authorization check ([`SessionStream::reauthorize`],
+/// ADR-RT010) — what the transport must do about a mid-session authorization change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReauthOutcome {
+    /// Authorization is current (the generation is unchanged, the session is not
+    /// store-managed, or the re-resolved role+scope still match): keep streaming.
+    Unchanged,
+    /// The principal's object scope changed (narrowed or widened) while it can
+    /// still read: the session has adopted the new scope. The transport emits a
+    /// `$resync` rebuild directive and re-sends the connect snapshot set under the
+    /// new scope, so the client drops now-hidden objects and gains newly-visible
+    /// ones.
+    ScopeChanged,
+    /// The principal lost read access (its key was revoked, or its role can no
+    /// longer [`Action::Read`]): the transport tears the session down (WS close
+    /// [`WS_CLOSE_FORBIDDEN`], SSE stream end).
+    Disconnect,
+}
+
+/// The live re-authorization handle a store-managed API-key session carries
+/// (ADR-RT010): it re-resolves the *current* principal for `key_id` from the
+/// shared [`ApiKeyStore`] whenever the wait-free `generation` advances.
+///
+/// Installed only for principals the store tracks; local-admin (auth disabled) and
+/// JWT principals have no store entry and keep their connect-time authorization, so
+/// they carry no `LiveAuthz`. The `store` handle is control-plane only — the engine
+/// never touches it (invariant #10).
+#[derive(Debug)]
+struct LiveAuthz {
+    /// The shared API-key store (the authorization source of truth).
+    store: Arc<ApiKeyStore>,
+    /// The authenticated key id whose current authorization is re-resolved.
+    key_id: String,
+    /// The role last re-resolved for this session (adopted on each change).
+    role: Role,
+    /// The authorization generation last observed; a higher store generation means
+    /// re-resolve.
+    generation: u64,
+}
+
+/// One step pulled from the engine broadcast by [`SessionStream::recv_event`]: an
+/// event to project, a skip (a resumed event already seen, or a lag the reader
+/// recovered from), or the channel closed.
+#[derive(Debug)]
+enum RecvStep {
+    /// An event to project into a delta frame (via `frame_for`).
+    Event(SeqEvent<Event>),
+    /// Nothing to emit this step (resume/lag skip); poll again.
+    Skipped,
+    /// Every engine publish handle was dropped — end the session.
+    Closed,
+}
+
 /// Drives one realtime session: emits the snapshot then streams deltas with
 /// lagged-skip semantics, issuing strictly-increasing per-connection `seq`s.
 ///
@@ -520,6 +586,16 @@ pub struct SessionStream {
     /// pulled from the bounded broadcast: no lock, no await, no back-pressure on
     /// the engine (invariant #10).
     snapshot_watermark: Option<u64>,
+    /// The live re-authorization handle (ADR-RT010), or [`None`] for a session
+    /// whose authorization is fixed for its lifetime (an unscoped local-admin, a
+    /// JWT principal, or a transport-only test). When set,
+    /// [`SessionStream::reauthorize`] re-resolves the current principal on an
+    /// authorization-generation change and updates
+    /// [`object_scope`](Self::object_scope) in place — so the read filter honors a
+    /// mid-session scope change without a reconnect. Sampling the generation is a
+    /// wait-free atomic load; the re-resolve takes only a control-plane read lock
+    /// the engine never holds (invariant #10).
+    live_authz: Option<LiveAuthz>,
 }
 
 impl SessionStream {
@@ -542,6 +618,7 @@ impl SessionStream {
             corr: None,
             object_scope: None,
             snapshot_watermark: None,
+            live_authz: None,
         }
     }
 
@@ -590,6 +667,123 @@ impl SessionStream {
     pub fn with_snapshot_watermark(mut self, watermark: u64) -> Self {
         self.snapshot_watermark = Some(watermark);
         self
+    }
+
+    /// Wire **live re-authorization** onto this session (ADR-RT010).
+    ///
+    /// `store` is the shared [`ApiKeyStore`], `key_id` the authenticated key, and
+    /// `role` its connect-time role. With it installed, [`reauthorize`](Self::reauthorize)
+    /// re-resolves the current principal for `key_id` whenever the store's
+    /// authorization generation advances, honoring a mid-session scope narrow/widen
+    /// (adopt the new scope + signal a rebuild), role downgrade below read, or key
+    /// revocation (disconnect). Install it **only** for store-managed API-key
+    /// principals — local-admin and JWT principals are not in the store and keep
+    /// their connect-time authorization.
+    ///
+    /// The generation is sampled at build time, so a change strictly after connect
+    /// is honored; a change racing the connect handshake is picked up at the next
+    /// generation bump (self-healing — connect itself resolves current authz).
+    #[must_use]
+    pub fn with_live_reauth(
+        mut self,
+        store: Arc<ApiKeyStore>,
+        key_id: impl Into<String>,
+        role: Role,
+    ) -> Self {
+        let generation = store.generation();
+        self.live_authz = Some(LiveAuthz {
+            store,
+            key_id: key_id.into(),
+            role,
+            generation,
+        });
+        self
+    }
+
+    /// Re-resolve the session's authorization if it changed since the last check
+    /// (ADR-RT010), returning what the transport must do about it.
+    ///
+    /// The fast path is a single wait-free atomic load of the store's generation;
+    /// only when it has advanced does this take the store's short control-plane read
+    /// lock to re-resolve the current principal. A session with no live-authz handle
+    /// (local-admin / JWT / transport-only tests) always returns
+    /// [`ReauthOutcome::Unchanged`]. No engine lock, no await, no channel into the
+    /// engine, no back-pressure on the publish path (invariant #10).
+    ///
+    /// * key revoked / role can no longer [`Action::Read`] → [`ReauthOutcome::Disconnect`].
+    /// * object scope changed (narrow, widen, or `None`↔`Some`) → the new scope is
+    ///   adopted in place and [`ReauthOutcome::ScopeChanged`] is returned.
+    /// * otherwise (role adopted, scope unchanged) → [`ReauthOutcome::Unchanged`].
+    pub fn reauthorize(&mut self) -> ReauthOutcome {
+        // Fast path: sample the generation and, only on a change, re-resolve —
+        // ending the immutable borrow before mutating session state below.
+        let (current_gen, resolved) = match self.live_authz.as_ref() {
+            None => return ReauthOutcome::Unchanged,
+            Some(live) => {
+                let current_gen = live.store.generation();
+                if current_gen == live.generation {
+                    return ReauthOutcome::Unchanged;
+                }
+                (current_gen, live.store.principal_for_key(&live.key_id))
+            }
+        };
+        // Record the observed generation so we re-resolve once per change (whatever
+        // the outcome). `live_authz` is `Some` in this branch.
+        if let Some(live) = self.live_authz.as_mut() {
+            live.generation = current_gen;
+        }
+        match resolved {
+            // Still authenticated and still able to read the realtime firehose:
+            // adopt the re-resolved role, and adopt the scope if it changed.
+            Some(principal) if principal.role.can(Action::Read) => {
+                if let Some(live) = self.live_authz.as_mut() {
+                    live.role = principal.role;
+                }
+                if self.object_scope == principal.scoped_object_ids {
+                    ReauthOutcome::Unchanged
+                } else {
+                    // Adopt the new scope in place; the read filter and the
+                    // re-snapshot the transport now emits both honor it.
+                    self.object_scope = principal.scoped_object_ids;
+                    ReauthOutcome::ScopeChanged
+                }
+            }
+            // The key is gone (revoked), or the re-resolved role can no longer read
+            // the realtime firehose — the mirror of the connect-time read gate. No
+            // current role fails `Read`, so this is the revocation path plus a
+            // forward-compatible guard for a future non-reading role.
+            _ => ReauthOutcome::Disconnect,
+        }
+    }
+
+    /// Build the server-initiated `$resync` control frame that tells the client to
+    /// **rebuild** (not merge) the object-bearing topics after a mid-session scope
+    /// change (ADR-RT010, [`ReauthOutcome::ScopeChanged`]).
+    ///
+    /// It names every topic that can carry an object-authz-scoped object
+    /// ([`Topic::Tiles`], [`Topic::Devices`], [`Topic::Switcher`]), so the client
+    /// drops ALL now-hidden cached objects on them; the transport then re-sends the
+    /// connect snapshot set under the new scope, so the client rebuilds to exactly
+    /// what a fresh connect under the new scope would show. Reason
+    /// [`ResyncReason::AuthzChanged`] distinguishes it from a replay-ring miss. Like
+    /// the other snapshot frames it goes through `issue_seq`, so the per-connection
+    /// seq stays gapless (resume-by-seq intact).
+    #[must_use]
+    pub fn resync_frame(&mut self, snapshot_seq: u64) -> RealtimeFrame {
+        let seq = self.issue_seq();
+        let envelope = Envelope::new(
+            Topic::Control,
+            seq,
+            MediaTime::from_nanos(i64::try_from(snapshot_seq).unwrap_or(i64::MAX)),
+            Event::Resync(Resync {
+                reason: ResyncReason::AuthzChanged,
+                resubscribe: vec![Topic::Tiles, Topic::Devices, Topic::Switcher],
+            }),
+        );
+        RealtimeFrame {
+            kind: FrameKind::Snapshot,
+            envelope,
+        }
     }
 
     /// Allocate the next per-connection sequence number.
@@ -773,45 +967,52 @@ impl SessionStream {
     ///
     /// [`RecvError::Closed`] when every engine publish handle has been dropped.
     pub async fn next_delta(&mut self) -> Result<Option<RealtimeFrame>, RecvError> {
-        // Two read modes:
-        // * **Resume replay** (`resume_after` set): drain the bounded broadcast
-        //   ring **non-blocking** via `try_recv`. The gap is finite (it cannot
-        //   exceed the ring), so `Empty` means the gap is fully replayed and we
-        //   return `Ok(None)` immediately rather than awaiting — awaiting here
-        //   would wedge a caller that polls past the gap. The session pump owns
-        //   the replay→live-tail handoff (re-snapshot the conflated lanes, then
-        //   read live with a `resume_after == None` stream). That handoff is not
-        //   wired yet: no current caller sets `resume_after` — `SessionStream` is
-        //   only constructed with `None` (the connect path), so this branch runs
-        //   solely in the broadcaster resume tests until a `since_seq` cursor
-        //   lands.
-        // * **Live tail** (`resume_after == None`, the connect path): `await` the
-        //   next event cooperatively. A slow client lags and is skipped; the
-        //   engine is never back-pressured (invariant #10).
+        match self.recv_event().await {
+            RecvStep::Event(seq_event) => Ok(self.frame_for(&seq_event)),
+            RecvStep::Skipped => Ok(None),
+            RecvStep::Closed => Err(RecvError::Closed),
+        }
+    }
+
+    /// Pull the next raw event from the engine broadcast, applying **lagged-skip**
+    /// isolation, without projecting it into a frame.
+    ///
+    /// Split out from [`next_delta`](Self::next_delta) so the transport can
+    /// [`reauthorize`](Self::reauthorize) **between** receiving an event and
+    /// projecting it (`frame_for`) — a mid-`await` scope change is then applied
+    /// before the event is filtered, so no out-of-scope delta slips through and the
+    /// per-connection seq stays gapless (ADR-RT010). Two read modes:
+    /// * **Resume replay** (`resume_after` set): drain the bounded broadcast ring
+    ///   **non-blocking** via `try_recv`; `Empty` yields [`RecvStep::Skipped`]
+    ///   promptly (awaiting here would wedge a caller polling past the gap). No
+    ///   current transport sets `resume_after`, so this branch runs solely in the
+    ///   broadcaster resume tests until a `since_seq` cursor lands.
+    /// * **Live tail** (`resume_after == None`, the connect path): `await` the next
+    ///   event cooperatively (cancel-safe, so the transport's `select!` may drop it
+    ///   for a re-auth tick without losing a message). A slow client lags and is
+    ///   skipped; the engine is never back-pressured (invariant #10).
+    async fn recv_event(&mut self) -> RecvStep {
         if self.resume_after.is_some() {
             return match self.sub.try_recv() {
-                Ok(seq_event) => Ok(self.frame_for(&seq_event)),
-                // The gap is fully replayed: nothing more buffered. Return
-                // promptly so a bounded drain loop terminates; the pump then
-                // re-snapshots and reconnects for the live tail.
-                Err(TryRecvError::Empty) => Ok(None),
+                Ok(seq_event) => RecvStep::Event(seq_event),
+                Err(TryRecvError::Empty) => RecvStep::Skipped,
                 Err(TryRecvError::Lagged(_)) => {
                     self.sub = self.sub.resubscribe();
-                    Ok(None)
+                    RecvStep::Skipped
                 }
-                Err(TryRecvError::Closed) => Err(RecvError::Closed),
+                Err(TryRecvError::Closed) => RecvStep::Closed,
             };
         }
         match self.sub.recv().await {
-            Ok(seq_event) => Ok(self.frame_for(&seq_event)),
+            Ok(seq_event) => RecvStep::Event(seq_event),
             Err(RecvError::Lagged(_)) => {
                 // Drop-oldest overflow for THIS slow client only: resubscribe at
                 // the head and let the client re-baseline. The engine never saw
                 // any back-pressure (invariant #10).
                 self.sub = self.sub.resubscribe();
-                Ok(None)
+                RecvStep::Skipped
             }
-            Err(RecvError::Closed) => Err(RecvError::Closed),
+            Err(RecvError::Closed) => RecvStep::Closed,
         }
     }
 
@@ -1167,11 +1368,11 @@ pub async fn ws_handler(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // Carry the authenticated principal's object scope into the session so the
-    // stream is a read-side projection of only its in-scope device/cast objects
-    // (BOLA visibility, ADR-W005/ADR-W025). An unscoped principal sees all.
-    let object_scope = principal.scoped_object_ids;
-    ws.on_upgrade(move |socket| run_ws_session(socket, state, object_scope))
+    // Carry the authenticated principal into the session so the stream is a
+    // read-side projection of only its in-scope device/cast objects (BOLA
+    // visibility, ADR-W005/ADR-W025) AND re-resolves live if its authorization is
+    // narrowed/revoked mid-session (ADR-RT010). An unscoped principal sees all.
+    ws.on_upgrade(move |socket| run_ws_session(socket, state, principal))
 }
 
 /// A pre-upgrade auth gate for the realtime transports.
@@ -1273,12 +1474,74 @@ pub async fn auth_status_handler(
     })
 }
 
+/// Install live re-authorization on `session` **iff** the principal is a
+/// store-managed API key (ADR-RT010).
+///
+/// Local-admin (auth disabled) and JWT principals have no [`ApiKeyStore`] entry —
+/// `principal_for_key` is [`None`] — so they are not store-revocable and keep their
+/// connect-time authorization (a JWT denylist is separate future work). Consumes
+/// the `Principal` (its `key_id`/`role` move into the session's live-authz handle).
+fn install_live_reauth(
+    session: SessionStream,
+    state: &AppState,
+    principal: Principal,
+) -> SessionStream {
+    let Principal {
+        key_id,
+        role,
+        scoped_object_ids,
+        ..
+    } = principal;
+    let session = session.with_object_scope(scoped_object_ids);
+    if state.api_keys.principal_for_key(&key_id).is_some() {
+        session.with_live_reauth(Arc::clone(&state.api_keys), key_id, role)
+    } else {
+        session
+    }
+}
+
+/// Build the frame burst the transport sends on a mid-session scope change
+/// (ADR-RT010, [`ReauthOutcome::ScopeChanged`]): the `$resync` rebuild directive
+/// followed by the connect snapshot set (tiles + per-device status), now filtered
+/// to the session's freshly-adopted scope — so the client rebuilds to exactly what
+/// a fresh connect under the new scope would show. All reads are wait-free
+/// control-plane loads (invariant #10).
+fn build_resync_frames(session: &mut SessionStream, state: &AppState) -> Vec<RealtimeFrame> {
+    let (snapshot, snapshot_seq) = current_engine_snapshot(state);
+    let mut frames = vec![session.resync_frame(snapshot_seq)];
+    if let Some(frame) = session.tiles_snapshot_frame(&snapshot, snapshot_seq) {
+        frames.push(frame);
+    }
+    frames.extend(session.devices_snapshot_frames(&state.device_status, snapshot_seq));
+    frames
+}
+
+/// Serialize a realtime frame and write it as a WebSocket text frame. Returns
+/// `false` when the client write failed (drop the session); a serialization
+/// failure skips the frame and returns `true`. The engine is never blocked by
+/// either (invariant #10).
+async fn ws_send_frame(socket: &mut WebSocket, frame: &RealtimeFrame) -> bool {
+    let Ok(text) = frame.to_json() else {
+        return true;
+    };
+    socket.send(Message::Text(text.into())).await.is_ok()
+}
+
+/// The WebSocket close frame for a mid-session authorization revocation (ADR-RT010).
+fn forbidden_close_frame() -> CloseFrame {
+    CloseFrame {
+        code: WS_CLOSE_FORBIDDEN,
+        reason: "authz revoked".into(),
+    }
+}
+
 /// Run one upgraded WebSocket session to completion.
 ///
-/// `object_scope` is the connecting principal's object-id allowlist (or [`None`]
-/// for an unscoped principal): the session delivers only its in-scope
-/// device/cast objects (BOLA visibility, ADR-W005/ADR-W025).
-async fn run_ws_session(mut socket: WebSocket, state: AppState, object_scope: Option<Vec<String>>) {
+/// `principal` is the connecting principal: its object scope confines the stream
+/// (BOLA visibility, ADR-W005/ADR-W025) and, for a store-managed API key, its
+/// authorization is re-resolved live so a mid-session narrow/widen/revoke takes
+/// effect without a reconnect (ADR-RT010).
+async fn run_ws_session(mut socket: WebSocket, state: AppState, principal: Principal) {
     let sub = state.engine.subscribe();
     let session_id = uuid_session_id();
     // Capture the broadcast watermark BETWEEN subscribing and reading the snapshot
@@ -1290,25 +1553,22 @@ async fn run_ws_session(mut socket: WebSocket, state: AppState, object_scope: Op
     // path (invariant #10).
     let watermark = state.engine.events.sequence();
     let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
-    let mut session = SessionStream::new(sub, session_id, None)
+    let session = SessionStream::new(sub, session_id, None)
         .with_corr_registry(Arc::clone(&state.corr))
-        .with_object_scope(object_scope)
         .with_snapshot_watermark(watermark);
+    // Carry the object scope + wire live re-authorization for store-managed keys.
+    let mut session = install_live_reauth(session, &state, principal);
 
     let hello = session.snapshot_frame(snapshot_seq);
-    if let Ok(text) = hello.to_json() {
-        if socket.send(Message::Text(text.into())).await.is_err() {
-            return;
-        }
+    if !ws_send_frame(&mut socket, &hello).await {
+        return;
     }
     // Seed the tile cache: the current per-tile lifecycle baseline, when the
     // engine blob carries one (realtime-api §5). Without it the client falls
     // back to the sparse deltas, exactly as before.
     if let Some(frame) = session.tiles_snapshot_frame(&snapshot, snapshot_seq) {
-        if let Ok(text) = frame.to_json() {
-            if socket.send(Message::Text(text.into())).await.is_err() {
-                return;
-            }
+        if !ws_send_frame(&mut socket, &frame).await {
+            return;
         }
     }
     // Seed the device cache: one latest-wins `device.status` snapshot per tracked
@@ -1317,25 +1577,54 @@ async fn run_ws_session(mut socket: WebSocket, state: AppState, object_scope: Op
     // current device status. Reading the registry is a wait-free control-plane
     // load (invariant #10).
     for frame in session.devices_snapshot_frames(&state.device_status, snapshot_seq) {
-        if let Ok(text) = frame.to_json() {
-            if socket.send(Message::Text(text.into())).await.is_err() {
-                return;
-            }
+        if !ws_send_frame(&mut socket, &frame).await {
+            return;
         }
     }
 
+    // Delta pump with live re-authorization (ADR-RT010). Each iteration wakes on a
+    // delta OR the idle re-auth tick, then re-resolves authorization BEFORE
+    // projecting/sending — so a mid-session scope change filters the very next
+    // delta (no leak, gapless seq), a revoke tears the session down, and an idle
+    // stream still honors a change within one tick. `recv_event().await` is
+    // cancel-safe, and the engine is never awaited (invariant #10).
+    let mut reauth_tick = tokio::time::interval(REAUTH_TICK);
+    reauth_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        match session.next_delta().await {
-            Ok(Some(frame)) => {
-                let Ok(text) = frame.to_json() else { continue };
-                if socket.send(Message::Text(text.into())).await.is_err() {
-                    // The client write failed: drop this session. The engine was
-                    // never blocked by it.
-                    break;
+        let step = tokio::select! {
+            _ = reauth_tick.tick() => None,
+            step = session.recv_event() => Some(step),
+        };
+        match session.reauthorize() {
+            ReauthOutcome::Unchanged => {}
+            ReauthOutcome::Disconnect => {
+                let _ = socket
+                    .send(Message::Close(Some(forbidden_close_frame())))
+                    .await;
+                return;
+            }
+            ReauthOutcome::ScopeChanged => {
+                for frame in build_resync_frames(&mut session, &state) {
+                    if !ws_send_frame(&mut socket, &frame).await {
+                        return;
+                    }
                 }
             }
-            Ok(None) => {}
-            Err(_closed) => break,
+        }
+        match step {
+            // A re-auth tick (re-resolution already ran above) or a resume/lag
+            // skip: nothing to send this iteration — loop and re-arm.
+            None | Some(RecvStep::Skipped) => {}
+            Some(RecvStep::Event(seq_event)) => {
+                if let Some(frame) = session.frame_for(&seq_event) {
+                    if !ws_send_frame(&mut socket, &frame).await {
+                        // The client write failed: drop this session. The engine
+                        // was never blocked by it.
+                        break;
+                    }
+                }
+            }
+            Some(RecvStep::Closed) => break,
         }
     }
 }
@@ -1379,11 +1668,12 @@ pub async fn sse_handler(
     let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
     // The authenticated principal's object scope confines the SSE stream to its
     // in-scope device/cast objects (BOLA visibility, ADR-W005/ADR-W025), exactly
-    // as the WebSocket transport; an unscoped principal sees all.
-    let mut session = SessionStream::new(sub, session_id, None)
+    // as the WebSocket transport; an unscoped principal sees all. Store-managed
+    // API-key principals additionally re-resolve live (ADR-RT010).
+    let session = SessionStream::new(sub, session_id, None)
         .with_corr_registry(Arc::clone(&state.corr))
-        .with_object_scope(principal.scoped_object_ids)
         .with_snapshot_watermark(watermark);
+    let mut session = install_live_reauth(session, &state, principal);
 
     let stream = async_stream::stream! {
         let hello = session.snapshot_frame(snapshot_seq);
@@ -1407,16 +1697,42 @@ pub async fn sse_handler(
                 yield Ok(SseEvent::default().event("snapshot").data(text));
             }
         }
+        // Delta pump with live re-authorization (ADR-RT010), identical in shape to
+        // the WebSocket transport: wake on a delta OR the idle re-auth tick,
+        // re-resolve BEFORE projecting, emit a `$resync` rebuild burst on a scope
+        // change, and end the stream on a revoke (the client re-auths on reconnect;
+        // SSE has no close code). The engine is never awaited (invariant #10).
+        let mut reauth_tick = tokio::time::interval(REAUTH_TICK);
+        reauth_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            match session.next_delta().await {
-                Ok(Some(frame)) => {
-                    if let Ok(text) = frame.to_json() {
-                        let id = frame.envelope.seq.get().to_string();
-                        yield Ok(SseEvent::default().event("delta").id(id).data(text));
+            let step = tokio::select! {
+                _ = reauth_tick.tick() => None,
+                step = session.recv_event() => Some(step),
+            };
+            match session.reauthorize() {
+                ReauthOutcome::Unchanged => {}
+                ReauthOutcome::Disconnect => break,
+                ReauthOutcome::ScopeChanged => {
+                    for frame in build_resync_frames(&mut session, &state) {
+                        if let Ok(text) = frame.to_json() {
+                            yield Ok(SseEvent::default().event("snapshot").data(text));
+                        }
                     }
                 }
-                Ok(None) => {}
-                Err(_closed) => break,
+            }
+            match step {
+                // A re-auth tick or a resume/lag skip: nothing to send this
+                // iteration — loop and re-arm.
+                None | Some(RecvStep::Skipped) => {}
+                Some(RecvStep::Event(seq_event)) => {
+                    if let Some(frame) = session.frame_for(&seq_event) {
+                        if let Ok(text) = frame.to_json() {
+                            let id = frame.envelope.seq.get().to_string();
+                            yield Ok(SseEvent::default().event("delta").id(id).data(text));
+                        }
+                    }
+                }
+                Some(RecvStep::Closed) => break,
             }
         }
     };
