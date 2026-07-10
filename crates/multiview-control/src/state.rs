@@ -624,6 +624,16 @@ pub struct AppState {
     /// derived and the cast-session routes refuse with an honest `409`.
     /// Read-only control-plane state (invariant #10).
     pub cast_delivery: Option<Arc<CastDelivery>>,
+    /// The outbound-dial SSRF policy (SEC-02/SEC-04, CWE-918) the managed-device
+    /// poller and Cast session actor screen each resolved dial IP against. The
+    /// non-breaking default
+    /// ([`DialPolicy::allow_lan`](multiview_config::device::net_guard::DialPolicy::allow_lan))
+    /// keeps a self-hosted appliance reaching its LAN devices (private/ULA/carrier
+    /// dialable) while the never-legitimate ranges (loopback, link-local incl. the
+    /// cloud-metadata IP, unspecified, multicast/broadcast) stay blocked; an
+    /// operator `control.device_dial_allow` allowlist tightens the dial to its own
+    /// device subnet(s). Read-only control-plane state (invariant #10).
+    pub dial_policy: Arc<multiview_config::device::net_guard::DialPolicy>,
     /// The runtime store of **ephemeral** cast sessions (DEV-D2, ADR-M011):
     /// runtime-only records that never enter the devices store, so a config
     /// export can never emit them. "Save as device" promotes one into a
@@ -910,6 +920,10 @@ impl AppState {
             device_drivers: Arc::new(DeviceDriverRegistry::new()),
             device_pollers: Arc::new(DevicePollerRegistry::new()),
             cast_delivery: None,
+            // Non-breaking default: LAN devices (private/ULA/carrier) stay
+            // dialable, never-legitimate ranges stay blocked. An operator
+            // `control.device_dial_allow` allowlist tightens it (SEC-02/SEC-04).
+            dial_policy: Arc::new(multiview_config::device::net_guard::DialPolicy::allow_lan()),
             cast_sessions: Arc::new(CastSessionStore::new()),
             audio_routing: Arc::new(AudioRoutingStore::new()),
             alarms: Arc::new(InMemoryAlarmStore::new()),
@@ -1526,6 +1540,18 @@ impl AppState {
     #[must_use]
     pub fn with_cast_delivery(mut self, delivery: Arc<CastDelivery>) -> Self {
         self.cast_delivery = Some(delivery);
+        self
+    }
+
+    /// Install the outbound-dial SSRF allowlist (SEC-02/SEC-04): the binary
+    /// builds it from `control.device_dial_allow`; tests inject a fixed policy.
+    /// Without one, the secure default denies every internal range.
+    #[must_use]
+    pub fn with_dial_policy(
+        mut self,
+        policy: Arc<multiview_config::device::net_guard::DialPolicy>,
+    ) -> Self {
+        self.dial_policy = policy;
         self
     }
 

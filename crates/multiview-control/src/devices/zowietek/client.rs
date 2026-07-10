@@ -822,9 +822,45 @@ mod scripted {
 /// The real reqwest-backed transport — off-by-default (`zowietek` feature).
 #[cfg(feature = "zowietek")]
 mod net {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use multiview_config::device::net_guard::{self, DialPolicy};
     use serde_json::Value;
 
     use super::{RpcVerb, TransportError, TransportResponse, ZowietekTransport};
+
+    /// The boxed error type reqwest's DNS resolver returns.
+    type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+    /// A reqwest DNS resolver that screens every RESOLVED IP against the
+    /// outbound-dial SSRF policy (SEC-02, CWE-918). Because reqwest resolves
+    /// (and re-resolves, per redirect / reconnect) through this seam, a public
+    /// name that answers with an internal address — a DNS-rebind — is refused at
+    /// resolution time, so the device poller never dials the cloud-metadata
+    /// endpoint or an internal host.
+    struct ScreeningResolver {
+        policy: Arc<DialPolicy>,
+    }
+
+    impl reqwest::dns::Resolve for ScreeningResolver {
+        fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            let policy = Arc::clone(&self.policy);
+            Box::pin(async move {
+                // reqwest supplies the host only; the real port is applied by
+                // reqwest to the returned IPs, so port 0 here is a placeholder.
+                let boxed = |e: std::io::Error| -> BoxError { Box::new(e) };
+                let resolved: Vec<SocketAddr> = tokio::net::lookup_host((name.as_str(), 0))
+                    .await
+                    .map_err(boxed)?
+                    .collect();
+                net_guard::screen_resolved(resolved.iter().map(SocketAddr::ip), &policy)
+                    .map_err(|e| -> BoxError { Box::new(e) })?;
+                let addrs: reqwest::dns::Addrs = Box::new(resolved.into_iter());
+                Ok(addrs)
+            })
+        }
+    }
 
     /// A live HTTP transport to one `ZowieBox` device, over plain HTTP (the vendor
     /// API is plain HTTP JSON-over-POST; a management VLAN is recommended in the
@@ -843,17 +879,84 @@ mod net {
         /// `http://[fd00:db8::42]`). The base is the scheme+authority; the
         /// module path and query are appended per request.
         ///
+        /// The client screens the dial target against `dial_policy` (SEC-02,
+        /// CWE-918) on the **actual** address reqwest will dial:
+        ///
+        /// * An **IP-literal** host — including the alt-encoded IPv4 forms
+        ///   (`2130706433`, `0x7f000001`, `0177.0.0.1`) and IPv4-mapped IPv6
+        ///   (`[::ffff:169.254.169.254]`) — is parsed with the same WHATWG `url`
+        ///   parser reqwest uses, canonicalized to a concrete `IpAddr`, and
+        ///   screened here with [`net_guard::screen_ip`]. reqwest dials an
+        ///   IP-literal host **directly, without invoking any DNS resolver**, so a
+        ///   resolver-only screen never sees these — screening the parsed literal
+        ///   on this path is what closes the bypass.
+        /// * A **DNS name** is screened lazily by the [`ScreeningResolver`], which
+        ///   resolves, screens every answer, and returns **only** the vetted
+        ///   addresses reqwest then dials — pinning the vetted result defeats
+        ///   DNS-rebind.
+        ///
+        /// The client also disables any environment proxy
+        /// ([`no_proxy`](reqwest::ClientBuilder::no_proxy)) so a system
+        /// `HTTP(S)_PROXY` cannot dial the destination unscreened on our behalf,
+        /// and follows **no** redirects
+        /// ([`redirect::Policy::none`](reqwest::redirect::Policy::none)) — a
+        /// validated host cannot 30x-bounce the poller to a blocked one, and the
+        /// device's named credentials are never re-sent to a redirect target.
+        ///
         /// # Errors
         ///
-        /// [`TransportError`] if the HTTP client cannot be constructed.
-        pub fn new(base: &str, timeout: std::time::Duration) -> Result<Self, TransportError> {
+        /// [`TransportError`] if `base` is not a valid URL/authority, has no host,
+        /// resolves to a blocked dial target, or the HTTP client cannot be built.
+        pub fn new(
+            base: &str,
+            timeout: std::time::Duration,
+            dial_policy: Arc<DialPolicy>,
+        ) -> Result<Self, TransportError> {
+            // A device address is either a full `http(s)://` URL or a bare
+            // authority (discovery emits `[fd00:db8::42]:5961`, no scheme).
+            // Normalize to a URL — default scheme plain http (the vendor API is
+            // HTTP JSON-over-POST) — so the SSRF screen and reqwest parse the
+            // exact same canonical host, and so `post` always builds a valid URL.
+            let normalized = if base.contains("://") {
+                base.trim_end_matches('/').to_owned()
+            } else {
+                format!("http://{}", base.trim_end_matches('/'))
+            };
+            let parsed = url::Url::parse(&normalized)
+                .map_err(|e| TransportError::new(format!("invalid device url {base:?}: {e}")))?;
+            match parsed.host() {
+                // An IP literal is dialled directly by reqwest (no resolver hop):
+                // screen the canonical parsed IP here, fail-closed.
+                Some(url::Host::Ipv4(v4)) => {
+                    net_guard::screen_ip(std::net::IpAddr::V4(v4), &dial_policy)
+                        .map_err(|e| TransportError::new(e.to_string()))?;
+                }
+                Some(url::Host::Ipv6(v6)) => {
+                    net_guard::screen_ip(std::net::IpAddr::V6(v6), &dial_policy)
+                        .map_err(|e| TransportError::new(e.to_string()))?;
+                }
+                // A DNS name is screened + pinned by the ScreeningResolver below.
+                Some(url::Host::Domain(_)) => {}
+                None => {
+                    return Err(TransportError::new(format!(
+                        "device url {base:?} has no host to dial"
+                    )));
+                }
+            }
             let client = reqwest::Client::builder()
                 .timeout(timeout)
+                .redirect(reqwest::redirect::Policy::none())
+                // A system HTTP(S)_PROXY must not dial the destination on our
+                // behalf — that would bypass the screen entirely.
+                .no_proxy()
+                .dns_resolver(Arc::new(ScreeningResolver {
+                    policy: dial_policy,
+                }))
                 .build()
                 .map_err(|e| TransportError::new(e.to_string()))?;
             Ok(Self {
                 client,
-                base: base.trim_end_matches('/').to_owned(),
+                base: normalized,
             })
         }
     }
@@ -887,5 +990,142 @@ mod net {
                 Err(e) => Err(TransportError::new(e.to_string())),
             }
         }
+    }
+}
+
+/// SSRF dial-path regression tests (SEC-02, CWE-918) for the real reqwest
+/// transport: prove the client refuses a loopback / alt-encoded-loopback dial
+/// target on the **actual connect path** — a real TCP listener is stood up and
+/// must never accept a connection.
+///
+/// A prior guard screened only DNS *names* (a custom reqwest resolver), but
+/// reqwest dials an IP-literal / alt-encoded URL (`http://2130706433/` =
+/// `127.0.0.1`) **without invoking the resolver**, so those bypassed the screen
+/// and reached loopback / the cloud-metadata endpoint. These tests exercise the
+/// bytes-on-the-wire path a name-only screen cannot see.
+#[cfg(all(test, feature = "zowietek"))]
+mod dial_screen_tests {
+    // Test-only: `expect`/`unwrap` are the standard test vocabulary here (the
+    // harness reports a panic as a failure). clippy's allow-*-in-tests does not
+    // fire for non-`#[test]` helper fns under a `cfg(all(test, feature = …))`
+    // module, so allow explicitly (rule 20).
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use std::io::ErrorKind;
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use multiview_config::device::net_guard::DialPolicy;
+    use serde_json::json;
+
+    use super::{ReqwestTransport, RpcVerb, ZowietekTransport};
+
+    /// Drive the real transport at `url` and report whether the loopback
+    /// `listener` ever accepted a connection. The screen refuses before any
+    /// socket opens, so the listener stays idle; a build that (regressibly)
+    /// succeeds still gets a POST attempt so a bypass would land on the socket.
+    fn loopback_reached(url: &str, listener: &TcpListener) -> bool {
+        // The non-breaking default policy: LAN is dialable, loopback is NEVER —
+        // so the refusal here is the unconditional never-legit floor, not an
+        // allowlist decision.
+        let policy = Arc::new(DialPolicy::allow_lan());
+        if let Ok(transport) = ReqwestTransport::new(url, Duration::from_millis(500), policy) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("current-thread runtime");
+            let body = json!({ "group": "account", "opt": "login_account", "data": {} });
+            // Ignore the outcome: on a bypass it is the socket landing on the
+            // listener that fails the test, not the POST's return value (a
+            // connect that hangs maps to Dropped, not an error).
+            let _ = rt.block_on(transport.post("system", RpcVerb::SetInfo, &body));
+        }
+        // Any connection reqwest opened is queued on the listener's backlog by
+        // now (the TCP handshake completes at connect time, before the POST
+        // times out), so a single non-blocking accept detects a bypass.
+        !matches!(listener.accept(), Err(e) if e.kind() == ErrorKind::WouldBlock)
+    }
+
+    /// Bind a loopback listener that never `accept`s on its own, returning it and
+    /// its ephemeral port.
+    fn idle_loopback_listener() -> (TcpListener, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        listener
+            .set_nonblocking(true)
+            .expect("listener set_nonblocking");
+        let port = listener.local_addr().expect("listener local_addr").port();
+        (listener, port)
+    }
+
+    #[test]
+    fn refuses_loopback_literal_before_connecting() {
+        let (listener, port) = idle_loopback_listener();
+        // A plain loopback literal: reqwest dials 127.0.0.1 directly (no resolver
+        // hop), so a name-only screen misses it. It must be refused.
+        assert!(
+            !loopback_reached(&format!("http://127.0.0.1:{port}/"), &listener),
+            "loopback literal dial reached the listener (SSRF screen bypassed)"
+        );
+    }
+
+    #[test]
+    fn refuses_alt_encoded_loopback_before_connecting() {
+        let (listener, port) = idle_loopback_listener();
+        // `2130706433` is the 32-bit decimal form of 127.0.0.1: the WHATWG `url`
+        // parser reqwest uses normalizes it to the loopback literal and dials it
+        // directly. Rust's `IpAddr` parser does NOT recognize this form, so the
+        // config-load literal screen misses it — the dial-time screen must catch
+        // it on the canonical parsed IP.
+        assert!(
+            !loopback_reached(&format!("http://2130706433:{port}/"), &listener),
+            "alt-encoded (decimal) loopback dial reached the listener (SSRF screen bypassed)"
+        );
+    }
+
+    #[test]
+    fn refuses_named_host_resolving_to_loopback_before_connecting() {
+        let (listener, port) = idle_loopback_listener();
+        // `localhost` is a DNS *name* (`url::Host::Domain`), not a literal, so it
+        // is not screened pre-dial — it exercises the OTHER half of the fix: the
+        // `ScreeningResolver` resolves it, screens every answer with
+        // `screen_resolved` (fail-closed on the first blocked IP), and returns
+        // only vetted addresses for reqwest to dial. `localhost` resolves to
+        // loopback (127.0.0.1 and/or ::1 — Linux getaddrinfo returns both), a
+        // never-legit range, so the resolver refuses and reqwest never opens the
+        // socket. reqwest DOES consult the custom resolver for named hosts
+        // (unlike IP literals), so this proves the resolver screen is wired in and
+        // defeats a name that answers with an internal address (DNS-rebind).
+        assert!(
+            !loopback_reached(&format!("http://localhost:{port}/"), &listener),
+            "named-host (localhost -> loopback) dial reached the listener (resolver screen bypassed)"
+        );
+    }
+
+    /// Positive control: prove the idle listener + the non-blocking `accept` that
+    /// [`loopback_reached`] relies on actually detect a real connection. Without
+    /// it, the three `!loopback_reached` assertions above could pass *vacuously* —
+    /// a listener whose `accept` never reported a connection would read as "dial
+    /// blocked" even with the screen removed. A raw `TcpStream::connect` (no
+    /// screen) lands on the backlog, and the same non-blocking `accept` the screen
+    /// tests use must see it.
+    ///
+    /// A fully-screened-transport-reaches-a-listener control is architecturally
+    /// impossible here: [`screen_ip`](multiview_config::device::net_guard::screen_ip)
+    /// refuses loopback — the only address CI can reliably bind a listener on —
+    /// *unconditionally*, before any allowlist is consulted. So this detection
+    /// control, plus `refuses_named_host_resolving_to_loopback_before_connecting`
+    /// (which builds the real transport and dials through the resolver), together
+    /// prove the screen tests are non-vacuous.
+    #[test]
+    fn the_non_blocking_accept_detects_a_real_connection() {
+        let (listener, port) = idle_loopback_listener();
+        // Hold the stream open past the accept so the connection stays established.
+        let _client = std::net::TcpStream::connect(("127.0.0.1", port))
+            .expect("raw connect to the idle loopback listener");
+        assert!(
+            !matches!(listener.accept(), Err(e) if e.kind() == ErrorKind::WouldBlock),
+            "the non-blocking accept must detect a real connection (else the screen tests are vacuous)"
+        );
     }
 }

@@ -3108,6 +3108,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "ipnet",
  "multiview-core",
  "multiview-overlay",
  "proptest",
@@ -3163,6 +3164,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.0",
  "tracing",
+ "url",
  "utoipa",
  "utoipa-axum",
  "utoipa-scalar",

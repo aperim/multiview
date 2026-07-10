@@ -143,6 +143,14 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ], optional = true }
 
+# The WHATWG URL parser — the SAME one reqwest resolves hosts through — so the
+# `zowietek` transport's SSRF screen (SEC-02, CWE-918) canonicalizes a device
+# URL's host to the exact `IpAddr` reqwest will dial (incl. alt-encoded IPv4
+# like `2130706433` and IPv4-mapped IPv6). Already in the lock via reqwest;
+# off-by-default (behind `zowietek`) so it stays out of the scanned default
+# graph (`deny.toml [graph] all-features = false`).
+url = { version = "2", optional = true }
+
 # The live CASTV2 wire layer for the `cast` managed-device driver: OFF by
 # default (`cast` / `devices-net`). The typed protocol payloads, the media-URL
 # rules, the session actor, and the registry wiring are ALWAYS compiled and
@@ -247,7 +255,7 @@ ciborium = "0.2.2"
 # scripted transport seam; only the real reqwest-backed transport
 # (`ReqwestTransport`) needs this feature, so the default build stays
 # pure-Rust/socket-free and CI-green.
-"zowietek" = ["dep:reqwest"]
+"zowietek" = ["dep:reqwest", "dep:url"]
 # Off-by-default live CASTV2 wire layer for the `cast` managed-device driver
 # (DEV-D2, ADR-M011). The protocol payloads + media-URL rules + session actor
 # + registry wiring are ALWAYS compiled and tested socket-free over the

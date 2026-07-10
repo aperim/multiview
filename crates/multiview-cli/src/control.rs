@@ -207,6 +207,11 @@ where
     // registry carries no cast member.
     let delivery = cast_delivery(config);
 
+    // The outbound-dial SSRF policy (SEC-02/SEC-04, CWE-918): the non-breaking
+    // LAN default, tightened by the operator's `control.device_dial_allow`
+    // allowlist (or the legacy env var).
+    let dial_policy = device_dial_policy(config.control.as_ref());
+
     let mut state = AppState::new(
         publisher,
         commands,
@@ -224,7 +229,8 @@ where
         state = state.with_whep(whep);
     }
     let mut state = state
-    .with_device_pollers(device_poller_registry(delivery.as_ref()))
+    .with_device_pollers(device_poller_registry(delivery.as_ref(), &dial_policy))
+    .with_dial_policy(Arc::clone(&dial_policy))
     .with_auth_disabled(auth_disabled)
     // The CORS allow-list for the WebRTC media-signalling routes (ADR-0048 §9):
     // map `[webrtc].cors_allow_origins` (default `["*"]`) onto the control plane
@@ -385,6 +391,7 @@ where
 #[cfg(feature = "devices-net")]
 fn device_poller_registry(
     cast_delivery: Option<&std::sync::Arc<multiview_control::devices::cast::media::CastDelivery>>,
+    dial_policy: &std::sync::Arc<multiview_config::device::net_guard::DialPolicy>,
 ) -> Arc<multiview_control::devices::DevicePollerRegistry> {
     use multiview_control::devices::cast::net::TlsCastConnector;
     use multiview_control::devices::cast::runtime::CastSessionFactory;
@@ -394,14 +401,16 @@ fn device_poller_registry(
     };
     // A 5s per-request timeout: generous for a LAN appliance, bounded so a hung
     // device times out into the supervised-reconnect path rather than wedging
-    // the poller task.
+    // the poller task. Both live transports screen every resolved dial IP
+    // against the SSRF `dial_policy` (SEC-02/SEC-04).
     let zowietek = ReqwestPollerFactory::new(
         std::time::Duration::from_secs(5),
         resolve_device_credentials,
+        Arc::clone(dial_policy),
     );
     let mut members: Vec<Arc<dyn DevicePollerFactory>> = vec![Arc::new(zowietek)];
     if let Some(delivery) = cast_delivery {
-        match TlsCastConnector::new() {
+        match TlsCastConnector::new(Arc::clone(dial_policy)) {
             Ok(connector) => members.push(Arc::new(CastSessionFactory::new(
                 Arc::new(connector),
                 Arc::clone(delivery),
@@ -425,8 +434,82 @@ fn device_poller_registry(
 #[cfg(not(feature = "devices-net"))]
 fn device_poller_registry(
     _cast_delivery: Option<&std::sync::Arc<multiview_control::devices::cast::media::CastDelivery>>,
+    _dial_policy: &std::sync::Arc<multiview_config::device::net_guard::DialPolicy>,
 ) -> Arc<multiview_control::devices::DevicePollerRegistry> {
     Arc::new(multiview_control::devices::DevicePollerRegistry::new())
+}
+
+/// Build the outbound-dial SSRF policy (SEC-02/SEC-04, CWE-918) an operator sets
+/// to **tighten** the dial to their own device subnet(s) — a list of CIDRs (e.g.
+/// `["192.168.0.0/16", "fd00:db8::/32"]`).
+///
+/// Precedence: the validated [`control.device_dial_allow`](multiview_config::ControlConfig::device_dial_allow)
+/// config field is the config-as-code home for the allowlist; the
+/// `MULTIVIEW_DEVICE_DIAL_ALLOW` env var (comma/whitespace-separated) is the
+/// legacy source, kept as a fallback during the migration off it. Absent from
+/// both ⇒ the non-breaking default: LAN devices (private/ULA/carrier) stay
+/// dialable while the never-legitimate ranges (loopback, link-local incl. the
+/// cloud-metadata IP, unspecified, multicast/broadcast) stay blocked. An
+/// unparseable entry logs a warning and falls back — fail-closed — to denying
+/// every allowlistable range (globally-routable hosts only), never silently
+/// widening back to the LAN default the operator was tightening away from.
+fn device_dial_policy(
+    control: Option<&multiview_config::ControlConfig>,
+) -> Arc<multiview_config::device::net_guard::DialPolicy> {
+    use multiview_config::device::net_guard::DialPolicy;
+
+    // The config field wins when present (it is validated at config load).
+    if let Some(cidrs) = control.and_then(|c| c.device_dial_allow.as_deref()) {
+        let policy = match DialPolicy::from_cidrs(cidrs.iter().map(String::as_str)) {
+            Ok(policy) => {
+                tracing::info!(
+                    entries = cidrs.len(),
+                    "device-dial allowlist loaded from control.device_dial_allow"
+                );
+                policy
+            }
+            // Rejected already at config load; fail closed here too rather than
+            // dialling wide, in case an unvalidated config ever reaches this.
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "control.device_dial_allow has an invalid CIDR; denying all internal \
+                     dial targets (only globally-routable hosts are dialled)"
+                );
+                DialPolicy::deny_all_allowlistable()
+            }
+        };
+        return Arc::new(policy);
+    }
+
+    let policy = match std::env::var("MULTIVIEW_DEVICE_DIAL_ALLOW") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let cidrs: Vec<&str> = raw
+                .split([',', ' ', '\t', '\n'])
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .collect();
+            match DialPolicy::from_cidrs(cidrs.iter().copied()) {
+                Ok(policy) => {
+                    tracing::info!(
+                        entries = cidrs.len(),
+                        "device-dial allowlist loaded from MULTIVIEW_DEVICE_DIAL_ALLOW"
+                    );
+                    policy
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "MULTIVIEW_DEVICE_DIAL_ALLOW has an invalid CIDR; denying all internal \
+                         dial targets (only globally-routable hosts are dialled)"
+                    );
+                    DialPolicy::deny_all_allowlistable()
+                }
+            }
+        }
+        _ => DialPolicy::allow_lan(),
+    };
+    Arc::new(policy)
 }
 
 /// Resolve a managed device's `(username, password)` from its

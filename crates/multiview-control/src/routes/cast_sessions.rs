@@ -40,10 +40,12 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use multiview_config::device::net_guard::{self, DialPolicy, HostSpec};
+
 use crate::audit::AuditAction;
 use crate::auth::{Action, Principal};
 use crate::concurrency::IdempotencyKey;
-use crate::devices::cast::media::{split_authority, CastMediaTarget};
+use crate::devices::cast::media::CastMediaTarget;
 use crate::devices::cast::store::CastSessionRecord;
 use crate::devices::PollerControl;
 use crate::error::{ControlError, ControlResult};
@@ -190,6 +192,33 @@ fn resolve_target<'d>(
     Ok((id, target))
 }
 
+/// Screen a Cast dial authority before the session actor is spawned (SEC-04,
+/// CWE-918). Parse `host[:port]`, resolve the host, and screen the RESOLVED IP
+/// against `policy`. Screening the resolved answer (not the name) defeats
+/// DNS-rebind: a public name that answers with a private/loopback address is
+/// refused. A parse/resolution failure or a blocked target is a `422`.
+async fn screen_cast_dial_target(address: &str, policy: &DialPolicy) -> ControlResult<()> {
+    let (host, port) = net_guard::parse_cast_authority(address)
+        .map_err(|e| ControlError::Validation(e.to_string()))?;
+    match host {
+        HostSpec::Ip(ip) => {
+            net_guard::screen_ip(ip, policy)
+                .map_err(|e| ControlError::Validation(e.to_string()))?;
+        }
+        HostSpec::Name(name) => {
+            let resolved = tokio::net::lookup_host((name.as_str(), port))
+                .await
+                .map_err(|e| {
+                    ControlError::Validation(format!("address {address:?} did not resolve: {e}"))
+                })?
+                .map(|socket| socket.ip());
+            net_guard::screen_resolved(resolved, policy)
+                .map_err(|e| ControlError::Validation(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
 /// `POST /api/v1/cast/sessions` — start an ad-hoc cast session (role: write).
 ///
 /// Resolves the rendition, spawns the supervised session actor through the
@@ -218,15 +247,12 @@ pub(crate) async fn start_cast_session(
     Json(request): Json<StartCastSessionRequest>,
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
-    // The dial authority must be a valid `host[:port]` (IPv6 bracketed); a
-    // malformed port is rejected here, never guessed at.
-    if split_authority(&request.address).is_none() {
-        return Err(ControlError::Validation(format!(
-            "address {:?} is not a valid host[:port] (IPv6 bracketed, e.g. \
-             \"[2001:db8::20]:8009\"; port defaults to 8009)",
-            request.address
-        )));
-    }
+    // SSRF guard (SEC-04, CWE-918): the session actor dials this authority
+    // (TCP+TLS). Parse it (a malformed `host[:port]` is a 422, never guessed
+    // at), resolve the host, and screen the RESOLVED IP (defeats DNS-rebind)
+    // against the operator dial policy — all BEFORE any side effect, so a
+    // rejected target casts nothing and records nothing.
+    screen_cast_dial_target(&request.address, &state.dial_policy).await?;
     // A castable rendition requires the delivery map the binary builds from
     // `control.cast_media_base` × the served HLS mounts (ADR-M011: the media
     // URL must be device-reachable — Cast devices resolve via hardcoded

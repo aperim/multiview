@@ -357,21 +357,27 @@ pub struct ReqwestPollerFactory {
     /// (1Password, env, file) without this crate depending on a secret store.
     #[allow(clippy::type_complexity)]
     resolve_credentials: Box<dyn Fn(&Device) -> Option<(String, String)> + Send + Sync>,
+    /// The outbound-dial SSRF policy the transport screens each resolved dial IP
+    /// against (SEC-02, CWE-918).
+    dial_policy: Arc<multiview_config::device::net_guard::DialPolicy>,
 }
 
 #[cfg(feature = "zowietek")]
 impl ReqwestPollerFactory {
-    /// Build a reqwest-backed factory with `timeout` per request and a
+    /// Build a reqwest-backed factory with `timeout` per request, a
     /// `resolve_credentials` closure mapping a device to its `(username,
-    /// password)` (resolved from `auth.secret_ref` by the binary's secret store).
+    /// password)` (resolved from `auth.secret_ref` by the binary's secret store),
+    /// and the outbound-dial SSRF `dial_policy` the transport enforces.
     #[must_use]
     pub fn new(
         timeout: std::time::Duration,
         resolve_credentials: impl Fn(&Device) -> Option<(String, String)> + Send + Sync + 'static,
+        dial_policy: Arc<multiview_config::device::net_guard::DialPolicy>,
     ) -> Self {
         Self {
             timeout,
             resolve_credentials: Box::new(resolve_credentials),
+            dial_policy,
         }
     }
 }
@@ -392,7 +398,11 @@ impl DevicePollerFactory for ReqwestPollerFactory {
         // resolver; without a credential the device cannot be logged into.
         let (username, password) = (self.resolve_credentials)(device)?;
 
-        let transport = match super::client::ReqwestTransport::new(address, self.timeout) {
+        let transport = match super::client::ReqwestTransport::new(
+            address,
+            self.timeout,
+            Arc::clone(&self.dial_policy),
+        ) {
             Ok(transport) => Arc::new(transport),
             Err(err) => {
                 tracing::warn!(
