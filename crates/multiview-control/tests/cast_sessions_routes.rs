@@ -204,22 +204,29 @@ async fn start_with_a_bad_address_is_a_validation_problem() {
 #[tokio::test]
 async fn start_rejects_ssrf_dial_targets_before_spawn() {
     // SEC-04 (CWE-918): the cast session actor dials `address` (TCP+TLS). A
-    // Write-role principal must not be able to point it at loopback, the cloud
-    // metadata endpoint, or an internal LAN host — the resolved IP is screened
-    // (default-deny), which also defeats DNS-rebind. Rejection is a 422 raised
-    // BEFORE any side effect: no session record, no actor spawn.
+    // Write-role principal must not be able to point it at loopback or the cloud
+    // metadata endpoint — the resolved IP is screened, and these never-legitimate
+    // ranges are ALWAYS blocked (no default, no allowlist re-enables them), which
+    // also defeats DNS-rebind to those dangerous targets. Rejection is a 422
+    // raised BEFORE any side effect: no session record, no actor spawn.
+    //
+    // Private/ULA LAN targets are NOT here: the default dial policy is
+    // non-breaking (a LAN appliance keeps reaching its Cast groups on dynamic
+    // ports). Locking those down is the operator allowlist's job — covered by
+    // `start_with_dial_allowlist_rejects_out_of_subnet_targets`.
     let h = cast_harness();
     let rejected = [
-        "169.254.169.254:8009",    // cloud-metadata IMDS
-        "127.0.0.1:8009",          // loopback
-        "169.254.42.1:8009",       // link-local
-        "[::1]:8009",              // IPv6 loopback
-        "[fe80::1]:8009",          // IPv6 link-local
-        "[::ffff:127.0.0.1]:8009", // IPv4-mapped loopback bypass
-        "10.0.0.8:8009",           // RFC1918
-        "172.16.0.8:8009",
-        "192.168.0.8:8009",
-        "[fd00::8]:8009", // ULA
+        "169.254.169.254:8009",          // cloud-metadata IMDS
+        "127.0.0.1:8009",                // loopback
+        "169.254.42.1:8009",             // link-local
+        "[::1]:8009",                    // IPv6 loopback
+        "[fe80::1]:8009",                // IPv6 link-local
+        "[::ffff:127.0.0.1]:8009",       // IPv4-mapped loopback bypass
+        "[::ffff:169.254.169.254]:8009", // IPv4-mapped IMDS bypass
+        "0.0.0.0:8009",                  // unspecified
+        "[::]:8009",                     // IPv6 unspecified
+        "239.0.0.9:8009",                // IPv4 multicast
+        "[ff02::1]:8009",                // IPv6 multicast
     ];
 
     for address in rejected {
@@ -249,10 +256,18 @@ async fn start_rejects_ssrf_dial_targets_before_spawn() {
 }
 
 #[tokio::test]
-async fn start_accepts_public_dial_targets() {
-    // Public / documentation IP literals (the suite's public stand-ins) reach
-    // the normal start path.
-    for address in ["198.51.100.8:8009", "[2001:db8::8]:8009"] {
+async fn start_accepts_public_and_lan_dial_targets() {
+    // Public / documentation IP literals AND private/ULA LAN targets reach the
+    // normal start path under the default (non-breaking) dial policy: a
+    // self-hosted appliance must keep casting to devices on its LAN out of the
+    // box. Only never-legitimate targets are blocked by default.
+    for address in [
+        "198.51.100.8:8009",  // public (TEST-NET-2 stand-in)
+        "[2001:db8::8]:8009", // public (documentation stand-in)
+        "10.0.0.8:8009",      // RFC1918 LAN device
+        "192.168.0.8:8009",   // RFC1918 LAN device
+        "[fd00::8]:8009",     // IPv6 ULA LAN device
+    ] {
         let h = cast_harness();
         let resp = send(
             &h.router,
@@ -266,7 +281,61 @@ async fn start_accepts_public_dial_targets() {
         assert_eq!(
             resp.status(),
             StatusCode::CREATED,
-            "public cast dial target {address:?} must be accepted"
+            "public/LAN cast dial target {address:?} must be accepted by default"
+        );
+    }
+}
+
+#[tokio::test]
+async fn start_with_dial_allowlist_rejects_out_of_subnet_targets() {
+    // SEC-04 hardening: when the operator locks the dial to their device subnet
+    // (`control.device_dial_allow`), a private target OUTSIDE that subnet — the
+    // authenticated internal-port-scan vector — is refused (422, before spawn),
+    // while a device INSIDE the subnet still starts normally.
+    use std::sync::Arc;
+    let policy = Arc::new(
+        multiview_config::device::net_guard::DialPolicy::from_cidrs(["192.168.0.0/16"])
+            .expect("valid dial allowlist"),
+    );
+    let h = harness_with(move |state| {
+        state
+            .with_device_pollers(scripted_cast_registry())
+            .with_cast_delivery(delivery())
+            .with_dial_policy(policy)
+    });
+
+    // Inside the allowlisted subnet: accepted.
+    let resp = send(
+        &h.router,
+        post_json(
+            "/api/v1/cast/sessions",
+            OPERATOR_TOKEN,
+            &serde_json::json!({ "address": "192.168.0.8:8009" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "a device inside the allowlisted subnet still starts"
+    );
+
+    // A private target outside the allowlist (and one inside a different private
+    // block) is refused before any actor spawn.
+    for address in ["10.0.0.8:8009", "172.16.0.8:8009", "[fd00::8]:8009"] {
+        let resp = send(
+            &h.router,
+            post_json(
+                "/api/v1/cast/sessions",
+                OPERATOR_TOKEN,
+                &serde_json::json!({ "address": address }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an out-of-subnet dial target {address:?} must be refused once an allowlist is set"
         );
     }
 }

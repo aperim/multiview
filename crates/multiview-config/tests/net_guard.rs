@@ -3,11 +3,22 @@
 //!
 //! The guard is the single source of truth both `Device::validate` (config
 //! load) and the control-plane dial sites (device poller + Cast session actor)
-//! consult before an outbound connection. These tests pin its behaviour: a
-//! strict default-deny of every internal range on the RESOLVED IP (so a
-//! DNS-rebind answer is caught, not just a literal), never-legitimate ranges
-//! that no operator allowlist can re-enable, and an operator CIDR allowlist
-//! that re-enables only the private/ULA LAN ranges.
+//! consult before an outbound connection. These tests pin its behaviour on the
+//! **RESOLVED** IP (so a DNS-rebind answer is caught, not just a literal):
+//!
+//! * The **default** ([`DialPolicy::default`] / [`DialPolicy::allow_lan`]) is
+//!   **non-breaking** — a self-hosted LAN appliance must keep reaching its
+//!   devices out of the box, so every *allowlistable* range (RFC 1918 private,
+//!   IPv6 ULA, RFC 6598 carrier-NAT) is dialable by default. The
+//!   **never-legitimate** ranges (loopback, link-local incl. the cloud-metadata
+//!   IP `169.254.169.254`, unspecified, multicast, broadcast, and their
+//!   IPv4-mapped forms) are **always** blocked — no default and no operator
+//!   allowlist can re-enable them. This closes the dangerous DNS-rebind targets
+//!   (metadata/loopback) unconditionally.
+//! * An operator [`DialPolicy::from_cidrs`] allowlist **tightens** the dial: a
+//!   private/ULA target is then reachable only if it falls inside one of the
+//!   operator CIDRs (locking the dial to the real device subnet closes the
+//!   authenticated internal-port-scan vector, SEC-04).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -28,10 +39,9 @@ fn ip(text: &str) -> IpAddr {
         .unwrap_or_else(|_| panic!("`{text}` is an IP literal"))
 }
 
-/// The never-legitimate + internal ranges a default (empty-allowlist) policy
-/// must reject on a resolved address.
-const BLOCKED: &[&str] = &[
-    // Never-legitimate (no allowlist can re-enable these).
+/// The never-legitimate ranges — no default and no operator allowlist can ever
+/// re-enable a dial to these. This is the unconditional SSRF floor.
+const NEVER_LEGIT: &[&str] = &[
     "127.0.0.1",
     "127.10.20.30",
     "::1",
@@ -45,7 +55,11 @@ const BLOCKED: &[&str] = &[
     "255.255.255.255",        // IPv4 broadcast
     "::ffff:127.0.0.1",       // IPv4-mapped loopback bypass
     "::ffff:169.254.169.254", // IPv4-mapped IMDS bypass
-    // Private / ULA / CGNAT (allowlistable, but denied by default).
+];
+
+/// The allowlistable LAN ranges — dialable by DEFAULT (non-breaking), and
+/// tightenable behind an operator [`DialPolicy::from_cidrs`] allowlist.
+const LAN: &[&str] = &[
     "10.0.0.8",
     "172.16.0.8",
     "192.168.0.8",
@@ -66,51 +80,60 @@ const PUBLIC: &[&str] = &[
 ];
 
 #[test]
-fn default_policy_denies_every_internal_range() {
-    let policy = DialPolicy::deny_internal();
-    for text in BLOCKED {
+fn default_policy_blocks_never_legit_but_allows_lan_and_public() {
+    // The non-breaking default: a LAN appliance keeps dialling its devices, but
+    // the dangerous never-legitimate targets stay blocked out of the box.
+    let policy = DialPolicy::default();
+
+    for text in NEVER_LEGIT {
         assert!(
             screen_ip(ip(text), &policy).is_err(),
-            "default-deny must reject {text}"
+            "the default must ALWAYS block never-legitimate {text}"
         );
     }
-}
-
-#[test]
-fn default_policy_accepts_global_unicast() {
-    let policy = DialPolicy::deny_internal();
+    for text in LAN {
+        screen_ip(ip(text), &policy)
+            .unwrap_or_else(|err| panic!("the default must allow LAN device {text}: {err}"));
+    }
     for text in PUBLIC {
         screen_ip(ip(text), &policy)
-            .unwrap_or_else(|err| panic!("default-deny must accept public {text}: {err}"));
+            .unwrap_or_else(|err| panic!("the default must allow public {text}: {err}"));
     }
 }
 
 #[test]
 fn screen_resolved_is_fail_closed_over_a_mixed_answer() {
-    let policy = DialPolicy::deny_internal();
-    // A single blocked IP among otherwise-public answers rejects the whole set
-    // (a DNS answer cannot smuggle in a private target).
+    let policy = DialPolicy::default();
+    // A single never-legitimate IP among otherwise-public answers rejects the
+    // whole set (a DNS answer cannot smuggle in a loopback/metadata target).
     assert!(
-        screen_resolved([ip("198.51.100.8"), ip("10.0.0.8")], &policy).is_err(),
-        "a mixed answer with one private IP must be rejected"
+        screen_resolved([ip("198.51.100.8"), ip("169.254.169.254")], &policy).is_err(),
+        "a mixed answer with one metadata IP must be rejected"
     );
     screen_resolved([ip("198.51.100.8"), ip("203.0.113.8")], &policy)
         .expect("an all-public answer is accepted");
 }
 
 #[test]
-fn operator_allowlist_reenables_only_private_and_ula_ranges() {
+fn operator_allowlist_tightens_dialing_to_the_listed_cidrs() {
+    // With an allowlist set, an allowlistable range is reachable ONLY inside one
+    // of the operator CIDRs — the recommended hardening that closes the
+    // authenticated internal-dial (SEC-04).
     let policy = DialPolicy::from_cidrs(["192.168.0.0/16", "fd00:db8::/32"])
         .expect("valid operator dial allowlist");
 
-    // Allowlisted LAN ranges are now reachable.
+    // Allowlisted LAN ranges remain reachable.
     screen_ip(ip("192.168.0.8"), &policy).expect("allowlisted RFC1918 host reachable");
     screen_ip(ip("fd00:db8::42"), &policy).expect("allowlisted ULA host reachable");
 
-    // A private range NOT in the allowlist stays denied.
+    // A private range OUTSIDE the allowlist is now denied (SEC-04 tightening).
     assert!(
         screen_ip(ip("10.0.0.8"), &policy).is_err(),
-        "a non-allowlisted private range stays denied"
+        "a private range outside the allowlist is denied once an allowlist is set"
+    );
+    assert!(
+        screen_ip(ip("fd00::8"), &policy).is_err(),
+        "a ULA outside the allowlist is denied once an allowlist is set"
     );
 }
 
@@ -143,29 +166,33 @@ impl HostResolver for FakeResolver {
 }
 
 #[test]
-fn resolve_and_screen_rejects_a_dns_rebind_answer() {
+fn resolve_and_screen_rejects_a_rebind_to_a_never_legit_target() {
     let resolver = FakeResolver(HashMap::from([
-        // A public NAME that answers with a private / loopback address — the
-        // classic DNS-rebind SSRF the resolved-IP check exists to defeat.
-        ("rebind-v4.example.test".to_owned(), vec![ip("10.0.0.5")]),
-        ("rebind-v6.example.test".to_owned(), vec![ip("::1")]),
+        // A public NAME that answers with a metadata / loopback address — the
+        // dangerous DNS-rebind SSRF the resolved-IP check exists to defeat. The
+        // default blocks these unconditionally (no allowlist involved).
+        (
+            "rebind-imds.example.test".to_owned(),
+            vec![ip("169.254.169.254")],
+        ),
+        ("rebind-loopback.example.test".to_owned(), vec![ip("::1")]),
         (
             "rebind-mixed.example.test".to_owned(),
-            vec![ip("198.51.100.8"), ip("192.168.1.5")],
+            vec![ip("198.51.100.8"), ip("127.0.0.1")],
         ),
         // A genuinely public host.
         ("real.example.test".to_owned(), vec![ip("198.51.100.8")]),
     ]));
-    let policy = DialPolicy::deny_internal();
+    let policy = DialPolicy::default();
 
     for host in [
-        "rebind-v4.example.test",
-        "rebind-v6.example.test",
+        "rebind-imds.example.test",
+        "rebind-loopback.example.test",
         "rebind-mixed.example.test",
     ] {
         assert!(
             resolve_and_screen(host, &policy, &resolver).is_err(),
-            "DNS-rebind answer for {host} must be rejected once resolved"
+            "a rebind answer for {host} pointing at a never-legit target must be rejected"
         );
     }
 
@@ -175,5 +202,21 @@ fn resolve_and_screen_rejects_a_dns_rebind_answer() {
         vetted,
         vec![ip("198.51.100.8")],
         "returns the vetted answer"
+    );
+}
+
+#[test]
+fn a_set_allowlist_still_catches_a_rebind_to_a_non_allowlisted_private_target() {
+    // SEC-04 hardening: once an operator locks the dial to their device subnet,
+    // a public name that rebinds to a DIFFERENT private range is caught on the
+    // resolved IP — not just literals.
+    let resolver = FakeResolver(HashMap::from([(
+        "rebind-lan.example.test".to_owned(),
+        vec![ip("10.9.9.9")],
+    )]));
+    let policy = DialPolicy::from_cidrs(["192.168.0.0/16"]).expect("valid allowlist");
+    assert!(
+        resolve_and_screen("rebind-lan.example.test", &policy, &resolver).is_err(),
+        "a rebind to a private range outside the operator allowlist must be rejected"
     );
 }
