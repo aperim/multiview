@@ -5,7 +5,7 @@
 //! [`MeshTransport`]: it **announces** this machine's signed
 //! [`AnnouncePayload`](crate::announce::AnnouncePayload) as a Conspect service
 //! type and **browses** for neighbours, draining their announcements for the
-//! pure logic to verify + fold into the [`PeerTable`](crate::peer::PeerTable).
+//! pure logic to decode + fold into the [`PeerTable`](crate::peer::PeerTable).
 //!
 //! ## IPv6-first (ADR-0042, hard rule)
 //!
@@ -38,7 +38,9 @@ use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::announce::AnnouncePayload;
 use crate::error::MeshError;
-use crate::transport::{MeshTransport, ReceivedAnnouncement};
+use crate::transport::{
+    reassemble_txt, MeshTransport, ReceivedAnnouncement, CHUNK_BYTES, CHUNK_COUNT_KEY,
+};
 
 /// The Conspect mDNS service type (RFC 6763). The leading `_conspect-mesh`
 /// service name + `_udp` (mesh announcements are connectionless) under the mDNS
@@ -50,13 +52,6 @@ pub const SERVICE_TYPE: &str = "_conspect-mesh._udp.local.";
 /// artefacts over a separate, operator-confirmed channel — O1). A fixed,
 /// registered-range default; overridable by the caller.
 pub const DEFAULT_PORT: u16 = 5354;
-
-/// The TXT property key holding the chunk count.
-const CHUNK_COUNT_KEY: &str = "c";
-
-/// The maximum bytes per TXT chunk value (well under the 255-byte mDNS TXT
-/// string limit, leaving headroom for the key + length prefix).
-const CHUNK_BYTES: usize = 200;
 
 /// The live mDNS announce + browse transport.
 ///
@@ -122,17 +117,7 @@ impl MdnsService {
     /// `None` if the chunking is absent/inconsistent (a foreign or malformed
     /// announcement is ignored, never panicked on).
     fn reassemble(resolved: &mdns_sd::ResolvedService) -> Option<Vec<u8>> {
-        let count: usize = resolved
-            .get_property_val_str(CHUNK_COUNT_KEY)?
-            .parse()
-            .ok()?;
-        let mut wire = Vec::with_capacity(count * CHUNK_BYTES);
-        for i in 0..count {
-            let key = format!("p{i}");
-            let chunk = resolved.get_property_val_str(&key)?;
-            wire.extend_from_slice(chunk.as_bytes());
-        }
-        Some(wire)
+        reassemble_txt(|key| resolved.get_property_val_str(key))
     }
 }
 
@@ -192,13 +177,10 @@ impl Drop for MdnsService {
     }
 }
 
-/// Reassemble + decode + verify a received announcement into a verified payload.
+/// Decode a reassembled received announcement into an untrusted payload.
 ///
-/// A convenience the announce/browse loop uses: decode the wire, verify the
-/// originator signature is present + well-formed (the caller supplies the
-/// originator key derived from the payload's own advertised key material in a
-/// future O2 key-distribution step; until then the structural decode + self-
-/// consistency is the gate). Returns the decoded payload on success.
+/// Signature verification happens at the lease-install layer against the pinned
+/// server key; this transport helper performs structural decoding only.
 ///
 /// # Errors
 /// [`MeshError::MalformedPayload`] if the bytes do not decode.

@@ -13,9 +13,25 @@
 use crate::announce::AnnouncePayload;
 use crate::error::MeshError;
 
+/// The TXT property key holding the chunk count.
+#[cfg(any(feature = "mdns", test))]
+pub(crate) const CHUNK_COUNT_KEY: &str = "c";
+
+/// The maximum bytes in a chunk emitted by the mesh announcer.
+#[cfg(any(feature = "mdns", test))]
+pub(crate) const CHUNK_BYTES: usize = 200;
+
+/// The maximum accepted chunk count (12.8 KiB at [`CHUNK_BYTES`] per chunk).
+///
+/// A legitimate announcement carries a small set of 32-byte salted hardware
+/// digests plus compact entitlement metadata. Sixty-four chunks leave substantial
+/// protocol headroom while bounding allocation and work from untrusted TXT input.
+#[cfg(any(feature = "mdns", test))]
+pub(crate) const MAX_CHUNKS: usize = 64;
+
 /// A received mesh announcement from the transport: the raw wire bytes of a
-/// peer's TXT-record payload. The logic decodes + verifies it; the transport
-/// never interprets it.
+/// peer's TXT-record payload. The transport never interprets it; consumers decode
+/// it into the untrusted discovered-peer inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceivedAnnouncement {
@@ -39,6 +55,27 @@ impl ReceivedAnnouncement {
     pub fn decode(&self) -> Result<AnnouncePayload, MeshError> {
         AnnouncePayload::from_wire(&self.wire)
     }
+}
+
+/// Reassemble numbered TXT chunks through a transport-specific property lookup.
+///
+/// The attacker-controlled count is capped before allocation or chunk lookup.
+#[cfg(any(feature = "mdns", test))]
+pub(crate) fn reassemble_txt<'a>(
+    mut property: impl FnMut(&str) -> Option<&'a str>,
+) -> Option<Vec<u8>> {
+    let count: usize = property(CHUNK_COUNT_KEY)?.parse().ok()?;
+    if count > MAX_CHUNKS {
+        return None;
+    }
+    let capacity = count.checked_mul(CHUNK_BYTES)?;
+    let mut wire = Vec::with_capacity(capacity);
+    for index in 0..count {
+        let key = format!("p{index}");
+        let chunk = property(&key)?;
+        wire.extend_from_slice(chunk.as_bytes());
+    }
+    Some(wire)
 }
 
 /// The transport seam: publish this machine's announcement, and report observed
@@ -65,4 +102,66 @@ pub trait MeshTransport {
     /// # Errors
     /// [`MeshError::Transport`] if the transport could not be polled.
     fn poll_received(&self) -> Result<Vec<ReceivedAnnouncement>, MeshError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{reassemble_txt, CHUNK_COUNT_KEY, MAX_CHUNKS};
+
+    #[test]
+    fn reassembly_rejects_hostile_count_before_reading_chunks() {
+        // A recorded flag (asserted, never panicked) proves the over-limit count
+        // is rejected before any chunk key `p{i}` is ever looked up.
+        let count = 1_000_000_000_000_usize.to_string();
+        let looked_up_chunk = std::cell::Cell::new(false);
+        let wire = reassemble_txt(|key| {
+            if key == CHUNK_COUNT_KEY {
+                Some(count.as_str())
+            } else {
+                looked_up_chunk.set(true);
+                None
+            }
+        });
+
+        assert_eq!(wire, None);
+        assert!(
+            !looked_up_chunk.get(),
+            "over-limit input must be rejected before reading any chunk"
+        );
+    }
+
+    #[test]
+    fn reassembly_accepts_exact_maximum_chunk_count() {
+        let mut properties = HashMap::new();
+        properties.insert(CHUNK_COUNT_KEY.to_owned(), MAX_CHUNKS.to_string());
+        for index in 0..MAX_CHUNKS {
+            properties.insert(format!("p{index}"), "x".to_owned());
+        }
+
+        let wire = reassemble_txt(|key| properties.get(key).map(String::as_str));
+
+        assert_eq!(wire, Some(vec![b'x'; MAX_CHUNKS]));
+    }
+
+    #[test]
+    fn reassembly_rejects_one_chunk_over_maximum() {
+        let count = (MAX_CHUNKS + 1).to_string();
+        let looked_up_chunk = std::cell::Cell::new(false);
+        let wire = reassemble_txt(|key| {
+            if key == CHUNK_COUNT_KEY {
+                Some(count.as_str())
+            } else {
+                looked_up_chunk.set(true);
+                None
+            }
+        });
+
+        assert_eq!(wire, None);
+        assert!(
+            !looked_up_chunk.get(),
+            "one-over-maximum must be rejected before reading any chunk"
+        );
+    }
 }
