@@ -690,6 +690,18 @@ fn stop_then_vamp_recues_to_head_distinct_from_pause_resume() {
 // 6. Property tests — period integrity + both seam-correlation regimes.
 // ----------------------------------------------------------------------------
 
+/// `SplitMix64` — a strong finalizing mixer used to derive well-distributed,
+/// mutually-independent sub-seeds for the ensemble below. Unlike `seed ^ (i·k)`,
+/// its avalanche breaks the linear relationship the content xorshift would otherwise
+/// preserve between sub-seeds, so the realizations it seeds are effectively
+/// independent (verified empirically — see `decorrelated_seam_power_ratio_mean`).
+fn splitmix64(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// One decorrelated-content realization's seam-power ratio: the mean per-frame
 /// stereo power over the `xfade`-frame crossfade seam, divided by the nominal
 /// `2·a²`. Content is ±`a` decorrelated noise seeded by `seed`. For a constant-power
@@ -716,11 +728,15 @@ fn decorrelated_seam_power_ratio(loop_frames: usize, xfade: usize, seed: u64) ->
     seam.iter().sum::<f64>() / xfade as f64 / nominal
 }
 
-/// The seam-power ratio averaged over `k` independent decorrelated realizations
-/// (distinct sub-seeds derived from `seed`). The single-realization SD ≈ 0.50/√xfade
-/// shrinks to 0.50/√(xfade·k), so choosing `k` with `xfade·k ≥ 256` makes the tight
-/// ±20% band a ≥6σ bound at every `xfade` — testing the *expected* power
-/// preservation instead of one high-variance small-`xfade` draw.
+/// The seam-power ratio averaged over `k` independent decorrelated realizations,
+/// each seeded by a `splitmix64`-mixed sub-seed of `seed` (whose avalanche makes the
+/// realizations effectively independent — a plain `seed ^ i·k` would stay linearly
+/// related through the content xorshift and not decorrelate). The single-realization
+/// SD ≈ 0.50/√xfade shrinks ≈1/√k with the ensemble size (measured, no floor), so the
+/// callers' `k = ⌈512/xfade⌉` (xfade·k ≥ 512) makes the tight ±20% band a measured
+/// ~7σ bound at every `xfade` — testing the *expected* power preservation instead of
+/// one high-variance small-`xfade` draw. Independence + the margin are verified
+/// empirically by `ensemble_mean_variance_shrinks_with_k`.
 fn decorrelated_seam_power_ratio_mean(
     loop_frames: usize,
     xfade: usize,
@@ -729,7 +745,7 @@ fn decorrelated_seam_power_ratio_mean(
 ) -> f64 {
     (0..k)
         .map(|i| {
-            let s = seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let s = splitmix64(seed.wrapping_add(i as u64));
             decorrelated_seam_power_ratio(loop_frames, xfade, s)
         })
         .sum::<f64>()
@@ -789,13 +805,15 @@ proptest! {
     ) {
         let xfade = xfade_req.min(loop_frames / 2).max(1);
         // Estimate the EXPECTED seam power over enough independent realizations that
-        // the estimator SD (0.50/√(xfade·k)) makes the ±20% band a ≥6σ bound even at
-        // tiny xfade. A single small-xfade seam averages only `xfade` frames of ±a
-        // noise (SD ≈ 0.50/√xfade ≈ 0.18 at xfade=8), so a per-draw ±20% band failed
-        // on correct code ~1–2σ of the time — the flake this fixes (task #16). The
-        // mean over k realizations tests the real property: the crossfade preserves
-        // power in expectation for decorrelated content.
-        let k = 256usize.div_ceil(xfade).max(1);
+        // the ±20% band is a robust ≥6σ bound even at tiny xfade. A single small-xfade
+        // seam averages only `xfade` frames of ±a noise (single-realization SD ≈
+        // 0.50/√xfade ≈ 0.17 at xfade=8), so a per-draw ±20% band failed on correct
+        // code — the flake this fixes (task #16). Averaging k `splitmix64`-seeded
+        // realizations shrinks the SD ≈1/√k with no floor (measured — see
+        // `ensemble_mean_variance_shrinks_with_k`); k = ⌈512/xfade⌉ gives a measured
+        // ~7σ margin at the worst case (xfade=8). Tests the real property: the
+        // crossfade preserves power in expectation for decorrelated content.
+        let k = 512usize.div_ceil(xfade).max(1);
         let ratio = decorrelated_seam_power_ratio_mean(loop_frames, xfade, seed, k);
         prop_assert!(
             (0.80..=1.20).contains(&ratio),
@@ -814,18 +832,68 @@ proptest! {
 fn decorrelated_seam_power_is_flat_at_the_reproduced_counterexample() {
     let (loop_frames, xfade_req, seed) = (1091usize, 11usize, 4_320_260_872_143_147_964u64);
     let xfade = xfade_req.min(loop_frames / 2).max(1);
-    // The single draw that tripped the old band is genuinely a high-variance ~1.26
-    // outlier (a small-`xfade` estimate), and it is realization 0 of the mean below.
+    // The single draw that tripped the old per-realization band is genuinely a
+    // high-variance ~1.26 outlier — a small-`xfade` estimate of a quantity whose
+    // expectation is 1.0 — reproduced here with the exact failing seed.
     let single = decorrelated_seam_power_ratio(loop_frames, xfade, seed);
     assert!(
         single > 1.20,
         "the reproduced single-draw ratio is the >1.20 outlier the old band caught (got {single})"
     );
     // The expected seam power — averaged over enough realizations — is within ±20%.
-    let k = 256usize.div_ceil(xfade).max(1);
+    let k = 512usize.div_ceil(xfade).max(1);
     let mean = decorrelated_seam_power_ratio_mean(loop_frames, xfade, seed, k);
     assert!(
         (0.80..=1.20).contains(&mean),
         "expected decorrelated seam power is flat (mean {mean} over {k} realizations)"
+    );
+}
+
+/// Establishes the fix's premise (addressing the #232 review): the `splitmix64`
+/// sub-seeds yield *effectively independent* realizations, so the k-ensemble mean's
+/// SD shrinks ≈1/√k versus a single realization — making the ±20% band a ≥6σ bound at
+/// the worst-case small `xfade`. A regression to correlated sub-seeds (e.g. plain
+/// `seed ^ i·k`) would leave the ensemble SD near the single-realization SD and fail
+/// the shrinkage / ≥6σ assertions. Deterministic (fixed base seeds).
+#[test]
+fn ensemble_mean_variance_shrinks_with_k() {
+    let loop_frames = 191usize; // the estimator variance depends on xfade, not length
+    let xfade = 8usize; // worst case: the largest single-realization SD (≈0.50/√8)
+    let k = 512usize.div_ceil(xfade).max(1); // = 64 → xfade·k = 512
+    let bases = 250u64;
+    let stats = |vals: &[f64]| -> (f64, f64) {
+        let n = vals.len() as f64;
+        let mean = vals.iter().sum::<f64>() / n;
+        let var = vals.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+        (mean, var.max(0.0).sqrt())
+    };
+    let single: Vec<f64> = (0..bases)
+        .map(|b| decorrelated_seam_power_ratio(loop_frames, xfade, splitmix64(b ^ 0xABCD)))
+        .collect();
+    let ensemble: Vec<f64> = (0..bases)
+        .map(|b| decorrelated_seam_power_ratio_mean(loop_frames, xfade, b ^ 0x1234_5678, k))
+        .collect();
+    let (mean_single, sd_single) = stats(&single);
+    let (mean_ens, sd_ens) = stats(&ensemble);
+    let sigma_margin = 0.20 / sd_ens;
+    println!(
+        "xfade={xfade} k={k}: single(mean={mean_single:.4} sd={sd_single:.4}) \
+         ensemble(mean={mean_ens:.4} sd={sd_ens:.4}) band=±20% => {sigma_margin:.1}sigma"
+    );
+    // Unbiased (both estimate the true ratio 1.0).
+    assert!(
+        (mean_ens - 1.0).abs() < 0.03,
+        "ensemble mean ≈ 1 (got {mean_ens})"
+    );
+    // Independence ⇒ ~1/√k shrinkage (k=64 ⇒ √64=8). Require the ensemble SD to fall
+    // well below the single-realization SD — a correlated ensemble would not.
+    assert!(
+        sd_ens < sd_single * 0.30,
+        "ensemble SD must shrink vs single (single {sd_single:.4}, ensemble {sd_ens:.4})"
+    );
+    // The tight ±20% band is a robust (measured ≈7σ) bound on the ensemble; require ≥6σ.
+    assert!(
+        sigma_margin >= 6.0,
+        "±20% must be ≥6σ on the k-ensemble (σ={sd_ens:.4}, margin {sigma_margin:.1})"
     );
 }
