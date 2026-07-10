@@ -23,8 +23,8 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, Query, State};
@@ -32,6 +32,7 @@ use axum::http::request::Parts;
 use axum::http::{header, HeaderMap};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use multiview_config::Origin;
 use multiview_core::time::MediaTime;
 use multiview_engine::{EventSubscription, RecvError, SeqEvent, TryRecvError};
 use multiview_events::{
@@ -1402,15 +1403,16 @@ fn current_engine_snapshot(state: &AppState) -> (EngineStateSnapshot, u64) {
 
 /// `GET /api/v1/ws` — the primary WebSocket transport.
 ///
-/// **Authenticated before the upgrade.** Streaming the engine event firehose
-/// (tile state, alerts, input/output status) is a privileged read: a valid
-/// `Bearer` API key with at least [`Action::Read`] ([`Role::Viewer`]) is
-/// required. Auth is resolved *pre-upgrade* — the [`Principal`] extractor and
-/// the role gate run before [`WebSocketUpgrade::on_upgrade`], so an
-/// unauthenticated or under-privileged request fails as a debuggable
-/// `401`/`403` `problem+json` HTTP response rather than a silently-closed socket
-/// (realtime-api §6). API/non-browser clients send `Authorization: Bearer`
-/// directly on the upgrade.
+/// **Authenticated (and origin-checked) before the upgrade.** Streaming the engine
+/// event firehose (tile state, alerts, input/output status) is a privileged read: a
+/// valid credential with at least [`Action::Read`] ([`Role::Viewer`]) is required.
+/// The [`RealtimeViewer`] extractor and the role gate run before
+/// [`WebSocketUpgrade::on_upgrade`], so a cross-origin (SEC-13), unauthenticated, or
+/// under-privileged request fails as a debuggable `403`/`401` `problem+json` HTTP
+/// response rather than a silently-closed socket (realtime-api §6). Native clients
+/// send `Authorization: Bearer` directly on the upgrade; a browser (which cannot set
+/// that header) presents a single-use `?ticket=` from `POST /api/v1/ws/ticket`
+/// instead of the durable bearer (SEC-01).
 ///
 /// On success, upgrades the connection and runs a [`SessionStream`] that emits
 /// the snapshot then streams deltas, writing each as a text frame. A write that
@@ -1435,14 +1437,15 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| run_ws_session(socket, state, principal, live_baseline))
 }
 
-/// A pre-upgrade auth gate for the realtime transports.
+/// A pre-upgrade auth + origin gate for the realtime transports.
 ///
-/// As a [`FromRequestParts`] extractor it resolves the `Bearer` / JWT /
-/// `?access_token=` [`Principal`] and enforces [`Action::Read`] — and because
-/// extractors run in argument order, placing it before [`WebSocketUpgrade`] makes
-/// authentication strictly precede the upgrade. So an unauthenticated /
-/// under-privileged client always gets a debuggable `401`/`403` HTTP response,
-/// not a `426` from the upgrade extractor (nor a silently-closed socket).
+/// As a [`FromRequestParts`] extractor it (1) enforces the [`AllowedOrigins`]
+/// CSWSH gate, then (2) resolves the `Bearer` / JWT / `?ticket=` [`Principal`] and
+/// enforces [`Action::Read`] — and because extractors run in argument order,
+/// placing it before [`WebSocketUpgrade`] makes both checks strictly precede the
+/// upgrade. So a cross-origin request is a `403`, an unauthenticated /
+/// under-privileged one a `401`/`403`, and never a `426` from the upgrade extractor
+/// (nor a silently-closed socket).
 ///
 /// Carries the resolved [`Principal`] and its live-reauth baseline generation
 /// (`Some` for store-managed API keys, `None` otherwise; ADR-RT010) captured at
@@ -1457,14 +1460,19 @@ impl FromRequestParts<AppState> for RealtimeViewer {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // A browser WebSocket/EventSource cannot set an `Authorization` header,
-        // so the bearer token is also accepted as `?access_token=` (header wins).
-        let access_token = Query::<AccessTokenQuery>::from_request_parts(parts, state)
+        // CSWSH gate FIRST (SEC-13): a WebSocket handshake bypasses SOP/CORS, so a
+        // cross-origin upgrade is refused before auth and regardless of
+        // `auth_disabled` — a foreign page can never reach the firehose.
+        enforce_origin(state, &parts.headers).map_err(IntoResponse::into_response)?;
+        // A browser WebSocket/EventSource cannot set an `Authorization` header, so
+        // the browser path presents a short-lived single-use `?ticket=` instead of
+        // the durable bearer (SEC-01; header still wins for native clients).
+        let ticket = Query::<TicketQuery>::from_request_parts(parts, state)
             .await
             .ok()
-            .and_then(|q| q.0.access_token);
+            .and_then(|q| q.0.ticket);
         let (principal, live_baseline) =
-            resolve_principal(state, &parts.headers, access_token.as_deref())
+            resolve_principal(state, &parts.headers, ticket.as_deref())
                 .map_err(IntoResponse::into_response)?;
         principal
             .role
@@ -1474,17 +1482,19 @@ impl FromRequestParts<AppState> for RealtimeViewer {
     }
 }
 
-/// The browser-transport token fallback: a WebSocket / `EventSource` cannot set
-/// an `Authorization` header, so the bearer token may be passed as the
-/// `access_token` query parameter (same-origin only).
+/// The browser realtime-auth carrier (ADR-RT011): a WebSocket / `EventSource`
+/// cannot set an `Authorization` header, so the short-lived single-use ticket from
+/// [`ws_ticket_handler`] is passed as `?ticket=`. Unlike the durable bearer it
+/// replaces, a consumed or expired ticket in a proxy/access log is inert (SEC-01,
+/// CWE-598).
 #[derive(Debug, serde::Deserialize)]
-pub struct AccessTokenQuery {
-    /// The raw `key_id.secret` bearer token, when not sent as a header.
-    access_token: Option<String>,
+pub struct TicketQuery {
+    /// The single-use realtime ticket minted by `POST /api/v1/ws/ticket`.
+    ticket: Option<String>,
 }
 
 /// Resolve a [`Principal`] from the `Authorization` header (API key, then JWT) or,
-/// failing that, the `access_token` query parameter (the browser WS/SSE path).
+/// failing that, a single-use `?ticket=` (the browser WS/SSE path).
 ///
 /// Returns the principal and its **live-reauth baseline** (ADR-RT010): `Some(gen)`
 /// — the store authorization generation captured *before* the store lookup — for a
@@ -1492,15 +1502,17 @@ pub struct AccessTokenQuery {
 /// local-admin (auth disabled) or JWT principal, which are not store-revocable.
 /// Capturing the generation before the lookup makes a revoke/re-scope racing the
 /// connect handshake observable to the first `reauthorize` (it advances past the
-/// baseline), closing the connect-race.
+/// baseline), closing the connect-race. A **ticket** already carries the baseline
+/// captured at mint, so its consumed value is threaded through unchanged.
 fn resolve_principal(
     state: &AppState,
     headers: &HeaderMap,
-    access_token: Option<&str>,
+    ticket: Option<&str>,
 ) -> Result<(Principal, Option<u64>), crate::error::ControlError> {
     // Auth disabled (explicit trusted-network mode): the realtime stream is open
     // as a local admin, matching the REST `Principal` extractor. Not store-managed,
-    // so no live-authz baseline.
+    // so no live-authz baseline. (The CSWSH origin gate runs independently, so it
+    // still applies in this mode — see `enforce_origin`.)
     if state.auth_disabled {
         return Ok((Principal::local_admin(), None));
     }
@@ -1521,10 +1533,330 @@ fn resolve_principal(
     if let Some(Ok(principal)) = state.authenticate_jwt(header) {
         return Ok((principal, None));
     }
-    if let Some(token) = access_token {
-        return state.api_keys.verify(token).map(|p| (p, Some(baseline)));
+    // Browser path: atomically consume the single-use ticket. It already carries the
+    // minting principal + its RT010 baseline, so no store re-probe is needed.
+    if let Some(token) = ticket {
+        if let Some(resolved) = state.ws_tickets.consume(token) {
+            return Ok(resolved);
+        }
     }
     Err(crate::error::ControlError::Unauthenticated)
+}
+
+/// The lifetime of a realtime auth ticket (ADR-RT011 / ADR-RT005 ~30 s): short
+/// enough that a ticket leaked into a log is inert almost immediately, long enough
+/// for a browser to receive the mint response and open the socket.
+pub const WS_TICKET_TTL: Duration = Duration::from_secs(30);
+
+/// The hard ceiling on live (unconsumed, unexpired) realtime tickets. Minting past
+/// it drops the oldest (invariant #10 — the control plane can never grow without
+/// bound under a mint flood). With single-use consumption and a 30 s TTL the live
+/// set is normally tiny; this is a flood ceiling, not an operating size.
+pub const WS_TICKET_CAPACITY: usize = 4096;
+
+/// One issued-but-unconsumed realtime ticket: the authorization it grants and its
+/// expiry deadline.
+#[derive(Debug, Clone)]
+struct TicketRecord {
+    /// The full principal (role + all scope axes) the WS/SSE session adopts.
+    principal: Principal,
+    /// The RT010 live-reauth baseline generation captured at mint (`Some` for a
+    /// store-managed API key, `None` for local-admin/JWT), so a key revoked between
+    /// mint and connect is caught by the session's first reauthorize.
+    baseline: Option<u64>,
+    /// The instant past which this ticket is expired and inert.
+    expires_at: Instant,
+}
+
+/// A bounded, single-use, TTL-swept store of short-lived realtime auth tickets
+/// (ADR-RT011, implementing ADR-RT005).
+///
+/// A browser cannot set an `Authorization` header on `new WebSocket()` /
+/// `EventSource`, so rather than smuggle the durable bearer through the URL query
+/// (SEC-01, CWE-598 — it leaks into proxy/access logs and history), the SPA mints a
+/// ticket via `POST /api/v1/ws/ticket` and connects with `?ticket=`. The ticket is
+/// a high-entropy opaque token consumed **atomically** on the WS/SSE upgrade.
+///
+/// It is **control-plane only** — the engine never touches it — behind a short-held
+/// [`Mutex`] (the [`CorrRegistry`] pattern): mint and consume are O(1) plus a
+/// bounded amortized sweep, never `.await`, and the retained set is capped
+/// ([`WS_TICKET_CAPACITY`], drop-oldest), so a mint flood can never grow it without
+/// bound (invariant #10).
+#[derive(Debug, Default)]
+pub struct WsTicketStore {
+    inner: Mutex<WsTicketInner>,
+}
+
+/// The mutable interior of a [`WsTicketStore`]: the live tickets plus their
+/// insertion (== expiry) order for drop-oldest / TTL eviction.
+#[derive(Debug, Default)]
+struct WsTicketInner {
+    /// token → record. Consuming a ticket removes it here (single-use); its entry
+    /// in `order` becomes a tombstone pruned lazily by `sweep_expired` / drop-oldest.
+    tickets: HashMap<String, TicketRecord>,
+    /// Token issue order. All tickets share one TTL, so this is also expiry order —
+    /// the front is always the oldest, letting the sweep stop at the first live,
+    /// unexpired ticket. Bounded to [`WS_TICKET_CAPACITY`] on mint.
+    order: VecDeque<String>,
+}
+
+impl WsTicketInner {
+    /// Evict expired tickets (and consumed-ticket tombstones) from the front. Since
+    /// every ticket shares [`WS_TICKET_TTL`], `order` is expiry-ordered, so the scan
+    /// stops at the first still-live, unexpired ticket — amortized O(evicted).
+    fn sweep_expired(&mut self, now: Instant) {
+        while let Some(front) = self.order.front() {
+            let evict = match self.tickets.get(front) {
+                Some(record) => now >= record.expires_at,
+                None => true, // a consumed-ticket tombstone
+            };
+            if !evict {
+                break;
+            }
+            if let Some(token) = self.order.pop_front() {
+                self.tickets.remove(&token);
+            }
+        }
+    }
+}
+
+impl WsTicketStore {
+    /// An empty ticket store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, WsTicketInner> {
+        // Recover a poisoned lock rather than propagate a panic on the auth path
+        // (safety rule 3): the store only ever swaps whole `TicketRecord`s, so a
+        // guard poisoned by an unrelated prior panic exposes a well-formed map.
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Mint a ticket for `principal` (carrying its RT010 `baseline`), valid for
+    /// [`WS_TICKET_TTL`] from now.
+    #[must_use]
+    pub fn mint(&self, principal: Principal, baseline: Option<u64>) -> String {
+        self.mint_at(principal, baseline, Instant::now())
+    }
+
+    /// [`mint`](Self::mint) with an explicit issue instant, for deterministic tests.
+    #[must_use]
+    pub fn mint_at(&self, principal: Principal, baseline: Option<u64>, now: Instant) -> String {
+        let token = new_ticket_token();
+        let record = TicketRecord {
+            principal,
+            baseline,
+            expires_at: now.checked_add(WS_TICKET_TTL).unwrap_or(now),
+        };
+        let mut inner = self.lock();
+        inner.sweep_expired(now);
+        // Drop-oldest until there is room, bounding the RETAINED set (tombstones
+        // included) to the capacity so a flood can never grow memory (invariant #10).
+        while inner.order.len() >= WS_TICKET_CAPACITY {
+            let Some(old) = inner.order.pop_front() else {
+                break;
+            };
+            inner.tickets.remove(&old);
+        }
+        inner.order.push_back(token.clone());
+        inner.tickets.insert(token.clone(), record);
+        token
+    }
+
+    /// Atomically **consume** a ticket: remove it and return its
+    /// `(principal, baseline)` iff it exists and is unexpired. Single-use — a
+    /// second consume (or an expired one) returns [`None`], and either way the
+    /// token is gone (an expired token is inert).
+    #[must_use]
+    pub fn consume(&self, token: &str) -> Option<(Principal, Option<u64>)> {
+        self.consume_at(token, Instant::now())
+    }
+
+    /// [`consume`](Self::consume) with an explicit instant, for deterministic tests.
+    #[must_use]
+    pub fn consume_at(&self, token: &str, now: Instant) -> Option<(Principal, Option<u64>)> {
+        // Remove from the map (single-use); the `order` entry is left as a tombstone
+        // pruned lazily by `sweep_expired`/drop-oldest, keeping consume O(1).
+        let record = self.lock().tickets.remove(token)?;
+        if now >= record.expires_at {
+            return None;
+        }
+        Some((record.principal, record.baseline))
+    }
+
+    /// The number of live tickets retained (a bound for tests / metrics).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.lock().tickets.len()
+    }
+
+    /// Whether no live tickets are retained.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A high-entropy opaque realtime ticket token: two CSPRNG-backed (`getrandom`)
+/// `UUIDv4` values, hex-encoded — ≥240 bits of entropy, far beyond guessable within
+/// a single-use ticket's ~30 s life.
+fn new_ticket_token() -> String {
+    let mut token = String::with_capacity(64);
+    token.push_str(&uuid::Uuid::new_v4().simple().to_string());
+    token.push_str(&uuid::Uuid::new_v4().simple().to_string());
+    token
+}
+
+/// The realtime `Origin` allow-list (SEC-13 / CSWSH, ADR-RT011): the operator's
+/// configured extra origins plus the always-permitted same-origin case.
+///
+/// A WebSocket / SSE handshake is exempt from the Same-Origin Policy and CORS, so
+/// this is the only thing standing between a foreign page and the engine firehose.
+#[derive(Debug, Clone, Default)]
+pub struct AllowedOrigins {
+    /// `control.allowed_origins`, strictly parsed + canonicalized to [`Origin`]
+    /// values. Empty ⇒ same-origin only. A raw string can never be stored, so
+    /// `null`/malformed can never be matched (fail-closed by construction).
+    configured: Vec<Origin>,
+}
+
+impl AllowedOrigins {
+    /// Build from the operator's `control.allowed_origins` list. Each entry is
+    /// strictly parsed to an [`Origin`]; anything that does not parse is dropped,
+    /// so a `null`/malformed value can never be stored and thus never matched
+    /// (fail-closed). Config-load validation (`MultiviewConfig::validate`) already
+    /// rejects a malformed entry with a hard error, so in production this only
+    /// canonicalizes — the drop is a defense-in-depth backstop for any direct
+    /// constructor (e.g. a test), closing the panel's "match parsed canonical
+    /// origins so null/malformed can never be allowed by any construction path".
+    #[must_use]
+    pub fn new(configured: Vec<String>) -> Self {
+        Self {
+            configured: configured
+                .into_iter()
+                .filter_map(|origin| Origin::parse(&origin).ok())
+                .collect(),
+        }
+    }
+
+    /// Whether `origin` (the request `Origin` header) is permitted given the request
+    /// `Host`. The `Origin` is strictly parsed first: `Origin: null`, a
+    /// path/query/fragment/userinfo, a non-http(s) scheme, or any other malformed
+    /// value is denied outright (fail-closed). A configured allow-list match wins;
+    /// otherwise the parsed origin's authority (`host[:port]`) must equal the
+    /// `Host` (same-origin — the embed-web SPA served from the appliance, zero
+    /// config).
+    #[must_use]
+    pub fn permits(&self, origin: &str, host: Option<&str>) -> bool {
+        let Ok(origin) = Origin::parse(origin) else {
+            return false; // `null`/opaque/path-bearing/bad-scheme — fail-closed
+        };
+        if self.configured.contains(&origin) {
+            return true;
+        }
+        match host {
+            Some(host) => origin.matches_host(host),
+            None => false,
+        }
+    }
+}
+
+/// Reject a cross-origin realtime upgrade (SEC-13 / CSWSH), on **both** WS and SSE
+/// and **regardless of `auth_disabled`** (CSWSH needs no credential).
+///
+/// An **absent** `Origin` passes: a non-browser client is not an SOP subject and
+/// not a CSWSH vector, and browsers always send `Origin` on a WS/SSE handshake. A
+/// **present** `Origin` must pass [`AllowedOrigins::permits`] — and a present but
+/// **unreadable** one (bytes that are not valid UTF-8, so no legitimate browser
+/// origin) is denied, NOT folded into the absent case (fail-closed). A request
+/// carrying **more than one** `Origin` header is denied as ambiguous (a browser
+/// sends exactly one).
+fn enforce_origin(state: &AppState, headers: &HeaderMap) -> Result<(), crate::error::ControlError> {
+    // Read ALL `Origin` values. Absent → native client, allow. A browser sends
+    // EXACTLY one; more than one is an ambiguous/smuggled request, and admitting on
+    // whichever value this gate reads while a downstream component trusts another is
+    // a CSWSH bypass — so a duplicate `Origin` fails closed.
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    let Some(origin_value) = origins.next() else {
+        return Ok(()); // absent: native client, not a CSWSH subject
+    };
+    if origins.next().is_some() {
+        return Err(crate::error::ControlError::Forbidden(
+            "cross-origin realtime connection refused (multiple Origin headers)".to_owned(),
+        ));
+    }
+    // Present but not valid UTF-8 → not a real browser `Origin`; fail closed
+    // rather than treat it as absent (defect #3).
+    let Ok(origin) = origin_value.to_str() else {
+        return Err(crate::error::ControlError::Forbidden(
+            "cross-origin realtime connection refused (unreadable Origin header)".to_owned(),
+        ));
+    };
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    if state.allowed_origins.permits(origin, host) {
+        Ok(())
+    } else {
+        Err(crate::error::ControlError::Forbidden(format!(
+            "cross-origin realtime connection refused (Origin {origin:?}); \
+             set control.allowed_origins to permit it"
+        )))
+    }
+}
+
+/// The `POST /api/v1/ws/ticket` response: a short-lived, single-use realtime auth
+/// ticket the browser passes as `?ticket=` on the WS/SSE upgrade (ADR-RT011).
+#[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct WsTicketResponse {
+    /// The opaque single-use ticket. Present it once as `?ticket=` within
+    /// `expires_in_secs`; it is consumed on the first WS/SSE upgrade.
+    pub ticket: String,
+    /// Seconds until the ticket expires ([`WS_TICKET_TTL`]).
+    pub expires_in_secs: u64,
+}
+
+/// `POST /api/v1/ws/ticket` — mint a short-lived, single-use realtime auth ticket
+/// for the browser transports (ADR-RT011, implementing ADR-RT005).
+///
+/// Authenticated exactly like a REST call — `Authorization: Bearer` header or JWT,
+/// **never** a URL query (that is the SEC-01 leak this replaces). The ticket
+/// carries the caller's full [`Principal`] (role + every scope axis) and its
+/// RT010 baseline, so the stream it opens has exactly the authorization the bearer
+/// would; the read gate ([`Action::Read`]) matches the WS/SSE gate. The durable
+/// bearer therefore never appears in a WS/SSE URL.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/api/v1/ws/ticket",
+        tag = "realtime",
+        // Authenticated exactly like a REST call: an `Authorization: Bearer`
+        // API key or JWT (never a URL query — that is the SEC-01 leak this
+        // replaces). Declared so the generated client carries typed auth.
+        security(("bearer_auth" = [])),
+        responses(
+            (status = 200, description = "A short-lived single-use realtime ticket to present as `?ticket=` on the WS/SSE upgrade.", body = WsTicketResponse),
+            (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
+            (status = 403, description = "Not authorized to read (below the viewer role).", body = crate::problem::Problem),
+        ),
+    )
+)]
+pub async fn ws_ticket_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let (principal, baseline) = match resolve_principal(&state, &headers, None) {
+        Ok(resolved) => resolved,
+        Err(err) => return err.into_response(),
+    };
+    if let Err(err) = principal.role.require(Action::Read) {
+        return err.into_response();
+    }
+    let ticket = state.ws_tickets.mint(principal, baseline);
+    axum::Json(WsTicketResponse {
+        ticket,
+        expires_in_secs: WS_TICKET_TTL.as_secs(),
+    })
+    .into_response()
 }
 
 /// The body of `GET /api/v1/auth/status` — the **unauthenticated** discovery
@@ -1542,15 +1874,17 @@ pub struct AuthStatus {
 }
 
 /// `GET /api/v1/auth/status` — report whether authentication is required and
-/// whether the presented credential (header `Bearer` or `?access_token=`)
-/// authenticates. Deliberately **unauthenticated**: the SPA must reach it before
-/// it holds a token. It leaks nothing beyond the two booleans.
+/// whether the presented `Authorization: Bearer` credential authenticates.
+/// Deliberately **unauthenticated**: the SPA must reach it before it holds a token.
+/// It leaks nothing beyond the two booleans.
+///
+/// Header-only: a durable bearer is **never** accepted in the URL query (SEC-01) —
+/// the SPA validates an entered key by sending it in the `Authorization` header.
 pub async fn auth_status_handler(
     State(state): State<AppState>,
-    Query(access): Query<AccessTokenQuery>,
     headers: HeaderMap,
 ) -> axum::Json<AuthStatus> {
-    let authenticated = resolve_principal(&state, &headers, access.access_token.as_deref()).is_ok();
+    let authenticated = resolve_principal(&state, &headers, None).is_ok();
     axum::Json(AuthStatus {
         auth_required: state.auth_required(),
         authenticated,
@@ -1763,11 +2097,13 @@ async fn run_ws_session(
 
 /// `GET /api/v1/events` — the one-way SSE fallback transport.
 ///
-/// **Authenticated** with the same `Bearer` API key as the WebSocket transport:
-/// SSE uses the `Authorization` header (realtime-api §6), and streaming the
-/// engine event firehose requires at least [`Action::Read`] ([`Role::Viewer`]).
-/// An unauthenticated or under-privileged request is rejected with a
-/// `401`/`403` `problem+json` response before any event is emitted.
+/// **Authenticated** exactly like the WebSocket transport: the `Authorization`
+/// header for native clients, or a single-use `?ticket=` for browsers (a durable
+/// bearer is never accepted in the URL query — SEC-01). Streaming the engine event
+/// firehose requires at least [`Action::Read`] ([`Role::Viewer`]). The same
+/// [`AllowedOrigins`] CSWSH gate as the WebSocket runs first, even in
+/// `auth_disabled` mode. An out-of-policy origin is a `403`; an unauthenticated or
+/// under-privileged request a `401`/`403` `problem+json` — all before any event.
 ///
 /// On success, emits the same snapshot-then-delta envelope stream as named SSE
 /// events. The underlying [`Sse`] body applies no back-pressure to the engine:
@@ -1778,10 +2114,15 @@ async fn run_ws_session(
 pub async fn sse_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(auth): Query<AccessTokenQuery>,
+    Query(query): Query<TicketQuery>,
 ) -> Response {
+    // CSWSH gate FIRST (SEC-13), independent of auth so it also holds when auth is
+    // disabled — parity with the WebSocket transport.
+    if let Err(err) = enforce_origin(&state, &headers) {
+        return err.into_response();
+    }
     let (principal, live_baseline) =
-        match resolve_principal(&state, &headers, auth.access_token.as_deref()) {
+        match resolve_principal(&state, &headers, query.ticket.as_deref()) {
             Ok(resolved) => resolved,
             Err(err) => return err.into_response(),
         };

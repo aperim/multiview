@@ -209,6 +209,53 @@ fn openapi_document_emits_layout_and_resource_write_ops() {
     }
 }
 
+#[test]
+fn ws_ticket_endpoint_declares_bearer_security() {
+    // SEC-01 (ADR-RT011, defect #6): the authenticated ticket-mint endpoint must
+    // DECLARE its Bearer security in the spec, so the generated TS client carries
+    // typed auth. Pre-fix it declared none (no `components.securitySchemes`, no
+    // per-operation `security`), silently presenting as unauthenticated.
+    use multiview_control::openapi::ApiDoc;
+    use utoipa::OpenApi;
+
+    let doc = ApiDoc::openapi();
+    let json = serde_json::to_value(&doc).expect("OpenAPI serializes");
+
+    // A security scheme is registered in components.
+    let schemes = json["components"]["securitySchemes"]
+        .as_object()
+        .expect("components.securitySchemes present");
+    assert!(
+        !schemes.is_empty(),
+        "at least one security scheme must be declared"
+    );
+
+    // The ticket-mint operation references a non-empty security requirement whose
+    // named scheme resolves to a declared HTTP Bearer scheme.
+    let security = json["paths"]["/api/v1/ws/ticket"]["post"]["security"]
+        .as_array()
+        .expect("POST /api/v1/ws/ticket declares `security`");
+    assert!(
+        !security.is_empty(),
+        "the ticket-mint endpoint must require authentication in the spec"
+    );
+    let scheme_name = security[0]
+        .as_object()
+        .and_then(|req| req.keys().next())
+        .expect("the security requirement names a scheme");
+    let scheme = schemes
+        .get(scheme_name)
+        .unwrap_or_else(|| panic!("security scheme {scheme_name:?} declared in components"));
+    assert_eq!(
+        scheme["type"], "http",
+        "the ticket auth scheme is HTTP auth"
+    );
+    assert_eq!(
+        scheme["scheme"], "bearer",
+        "the ticket auth scheme is Bearer"
+    );
+}
+
 #[tokio::test]
 async fn openapi_json_is_served() {
     let h = harness();

@@ -8285,6 +8285,53 @@
         }
       }
     },
+    "/api/v1/ws/ticket": {
+      "post": {
+        "tags": [
+          "realtime"
+        ],
+        "summary": "`POST /api/v1/ws/ticket` — mint a short-lived, single-use realtime auth ticket\nfor the browser transports (ADR-RT011, implementing ADR-RT005).",
+        "description": "Authenticated exactly like a REST call — `Authorization: Bearer` header or JWT,\n**never** a URL query (that is the SEC-01 leak this replaces). The ticket\ncarries the caller's full [`Principal`] (role + every scope axis) and its\nRT010 baseline, so the stream it opens has exactly the authorization the bearer\nwould; the read gate ([`Action::Read`]) matches the WS/SSE gate. The durable\nbearer therefore never appears in a WS/SSE URL.",
+        "operationId": "ws_ticket_handler",
+        "responses": {
+          "200": {
+            "description": "A short-lived single-use realtime ticket to present as `?ticket=` on the WS/SSE upgrade.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WsTicketResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not authorized to read (below the viewer role).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
+      }
+    },
     "/x-nmos/connection/v1.1/single/receivers/{id}/staged": {
       "patch": {
         "tags": [
@@ -15241,6 +15288,33 @@
             "description": "Section names changed on disk that only apply on restart (sorted,\ndeduplicated; latched until restart — ADR-W020)."
           }
         }
+      },
+      "WsTicketResponse": {
+        "type": "object",
+        "description": "The `POST /api/v1/ws/ticket` response: a short-lived, single-use realtime auth\nticket the browser passes as `?ticket=` on the WS/SSE upgrade (ADR-RT011).",
+        "required": [
+          "ticket",
+          "expires_in_secs"
+        ],
+        "properties": {
+          "expires_in_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until the ticket expires ([`WS_TICKET_TTL`]).",
+            "minimum": 0
+          },
+          "ticket": {
+            "type": "string",
+            "description": "The opaque single-use ticket. Present it once as `?ticket=` within\n`expires_in_secs`; it is consumed on the first WS/SSE upgrade."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer_auth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Machine bearer token: a hashed API key or a JWT, sent as `Authorization: Bearer <token>`."
       }
     }
   },

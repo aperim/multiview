@@ -66,6 +66,18 @@ describe('useEngineEvents devices topic', () => {
   beforeEach(() => {
     FakeWebSocket.instances = [];
     vi.stubGlobal('WebSocket', FakeWebSocket);
+    // The realtime auth ticket mint (`POST /api/v1/ws/ticket`, ADR-RT011): the
+    // connect fetches a single-use ticket before opening the socket.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({ ticket: 'test-ticket', expires_in_secs: 30 }),
+        }),
+      ),
+    );
     client = new QueryClient();
   });
 
@@ -78,8 +90,16 @@ describe('useEngineEvents devices topic', () => {
     return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
   }
 
-  function start(): { socket: FakeWebSocket; unmount: () => void } {
+  async function start(): Promise<{ socket: FakeWebSocket; unmount: () => void }> {
     const { unmount } = renderHook(() => useEngineEvents(), { wrapper });
+    // The connect mints a single-use ticket (async) before opening the socket
+    // (ADR-RT011); wait for the socket under `act` so connect-driven state
+    // updates flush.
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(FakeWebSocket.instances.length).toBeGreaterThan(0);
+      });
+    });
     const socket = FakeWebSocket.instances[0];
     if (socket === undefined) {
       throw new Error('no socket');
@@ -90,8 +110,8 @@ describe('useEngineEvents devices topic', () => {
     return { socket, unmount };
   }
 
-  it('device.status upserts the per-device snapshot, latest wins', () => {
-    const { socket, unmount } = start();
+  it('device.status upserts the per-device snapshot, latest wins', async () => {
+    const { socket, unmount } = await start();
     act(() => {
       socket.emit(
         frame(
@@ -125,8 +145,8 @@ describe('useEngineEvents devices topic', () => {
     unmount();
   });
 
-  it('device.removed drops the snapshot and records a lifecycle event', () => {
-    const { socket, unmount } = start();
+  it('device.removed drops the snapshot and records a lifecycle event', async () => {
+    const { socket, unmount } = await start();
     act(() => {
       socket.emit(
         frame(1, 'device.status', { device_id: 'dev-a', state: 'ONLINE' }, { id: 'dev-a' }),
@@ -140,8 +160,8 @@ describe('useEngineEvents devices topic', () => {
     unmount();
   });
 
-  it('lifecycle events stack newest-first in the session ring', () => {
-    const { socket, unmount } = start();
+  it('lifecycle events stack newest-first in the session ring', async () => {
+    const { socket, unmount } = await start();
     act(() => {
       socket.emit(
         frame(
@@ -189,8 +209,8 @@ describe('useEngineEvents devices topic', () => {
     unmount();
   });
 
-  it('device.discovered rows correlate to their scan via the envelope corr', () => {
-    const { socket, unmount } = start();
+  it('device.discovered rows correlate to their scan via the envelope corr', async () => {
+    const { socket, unmount } = await start();
     act(() => {
       socket.emit(
         frame(
@@ -209,8 +229,8 @@ describe('useEngineEvents devices topic', () => {
     unmount();
   });
 
-  it('throttles engine-clock writes: a burst within 500 ms writes once', () => {
-    const { socket, unmount } = start();
+  it('throttles engine-clock writes: a burst within 500 ms writes once', async () => {
+    const { socket, unmount } = await start();
     act(() => {
       socket.emit(
         frame(1, 'device.status', { device_id: 'dev-a', state: 'ONLINE' }, {
@@ -253,8 +273,8 @@ describe('useEngineEvents devices topic', () => {
     unmount();
   });
 
-  it('device.adopted invalidates the devices list (another operator adopted)', () => {
-    const { socket, unmount } = start();
+  it('device.adopted invalidates the devices list (another operator adopted)', async () => {
+    const { socket, unmount } = await start();
     client.setQueryData(['resources', 'devices'], []);
     act(() => {
       socket.emit(
@@ -283,8 +303,8 @@ describe('useEngineEvents devices topic', () => {
     unmount();
   });
 
-  it('device.removed invalidates the devices list', () => {
-    const { socket, unmount } = start();
+  it('device.removed invalidates the devices list', async () => {
+    const { socket, unmount } = await start();
     client.setQueryData(['resources', 'devices'], []);
     act(() => {
       socket.emit(frame(1, 'device.removed', { device_id: 'dev-a' }, { id: 'dev-a' }));
@@ -293,8 +313,8 @@ describe('useEngineEvents devices topic', () => {
     unmount();
   });
 
-  it("a new scan's rows prune previous scans' discovered rows", () => {
-    const { socket, unmount } = start();
+  it("a new scan's rows prune previous scans' discovered rows", async () => {
+    const { socket, unmount } = await start();
     act(() => {
       socket.emit(
         frame(
@@ -332,8 +352,8 @@ describe('useEngineEvents devices topic', () => {
     unmount();
   });
 
-  it('tracks an engine-monotonic clock reference from envelope timestamps', () => {
-    const { socket, unmount } = start();
+  it('tracks an engine-monotonic clock reference from envelope timestamps', async () => {
+    const { socket, unmount } = await start();
     act(() => {
       socket.emit(
         frame(5, 'device.status', { device_id: 'dev-a', state: 'ONLINE' }, { id: 'dev-a' }),
@@ -345,8 +365,8 @@ describe('useEngineEvents devices topic', () => {
     unmount();
   });
 
-  it('$resync discards every devices cache (rebuild, never merge)', () => {
-    const { socket, unmount } = start();
+  it('$resync discards every devices cache (rebuild, never merge)', async () => {
+    const { socket, unmount } = await start();
     act(() => {
       socket.emit(
         frame(1, 'device.status', { device_id: 'dev-a', state: 'ONLINE' }, { id: 'dev-a' }),

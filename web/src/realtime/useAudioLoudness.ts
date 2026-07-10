@@ -14,9 +14,9 @@
 // per-sample reference (target ± tolerance, dBTP ceiling).
 import { useEffect, useState } from "react";
 
-import { getStoredToken } from "../api/token";
 import { RealtimeConnection } from "./connection";
 import type { RealtimeStatus } from "./connection";
+import { mintWsTicket, realtimeWsBaseUrl } from "./ticket";
 
 /** A program-bus EBU R128 loudness sample (mirrors the Rust `AudioLoudness`). */
 export interface AudioLoudnessSample {
@@ -233,19 +233,6 @@ export class LoudnessBallistics {
   }
 }
 
-function resolveWsUrl(): string {
-  // Same-origin: the dev proxy and the embedded build both serve `/api/v1/ws`.
-  const { protocol, host } = window.location;
-  const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
-  const base = `${wsProtocol}//${host}/api/v1/ws`;
-  // A browser WebSocket cannot send an Authorization header; the control plane
-  // also accepts the bearer token as an `access_token` query parameter.
-  const token = getStoredToken();
-  return token === undefined
-    ? base
-    : `${base}?access_token=${encodeURIComponent(token)}`;
-}
-
 /** A point-in-time view the meter widget renders. */
 export interface AudioLoudnessState {
   /** Coarse realtime connection status. */
@@ -274,7 +261,7 @@ export function useAudioLoudness(): AudioLoudnessState {
 
   useEffect(() => {
     const ballistics = new LoudnessBallistics();
-    const connection: RealtimeConnection = new RealtimeConnection(resolveWsUrl(), {
+    const connection: RealtimeConnection = new RealtimeConnection(realtimeWsBaseUrl(), {
       onStatus: (next): void => {
         setStatus(next);
       },
@@ -294,7 +281,7 @@ export function useAudioLoudness(): AudioLoudnessState {
           heldPeakDbtp: ballistics.heldPeakDbtp(),
         });
       },
-    });
+    }, mintWsTicket);
     connection.start();
     return (): void => {
       connection.stop();

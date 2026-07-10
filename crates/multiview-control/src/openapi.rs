@@ -14,10 +14,42 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Json;
 use axum::Router;
-use utoipa::OpenApi;
+use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa::{Modify, OpenApi};
 use utoipa_scalar::{Scalar, Servable};
 
 use crate::state::AppState;
+
+/// Registers the reusable `bearer_auth` security scheme (HTTP Bearer) in the
+/// document components so authenticated operations can reference it with
+/// `security(("bearer_auth" = []))`. The scheme covers both machine bearers the
+/// control plane accepts — a hashed API key and a JWT — carried as
+/// `Authorization: Bearer <token>` (ADR-W004). Applied via `modifiers(...)` below.
+///
+/// No *global* `security` requirement is set: only the operations that annotate
+/// their own `security` advertise it, so unauthenticated routes (health,
+/// `/auth/status`) are not falsely marked as requiring a credential.
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        // `components` is always present once schemas are registered above, but
+        // create it defensively rather than unwrap (no panics in library code).
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "bearer_auth",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .description(Some(
+                        "Machine bearer token: a hashed API key or a JWT, sent as \
+                         `Authorization: Bearer <token>`.",
+                    ))
+                    .build(),
+            ),
+        );
+    }
+}
 
 /// The `AsyncAPI` 3.0 document, embedded at compile time from the generated
 /// file produced by `cargo xtask gen-asyncapi`. Served as-is; the `xtask` is
@@ -43,6 +75,7 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
             url = "https://github.com/aperim/multiview/blob/main/LICENSE",
         ),
     ),
+    modifiers(&SecurityAddon),
     paths(
         crate::routes::list_layouts,
         crate::routes::get_layout,
@@ -179,9 +212,12 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::nmos::list_senders,
         crate::nmos::list_receivers,
         crate::nmos::patch_staged,
+        // Realtime browser auth: mint a single-use WS/SSE ticket (ADR-RT011).
+        crate::realtime::ws_ticket_handler,
     ),
     components(schemas(
         crate::problem::Problem,
+        crate::realtime::WsTicketResponse,
         crate::preview::PreviewCapabilities,
         crate::preview::ScopeCapabilities,
         crate::preview::ScopeCapability,

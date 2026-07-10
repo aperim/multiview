@@ -39,6 +39,7 @@ pub mod failover;
 pub mod grid;
 pub mod layout_doc;
 pub mod media;
+pub mod origin;
 pub mod placement;
 pub mod probe;
 pub mod program;
@@ -75,6 +76,7 @@ pub use media::{
     frames_for_ms, EofPolicy, MediaAsset, MediaAssetKind, MediaLibrary, MediaPlayer,
     MediaPlayerAudio,
 };
+pub use origin::{Origin, OriginParseError};
 pub use placement::{DevicePin, MigrationPolicy, PinVendor, PlacementConfig, PlacementWeights};
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
 pub use program::{ProgramId, ProgramKind, ProgramSpec};
@@ -173,6 +175,21 @@ pub struct ControlConfig {
     /// config load (fail-closed) rather than silently widening the screen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_dial_allow: Option<Vec<String>>,
+    /// The realtime `Origin` allow-list (SEC-13 / CSWSH, ADR-RT011): extra browser
+    /// origins permitted to open the WebSocket (`/api/v1/ws`) and SSE
+    /// (`/api/v1/events`) streams, **in addition to** the always-allowed same-origin
+    /// case (an `Origin` whose authority equals the request `Host`). Each entry is a
+    /// full origin — `scheme://host[:port]`, e.g. `"https://ops.example"` or
+    /// `"http://[2001:db8::7]:8080"` — matched case-insensitively.
+    ///
+    /// **Absent/empty** ⇒ same-origin only: the embed-web SPA served from the
+    /// appliance works with no config. **Set** ⇒ also permit these origins (a
+    /// separate web origin, or a reverse proxy that rewrites `Host`). A cross-origin
+    /// WS/SSE handshake bypasses SOP/CORS, so this list is the CSWSH defense and is
+    /// enforced even when auth is disabled. Each entry is validated as a
+    /// `scheme://host` origin by [`MultiviewConfig::validate`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_origins: Vec<String>,
 }
 
 /// Process-wide system settings.
@@ -779,6 +796,22 @@ impl MultiviewConfig {
                 // dial policy is built from.
                 crate::device::net_guard::DialPolicy::from_cidrs(cidrs).map_err(|e| {
                     ConfigError::Validation(format!("control.device_dial_allow: {e}"))
+                })?;
+            }
+            for origin in &control.allowed_origins {
+                // Strictly parse each entry as a serialized origin (scheme://host
+                // [:port], nothing else). A malformed entry must fail at config
+                // load — a silently never-matching allow-list line is a fail-open
+                // usability trap (SEC-13): the operator believes an origin is
+                // permitted when it can never match. The same parser backs the
+                // runtime `AllowedOrigins` construction + request-header check
+                // (`crate::origin::Origin`), so config and runtime cannot diverge.
+                crate::origin::Origin::parse(origin).map_err(|err| {
+                    ConfigError::Validation(format!(
+                        "control.allowed_origins entry {origin:?} is not a valid scheme://host \
+                         origin: {err} (e.g. \"https://ops.example\" or \
+                         \"http://[2001:db8::7]:8080\")"
+                    ))
                 })?;
             }
         }
