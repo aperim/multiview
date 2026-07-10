@@ -574,6 +574,62 @@ mod tests {
         assert!(store.verify("admin.wrong").is_err());
     }
 
+    // ---- ADR-W026: config-declared scoped API keys ----
+
+    #[test]
+    fn config_key_maps_role_and_all_three_scope_axes() {
+        use multiview_config::{ApiKeyConfig, ApiKeyRole};
+        let key = ApiKeyConfig::new("site-a-op", "ENV_A", ApiKeyRole::Operator)
+            .with_scoped_object_ids(vec!["cam-3".to_owned()])
+            .with_scoped_output_ids(vec!["out-1".to_owned(), "program:main".to_owned()])
+            .with_scoped_discovery_domains(vec!["site-a".to_owned()]);
+        let principal = principal_from_config(&key);
+        assert_eq!(principal.key_id, "site-a-op");
+        assert_eq!(principal.role, Role::Operator);
+        assert_eq!(
+            principal.scoped_object_ids.as_deref(),
+            Some(&["cam-3".to_owned()][..])
+        );
+        assert_eq!(
+            principal.scoped_output_ids.as_deref(),
+            Some(&["out-1".to_owned(), "program:main".to_owned()][..])
+        );
+        assert_eq!(
+            principal.scoped_discovery_domains.as_deref(),
+            Some(&["site-a".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn register_config_api_keys_registers_and_authenticates() {
+        use multiview_config::{ApiKeyConfig, ApiKeyRole};
+        let mut store = ApiKeyStore::new(b"pepper".to_vec());
+        let keys = vec![ApiKeyConfig::new("k1", "ENV_K1", ApiKeyRole::Viewer)];
+        register_config_api_keys(&mut store, &keys, |name| {
+            (name == "ENV_K1").then(|| "the-secret".to_owned())
+        })
+        .expect("registration succeeds when the secret env is present");
+        let principal = store
+            .verify("k1.the-secret")
+            .expect("the registered key authenticates");
+        assert_eq!(principal.role, Role::Viewer);
+    }
+
+    #[test]
+    fn register_config_api_keys_errors_on_missing_secret() {
+        use multiview_config::{ApiKeyConfig, ApiKeyRole};
+        let mut store = ApiKeyStore::new(b"pepper".to_vec());
+        let keys = vec![ApiKeyConfig::new("k1", "ENV_MISSING", ApiKeyRole::Operator)];
+        // A scoped key whose secret env is unset is a HARD startup error, never a
+        // silent no-op (an un-authenticatable key is a latent misconfiguration).
+        let err = register_config_api_keys(&mut store, &keys, |_| None)
+            .expect_err("a missing secret env is a startup error");
+        assert!(
+            err.contains("ENV_MISSING"),
+            "the error names the missing env var: {err}"
+        );
+    }
+
     #[test]
     fn generated_bootstrap_token_is_returned_and_authenticates() {
         let (store, bootstrap) = provision_admin_keys(None);
