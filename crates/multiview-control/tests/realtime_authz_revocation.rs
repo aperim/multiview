@@ -123,6 +123,63 @@ async fn scope_revocation_stops_delivering_the_revoked_object() {
     );
 }
 
+/// ADR-W026 over RT010: the OUTPUT axis is carried into the live session and
+/// re-scoped mid-session. An output-only widen (object + discovery unchanged) is
+/// a `ScopeChanged` — the pre-W026 object-only `reauthorize` missed it, so an
+/// output re-scope was DEAD on the live stream.
+#[tokio::test]
+async fn reauthorize_adopts_an_output_only_scope_change() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let base = Principal {
+        key_id: "k1".to_owned(),
+        role: Role::Operator,
+        scoped_object_ids: None,
+        scoped_output_ids: Some(vec!["out-a".to_owned()]),
+        scoped_discovery_domains: None,
+    };
+    let store = store_with("k1", "secret", base.clone());
+    let mut session = SessionStream::new(engine.subscribe(), "sess-out-axis", None)
+        .with_scopes(None, Some(vec!["out-a".to_owned()]), None)
+        .with_live_reauth(Arc::clone(&store), "k1", Role::Operator);
+
+    // Grant `program:main` on the output axis only.
+    assert!(store.set_principal(
+        "k1",
+        Principal {
+            scoped_output_ids: Some(vec!["out-a".to_owned(), "program:main".to_owned()]),
+            ..base.clone()
+        }
+    ));
+    assert_eq!(session.reauthorize(), ReauthOutcome::ScopeChanged);
+}
+
+/// ADR-W026 over RT010: the DISCOVERY axis is carried into the live session and
+/// re-scoped mid-session. A discovery-only widen is a `ScopeChanged`.
+#[tokio::test]
+async fn reauthorize_adopts_a_discovery_only_scope_change() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let base = Principal {
+        key_id: "k1".to_owned(),
+        role: Role::Operator,
+        scoped_object_ids: None,
+        scoped_output_ids: None,
+        scoped_discovery_domains: Some(vec!["site-a".to_owned()]),
+    };
+    let store = store_with("k1", "secret", base.clone());
+    let mut session = SessionStream::new(engine.subscribe(), "sess-disc-axis", None)
+        .with_scopes(None, None, Some(vec!["site-a".to_owned()]))
+        .with_live_reauth(Arc::clone(&store), "k1", Role::Operator);
+
+    assert!(store.set_principal(
+        "k1",
+        Principal {
+            scoped_discovery_domains: Some(vec!["site-a".to_owned(), "site-b".to_owned()]),
+            ..base.clone()
+        }
+    ));
+    assert_eq!(session.reauthorize(), ReauthOutcome::ScopeChanged);
+}
+
 /// A full deauthorization (the API key revoked — "role downgraded to none"): the
 /// principal no longer resolves to any reading role, so the established session is
 /// torn down (`ReauthOutcome::Disconnect`) rather than streaming to a revoked
