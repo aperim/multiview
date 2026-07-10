@@ -1115,7 +1115,19 @@ impl DeviceKeyStore {
             return Ok(Self { key });
         }
         // Absent: generate a fresh key and try to install it atomically (O_EXCL).
-        let key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        // Draw the 32 seed bytes straight from the OS CSPRNG (ed25519-dalek 3.x
+        // aligns to rand_core 0.10, which no longer ships `OsRng`; `getrandom::fill`
+        // is the entropy source). Fail CLOSED on an entropy error — keep last-good,
+        // never mint a low-entropy identity (no panic, unlike a `generate`+`UnwrapErr`
+        // path). `SigningKey::from_bytes` over a uniformly-random seed is exactly the
+        // key `SigningKey::generate` would have produced from the same RNG bytes.
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed).map_err(|e| {
+            HeartbeatError::Transport(format!(
+                "failed to draw OS entropy for a fresh device key: {e}"
+            ))
+        })?;
+        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
         match Self::install_new(&path, &key.to_bytes())? {
             // We won the create-once race: our key is the durable identity.
             InstallOutcome::Installed => Ok(Self { key }),

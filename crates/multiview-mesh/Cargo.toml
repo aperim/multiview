@@ -40,7 +40,9 @@ chrono = { workspace = true, features = ["serde"] }
 # already on the deny.toml allowlist (the licence crate pulls the identical
 # closure). Default features disabled + only `alloc` (signature/key parsing); no
 # RNG/keygen in non-test code — the mesh checks signatures handed to it.
-ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+# ed25519-dalek 3.x aligns to curve25519-dalek 5 / signature 3 (ADR-I010);
+# `verify_strict` + `Signature::from_bytes` are byte-identical to 2.x.
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 
 # The mDNS socket layer (announce + browse) is OFF by default (brief §13.2 / O5):
 # the default build is a pure shell so `cargo check --workspace` stays GPU-free,
@@ -64,10 +66,12 @@ mdns = ["dep:mdns-sd", "dep:tokio"]
 
 [dev-dependencies]
 # Test-only deterministic keypair generation for the Ed25519 announce-signature
-# tests (valid / tampered / wrong-key). `rand_core` enables `SigningKey::generate`;
-# the non-test library never depends on an RNG (data minimisation).
-ed25519-dalek = { version = "2", default-features = false, features = ["alloc", "rand_core"] }
-rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
+# tests (valid / tampered / wrong-key). The ed25519-dalek `rand_core` feature
+# enables `SigningKey::generate` + re-exports the rand_core (0.10) it binds to; OS
+# entropy is `getrandom::SysRng` wrapped in `rand_core::UnwrapErr` (ADR-I010). The
+# non-test library never depends on an RNG (data minimisation).
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "rand_core"] }
+getrandom = { version = "0.4", default-features = false, features = ["sys_rng"] }
 
 [lints]
 workspace = true

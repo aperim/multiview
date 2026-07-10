@@ -15,7 +15,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use ed25519_dalek::rand_core::UnwrapErr;
 use ed25519_dalek::SigningKey;
+use getrandom::SysRng;
 use multiview_mesh::announce::{
     AnnouncePayload, EntitlementSummary, SaltedDigest, ANNOUNCE_PROTOCOL_VERSION,
 };
@@ -23,7 +25,6 @@ use multiview_mesh::driver::announce_browse_step;
 use multiview_mesh::peer::{PeerKey, PEER_STALE_AFTER};
 use multiview_mesh::transport::{MeshTransport, ReceivedAnnouncement};
 use multiview_mesh::{ClaimState, MeshError, MeshRole, MeshState};
-use rand_core::OsRng;
 
 fn epoch() -> DateTime<Utc> {
     DateTime::from_timestamp(1_700_000_000, 0).unwrap()
@@ -31,7 +32,7 @@ fn epoch() -> DateTime<Utc> {
 
 /// A signed announce for a peer whose primary digest is `[byte;32]`.
 fn neighbour_wire(byte: u8, claim: ClaimState) -> Vec<u8> {
-    let key = SigningKey::generate(&mut OsRng);
+    let key = SigningKey::generate(&mut UnwrapErr(SysRng));
     let granted = epoch();
     let expires = granted + chrono::Duration::days(35);
     let summary = EntitlementSummary::new(

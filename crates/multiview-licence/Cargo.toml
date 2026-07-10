@@ -36,7 +36,10 @@ chrono = { workspace = true, features = ["serde", "alloc"] }
 # mints keys, it checks signatures handed to it). Default features are disabled
 # and only `alloc` (for the `Signature`/key parsing surface) is enabled; the
 # `rand_core` keygen feature is pulled in dev-dependencies for test keypairs only.
-ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+# ed25519-dalek 3.x aligns the closure to curve25519-dalek 5 / signature 3 /
+# sha2 0.11; verification (`VerifyingKey::from_bytes` fallible, `Signature::from_bytes`
+# infallible over `&[u8;64]`, `verify_strict`) is byte-identical to 2.x (ADR-I010).
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 # CBOR encode/decode for the local lease lifecycle: the dropped lease/binding
 # file (the directory-watcher reads it) and the `<host>.challenge` export (salted
 # digests + counters only — data minimisation, brief §3/§8). `ciborium` and its
@@ -98,10 +101,12 @@ tokio = { workspace = true, optional = true }
 proptest = "1.11.0"
 serde_json = { workspace = true }
 # Test-only deterministic keypair generation for the Ed25519 verify tests
-# (valid / tampered / wrong-key). `rand_core` enables `SigningKey::generate`;
-# the non-test library never depends on an RNG.
-ed25519-dalek = { version = "2", default-features = false, features = ["alloc", "rand_core"] }
-rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
+# (valid / tampered / wrong-key). The ed25519-dalek `rand_core` feature enables
+# `SigningKey::generate` + re-exports the exact rand_core (0.10) it binds to; the
+# OS entropy source is `getrandom::SysRng` wrapped in `rand_core::UnwrapErr`
+# (ADR-I010). The non-test library never depends on an RNG.
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "rand_core"] }
+getrandom = { version = "0.4", default-features = false, features = ["sys_rng"] }
 # Test-only signing of golden leases/attestations for the `heartbeat` tests:
 # `p256`'s `arithmetic` + RustCrypto `signature` give an ECDSA-P256 signer for
 # fabricating a fake root-attested keyset, and `ed25519-dalek/rand_core` signs the

@@ -196,15 +196,16 @@ toml = "1.1"
 # `POST /api/v1/licence/lease` route ingests, and drive the store clock across
 # day boundaries. Test-only; the non-test control build never mints keys nor
 # reads a clock (the licence crate is verification-only / clock-injected). All
-# `MIT`/`Apache-2.0`, already on the deny.toml allowlist.
+# `MIT`/`Apache-2.0`, already on the deny.toml allowlist. ed25519-dalek 3.x aligns
+# to rand_core 0.10 / getrandom 0.4 (ADR-I010): the test keygen draws OS entropy via
+# `getrandom::SysRng` wrapped in the ed25519-dalek-re-exported `rand_core::UnwrapErr`
+# (the `rand_core` feature re-exports the exact rand_core `SigningKey::generate` binds to).
 chrono = { workspace = true, features = ["alloc"] }
-ed25519-dalek = { version = "2", default-features = false, features = [
+ed25519-dalek = { version = "3", default-features = false, features = [
     "alloc",
     "rand_core",
 ] }
-rand_core = { version = "0.6", default-features = false, features = [
-    "getrandom",
-] }
+getrandom = { version = "0.4", default-features = false, features = ["sys_rng"] }
 ciborium = "0.2.2"
 
 [features]

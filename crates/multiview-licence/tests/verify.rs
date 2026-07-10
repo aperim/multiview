@@ -10,11 +10,12 @@
     clippy::missing_panics_doc
 )]
 
+use ed25519_dalek::rand_core::UnwrapErr;
 use ed25519_dalek::{Signer, SigningKey};
+use getrandom::SysRng;
 use multiview_licence::lease::{Lease, LeaseSource};
 use multiview_licence::verify::{verify_signed_lease, PinnedKey, SignedLease};
 use multiview_licence::{LicenceError, ACTIVATION_WINDOW_DAYS};
-use rand_core::OsRng;
 
 fn epoch() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap()
@@ -40,7 +41,7 @@ fn sign_with(key: &SigningKey, lease: &Lease) -> SignedLease {
 
 #[test]
 fn valid_signature_against_pinned_key_verifies() {
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let key = SigningKey::generate(&mut rng);
     let pinned = PinnedKey::from_verifying_key(&key.verifying_key());
     let lease = sample_lease();
@@ -52,7 +53,7 @@ fn valid_signature_against_pinned_key_verifies() {
 
 #[test]
 fn tampered_payload_is_rejected() {
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let key = SigningKey::generate(&mut rng);
     let pinned = PinnedKey::from_verifying_key(&key.verifying_key());
     let lease = sample_lease();
@@ -68,7 +69,7 @@ fn tampered_payload_is_rejected() {
 
 #[test]
 fn wrong_key_is_rejected() {
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let real_signing_key = SigningKey::generate(&mut rng);
     let other = SigningKey::generate(&mut rng);
     // Pin the OTHER key — the signature was made by `real_signing_key`.
@@ -82,7 +83,7 @@ fn wrong_key_is_rejected() {
 
 #[test]
 fn malformed_signature_length_is_a_typed_error() {
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let key = SigningKey::generate(&mut rng);
     let pinned = PinnedKey::from_verifying_key(&key.verifying_key());
     let lease = sample_lease();
@@ -99,7 +100,7 @@ fn malformed_signature_length_is_a_typed_error() {
 
 #[test]
 fn pinned_key_from_bytes_roundtrips() {
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let key = SigningKey::generate(&mut rng);
     let vk = key.verifying_key();
     let pinned = PinnedKey::from_bytes(vk.to_bytes()).expect("32-byte key must parse");

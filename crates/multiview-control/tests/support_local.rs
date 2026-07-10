@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
+use ed25519_dalek::rand_core::UnwrapErr;
 use ed25519_dalek::{Signer, SigningKey};
+use getrandom::SysRng;
 use multiview_control::account_audit::AccountAuditKind;
 use multiview_control::support_store::{DataRequest, DataRequestState, TicketSeverity};
 use multiview_control::{AppState, DataRequestRepository, InMemoryDataRequests, LicenceState};
@@ -45,7 +47,6 @@ use multiview_licence::store::{LeaseBinding, LeaseStore};
 use multiview_licence::verify::{PinnedKey, SignedLease};
 use multiview_licence::ACTIVATION_WINDOW_DAYS;
 use multiview_telemetry::RetentionStore;
-use rand_core::OsRng;
 use support::{
     body_json, get, harness_with, post_json, send, Harness, ADMIN_TOKEN, OPERATOR_TOKEN,
     SCOPED_TOKEN, VIEWER_TOKEN,
@@ -58,7 +59,7 @@ fn epoch() -> DateTime<Utc> {
 
 /// A fresh keypair + the pinned verifying key derived from it.
 fn keypair() -> (SigningKey, PinnedKey) {
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let key = SigningKey::generate(&mut rng);
     let pinned = PinnedKey::from_verifying_key(&key.verifying_key());
     (key, pinned)
