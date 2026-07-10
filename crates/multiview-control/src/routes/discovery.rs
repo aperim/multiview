@@ -107,6 +107,7 @@ pub(crate) async fn scan_devices(
     principal.role.require(Action::Write)?;
 
     let zowietek = state.discovery_config.zowietek_service_type.clone();
+    let domain = state.discovery_config.domain.clone();
     let service_types = scan_service_types(
         zowietek.as_deref(),
         &state.discovery_config.extra_service_types,
@@ -162,6 +163,7 @@ pub(crate) async fn scan_devices(
                     scan_types,
                     budget,
                     zowietek,
+                    domain,
                 )
                 .await;
                 // The guard clears the single-flight slot when this task ends
@@ -196,6 +198,12 @@ fn scan_accepted(op: &OperationId, service_types: Vec<String>, budget: Duration)
 /// type (the `[discovery]` config section) — the only way a service is ever
 /// classified `zowietek-control`.
 ///
+/// `domain` is the observing node's operator-declared discovery domain
+/// (ADR-W026). This one local-config value stamps BOTH the realtime
+/// `device.discovered` event and its REST inventory row; it is never read from
+/// responder-controlled `raw`, so the two surfaces cannot disagree and a
+/// discovered device cannot assert its own authorization scope.
+///
 /// The browser's `browse` is potentially blocking (the `mdns-sd` daemon delivers
 /// over channels the interleaved drain consumes for the budget), so it runs on a
 /// blocking thread — this keeps the async runtime free and, crucially, off the
@@ -208,21 +216,30 @@ async fn run_scan(
     service_types: Vec<String>,
     budget: Duration,
     configured_zowietek: Option<String>,
+    domain: Option<String>,
 ) {
     let found = tokio::task::spawn_blocking(move || browser.browse(&service_types, budget))
         .await
         .unwrap_or_default();
     let expires_at = Instant::now() + DEFAULT_ENTRY_TTL;
     for raw in &found {
-        let service = DiscoveredService::from_raw(raw, configured_zowietek.as_deref(), expires_at);
+        let service = DiscoveredService::from_raw(
+            raw,
+            configured_zowietek.as_deref(),
+            expires_at,
+            domain.clone(),
+        );
         // Publish the untrusted row first (so a realtime client sees it), then
-        // record it in the inventory the GET reads.
+        // record it in the inventory the GET reads. The event and the row are
+        // stamped with the SAME `domain` value (once from local config), so the
+        // realtime and REST surfaces can never disagree on scope.
         let primary = service.primary();
         broadcaster.discovered(
             service.driver_kind.as_str(),
             &primary.address,
             primary.family,
             Some(service.name.clone()),
+            service.domain.clone(),
         );
         inventory.upsert(service);
     }

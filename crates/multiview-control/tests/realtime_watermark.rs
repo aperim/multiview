@@ -59,12 +59,11 @@ fn device_status(device_id: &str) -> Event {
 /// A `device.discovered` event — a lossless lifecycle row that carries NO registry
 /// id and is in NEITHER the engine state blob nor the `DeviceStatus` registry.
 fn device_discovered(driver: &str) -> Event {
-    Event::DeviceDiscovered(DeviceDiscovered {
-        driver: driver.to_owned(),
-        address: "http://[fd00:db8::42]".to_owned(),
-        family: AddressFamily::Ipv6,
-        name: None,
-    })
+    Event::DeviceDiscovered(DeviceDiscovered::new(
+        driver.to_owned(),
+        "http://[fd00:db8::42]".to_owned(),
+        AddressFamily::Ipv6,
+    ))
 }
 
 /// A `device.mode` event — a lossless lifecycle transition, in no connect snapshot.

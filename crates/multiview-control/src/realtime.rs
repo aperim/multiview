@@ -2032,12 +2032,11 @@ mod topic_routing_tests {
                 group: "lobby-wall".to_owned(),
                 change: SyncChange::Left,
             }),
-            Event::DeviceDiscovered(DeviceDiscovered {
-                driver: "zowietek".to_owned(),
-                address: "http://[fd00:db8::42]".to_owned(),
-                family: AddressFamily::Ipv6,
-                name: None,
-            }),
+            Event::DeviceDiscovered(DeviceDiscovered::new(
+                "zowietek".to_owned(),
+                "http://[fd00:db8::42]".to_owned(),
+                AddressFamily::Ipv6,
+            )),
             Event::TimingStatus(TimingStatus {
                 stream_id: "prog-main".to_owned(),
                 epoch: WallClockRef::new(0, 0, Rational::new(90_000, 1)),
@@ -2092,12 +2091,11 @@ mod topic_routing_tests {
 
         // A discovery row has no registry id yet — it is scoped by `corr`
         // (the scan operation), never by a fabricated id.
-        let discovered = Event::DeviceDiscovered(DeviceDiscovered {
-            driver: "zowietek".to_owned(),
-            address: "http://[fd00:db8::42]".to_owned(),
-            family: AddressFamily::Ipv6,
-            name: None,
-        });
+        let discovered = Event::DeviceDiscovered(DeviceDiscovered::new(
+            "zowietek".to_owned(),
+            "http://[fd00:db8::42]".to_owned(),
+            AddressFamily::Ipv6,
+        ));
         assert_eq!(event_scope_id(&discovered), None);
     }
 }
