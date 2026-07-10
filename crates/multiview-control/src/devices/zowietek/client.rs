@@ -1005,6 +1005,12 @@ mod net {
 /// bytes-on-the-wire path a name-only screen cannot see.
 #[cfg(all(test, feature = "zowietek"))]
 mod dial_screen_tests {
+    // Test-only: `expect`/`unwrap` are the standard test vocabulary here (the
+    // harness reports a panic as a failure). clippy's allow-*-in-tests does not
+    // fire for non-`#[test]` helper fns under a `cfg(all(test, feature = …))`
+    // module, so allow explicitly (rule 20).
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
     use std::io::ErrorKind;
     use std::net::TcpListener;
     use std::sync::Arc;
