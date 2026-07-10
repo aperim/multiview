@@ -101,7 +101,7 @@ per-delta on an active stream and within one tick on an idle one:
 
 - `Unchanged` → continue.
 - `ScopeChanged` → emit `Event::Resync(Resync { reason: AuthzChanged,
-  resubscribe: [tiles, devices, switcher] })` (a server-initiated `$resync` = full
+  resubscribe: [tiles, devices] })` (a server-initiated `$resync` = full
   **rebuild**, not merge — ADR-RT003) followed by the connect snapshot set
   (`tiles_snapshot_frame` + `devices_snapshot_frames`) now filtered to the **new**
   scope. The client drops all cached objects on those topics and rebuilds from the
@@ -173,15 +173,26 @@ the AsyncAPI spec is regenerated (`cargo xtask gen-asyncapi`).
 - **Harder / committed to maintain:** `ApiKeyStore` is now interior-mutable
   (`RwLock` + `AtomicU64`, no `Clone`); `verify`/`verify_authorization` take a read
   lock (uncontended, cheap). The realtime pump grows a `select!` with a re-auth tick.
-  The `resubscribe` topic list (`[tiles, devices, switcher]`) must track the set of
-  topics that can carry object-authz-scoped events — if a new object-scoped event
-  class lands on a new topic, add it here (mirrors the `object_authz_scope_id`
-  coverage set).
+  The `resubscribe` topic list (`[tiles, devices]`) must name exactly the topics
+  `build_resync_frames` re-snapshots — never a topic that is cleared but not rebuilt.
+  `switcher` is deliberately excluded: it is not object-authz-scoped (the scope
+  filter is Devices-domain) and is never re-snapshotted at connect or on resync, so
+  listing it would strand a rebuild-not-merge client's switcher state. If a new
+  object-scoped event class lands on a new topic **and** is re-snapshotted, add it
+  here (mirrors the `object_authz_scope_id` coverage set).
 - **Bounded latency (operator-facing):** on an active stream revocation is
   effectively immediate (re-checked per delta); on an idle stream it is bounded by
   `REAUTH_TICK` (default 5 s), tunable against per-session idle-wakeup cost. A change
-  racing the connect handshake is caught at the next generation bump (self-healing;
-  connect already resolves current authz).
+  racing the connect handshake is caught **deterministically**, not left to a later
+  bump: `resolve_principal` captures the authorization generation *before* it
+  resolves the key and threads it as the session's live-authz baseline (`Some` for
+  store keys, `None` for local-admin/JWT), and both transports run a pre-snapshot
+  `reauthorize` gate — so a revoke or re-scope landing between auth and handle-install
+  disconnects (no snapshot leak) or adopts the new scope before the first snapshot,
+  rather than being retained until an unrelated future mutation. Installing the
+  live-authz handle for **every** store key (not a racy `principal_for_key().is_some()`
+  re-probe) is what lets a revoked-in-window key disconnect instead of being mistaken
+  for a non-store principal.
 - **Scope for now:** revocation covers store-managed API keys. Auth-disabled
   (`local_admin`) principals are unscoped admins with nothing to revoke; JWT
   principals are re-minted per request from the external token and are not
