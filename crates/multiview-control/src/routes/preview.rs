@@ -83,6 +83,13 @@ pub(crate) async fn input_jpeg(
     // `{id}.jpg` — strip the extension the UI requests so the id matches the
     // engine's source id.
     let id = id.strip_suffix(".jpg").unwrap_or(&id);
+    // Per-object authz (BOLA, SEC-05 / ADR-W005): a preview input id is a source
+    // id (the same object-scope axis as `GET /inputs/{id}/streams`), so a scoped
+    // principal may view only its in-scope inputs. Checked on the stripped id,
+    // BEFORE the provider is consulted — a denial never samples the frame.
+    if let Err(err) = crate::auth::authorize_object(&principal, id) {
+        return err.into_response();
+    }
     match state.preview.input_jpeg(id, PREVIEW_QUALITY) {
         Some(bytes) => jpeg_response(bytes),
         None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -98,7 +105,17 @@ pub(crate) async fn list_input_ids(
     if let Err(err) = principal.role.require(Action::Read) {
         return err.into_response();
     }
-    Json(state.preview.input_ids()).into_response()
+    // Per-object ROW visibility (BOLA, SEC-05 / ADR-W005): drop input ids outside
+    // the principal's object scope so the enumeration cannot leak inputs a
+    // single-id `GET` would 403 (wholesale-enumeration defense). A no-op for an
+    // unscoped principal — exactly the `list_layouts` row-filter idiom.
+    let ids: Vec<String> = state
+        .preview
+        .input_ids()
+        .into_iter()
+        .filter(|id| crate::auth::authorize_object(&principal, id).is_ok())
+        .collect();
+    Json(ids).into_response()
 }
 
 /// The base path of a WHEP scope's focus resource (the `POST` target and the
