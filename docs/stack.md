@@ -13,7 +13,7 @@ reference.
 |-----------|---------------------|
 | **Package managers** | **Cargo** (Rust workspace) is the primary; **npm** for the `web/` SPA. No other Rust or JS package manager — never mix in yarn/pnpm/bun for `web/`. |
 | **Frozen install** | Rust: `cargo build --locked` / `cargo test --workspace --locked` (cargo **ignores** the lockfile without `--locked`). Web: `npm ci` (from the committed `web/package-lock.json`). |
-| **Language / runtime** | **Rust 2021**, stable channel, MSRV **1.82**, pinned via [`rust-toolchain.toml`](../rust-toolchain.toml). `web/` is **TypeScript** (React 19 + Vite) under `strict` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`. |
+| **Language / runtime** | **Rust 2021**, stable channel, MSRV **1.85** (raised from 1.82 by ed25519-dalek 3.0 / curve25519-dalek 5.0 edition-2024 deps — ADR-I010), pinned via [`rust-toolchain.toml`](../rust-toolchain.toml). `web/` is **TypeScript** (React 19 + Vite) under `strict` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`. |
 | **Hosting / deploy** | Self-hosted **binary/daemon `multiview`** and **OCI container images** published to **GHCR** (`.github/workflows/docker.yml`, `ffmpeg-base.yml`, `release*.yml`). Linux (x86_64 + aarch64) and macOS (Apple Silicon + Intel). **No Windows.** No cloud SaaS hosting runtime. |
 | **Secret manager** | **1Password** (`op read` → `chmod 600` temp file → `rm -f`, or `op ssh-agent`). Secrets never touch git or terminal history. |
 | **AI co-author trailer** | `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` |

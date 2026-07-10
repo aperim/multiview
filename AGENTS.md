@@ -215,7 +215,7 @@ regardless of autonomy.
 
 38. **`cargo` is the primary package manager** (Rust workspace); **`npm`** is the only one for
     `web/`. Never mix in another Rust or JS package manager. Details: [`docs/stack.md`](docs/stack.md).
-39. **Rust 2021, stable, MSRV 1.82** (pinned via `rust-toolchain.toml`) is the language/runtime;
+39. **Rust 2021, stable, MSRV 1.85** (pinned via `rust-toolchain.toml`) is the language/runtime;
     `web/` is TypeScript (React 19 + Vite). Linux (x86_64 + aarch64) + macOS (Apple Silicon +
     Intel). **No Windows** (explicit non-goal).
 40. **Self-hosted binary/daemon `multiview` + OCI images on GHCR** is the deploy target (`deploy/`,
@@ -248,7 +248,7 @@ RTMP/SRT push).
   even from bad/glitchy inputs and on contended/shared hosts.
 - **Platforms:** Linux (x86_64 + aarch64; NVIDIA via Container Toolkit, Intel/AMD via VAAPI) and
   macOS (Apple Silicon + Intel, native). **No Windows.**
-- **Edition / toolchain:** Rust **2021**, stable, MSRV 1.82, pinned via `rust-toolchain.toml`.
+- **Edition / toolchain:** Rust **2021**, stable, MSRV 1.85, pinned via `rust-toolchain.toml`.
 - **License:** project code is **source-available** under the **Multiview Source-Available
   Non-Commercial License** (© Aperim Pty Ltd) — free for non-commercial/home use, commercial
   licence otherwise. See §G for the build-profile licensing model.
