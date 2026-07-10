@@ -187,6 +187,27 @@ impl Mixer {
         self.format
     }
 
+    /// The number of physical input-strip slots the mixer currently holds —
+    /// occupied strips **plus** any reclaimed-and-free slots retained for reuse.
+    ///
+    /// This is the bounded-memory observable for the program-bus cross-fade path
+    /// (invariant #9): it is the high-water mark of concurrently-live strips and
+    /// must **not** grow unboundedly as completed cross-fades come and go — a
+    /// retired outgoing strip's slot is reclaimed and reused, never leaked.
+    #[must_use]
+    pub fn slot_count(&self) -> usize {
+        self.inputs.len()
+    }
+
+    /// The number of currently-occupied input strips (excludes any
+    /// reclaimed/free slots). At steady state this is the number of sources
+    /// actually routed on the bus; a completed cross-fade's outgoing strip is
+    /// **not** counted — it is reclaimed once its fade finishes.
+    #[must_use]
+    pub fn live_input_count(&self) -> usize {
+        self.inputs.len()
+    }
+
     /// Register a new input strip, returning its [`RoutePoint`]. The input is
     /// not routed to the program bus until [`Mixer::route_to_program`] is
     /// called.

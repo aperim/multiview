@@ -454,3 +454,85 @@ fn crossfade_of_a_nonexistent_point_is_a_clean_error() {
     let err = bus.repoint_crossfade(bogus, store, 480).unwrap_err();
     assert!(matches!(err, multiview_audio::AudioError::UnknownInput(42)));
 }
+
+// ---------------------------------------------------------------------------
+// Bounded memory (invariant #9): completed cross-fades reclaim their strip.
+// ---------------------------------------------------------------------------
+
+/// (e) BOUNDED MEMORY — a completed cross-fade must RECLAIM its outgoing mixer
+/// strip. A `repoint_crossfade` adds a temporary outgoing strip that fades out;
+/// once its ramp completes the strip is retired. If retirement only *unroutes*
+/// the strip (leaving it resident in the mixer's strip storage), then every
+/// cross-fade leaks one strip forever — on a 24/7 multi-program host that is
+/// unbounded RAM growth on the data plane (invariant #9: bounded queues/pools
+/// "allocated at start, never grow").
+///
+/// This drives many add/route/complete cross-fade cycles through the program bus
+/// and asserts (1) after each completed fade only the channel strip remains live
+/// — the outgoing strip was reclaimed, not leaked — and (2) the mixer's physical
+/// strip storage stays BOUNDED across all cycles (reused slots, not one leaked
+/// strip each). It FAILS against the leaking (unroute-only) retirement and PASSES
+/// once retirement reclaims the slot.
+#[test]
+fn repeated_crossfades_reclaim_strips_and_stay_bounded() {
+    let fmt = stereo();
+    // 25 fps @ 48k = 1920 samples/tick; a 480-frame (~10 ms) ramp is well under
+    // one tick block, so a single tick completes each fade and retires its strip.
+    let mut bus = ProgramBus::new(fmt, Rational::new(25, 1));
+    let ramp = 480usize;
+
+    let store_a = Arc::new(AudioStore::new(fmt, 192_000));
+    store_a
+        .publish(&AudioBlock::from_interleaved(fmt, vec![0.4f32; 8_000 * 2]).unwrap())
+        .unwrap();
+    let point = bus.add_source("prog", Arc::clone(&store_a), 1.0);
+
+    // Baseline: one routed source == one live strip, one physical slot.
+    let baseline_slots = bus.mixer_slot_count();
+    assert_eq!(
+        bus.live_strip_count(),
+        1,
+        "one routed source is one live strip at start"
+    );
+
+    const CYCLES: usize = 200;
+    for i in 0..CYCLES {
+        // Cross-fade the single channel onto a fresh store over a short ramp. The
+        // channel keeps its identity (`point`), so we re-point it every cycle.
+        let next = Arc::new(AudioStore::new(fmt, 192_000));
+        next.publish(&AudioBlock::from_interleaved(fmt, vec![0.4f32; 8_000 * 2]).unwrap())
+            .unwrap();
+        bus.repoint_crossfade(point, Arc::clone(&next), ramp)
+            .unwrap();
+        // Fresh audio at the new store's live edge to cover the reads.
+        next.publish(&AudioBlock::from_interleaved(fmt, vec![0.4f32; 4_000 * 2]).unwrap())
+            .unwrap();
+        // One tick covers the whole 480-frame ramp (1920 > 480) and retires the
+        // outgoing strip; a second tick is safely past it.
+        let _ = bus.tick();
+        let _ = bus.tick();
+
+        // After a completed cross-fade exactly ONE strip is live (the channel).
+        // The outgoing strip must have been reclaimed — not merely unrouted and
+        // left resident. The leaking implementation has `i + 2` live strips here.
+        assert_eq!(
+            bus.live_strip_count(),
+            1,
+            "after cross-fade #{i} only the channel strip may remain live; the \
+             faded-out strip must be reclaimed, not leaked (got {})",
+            bus.live_strip_count()
+        );
+    }
+
+    // BOUNDED: the mixer's physical strip storage never grew unboundedly. With
+    // slot reuse it stays a small constant; the leaking implementation is
+    // ~CYCLES+1 physical slots here.
+    assert!(
+        bus.mixer_slot_count() <= baseline_slots + 2,
+        "mixer strip storage must stay bounded across {CYCLES} completed \
+         cross-fades (reused slots, not one leaked strip each): got {} physical \
+         slots, baseline {}",
+        bus.mixer_slot_count(),
+        baseline_slots
+    );
+}

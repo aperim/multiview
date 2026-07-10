@@ -274,6 +274,27 @@ impl ProgramBus {
         self.format
     }
 
+    /// The number of physical mixer input-strip slots backing this bus
+    /// (occupied strips + any reclaimed-free slots).
+    ///
+    /// The bounded-memory observable for the cross-fade path (invariant #9):
+    /// repeated completed cross-fades must **reuse** their retired strip slots,
+    /// so this stays bounded and never grows one leaked strip per fade. See
+    /// [`Mixer::slot_count`](crate::mixer::Mixer::slot_count).
+    #[must_use]
+    pub fn mixer_slot_count(&self) -> usize {
+        self.mixer.slot_count()
+    }
+
+    /// The number of currently-occupied mixer strips on this bus: the routed
+    /// channel(s) plus any in-flight cross-fade's outgoing strip. A completed
+    /// fade's outgoing strip is reclaimed and is **not** counted. See
+    /// [`Mixer::live_input_count`](crate::mixer::Mixer::live_input_count).
+    #[must_use]
+    pub fn live_strip_count(&self) -> usize {
+        self.mixer.live_input_count()
+    }
+
     /// Mix one output tick of program audio.
     ///
     /// Advances the [`SampleClock`] by one tick to
