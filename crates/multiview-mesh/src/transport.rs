@@ -112,13 +112,24 @@ mod tests {
 
     #[test]
     fn reassembly_rejects_hostile_count_before_reading_chunks() {
+        // A recorded flag (asserted, never panicked) proves the over-limit count
+        // is rejected before any chunk key `p{i}` is ever looked up.
         let count = 1_000_000_000_000_usize.to_string();
-        let wire = reassemble_txt(|key| match key {
-            CHUNK_COUNT_KEY => Some(count.as_str()),
-            _ => panic!("over-limit input must be rejected before reading chunks"),
+        let looked_up_chunk = std::cell::Cell::new(false);
+        let wire = reassemble_txt(|key| {
+            if key == CHUNK_COUNT_KEY {
+                Some(count.as_str())
+            } else {
+                looked_up_chunk.set(true);
+                None
+            }
         });
 
         assert_eq!(wire, None);
+        assert!(
+            !looked_up_chunk.get(),
+            "over-limit input must be rejected before reading any chunk"
+        );
     }
 
     #[test]
@@ -137,11 +148,20 @@ mod tests {
     #[test]
     fn reassembly_rejects_one_chunk_over_maximum() {
         let count = (MAX_CHUNKS + 1).to_string();
-        let wire = reassemble_txt(|key| match key {
-            CHUNK_COUNT_KEY => Some(count.as_str()),
-            _ => panic!("over-limit input must be rejected before reading chunks"),
+        let looked_up_chunk = std::cell::Cell::new(false);
+        let wire = reassemble_txt(|key| {
+            if key == CHUNK_COUNT_KEY {
+                Some(count.as_str())
+            } else {
+                looked_up_chunk.set(true);
+                None
+            }
         });
 
         assert_eq!(wire, None);
+        assert!(
+            !looked_up_chunk.get(),
+            "one-over-maximum must be rejected before reading any chunk"
+        );
     }
 }
