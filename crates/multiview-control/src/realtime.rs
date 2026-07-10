@@ -1770,11 +1770,23 @@ impl AllowedOrigins {
 /// not a CSWSH vector, and browsers always send `Origin` on a WS/SSE handshake. A
 /// **present** `Origin` must pass [`AllowedOrigins::permits`] — and a present but
 /// **unreadable** one (bytes that are not valid UTF-8, so no legitimate browser
-/// origin) is denied, NOT folded into the absent case (fail-closed).
+/// origin) is denied, NOT folded into the absent case (fail-closed). A request
+/// carrying **more than one** `Origin` header is denied as ambiguous (a browser
+/// sends exactly one).
 fn enforce_origin(state: &AppState, headers: &HeaderMap) -> Result<(), crate::error::ControlError> {
-    let Some(origin_value) = headers.get(header::ORIGIN) else {
+    // Read ALL `Origin` values. Absent → native client, allow. A browser sends
+    // EXACTLY one; more than one is an ambiguous/smuggled request, and admitting on
+    // whichever value this gate reads while a downstream component trusts another is
+    // a CSWSH bypass — so a duplicate `Origin` fails closed.
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    let Some(origin_value) = origins.next() else {
         return Ok(()); // absent: native client, not a CSWSH subject
     };
+    if origins.next().is_some() {
+        return Err(crate::error::ControlError::Forbidden(
+            "cross-origin realtime connection refused (multiple Origin headers)".to_owned(),
+        ));
+    }
     // Present but not valid UTF-8 → not a real browser `Origin`; fail closed
     // rather than treat it as absent (defect #3).
     let Ok(origin) = origin_value.to_str() else {

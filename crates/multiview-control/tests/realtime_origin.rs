@@ -153,6 +153,36 @@ async fn cross_origin_rejected_before_auth_with_valid_bearer() {
     );
 }
 
+/// A request carrying MORE THAN ONE `Origin` header is ambiguous — a browser sends
+/// exactly one — so it is refused, even when the first value would pass alone (a
+/// same-origin value paired with a foreign one). Fail-closed on Origin ambiguity.
+#[tokio::test]
+async fn duplicate_origin_headers_rejected() {
+    let harness = harness_with(|state| state.with_auth_disabled(true));
+
+    for path in ["/api/v1/ws", "/api/v1/events"] {
+        let resp = send(
+            &harness.router,
+            Request::builder()
+                .method("GET")
+                .uri(path)
+                .header(header::HOST, "mv.local")
+                // First value is same-origin (would pass ALONE); second is foreign.
+                // Two Origin headers → ambiguous → denied regardless of the first.
+                .header(header::ORIGIN, "http://mv.local")
+                .header(header::ORIGIN, "https://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "multiple Origin headers must be refused as ambiguous on {path}"
+        );
+    }
+}
+
 /// A same-origin SSE upgrade passes the Origin gate (auth disabled → 200): the
 /// embed-web SPA served from the appliance works with zero config.
 #[tokio::test]
