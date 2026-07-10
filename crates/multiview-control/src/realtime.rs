@@ -509,6 +509,17 @@ pub struct SessionStream {
     /// enumerate objects it could not read. Pure per-client read filtering: it
     /// never blocks and never touches the engine publish path (invariant #10).
     object_scope: Option<Vec<String>>,
+    /// The connect-time **broadcast watermark** (ADR-RT009): the engine event
+    /// sequence (`EnginePublisher::events.sequence()`) captured together with the
+    /// connect snapshot, or [`None`] for a session with no snapshot pairing (the
+    /// resume path and transport-only tests). When set, a delta whose engine
+    /// `seq <= watermark` is already reflected in the snapshot the client
+    /// received, so it is dropped rather than re-delivered — killing the duplicate
+    /// and the transient backward-roll a queued pre-snapshot transition would
+    /// cause. The drop is a read-side, per-connection decision on events already
+    /// pulled from the bounded broadcast: no lock, no await, no back-pressure on
+    /// the engine (invariant #10).
+    snapshot_watermark: Option<u64>,
 }
 
 impl SessionStream {
@@ -530,6 +541,7 @@ impl SessionStream {
             resume_after,
             corr: None,
             object_scope: None,
+            snapshot_watermark: None,
         }
     }
 
@@ -557,6 +569,26 @@ impl SessionStream {
     #[must_use]
     pub fn with_object_scope(mut self, scope: Option<Vec<String>>) -> Self {
         self.object_scope = scope;
+        self
+    }
+
+    /// Pair this session with the connect-time **broadcast watermark** (ADR-RT009).
+    ///
+    /// `watermark` is the engine event sequence (`EnginePublisher::events.sequence()`)
+    /// captured together with the connect snapshot. With it set,
+    /// [`SessionStream::next_delta`] drops every subscribed event whose engine
+    /// `seq <= watermark` — those are already reflected in the snapshot the client
+    /// received, so re-delivering them would be a duplicate (and, for a
+    /// multi-transition object, a transient backward roll). The drop happens
+    /// **before** `issue_seq`, so it leaves no gap in the per-connection sequence
+    /// (resume-by-seq stays intact) and composes with the object-scope filter.
+    ///
+    /// A pure per-client read decision on events already pulled from the bounded
+    /// broadcast: it never blocks, never locks, and never touches the engine
+    /// publish path (invariant #10).
+    #[must_use]
+    pub fn with_snapshot_watermark(mut self, watermark: u64) -> Self {
+        self.snapshot_watermark = Some(watermark);
         self
     }
 
@@ -809,6 +841,28 @@ impl SessionStream {
                 return None;
             }
         }
+        // Connect-time broadcast watermark (ADR-RT009): a **snapshot-backed** event
+        // whose engine seq is at or before the broadcast frontier captured with the
+        // connect snapshot is ALREADY reflected in that snapshot — drop it so it is
+        // not re-delivered as a delta (duplicate) and a queued pre-snapshot
+        // transition cannot replay after the newer snapshot (transient backward
+        // roll). The drop is SCOPED to snapshot-backed events
+        // ([`event_is_snapshot_backed`] — only `tile.state` and `device.status`,
+        // the two classes the connect snapshot reproduces): a lossless / event-only
+        // variant (`device.discovered`/`.mode`/`.error`, cast/media/alert/…) is in
+        // NO snapshot and carries no resumable seq, so a global drop would
+        // permanently lose one that lands in the subscribe→snapshot window — worse
+        // than the duplicate this fixes. Checked BEFORE `issue_seq` so the drop
+        // leaves no gap in the per-connection seq (like the resume/conflated/scope
+        // skips), and before the object-scope filter so the read-side drops
+        // compose. A pure per-client read decision on an event already pulled from
+        // the bounded broadcast: no lock, no await, never touches the engine publish
+        // path (invariant #10).
+        if let Some(watermark) = self.snapshot_watermark {
+            if seq_event.seq <= watermark && event_is_snapshot_backed(&seq_event.event) {
+                return None;
+            }
+        }
         // Per-object visibility (BOLA, ADR-W005/ADR-W025): a scoped principal
         // receives a Devices-domain OBJECT delta (device.* / cast.session.*)
         // only when its scope id is in the allowlist — by parity with
@@ -976,6 +1030,35 @@ fn object_authz_scope_id(event: &Event) -> Option<&str> {
         Event::TileState(tile) => tile.input.as_deref(),
         _ => None,
     }
+}
+
+/// Whether the connect-time snapshot reproduces this event's current value as a
+/// same-topic snapshot frame (ADR-RT009) — the ONLY class the connect watermark
+/// may drop.
+///
+/// `true` for exactly the two variants a fresh client receives a snapshot frame
+/// for, so a pre-watermark delta of them is already in that snapshot and
+/// re-delivering it would duplicate / roll the client back:
+/// * `tile.state` — reproduced by the `tiles` snapshot ([`SessionStream::tiles_snapshot_frame`],
+///   read from the engine state blob; the tick path publishes the state fold
+///   before the event, so a dropped delta is already reflected).
+/// * `device.status` — reproduced by the per-device `device.status` snapshot
+///   ([`SessionStream::devices_snapshot_frames`], read from the
+///   [`DeviceStatusRegistry`]; `DeviceBroadcaster::publish_status` updates the
+///   registry before publishing the event, so a dropped delta is already
+///   reflected).
+///
+/// `false` for **every other** event: the device lifecycle events
+/// (`device.discovered`/`.mode`/`.error`/`.adopted`/`.removed`/`.sync`),
+/// cast-session membership, `media.player_state`, alerts, input/job/alarm/tally/
+/// salvo, and the un-re-snapshotted conflated telemetry (`timing.status`,
+/// `audio.meter`, `system.metrics`, `rist.link.stats`). None appears in any
+/// connect snapshot frame, so the watermark must NEVER drop them — a global drop
+/// would permanently lose one that lands in the subscribe→snapshot window (it has
+/// no snapshot to heal from and no seq the client can resume; RT003 losslessness).
+#[must_use]
+fn event_is_snapshot_backed(event: &Event) -> bool {
+    matches!(event, Event::TileState(_) | Event::DeviceStatus(_))
 }
 
 /// The coarse topic an event is published on (the realtime-api topic map).
@@ -1198,11 +1281,20 @@ pub async fn auth_status_handler(
 async fn run_ws_session(mut socket: WebSocket, state: AppState, object_scope: Option<Vec<String>>) {
     let sub = state.engine.subscribe();
     let session_id = uuid_session_id();
+    // Capture the broadcast watermark BETWEEN subscribing and reading the snapshot
+    // (ADR-RT009). Subscribing first means no event published after the watermark
+    // is missed; capturing the watermark before the snapshot read means — because
+    // the engine publishes state-then-event (runtime.rs) — the snapshot reflects
+    // every event with `seq <= watermark`, so dropping those deltas loses nothing.
+    // Both reads are wait-free atomic loads that never touch the engine publish
+    // path (invariant #10).
+    let watermark = state.engine.events.sequence();
+    let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
     let mut session = SessionStream::new(sub, session_id, None)
         .with_corr_registry(Arc::clone(&state.corr))
-        .with_object_scope(object_scope);
+        .with_object_scope(object_scope)
+        .with_snapshot_watermark(watermark);
 
-    let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
     let hello = session.snapshot_frame(snapshot_seq);
     if let Ok(text) = hello.to_json() {
         if socket.send(Message::Text(text.into())).await.is_err() {
@@ -1277,13 +1369,21 @@ pub async fn sse_handler(
 
     let sub = state.engine.subscribe();
     let session_id = uuid_session_id();
+    // Capture the broadcast watermark between subscribe and the snapshot read, and
+    // pair it with the snapshot (ADR-RT009) — identical to the WebSocket transport:
+    // subscribe-first misses no post-watermark event; watermark-before-snapshot
+    // (state-then-event publish ordering) means the snapshot reflects every event
+    // with `seq <= watermark`; and both reads are wait-free atomic loads that never
+    // touch the engine publish path (invariant #10).
+    let watermark = state.engine.events.sequence();
+    let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
     // The authenticated principal's object scope confines the SSE stream to its
     // in-scope device/cast objects (BOLA visibility, ADR-W005/ADR-W025), exactly
     // as the WebSocket transport; an unscoped principal sees all.
     let mut session = SessionStream::new(sub, session_id, None)
         .with_corr_registry(Arc::clone(&state.corr))
-        .with_object_scope(principal.scoped_object_ids);
-    let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
+        .with_object_scope(principal.scoped_object_ids)
+        .with_snapshot_watermark(watermark);
 
     let stream = async_stream::stream! {
         let hello = session.snapshot_frame(snapshot_seq);
