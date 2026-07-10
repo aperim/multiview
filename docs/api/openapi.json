@@ -8324,7 +8324,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          }
+        ]
       }
     },
     "/x-nmos/connection/v1.1/single/receivers/{id}/staged": {
@@ -15303,6 +15308,13 @@
             "description": "The opaque single-use ticket. Present it once as `?ticket=` within\n`expires_in_secs`; it is consumed on the first WS/SSE upgrade."
           }
         }
+      }
+    },
+    "securitySchemes": {
+      "bearer_auth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Machine bearer token: a hashed API key or a JWT, sent as `Authorization: Bearer <token>`."
       }
     }
   },

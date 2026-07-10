@@ -39,6 +39,7 @@ pub mod failover;
 pub mod grid;
 pub mod layout_doc;
 pub mod media;
+pub mod origin;
 pub mod placement;
 pub mod probe;
 pub mod program;
@@ -75,6 +76,7 @@ pub use media::{
     frames_for_ms, EofPolicy, MediaAsset, MediaAssetKind, MediaLibrary, MediaPlayer,
     MediaPlayerAudio,
 };
+pub use origin::{Origin, OriginParseError};
 pub use placement::{DevicePin, MigrationPolicy, PinVendor, PlacementConfig, PlacementWeights};
 pub use probe::{DetectionZone, Dwell, LoudnessTarget, Probe, ProbeKind};
 pub use program::{ProgramId, ProgramKind, ProgramSpec};
@@ -797,23 +799,20 @@ impl MultiviewConfig {
                 })?;
             }
             for origin in &control.allowed_origins {
-                // Shape only: a non-empty `scheme://host` origin (an Origin carries
-                // no path). A malformed entry must fail at config load — a silently
-                // never-matching allow-list entry is a fail-open usability trap
-                // (SEC-13). The runtime match is case-insensitive on the authority.
-                if origin.trim().is_empty() {
-                    return Err(ConfigError::Validation(
-                        "control.allowed_origins contains an empty origin (each entry is a \
-                         scheme://host origin, e.g. \"https://ops.example\")"
-                            .to_owned(),
-                    ));
-                }
-                if !origin.contains("://") {
-                    return Err(ConfigError::Validation(format!(
-                        "control.allowed_origins entry {origin:?} is not a scheme://host origin \
-                         (e.g. \"https://ops.example\" or \"http://[2001:db8::7]:8080\")"
-                    )));
-                }
+                // Strictly parse each entry as a serialized origin (scheme://host
+                // [:port], nothing else). A malformed entry must fail at config
+                // load — a silently never-matching allow-list line is a fail-open
+                // usability trap (SEC-13): the operator believes an origin is
+                // permitted when it can never match. The same parser backs the
+                // runtime `AllowedOrigins` construction + request-header check
+                // (`crate::origin::Origin`), so config and runtime cannot diverge.
+                crate::origin::Origin::parse(origin).map_err(|err| {
+                    ConfigError::Validation(format!(
+                        "control.allowed_origins entry {origin:?} is not a valid scheme://host \
+                         origin: {err} (e.g. \"https://ops.example\" or \
+                         \"http://[2001:db8::7]:8080\")"
+                    ))
+                })?;
             }
         }
         Ok(())

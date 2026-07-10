@@ -72,21 +72,37 @@ engine; a shared store is future work, ADR-RT005).
 
 **3. Origin allow-list (SEC-13).** An `AllowedOrigins` gate is checked on **both** the WS
 and SSE upgrade, **before** auth and **regardless of `auth_disabled`** (CSWSH needs no
-credential). Policy: an **absent** `Origin` header passes (non-browser clients are not
-subject to SOP and are not a CSWSH vector — browsers always send `Origin` on a WS/SSE
-handshake); a **present** `Origin` passes iff it is in the configured allow-list **or** it
-is **same-origin** (its authority equals the request's `Host` header). `Origin: null` is
-denied (fail-closed). The list is sourced from a new **`control.allowed_origins`** config
-field (`crates/multiview-config/src/lib.rs`, default empty ⇒ same-origin-only), wired to
-`AppState` by `multiview-cli`. The "derive the default from the bind/public origin" of the
-task is realized dynamically via the `Host`-header same-origin comparison — strictly more
-robust than parsing the wildcard `listen = "[::]:8080"`, and correct behind a
-Host-preserving reverse proxy.
+credential). Both the configured entries and the request `Origin` are **strictly parsed**
+to a canonical `Origin` value (`crates/multiview-config/src/origin.rs`): exactly
+`scheme://host[:port]` with an `http`/`https` scheme and **nothing else** — no path,
+query, fragment, or userinfo. The parse is deliberately stricter than a general URL
+parser, so a lenient reduction like `https://host/evil` → the bare authority `host` (a
+same-origin bypass) is impossible. Policy: an **absent** `Origin` header passes
+(non-browser clients are not subject to SOP and are not a CSWSH vector — browsers always
+send `Origin` on a WS/SSE handshake); a **present** `Origin` passes iff, once parsed, it
+is in the configured allow-list **or** is **same-origin** (its parsed authority equals the
+request's `Host` header, host case-insensitive + port exact). A present `Origin` that does
+**not** strictly parse — `Origin: null`, a path/query/userinfo, a non-http(s) scheme, or a
+non-UTF-8 header — is **denied fail-closed** (it is never folded into the absent case). The
+same parser guards **every** construction path, so `null`/malformed can never be stored as
+an allow-list entry (`AllowedOrigins::new` drops what does not parse) and thus can never be
+matched. The list is sourced from a new **`control.allowed_origins`** config field
+(`crates/multiview-config/src/lib.rs`, default empty ⇒ same-origin-only), whose entries are
+rejected at config-load if malformed (same `Origin::parse`), and is wired to `AppState` by
+`multiview-cli`. The "derive the default from the bind/public origin" of the task is
+realized dynamically via the `Host`-header same-origin comparison — strictly more robust
+than parsing the wildcard `listen = "[::]:8080"`, and correct behind a Host-preserving
+reverse proxy.
+
+The `POST /api/v1/ws/ticket` mint declares its Bearer auth in the OpenAPI spec (the
+`bearer_auth` HTTP security scheme, referenced per-operation — no global default, so
+unauthenticated routes are not falsely marked), so the generated TS client carries typed
+auth for the ticket call.
 
 **4. SSE parity.** `/api/v1/events` gets the identical ticket + Origin treatment.
 
 Touched: `crates/multiview-control/src/{realtime.rs, auth.rs, state.rs, lib.rs,
-routes/mod.rs, openapi.rs}`, `crates/multiview-config/src/lib.rs`,
+routes/mod.rs, openapi.rs}`, `crates/multiview-config/src/{lib.rs, origin.rs}`,
 `crates/multiview-cli/src/control.rs`, and the SPA realtime client under `web/src`.
 
 ## Rationale

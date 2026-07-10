@@ -32,6 +32,7 @@ use axum::http::request::Parts;
 use axum::http::{header, HeaderMap};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use multiview_config::Origin;
 use multiview_core::time::MediaTime;
 use multiview_engine::{EventSubscription, RecvError, SeqEvent, TryRecvError};
 use multiview_events::{
@@ -1715,65 +1716,71 @@ fn new_ticket_token() -> String {
 /// this is the only thing standing between a foreign page and the engine firehose.
 #[derive(Debug, Clone, Default)]
 pub struct AllowedOrigins {
-    /// `control.allowed_origins`, normalized to lowercase for a case-insensitive
-    /// compare. Empty ⇒ same-origin only.
-    configured: Vec<String>,
+    /// `control.allowed_origins`, strictly parsed + canonicalized to [`Origin`]
+    /// values. Empty ⇒ same-origin only. A raw string can never be stored, so
+    /// `null`/malformed can never be matched (fail-closed by construction).
+    configured: Vec<Origin>,
 }
 
 impl AllowedOrigins {
-    /// Build from the operator's `control.allowed_origins` list.
+    /// Build from the operator's `control.allowed_origins` list. Each entry is
+    /// strictly parsed to an [`Origin`]; anything that does not parse is dropped,
+    /// so a `null`/malformed value can never be stored and thus never matched
+    /// (fail-closed). Config-load validation (`MultiviewConfig::validate`) already
+    /// rejects a malformed entry with a hard error, so in production this only
+    /// canonicalizes — the drop is a defense-in-depth backstop for any direct
+    /// constructor (e.g. a test), closing the panel's "match parsed canonical
+    /// origins so null/malformed can never be allowed by any construction path".
     #[must_use]
     pub fn new(configured: Vec<String>) -> Self {
         Self {
             configured: configured
                 .into_iter()
-                .map(|origin| origin.trim().to_ascii_lowercase())
+                .filter_map(|origin| Origin::parse(&origin).ok())
                 .collect(),
         }
     }
 
     /// Whether `origin` (the request `Origin` header) is permitted given the request
-    /// `Host`. A configured allow-list match wins; otherwise the origin's authority
-    /// (`host[:port]`) must equal the `Host` (same-origin — the embed-web SPA served
-    /// from the appliance, with zero config). `Origin: null` or any origin without a
-    /// parseable authority is denied (fail-closed).
+    /// `Host`. The `Origin` is strictly parsed first: `Origin: null`, a
+    /// path/query/fragment/userinfo, a non-http(s) scheme, or any other malformed
+    /// value is denied outright (fail-closed). A configured allow-list match wins;
+    /// otherwise the parsed origin's authority (`host[:port]`) must equal the
+    /// `Host` (same-origin — the embed-web SPA served from the appliance, zero
+    /// config).
     #[must_use]
     pub fn permits(&self, origin: &str, host: Option<&str>) -> bool {
-        let origin_norm = origin.trim().to_ascii_lowercase();
-        if self
-            .configured
-            .iter()
-            .any(|allowed| allowed == &origin_norm)
-        {
+        let Ok(origin) = Origin::parse(origin) else {
+            return false; // `null`/opaque/path-bearing/bad-scheme — fail-closed
+        };
+        if self.configured.contains(&origin) {
             return true;
         }
-        let Some(origin_authority) = origin_authority(&origin_norm) else {
-            return false; // `null`/opaque or unparseable — fail-closed
-        };
         match host {
-            Some(host) => origin_authority == host.trim().to_ascii_lowercase().as_str(),
+            Some(host) => origin.matches_host(host),
             None => false,
         }
     }
 }
 
-/// The `host[:port]` authority of an `Origin` (`scheme://host[:port]`), or [`None`]
-/// for an opaque origin (`null`) or one without a scheme delimiter.
-fn origin_authority(origin: &str) -> Option<&str> {
-    let after_scheme = origin.split_once("://")?.1;
-    // An `Origin` carries no path/query, but be defensive and stop at the first `/`.
-    Some(after_scheme.split('/').next().unwrap_or(after_scheme))
-}
-
 /// Reject a cross-origin realtime upgrade (SEC-13 / CSWSH), on **both** WS and SSE
 /// and **regardless of `auth_disabled`** (CSWSH needs no credential).
 ///
-/// An absent `Origin` passes: a non-browser client is not an SOP subject and not a
-/// CSWSH vector, and browsers always send `Origin` on a WS/SSE handshake. A present
-/// `Origin` must pass [`AllowedOrigins::permits`].
+/// An **absent** `Origin` passes: a non-browser client is not an SOP subject and
+/// not a CSWSH vector, and browsers always send `Origin` on a WS/SSE handshake. A
+/// **present** `Origin` must pass [`AllowedOrigins::permits`] — and a present but
+/// **unreadable** one (bytes that are not valid UTF-8, so no legitimate browser
+/// origin) is denied, NOT folded into the absent case (fail-closed).
 fn enforce_origin(state: &AppState, headers: &HeaderMap) -> Result<(), crate::error::ControlError> {
-    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
-        return Ok(());
+    let Some(origin_value) = headers.get(header::ORIGIN) else {
+        return Ok(()); // absent: native client, not a CSWSH subject
+    };
+    // Present but not valid UTF-8 → not a real browser `Origin`; fail closed
+    // rather than treat it as absent (defect #3).
+    let Ok(origin) = origin_value.to_str() else {
+        return Err(crate::error::ControlError::Forbidden(
+            "cross-origin realtime connection refused (unreadable Origin header)".to_owned(),
+        ));
     };
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
     if state.allowed_origins.permits(origin, host) {
@@ -1813,6 +1820,10 @@ pub struct WsTicketResponse {
         post,
         path = "/api/v1/ws/ticket",
         tag = "realtime",
+        // Authenticated exactly like a REST call: an `Authorization: Bearer`
+        // API key or JWT (never a URL query — that is the SEC-01 leak this
+        // replaces). Declared so the generated client carries typed auth.
+        security(("bearer_auth" = [])),
         responses(
             (status = 200, description = "A short-lived single-use realtime ticket to present as `?ticket=` on the WS/SSE upgrade.", body = WsTicketResponse),
             (status = 401, description = "Missing or invalid credentials.", body = crate::problem::Problem),
