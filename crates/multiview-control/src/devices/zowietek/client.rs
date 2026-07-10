@@ -1101,4 +1101,31 @@ mod dial_screen_tests {
             "named-host (localhost -> loopback) dial reached the listener (resolver screen bypassed)"
         );
     }
+
+    /// Positive control: prove the idle listener + the non-blocking `accept` that
+    /// [`loopback_reached`] relies on actually detect a real connection. Without
+    /// it, the three `!loopback_reached` assertions above could pass *vacuously* —
+    /// a listener whose `accept` never reported a connection would read as "dial
+    /// blocked" even with the screen removed. A raw `TcpStream::connect` (no
+    /// screen) lands on the backlog, and the same non-blocking `accept` the screen
+    /// tests use must see it.
+    ///
+    /// A fully-screened-transport-reaches-a-listener control is architecturally
+    /// impossible here: [`screen_ip`](multiview_config::device::net_guard::screen_ip)
+    /// refuses loopback — the only address CI can reliably bind a listener on —
+    /// *unconditionally*, before any allowlist is consulted. So this detection
+    /// control, plus `refuses_named_host_resolving_to_loopback_before_connecting`
+    /// (which builds the real transport and dials through the resolver), together
+    /// prove the screen tests are non-vacuous.
+    #[test]
+    fn the_non_blocking_accept_detects_a_real_connection() {
+        let (listener, port) = idle_loopback_listener();
+        // Hold the stream open past the accept so the connection stays established.
+        let _client = std::net::TcpStream::connect(("127.0.0.1", port))
+            .expect("raw connect to the idle loopback listener");
+        assert!(
+            !matches!(listener.accept(), Err(e) if e.kind() == ErrorKind::WouldBlock),
+            "the non-blocking accept must detect a real connection (else the screen tests are vacuous)"
+        );
+    }
 }
