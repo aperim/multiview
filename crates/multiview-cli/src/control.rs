@@ -232,6 +232,17 @@ where
     .with_device_pollers(device_poller_registry(delivery.as_ref(), &dial_policy))
     .with_dial_policy(Arc::clone(&dial_policy))
     .with_auth_disabled(auth_disabled)
+    // The realtime `Origin` allow-list (SEC-13 / CSWSH, ADR-RT011): map
+    // `control.allowed_origins` (empty ⇒ same-origin only) onto the WS + SSE upgrade
+    // gate. Enforced even when auth is disabled — a cross-origin handshake bypasses
+    // SOP/CORS, so this is the CSWSH defense for the realtime firehose.
+    .with_allowed_origins(
+        config
+            .control
+            .as_ref()
+            .map(|control| control.allowed_origins.clone())
+            .unwrap_or_default(),
+    )
     // The CORS allow-list for the WebRTC media-signalling routes (ADR-0048 §9):
     // map `[webrtc].cors_allow_origins` (default `["*"]`) onto the control plane
     // so a browser served from a web origin can WHIP-publish / WHEP-play.

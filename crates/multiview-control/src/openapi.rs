@@ -179,9 +179,12 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::nmos::list_senders,
         crate::nmos::list_receivers,
         crate::nmos::patch_staged,
+        // Realtime browser auth: mint a single-use WS/SSE ticket (ADR-RT011).
+        crate::realtime::ws_ticket_handler,
     ),
     components(schemas(
         crate::problem::Problem,
+        crate::realtime::WsTicketResponse,
         crate::preview::PreviewCapabilities,
         crate::preview::ScopeCapabilities,
         crate::preview::ScopeCapability,

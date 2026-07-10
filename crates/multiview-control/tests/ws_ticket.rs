@@ -5,9 +5,9 @@
 //! principal-bound ticket, and the WS/SSE upgrades accept `?ticket=` and consume
 //! it atomically (ADR-RT011, implementing ADR-RT005).
 //!
-//! These tests drive both the transport-agnostic `WsTicketStore` core (single-use
-//! + TTL + scope-carry + bounded) and the real HTTP surface (mint auth, the
-//! removal of the durable-bearer query, single-use over SSE).
+//! These tests drive both the transport-agnostic `WsTicketStore` core (single-use,
+//! TTL, scope-carry, bounded) and the real HTTP surface (mint auth, the removal of
+//! the durable-bearer query, single-use over SSE).
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -48,8 +48,16 @@ fn mint_then_consume_returns_the_full_principal_and_baseline() {
     let (principal, baseline) = store
         .consume(&ticket)
         .expect("a fresh ticket consumes to its principal");
-    assert_eq!(principal, scoped_principal(), "the full principal is carried");
-    assert_eq!(baseline, Some(7), "the RT010 baseline generation is carried");
+    assert_eq!(
+        principal,
+        scoped_principal(),
+        "the full principal is carried"
+    );
+    assert_eq!(
+        baseline,
+        Some(7),
+        "the RT010 baseline generation is carried"
+    );
 }
 
 /// (c) SINGLE-USE: a ticket consumes exactly once; a replay is rejected.
@@ -74,7 +82,9 @@ fn expired_ticket_is_rejected() {
     let ticket = store.mint_at(scoped_principal(), None, t0);
 
     // Just before the TTL edge: still valid.
-    let almost = t0 + WS_TICKET_TTL - Duration::from_millis(1);
+    let almost = (t0 + WS_TICKET_TTL)
+        .checked_sub(Duration::from_millis(1))
+        .unwrap();
     // A distinct ticket to probe the edge without consuming the one under test.
     let edge = store.mint_at(scoped_principal(), None, t0);
     assert!(
@@ -154,7 +164,11 @@ async fn ticket_endpoint_requires_auth_and_mints() {
         post_if_match("/api/v1/ws/ticket", ADMIN_TOKEN, None),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK, "an authenticated mint succeeds");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "an authenticated mint succeeds"
+    );
     let body = body_json(resp).await;
     assert!(
         body["ticket"].as_str().is_some_and(|t| !t.is_empty()),

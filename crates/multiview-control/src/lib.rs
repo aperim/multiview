@@ -93,7 +93,7 @@ pub mod openapi_schemas;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 
 pub use account_audit::{
@@ -150,7 +150,10 @@ pub use preview::{
     SharedWhep, WhepAnswer, WhepProvider, WhepReject, WhepScope,
 };
 pub use problem::{Problem, PROBLEM_JSON};
-pub use realtime::{CorrKey, CorrRegistry, RealtimeFrame, ReauthOutcome, SessionStream};
+pub use realtime::{
+    AllowedOrigins, CorrKey, CorrRegistry, RealtimeFrame, ReauthOutcome, SessionStream,
+    WsTicketResponse, WsTicketStore, WS_TICKET_CAPACITY, WS_TICKET_TTL,
+};
 pub use repository::{InMemoryRepository, Layout, LayoutInput, Repository, VersionedLayout};
 pub use resource_store::{
     DeviceKind, InMemoryDeviceStore, InMemoryMediaPlayerStore, InMemoryOutputStore,
@@ -226,6 +229,9 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
         ))
         .route("/ws", get(realtime::ws_handler))
+        // Mint a short-lived single-use realtime auth ticket (ADR-RT011): the
+        // browser path that keeps the durable bearer out of the WS/SSE URL (SEC-01).
+        .route("/ws/ticket", post(realtime::ws_ticket_handler))
         .route("/events", get(realtime::sse_handler))
         // Unauthenticated auth-mode discovery: the SPA reads this before it has a
         // token, to decide whether to show a login gate (and to validate a key).

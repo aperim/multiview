@@ -738,8 +738,22 @@ pub struct AppState {
     /// deployment; the binary logs a loud warning when it does. When `true`, the
     /// `Principal` extractor and the realtime `resolve_principal` short-circuit to
     /// [`Principal::local_admin`](crate::auth::Principal::local_admin) without a
-    /// token, so the whole API + WS/SSE are open.
+    /// token, so the whole API + WS/SSE are open. The realtime `Origin` CSWSH gate
+    /// ([`AppState::allowed_origins`]) is enforced **independently** of this flag.
     pub auth_disabled: bool,
+    /// The bounded, single-use realtime **ticket** store (ADR-RT011): a browser
+    /// mints a short-lived ticket via `POST /api/v1/ws/ticket` and connects with
+    /// `?ticket=`, so the durable bearer never rides a WS/SSE URL (SEC-01,
+    /// CWE-598). Control-plane-only, TTL-swept, drop-oldest — it can never
+    /// back-pressure the engine (invariant #10).
+    pub ws_tickets: Arc<crate::realtime::WsTicketStore>,
+    /// The realtime `Origin` allow-list (SEC-13 / CSWSH, ADR-RT011): the WS **and**
+    /// SSE upgrades reject a cross-origin handshake (a foreign page cannot reach the
+    /// firehose), enforced even when [`AppState::auth_disabled`]. Empty (the default)
+    /// permits same-origin only (`Origin` authority == request `Host`); the binary
+    /// widens it from `control.allowed_origins`. Read-only control-plane state
+    /// (invariant #10).
+    pub allowed_origins: Arc<crate::realtime::AllowedOrigins>,
     /// The CORS allow-list applied to the **WebRTC media-signalling routes**
     /// (WHIP ingest, WHEP-serve output, the preview-WHEP focus routes, and
     /// preview capabilities — ADR-0048 §9). Each entry is an allowed `Origin`,
@@ -955,6 +969,15 @@ impl AppState {
             // Secure default: authentication is REQUIRED. An operator opts out
             // explicitly via `with_auth_disabled` (config/env), never silently.
             auth_disabled: false,
+            // A fresh, empty realtime ticket store (ADR-RT011): the browser mints a
+            // short-lived single-use ticket for the WS/SSE upgrade so the durable
+            // bearer never rides a URL (SEC-01). Bounded + TTL-swept (invariant #10).
+            ws_tickets: Arc::new(crate::realtime::WsTicketStore::new()),
+            // Same-origin-only by default (empty allow-list): the embed-web SPA is
+            // permitted with no config; the binary widens it from
+            // `control.allowed_origins`. Enforced on WS + SSE even auth-disabled
+            // (SEC-13 / CSWSH). Read-only control-plane state (invariant #10).
+            allowed_origins: Arc::new(crate::realtime::AllowedOrigins::default()),
             // Wildcard CORS on the media-signalling routes by default (ADR-0048
             // §9): a browser served from any web origin can WHIP-publish /
             // WHEP-play. The binary narrows this from `webrtc.cors_allow_origins`.
@@ -1201,6 +1224,16 @@ impl AppState {
     #[must_use]
     pub fn with_auth_disabled(mut self, disabled: bool) -> Self {
         self.auth_disabled = disabled;
+        self
+    }
+
+    /// Set the realtime `Origin` allow-list from `control.allowed_origins` (SEC-13 /
+    /// CSWSH, ADR-RT011). Each entry is a full origin (`scheme://host[:port]`); an
+    /// empty list (the default) permits same-origin only. Applied to the WS **and**
+    /// SSE upgrades, even when auth is disabled.
+    #[must_use]
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = Arc::new(crate::realtime::AllowedOrigins::new(origins));
         self
     }
 

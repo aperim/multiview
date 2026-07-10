@@ -1,4 +1,4 @@
-//! SEC-13 (CSWSH): a WebSocket / EventSource handshake is exempt from the
+//! SEC-13 (CSWSH): a WebSocket / `EventSource` handshake is exempt from the
 //! Same-Origin Policy and CORS, so without an `Origin` check any site the victim
 //! visits can `new WebSocket()` to `/api/v1/ws` and read the engine firehose. An
 //! `auth_disabled` trusted-network mode makes this a zero-credential read.
