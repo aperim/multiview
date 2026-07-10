@@ -40,7 +40,7 @@ chrono = { workspace = true, features = ["serde"] }
 # already on the deny.toml allowlist (the licence crate pulls the identical
 # closure). Default features disabled + only `alloc` (signature/key parsing); no
 # RNG/keygen in non-test code — the mesh checks signatures handed to it.
-ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
 
 # The mDNS socket layer (announce + browse) is OFF by default (brief §13.2 / O5):
 # the default build is a pure shell so `cargo check --workspace` stays GPU-free,

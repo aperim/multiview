@@ -51,7 +51,7 @@ multiview-hal = { workspace = true }
 # the `gpu` feature (the cli already links wgpu transitively via the compositor's
 # `wgpu` feature there), so the default pure-Rust build never sees it. `std` only —
 # no backend feature is needed to read the adapter-info enums.
-wgpu = { version = "29", default-features = false, features = [
+wgpu = { version = "30", default-features = false, features = [
   "std",
 ], optional = true }
 multiview-ffmpeg = { workspace = true }
@@ -118,7 +118,7 @@ rustix = { workspace = true, features = ["fs", "process"], optional = true }
 # already in the workspace graph (the licence crate's verify path); `rand_core`
 # (`getrandom`) seeds the one-time keygen. Optional + gated so the default build
 # pulls no RNG/signing surface.
-ed25519-dalek = { version = "2", default-features = false, features = [
+ed25519-dalek = { version = "3", default-features = false, features = [
     "alloc",
     "rand_core",
 ], optional = true }
@@ -167,8 +167,8 @@ tempfile = "3"
 # stalled/partitioned `server.activate(...)`), and an Ed25519 device key signs the PoP.
 # All already in the workspace graph behind `heartbeat` (deny-clean, no new crate);
 # dev-only — the cli's non-test code has no signer/RNG.
-ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
-p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+ed25519-dalek = { version = "3", default-features = false, features = ["alloc"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa"] }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 serde_json = { workspace = true }
 # Property tests for the pure media-player transport state machine (ADR-0057 /

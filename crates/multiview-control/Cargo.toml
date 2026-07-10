@@ -198,7 +198,7 @@ toml = "1.1"
 # reads a clock (the licence crate is verification-only / clock-injected). All
 # `MIT`/`Apache-2.0`, already on the deny.toml allowlist.
 chrono = { workspace = true, features = ["alloc"] }
-ed25519-dalek = { version = "2", default-features = false, features = [
+ed25519-dalek = { version = "3", default-features = false, features = [
     "alloc",
     "rand_core",
 ] }
