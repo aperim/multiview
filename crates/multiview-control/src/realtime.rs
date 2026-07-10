@@ -841,18 +841,25 @@ impl SessionStream {
                 return None;
             }
         }
-        // Connect-time broadcast watermark (ADR-RT009): an event whose engine seq
-        // is at or before the broadcast frontier captured with the connect
-        // snapshot is ALREADY reflected in that snapshot — drop it so it is not
-        // re-delivered as a delta (duplicate) and a queued pre-snapshot transition
-        // cannot replay after the newer snapshot (transient backward roll). Checked
-        // BEFORE `issue_seq` so the drop leaves no gap in the per-connection seq
-        // (exactly like the resume/conflated/scope skips), and before the
-        // object-scope filter so the two read-side drops compose. A pure per-client
-        // read decision on an event already pulled from the bounded broadcast: no
-        // lock, no await, never touches the engine publish path (invariant #10).
+        // Connect-time broadcast watermark (ADR-RT009): a **snapshot-backed** event
+        // whose engine seq is at or before the broadcast frontier captured with the
+        // connect snapshot is ALREADY reflected in that snapshot — drop it so it is
+        // not re-delivered as a delta (duplicate) and a queued pre-snapshot
+        // transition cannot replay after the newer snapshot (transient backward
+        // roll). The drop is SCOPED to snapshot-backed events
+        // ([`event_is_snapshot_backed`] — only `tile.state` and `device.status`,
+        // the two classes the connect snapshot reproduces): a lossless / event-only
+        // variant (`device.discovered`/`.mode`/`.error`, cast/media/alert/…) is in
+        // NO snapshot and carries no resumable seq, so a global drop would
+        // permanently lose one that lands in the subscribe→snapshot window — worse
+        // than the duplicate this fixes. Checked BEFORE `issue_seq` so the drop
+        // leaves no gap in the per-connection seq (like the resume/conflated/scope
+        // skips), and before the object-scope filter so the read-side drops
+        // compose. A pure per-client read decision on an event already pulled from
+        // the bounded broadcast: no lock, no await, never touches the engine publish
+        // path (invariant #10).
         if let Some(watermark) = self.snapshot_watermark {
-            if seq_event.seq <= watermark {
+            if seq_event.seq <= watermark && event_is_snapshot_backed(&seq_event.event) {
                 return None;
             }
         }
@@ -1023,6 +1030,35 @@ fn object_authz_scope_id(event: &Event) -> Option<&str> {
         Event::TileState(tile) => tile.input.as_deref(),
         _ => None,
     }
+}
+
+/// Whether the connect-time snapshot reproduces this event's current value as a
+/// same-topic snapshot frame (ADR-RT009) — the ONLY class the connect watermark
+/// may drop.
+///
+/// `true` for exactly the two variants a fresh client receives a snapshot frame
+/// for, so a pre-watermark delta of them is already in that snapshot and
+/// re-delivering it would duplicate / roll the client back:
+/// * `tile.state` — reproduced by the `tiles` snapshot ([`SessionStream::tiles_snapshot_frame`],
+///   read from the engine state blob; the tick path publishes the state fold
+///   before the event, so a dropped delta is already reflected).
+/// * `device.status` — reproduced by the per-device `device.status` snapshot
+///   ([`SessionStream::devices_snapshot_frames`], read from the
+///   [`DeviceStatusRegistry`]; `DeviceBroadcaster::publish_status` updates the
+///   registry before publishing the event, so a dropped delta is already
+///   reflected).
+///
+/// `false` for **every other** event: the device lifecycle events
+/// (`device.discovered`/`.mode`/`.error`/`.adopted`/`.removed`/`.sync`),
+/// cast-session membership, `media.player_state`, alerts, input/job/alarm/tally/
+/// salvo, and the un-re-snapshotted conflated telemetry (`timing.status`,
+/// `audio.meter`, `system.metrics`, `rist.link.stats`). None appears in any
+/// connect snapshot frame, so the watermark must NEVER drop them — a global drop
+/// would permanently lose one that lands in the subscribe→snapshot window (it has
+/// no snapshot to heal from and no seq the client can resume; RT003 losslessness).
+#[must_use]
+fn event_is_snapshot_backed(event: &Event) -> bool {
+    matches!(event, Event::TileState(_) | Event::DeviceStatus(_))
 }
 
 /// The coarse topic an event is published on (the realtime-api topic map).
