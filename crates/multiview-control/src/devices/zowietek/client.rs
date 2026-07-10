@@ -879,23 +879,76 @@ mod net {
         /// `http://[fd00:db8::42]`). The base is the scheme+authority; the
         /// module path and query are appended per request.
         ///
-        /// The client screens every resolved dial IP against `dial_policy`
-        /// (SEC-02, CWE-918) and follows **no** redirects
+        /// The client screens the dial target against `dial_policy` (SEC-02,
+        /// CWE-918) on the **actual** address reqwest will dial:
+        ///
+        /// * An **IP-literal** host — including the alt-encoded IPv4 forms
+        ///   (`2130706433`, `0x7f000001`, `0177.0.0.1`) and IPv4-mapped IPv6
+        ///   (`[::ffff:169.254.169.254]`) — is parsed with the same WHATWG `url`
+        ///   parser reqwest uses, canonicalized to a concrete `IpAddr`, and
+        ///   screened here with [`net_guard::screen_ip`]. reqwest dials an
+        ///   IP-literal host **directly, without invoking any DNS resolver**, so a
+        ///   resolver-only screen never sees these — screening the parsed literal
+        ///   on this path is what closes the bypass.
+        /// * A **DNS name** is screened lazily by the [`ScreeningResolver`], which
+        ///   resolves, screens every answer, and returns **only** the vetted
+        ///   addresses reqwest then dials — pinning the vetted result defeats
+        ///   DNS-rebind.
+        ///
+        /// The client also disables any environment proxy
+        /// ([`no_proxy`](reqwest::ClientBuilder::no_proxy)) so a system
+        /// `HTTP(S)_PROXY` cannot dial the destination unscreened on our behalf,
+        /// and follows **no** redirects
         /// ([`redirect::Policy::none`](reqwest::redirect::Policy::none)) — a
         /// validated host cannot 30x-bounce the poller to a blocked one, and the
         /// device's named credentials are never re-sent to a redirect target.
         ///
         /// # Errors
         ///
-        /// [`TransportError`] if the HTTP client cannot be constructed.
+        /// [`TransportError`] if `base` is not a valid URL/authority, has no host,
+        /// resolves to a blocked dial target, or the HTTP client cannot be built.
         pub fn new(
             base: &str,
             timeout: std::time::Duration,
             dial_policy: Arc<DialPolicy>,
         ) -> Result<Self, TransportError> {
+            // A device address is either a full `http(s)://` URL or a bare
+            // authority (discovery emits `[fd00:db8::42]:5961`, no scheme).
+            // Normalize to a URL — default scheme plain http (the vendor API is
+            // HTTP JSON-over-POST) — so the SSRF screen and reqwest parse the
+            // exact same canonical host, and so `post` always builds a valid URL.
+            let normalized = if base.contains("://") {
+                base.trim_end_matches('/').to_owned()
+            } else {
+                format!("http://{}", base.trim_end_matches('/'))
+            };
+            let parsed = url::Url::parse(&normalized)
+                .map_err(|e| TransportError::new(format!("invalid device url {base:?}: {e}")))?;
+            match parsed.host() {
+                // An IP literal is dialled directly by reqwest (no resolver hop):
+                // screen the canonical parsed IP here, fail-closed.
+                Some(url::Host::Ipv4(v4)) => {
+                    net_guard::screen_ip(std::net::IpAddr::V4(v4), &dial_policy)
+                        .map_err(|e| TransportError::new(e.to_string()))?;
+                }
+                Some(url::Host::Ipv6(v6)) => {
+                    net_guard::screen_ip(std::net::IpAddr::V6(v6), &dial_policy)
+                        .map_err(|e| TransportError::new(e.to_string()))?;
+                }
+                // A DNS name is screened + pinned by the ScreeningResolver below.
+                Some(url::Host::Domain(_)) => {}
+                None => {
+                    return Err(TransportError::new(format!(
+                        "device url {base:?} has no host to dial"
+                    )));
+                }
+            }
             let client = reqwest::Client::builder()
                 .timeout(timeout)
                 .redirect(reqwest::redirect::Policy::none())
+                // A system HTTP(S)_PROXY must not dial the destination on our
+                // behalf — that would bypass the screen entirely.
+                .no_proxy()
                 .dns_resolver(Arc::new(ScreeningResolver {
                     policy: dial_policy,
                 }))
@@ -903,7 +956,7 @@ mod net {
                 .map_err(|e| TransportError::new(e.to_string()))?;
             Ok(Self {
                 client,
-                base: base.trim_end_matches('/').to_owned(),
+                base: normalized,
             })
         }
     }

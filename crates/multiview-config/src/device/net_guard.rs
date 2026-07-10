@@ -361,18 +361,24 @@ pub fn screen_ip(ip: IpAddr, policy: &DialPolicy) -> Result<(), AddressError> {
     }
 }
 
-/// Screen a resolved-literal IP for the **config-load** layer: reject only the
-/// never-legitimate ranges, accepting private/ULA/carrier (dial-gated at
-/// runtime, valid at config load).
+/// Screen a config-load literal dial target — the **deployment-independent**
+/// layer. This is the SAME screen the dial sites run ([`screen_ip`]), evaluated
+/// under the non-breaking default [`DialPolicy::allow_lan`], not a weaker one:
+/// the never-legitimate ranges (loopback, link-local incl. IMDS, unspecified,
+/// multicast/broadcast, IPv4-mapped forms) are refused, while private/ULA/carrier
+/// LAN literals are accepted (a managed device legitimately lives on the LAN —
+/// whether its private address may actually be *dialled* is the runtime
+/// [`DialPolicy`] decision the dial sites apply, and can only ever *tighten*,
+/// never re-admit a never-legitimate literal).
 ///
 /// # Errors
 ///
 /// [`AddressError::Blocked`] for a never-legitimate range.
 pub fn screen_config_literal(ip: IpAddr) -> Result<(), AddressError> {
-    match classify(ip) {
-        Some(class) if !class.allowlistable() => Err(AddressError::Blocked { ip, class }),
-        _ => Ok(()),
-    }
+    // Config load has no operator dial policy yet, so it screens with the
+    // permissive default — identical to the dial-time screen minus any operator
+    // tightening (which never re-admits a never-legitimate literal anyway).
+    screen_ip(ip, &DialPolicy::allow_lan())
 }
 
 /// Screen every IP a host resolved to, fail-closed: a single blocked answer
