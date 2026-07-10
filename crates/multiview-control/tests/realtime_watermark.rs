@@ -24,7 +24,8 @@ use std::sync::Arc;
 use multiview_control::SessionStream;
 use multiview_engine::EnginePublisher;
 use multiview_events::{
-    Alert, AlertSeverity, DeviceState, DeviceStatus, Event, FrameKind, LifecycleState, TileState,
+    AddressFamily, Alert, AlertSeverity, DeviceDiscovered, DeviceError, DeviceMode, DeviceState,
+    DeviceStatus, Event, FrameKind, ImpactClass, LifecycleState, ModePhase, TileState,
 };
 
 type Publisher = EnginePublisher<serde_json::Value, Event>;
@@ -53,6 +54,37 @@ fn tile(input: &str, from: LifecycleState, to: LifecycleState) -> Event {
 /// A `device.status` event scoped (by `object_authz_scope_id`) to `device_id`.
 fn device_status(device_id: &str) -> Event {
     Event::DeviceStatus(DeviceStatus::new(device_id, DeviceState::Online))
+}
+
+/// A `device.discovered` event — a lossless lifecycle row that carries NO registry
+/// id and is in NEITHER the engine state blob nor the `DeviceStatus` registry.
+fn device_discovered(driver: &str) -> Event {
+    Event::DeviceDiscovered(DeviceDiscovered {
+        driver: driver.to_owned(),
+        address: "http://[fd00:db8::42]".to_owned(),
+        family: AddressFamily::Ipv6,
+        name: None,
+    })
+}
+
+/// A `device.mode` event — a lossless lifecycle transition, in no connect snapshot.
+fn device_mode(device_id: &str, mode: &str) -> Event {
+    Event::DeviceMode(DeviceMode {
+        device_id: device_id.to_owned(),
+        mode: mode.to_owned(),
+        phase: ModePhase::Finished,
+        impact: ImpactClass::Device,
+        detail: None,
+    })
+}
+
+/// A `device.error` event — a lossless lifecycle signal, in no connect snapshot.
+fn device_error(device_id: &str, message: &str) -> Event {
+    Event::DeviceError(DeviceError {
+        device_id: device_id.to_owned(),
+        code: None,
+        message: message.to_owned(),
+    })
 }
 
 /// Drain up to `polls` deltas from a session, collecting the ones actually
@@ -187,4 +219,115 @@ async fn absent_watermark_delivers_every_delta_unchanged() {
     );
     assert_eq!(delivered[0].envelope.seq.get(), 1);
     assert_eq!(delivered[2].envelope.seq.get(), 3);
+}
+
+/// CRITICAL LOST-DELTA GUARD (PR #230 review-panel finding): lossless lifecycle
+/// events that appear in NO connect snapshot frame — `device.discovered`,
+/// `device.mode`, `device.error` (none is in `current_engine_snapshot()` NOR the
+/// `DeviceStatus` registry; `device.discovered` has no registry id at all) — MUST
+/// be delivered even when they land in the pre-watermark window. A *global*
+/// `seq <= watermark` drop would permanently lose them: they are in no snapshot to
+/// heal from and carry no seq the client can resume — strictly worse than the
+/// duplicate the watermark fixes. This FAILS on the un-scoped (global) watermark
+/// and passes once the drop is scoped to snapshot-backed variants (ADR-RT009).
+#[tokio::test]
+async fn watermark_never_drops_lossless_lifecycle_events() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let sub = engine.subscribe();
+
+    // Three lossless lifecycle events land in the subscribe->snapshot window.
+    // Not one is reproduced by any connect snapshot frame.
+    let _d1 = engine.publish_event(device_discovered("ndi-source"));
+    let _d2 = engine.publish_event(device_mode("dev-a", "decoder"));
+    let _d3 = engine.publish_event(device_error("dev-a", "probe failed"));
+    let watermark = engine.events.sequence();
+
+    let mut session =
+        SessionStream::new(sub, "sess-lossless", None).with_snapshot_watermark(watermark);
+    // Snapshot first, exactly as the transports emit it — it reproduces NONE of
+    // the three lifecycle events above.
+    let _hello = session.snapshot_frame(engine.state.sequence());
+
+    // All three are pre-watermark (`seq <= watermark`) but lossless — the
+    // watermark must NOT drop them. They arrive as the first three deltas, in
+    // order, at gapless per-connection seqs 1,2,3.
+    let delivered = drain(&mut session, 3).await;
+    assert_eq!(
+        delivered.len(),
+        3,
+        "lossless lifecycle events in the pre-watermark window must never be dropped by the watermark"
+    );
+    assert_eq!(delivered[0].envelope.seq.get(), 1);
+    assert_eq!(delivered[2].envelope.seq.get(), 3);
+    assert!(
+        matches!(delivered[0].envelope.payload, Event::DeviceDiscovered(_)),
+        "device.discovered must survive the watermark window"
+    );
+    assert!(
+        matches!(delivered[1].envelope.payload, Event::DeviceMode(_)),
+        "device.mode must survive the watermark window"
+    );
+    assert!(
+        matches!(delivered[2].envelope.payload, Event::DeviceError(_)),
+        "device.error must survive the watermark window"
+    );
+}
+
+/// FINDING (a) strengthened with an actual snapshot inspection: a snapshot-backed
+/// event (`tile.state`, reproduced in the `TilesSnapshot`) that lands in the
+/// pre-watermark window IS in the built snapshot AND is suppressed as a delta — no
+/// duplicate, no backward roll. The test BUILDS the tiles snapshot frame and
+/// asserts it actually contains the tile, proving the no-duplicate premise the
+/// watermark relies on (not just the suppression mechanics).
+#[tokio::test]
+async fn watermark_drops_a_tile_state_the_built_snapshot_reproduces() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let sub = engine.subscribe();
+
+    // A tile.state transition lands in the window; the engine state blob the
+    // connect snapshot reads reflects the resulting state (LIVE) — modelling the
+    // tick-path state-then-event ordering (state_of precedes event_of).
+    let _s1 = engine.publish_event(tile("cam", LifecycleState::NoSignal, LifecycleState::Live));
+    let watermark = engine.events.sequence();
+    let blob = serde_json::json!({
+        "tiles": [ { "id": "tile-cam", "state": "LIVE", "input": "cam" } ]
+    });
+
+    let mut session = SessionStream::new(sub, "sess-snap", None).with_snapshot_watermark(watermark);
+    let _hello = session.snapshot_frame(engine.state.sequence());
+
+    // The built tiles snapshot REPRODUCES the tile's current state — so the
+    // pre-watermark tile.state delta is redundant (it is already in the snapshot).
+    let tiles_snap = session
+        .tiles_snapshot_frame(&blob, engine.state.sequence())
+        .expect("a tiles snapshot frame is built");
+    match &tiles_snap.envelope.payload {
+        Event::TilesSnapshot(s) => assert!(
+            s.tiles.iter().any(|t| t.input.as_deref() == Some("cam")),
+            "the connect snapshot must reproduce the tile the pre-watermark delta describes"
+        ),
+        other => panic!("expected a tiles snapshot, got {other:?}"),
+    }
+
+    // A fresh post-watermark event proves the stream still flows past the drop.
+    let _s2 = engine.publish_event(alert("after"));
+
+    // The pre-watermark tile.state (in the snapshot) is suppressed; only the
+    // post-watermark alert is delivered. Two snapshot frames issued per-connection
+    // seqs 0 ($hello) and 1 (tiles), so the first delta is gapless seq 2.
+    let delivered = drain(&mut session, 2).await;
+    assert_eq!(
+        delivered.len(),
+        1,
+        "the snapshot-backed tile.state delta must not be re-delivered"
+    );
+    assert_eq!(
+        delivered[0].envelope.seq.get(),
+        2,
+        "first delta follows the two snapshot frames (seqs 0,1) — gapless"
+    );
+    assert!(matches!(
+        delivered[0].envelope.payload,
+        Event::AlertRaised(_)
+    ));
 }
