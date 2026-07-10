@@ -518,6 +518,71 @@ fn cancel_exit_keeps_looping_forever() {
     assert!(!deck.has_ended(), "a cancelled-exit deck has not ended");
 }
 
+// ADR-T019 / cross-vendor review Finding 2: the exit fade-out tail must scale the
+// CONTINUING loop content (frames m, m+1, …) by the cosine envelope — not hold a single
+// frame (body[0]) under it. A *constant* body hides the defect (a held frame equals the
+// continuation), which is why `an_armed_exit_settles_to_silence` (a constant 0.3 body)
+// passes either way. This uses distinct per-frame content and checks the exit tail
+// against the loop's OWN continuation scaled by the content-independent fade curve.
+#[test]
+fn an_exit_fade_attenuates_the_continuing_content_not_a_held_frame() {
+    let loop_frames = 600usize;
+    let xfade = 60usize;
+    let total = loop_frames + xfade;
+
+    // (1) Derive the fade curve g(j) from a CONSTANT deck, where held == continuation so
+    // the exit tail is unambiguously C·g(j) whether or not the defect is present.
+    let c = 0.5f32;
+    let flat = vec![c; total * 2];
+    let mut flat_deck = LoopDeck::with_segment(stereo(), &flat, loop_frames, xfade).unwrap();
+    flat_deck.vamp();
+    let _ = drain_at(&flat_deck, 0, loop_frames / 2, 64);
+    flat_deck.arm_exit();
+    let flat_tail = flat_deck.read_at(loop_frames as u64, xfade); // exit tail over [L, L+xfade)
+    let gain: Vec<f64> = (0..xfade)
+        .map(|j| f64::from(flat_tail.interleaved()[j * 2]) / f64::from(c))
+        .collect();
+
+    // (2) A strictly increasing RAMP body: every frame differs, so a held first frame is
+    // distinguishable from the true continuation across the whole tail window.
+    let mut ramp = vec![0.0f32; total * 2];
+    for f in 0..total {
+        let v = 0.2f32 + 0.6f32 * (f as f32 / total as f32); // [0.2, 0.8), strictly increasing
+        ramp[f * 2] = v;
+        ramp[f * 2 + 1] = v;
+    }
+    // The looping continuation over [L, L+xfade) on a deck that is NOT exiting.
+    let mut cont_deck = LoopDeck::with_segment(stereo(), &ramp, loop_frames, xfade).unwrap();
+    cont_deck.vamp();
+    let cont = cont_deck.read_at(loop_frames as u64, xfade);
+    // The exit tail over the same span on an armed deck.
+    let mut exit_deck = LoopDeck::with_segment(stereo(), &ramp, loop_frames, xfade).unwrap();
+    exit_deck.vamp();
+    let _ = drain_at(&exit_deck, 0, loop_frames / 2, 64);
+    exit_deck.arm_exit();
+    let tail = exit_deck.read_at(loop_frames as u64, xfade);
+
+    let cont_s = cont.interleaved();
+    let tail_s = tail.interleaved();
+    let mut max_err = 0.0f64; // |actual − continuation·g|  → 0 iff the tail fades the continuation
+    let mut ref_gap = 0.0f64; // |continuation·g − held·g|  → proves held ≠ continuation for this ramp
+    for j in 0..xfade {
+        let expected = f64::from(cont_s[j * 2]) * gain[j]; // continuation × fade  (correct)
+        let held = f64::from(cont_s[0]) * gain[j]; // body[0]   × fade  (the defect)
+        let actual = f64::from(tail_s[j * 2]);
+        max_err = max_err.max((actual - expected).abs());
+        ref_gap = ref_gap.max((expected - held).abs());
+    }
+    assert!(
+        ref_gap > 1e-2,
+        "non-vacuous: the continuation and held-frame forms diverge for this ramp (ref_gap={ref_gap})"
+    );
+    assert!(
+        max_err < 1e-4,
+        "the exit fade must attenuate the CONTINUING loop content, not hold body[0] under the envelope (max_err={max_err})"
+    );
+}
+
 // ----------------------------------------------------------------------------
 // 5. Empty / paused / stopped decks: silence, never a stall or panic.
 // ----------------------------------------------------------------------------
