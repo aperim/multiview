@@ -434,6 +434,22 @@ pub fn redact_config_for_export(value: &serde_json::Value) -> serde_json::Value 
     }
 }
 
+/// Mask inline cleartext secrets in a REST response view for a non-admin
+/// principal, using the same structurally-preserving policy as config export.
+///
+/// The caller passes an owned response copy; this mutates only that view and
+/// never the stored document. An [`crate::auth::Role::Admin`] principal keeps the
+/// original value for operational access. Every less-privileged role receives
+/// [`EXPORT_REDACTED_SENTINEL`] in each inline-secret field.
+pub(crate) fn redact_inline_secrets_for_read(
+    principal: &crate::auth::Principal,
+    value: &mut serde_json::Value,
+) {
+    if principal.role != crate::auth::Role::Admin {
+        *value = redact_config_for_export(value);
+    }
+}
+
 // ── The bundle store ────────────────────────────────────────────────────────
 
 /// Mint a fresh bundle id (an uppercased short hex of a v4 UUID, `SB-` prefixed

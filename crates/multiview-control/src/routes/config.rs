@@ -56,6 +56,13 @@ pub struct DiffQuery {
     pub to: u64,
 }
 
+/// Mask inline cleartext secrets in a config-revision response for a non-admin.
+/// The version store has already returned an owned clone, so this mutates only
+/// the response view and never the immutable stored revision.
+fn redact_revision_for_read(principal: &Principal, revision: &mut ConfigRevision) {
+    crate::support_bundle::redact_inline_secrets_for_read(principal, &mut revision.document);
+}
+
 /// `GET /api/v1/config/{target}` — revision history, newest-first (role: read).
 pub(crate) async fn list_history(
     State(state): State<AppState>,
@@ -64,7 +71,11 @@ pub(crate) async fn list_history(
 ) -> ControlResult<Json<Vec<ConfigRevision>>> {
     principal.role.require(Action::Read)?;
     crate::auth::authorize_object(&principal, &target)?;
-    Ok(Json(state.config_versions.history(&target)?))
+    let mut history = state.config_versions.history(&target)?;
+    for revision in &mut history {
+        redact_revision_for_read(&principal, revision);
+    }
+    Ok(Json(history))
 }
 
 /// `GET /api/v1/config/{target}/diff?from=&to=` — structural diff (role: read).
@@ -92,11 +103,11 @@ pub(crate) async fn get_revision(
 ) -> ControlResult<Json<ConfigRevision>> {
     principal.role.require(Action::Read)?;
     crate::auth::authorize_object(&principal, &target)?;
-    Ok(Json(
-        state
-            .config_versions
-            .get(&target, RevisionId::new(revision))?,
-    ))
+    let mut revision = state
+        .config_versions
+        .get(&target, RevisionId::new(revision))?;
+    redact_revision_for_read(&principal, &mut revision);
+    Ok(Json(revision))
 }
 
 /// `PUT /api/v1/config/{target}` — commit a new revision (role: write).
@@ -143,7 +154,9 @@ pub(crate) async fn rollback_revision(
         &target,
         Some(serde_json::json!({ "restored_to": req.to, "new_revision": revision.revision.get() })),
     );
-    Ok((StatusCode::CREATED, Json(revision)))
+    let mut response_revision = revision;
+    redact_revision_for_read(&principal, &mut response_revision);
+    Ok((StatusCode::CREATED, Json(response_revision)))
 }
 
 /// `GET /api/v1/config/export` — render the live resource stores as a complete
@@ -720,6 +733,7 @@ pub(crate) async fn revert_to_start(
     idem: IdempotencyKey,
 ) -> ControlResult<(StatusCode, Json<RevertToStartBody>)> {
     principal.role.require(Action::Write)?;
+    crate::routes::require_unscoped_for_whole_system(&principal)?;
     let Some(model) = state.boot_model.clone() else {
         return Err(ControlError::Conflict(
             "this run has no boot configuration model (it was not started from a config \
@@ -924,6 +938,7 @@ pub(crate) async fn promote_to_boot(
     idem: IdempotencyKey,
 ) -> ControlResult<Json<PromoteBody>> {
     principal.role.require(Action::Write)?;
+    crate::routes::require_unscoped_for_whole_system(&principal)?;
     let Some(model) = state.boot_model.clone() else {
         return Err(ControlError::Conflict(
             "this run has no boot configuration model (it was not started from a config \
