@@ -2188,6 +2188,32 @@ export interface paths {
         patch: operations["whip_patch"];
         trace?: never;
     };
+    "/api/v1/ws/ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/ws/ticket` — mint a short-lived, single-use realtime auth ticket
+         *     for the browser transports (ADR-RT011, implementing ADR-RT005).
+         * @description Authenticated exactly like a REST call — `Authorization: Bearer` header or JWT,
+         *     **never** a URL query (that is the SEC-01 leak this replaces). The ticket
+         *     carries the caller's full [`Principal`] (role + every scope axis) and its
+         *     RT010 baseline, so the stream it opens has exactly the authorization the bearer
+         *     would; the read gate ([`Action::Read`]) matches the WS/SSE gate. The durable
+         *     bearer therefore never appears in a WS/SSE URL.
+         */
+        post: operations["ws_ticket_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/x-nmos/connection/v1.1/single/receivers/{id}/staged": {
         parameters: {
             query?: never;
@@ -5482,6 +5508,22 @@ export interface components {
              *     deduplicated; latched until restart — ADR-W020).
              */
             restart_pending: string[];
+        };
+        /**
+         * @description The `POST /api/v1/ws/ticket` response: a short-lived, single-use realtime auth
+         *     ticket the browser passes as `?ticket=` on the WS/SSE upgrade (ADR-RT011).
+         */
+        WsTicketResponse: {
+            /**
+             * Format: int64
+             * @description Seconds until the ticket expires ([`WS_TICKET_TTL`]).
+             */
+            expires_in_secs: number;
+            /**
+             * @description The opaque single-use ticket. Present it once as `?ticket=` within
+             *     `expires_in_secs`; it is consumed on the first WS/SSE upgrade.
+             */
+            ticket: string;
         };
     };
     responses: never;
@@ -12206,6 +12248,44 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    ws_ticket_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A short-lived single-use realtime ticket to present as `?ticket=` on the WS/SSE upgrade. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WsTicketResponse"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authorized to read (below the viewer role). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
             };
         };
     };

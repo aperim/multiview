@@ -8,9 +8,9 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { QueryClient } from "@tanstack/react-query";
 
-import { getStoredToken } from "../api/token";
 import { RealtimeConnection } from "./connection";
 import type { RealtimeStatus } from "./connection";
+import { mintWsTicket, realtimeWsBaseUrl } from "./ticket";
 import {
   CONTROL_TOPIC,
   parseDeviceDiscovered,
@@ -134,20 +134,6 @@ export interface EngineEvents {
   readonly lastSeq: number;
   /** A monotonically-increasing count of sequence gaps seen this session. */
   readonly gaps: number;
-}
-
-function resolveWsUrl(): string {
-  // Same-origin: the dev proxy and the embedded build both serve `/api/v1/ws`.
-  const { protocol, host } = window.location;
-  const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
-  const base = `${wsProtocol}//${host}/api/v1/ws`;
-  // A browser WebSocket can't send an Authorization header, so the control plane
-  // also accepts the bearer token as an `access_token` query parameter; pass the
-  // operator's stored token (same-origin) so the privileged stream authenticates.
-  const token = getStoredToken();
-  return token === undefined
-    ? base
-    : `${base}?access_token=${encodeURIComponent(token)}`;
 }
 
 function tileFromEntry(entry: TileSnapshotEntry): LiveTile {
@@ -342,7 +328,7 @@ export function useEngineEvents(): EngineEvents {
   const connectionRef = useRef<RealtimeConnection | null>(null);
 
   useEffect(() => {
-    const connection = new RealtimeConnection(resolveWsUrl(), {
+    const connection = new RealtimeConnection(realtimeWsBaseUrl(), {
       onStatus: (next): void => {
         setStatus(next);
       },
@@ -419,7 +405,7 @@ export function useEngineEvents(): EngineEvents {
             return;
         }
       },
-    });
+    }, mintWsTicket);
     connectionRef.current = connection;
     connection.start();
     return (): void => {
