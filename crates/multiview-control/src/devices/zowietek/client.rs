@@ -1082,4 +1082,23 @@ mod dial_screen_tests {
             "alt-encoded (decimal) loopback dial reached the listener (SSRF screen bypassed)"
         );
     }
+
+    #[test]
+    fn refuses_named_host_resolving_to_loopback_before_connecting() {
+        let (listener, port) = idle_loopback_listener();
+        // `localhost` is a DNS *name* (`url::Host::Domain`), not a literal, so it
+        // is not screened pre-dial — it exercises the OTHER half of the fix: the
+        // `ScreeningResolver` resolves it, screens every answer with
+        // `screen_resolved` (fail-closed on the first blocked IP), and returns
+        // only vetted addresses for reqwest to dial. `localhost` resolves to
+        // loopback (127.0.0.1 and/or ::1 — Linux getaddrinfo returns both), a
+        // never-legit range, so the resolver refuses and reqwest never opens the
+        // socket. reqwest DOES consult the custom resolver for named hosts
+        // (unlike IP literals), so this proves the resolver screen is wired in and
+        // defeats a name that answers with an internal address (DNS-rebind).
+        assert!(
+            !loopback_reached(&format!("http://localhost:{port}/"), &listener),
+            "named-host (localhost -> loopback) dial reached the listener (resolver screen bypassed)"
+        );
+    }
 }
