@@ -96,8 +96,13 @@ impl Origin {
     ///
     /// See [`OriginParseError`] for the precise rejection reasons.
     pub fn parse(input: &str) -> Result<Self, OriginParseError> {
+        // Parse the input VERBATIM — no trim. A serialized Origin is exactly
+        // `scheme://host[:port]`; leading/trailing/embedded ASCII whitespace makes
+        // it malformed and must fail closed (a padded scheme fails the scheme
+        // match below; padding elsewhere is caught by `parse_authority`'s
+        // whitespace rejection). Trimming would silently normalize an attacker- or
+        // typo-supplied `" https://x "` into an allow-listed origin.
         let (scheme_raw, rest) = input
-            .trim()
             .split_once("://")
             .ok_or(OriginParseError::MissingScheme)?;
         let scheme = match scheme_raw.to_ascii_lowercase().as_str() {
@@ -247,6 +252,25 @@ mod tests {
                 Origin::parse(bad),
                 Err(want),
                 "{bad:?} must be rejected as {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_whitespace_padding() {
+        // A serialized Origin has no surrounding or embedded whitespace. The parser
+        // is verbatim (no `trim`), so a padded value fails closed rather than being
+        // normalized into an allow-listed origin (panel rev3 finding).
+        for bad in [
+            " https://ops.example",  // leading space → scheme " https" mismatch
+            "https://ops.example ",  // trailing space → authority whitespace
+            "https://ops.example\n", // trailing newline
+            "\thttps://ops.example", // leading tab
+            "https:// ops.example",  // embedded space in the authority
+        ] {
+            assert!(
+                Origin::parse(bad).is_err(),
+                "{bad:?} (whitespace-padded) must be rejected, not trimmed-and-accepted"
             );
         }
     }
