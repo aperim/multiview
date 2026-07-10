@@ -61,10 +61,16 @@ use crate::isolation::EnginePublisher;
 pub const MAX_REPEATS_PER_TICK: u32 = 120;
 
 /// The longest a [`RealtimePacer`] sleeps in one step before re-checking the
-/// [`StopSignal`]. Real per-tick deadlines are at most one tick period out
-/// (~16.7 ms at 60 fps), so this cap never fragments a normal wait; it only
-/// bounds the stop-observation latency when a deadline is unusually far in the
-/// future (a paused/jumped clock), keeping shutdown prompt without busy-waking.
+/// [`StopSignal`]. This deliberately bounds stop-observation latency to ~one
+/// poll interval (~10 ms) **regardless of clock state** — even a deadline the
+/// clock has not yet reached (a paused/jumped clock, or a CPU-contended host
+/// whose wall-clock has not advanced a whole period). Because it is shorter
+/// than every broadcast tick period (16.7 ms at 60 fps .. 41.7 ms at 24 fps),
+/// a normal one-tick wait is intentionally split into ~2-5 of these sleeps —
+/// cheap (each step is an allocation-free timer registration) and what keeps
+/// shutdown prompt on an unreachable deadline (ADR-T018, the fix for the CI
+/// ~37-min "hang"). It never delays a tick: the deadline is re-checked each
+/// step, so the wait ends the instant the clock reaches it.
 const PACER_STOP_POLL: Duration = Duration::from_millis(10);
 
 /// How the runtime waits for a tick's wall-clock deadline.
@@ -124,9 +130,10 @@ impl Pacer for RealtimePacer {
             }
             let nanos = u64::try_from(remaining).unwrap_or(u64::MAX);
             // Cap each sleep so a stop raised mid-wait is seen within one poll
-            // interval rather than only after the (possibly far) deadline. A
-            // normal one-period wait is shorter than the cap, so this is a single
-            // sleep in the steady state.
+            // interval rather than only after the (possibly far) deadline. The
+            // cap is below every tick period, so a normal one-tick wait is
+            // deliberately split into ~2-5 short sleeps (see PACER_STOP_POLL);
+            // the deadline is re-checked each pass, so it never delays a tick.
             let poll_cap = u64::try_from(PACER_STOP_POLL.as_nanos()).unwrap_or(u64::MAX);
             tokio::time::sleep(Duration::from_nanos(nanos.min(poll_cap))).await;
         }
