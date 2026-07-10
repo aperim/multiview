@@ -66,6 +66,31 @@ fn resolve_auth(state: &AppState, headers: &HeaderMap) -> WhipAuth {
     WhipAuth { bearer, write_key }
 }
 
+/// Enforce per-object authorization on the **API-key** credential path (BOLA,
+/// SEC-08 / ADR-W005). The WHIP bearer is either the per-source token (which the
+/// provider authorizes against the source's own secret) OR a control-plane API
+/// key. When it is a valid API key, it must additionally be authorized for THIS
+/// `source_id` on the object axis — a scoped Write key may not publish to or tear
+/// down a source outside its allowlist. The per-source token path (a bearer that
+/// is not an API key) is unaffected.
+///
+/// Runs BEFORE the provider is touched, so a denial has zero side effect.
+/// Returns `Some(403 /problems/forbidden)` for an out-of-scope API key, and
+/// `None` for the token path, an in-scope key, or auth-disabled mode.
+fn authorize_api_key_scope(state: &AppState, auth: &WhipAuth, source_id: &str) -> Option<Response> {
+    if state.auth_disabled {
+        return None;
+    }
+    let bearer = auth.bearer.as_deref()?;
+    // A bearer that does not verify as an API key is the per-source token path —
+    // the provider authorizes it against the source's own token; leave it alone.
+    let principal = state.api_keys.verify(bearer).ok()?;
+    // It IS a control-plane API key: it must be in object scope for this source.
+    crate::auth::authorize_object(&principal, source_id)
+        .err()
+        .map(|_| whip_reject_response(source_id, WhipReject::Forbidden))
+}
+
 /// Map a [`WhipReject`] onto its RFC 9457 `application/problem+json` response
 /// (ADR-T014 §2 status mapping).
 fn whip_reject_response(source_id: &str, reject: WhipReject) -> Response {
@@ -186,6 +211,12 @@ pub(crate) async fn whip_publish(
     };
 
     let auth = resolve_auth(&state, &headers);
+    // Per-object authz on the API-key path (BOLA, SEC-08): a scoped key may
+    // publish only to sources within its object allowlist. The per-source token
+    // path is unaffected; this runs before the transport (zero side effect).
+    if let Some(denied) = authorize_api_key_scope(&state, &auth, &source_id) {
+        return denied;
+    }
     match state.whip.negotiate(&source_id, offer, &auth) {
         Ok(answer) => {
             let location = format!(
@@ -247,6 +278,13 @@ pub(crate) async fn whip_delete(
     // source token bearer or a Write API key. A request with neither is 401/403.
     if auth.bearer.is_none() {
         return whip_reject_response(&source_id, WhipReject::Unauthorized);
+    }
+    // Per-object authz on the API-key path (BOLA, SEC-08): a scoped key may tear
+    // down only sessions on sources within its object allowlist. The provider's
+    // release does not re-check authorization, so this route guard is what makes
+    // a denied teardown a 403 with zero side effect.
+    if let Some(denied) = authorize_api_key_scope(&state, &auth, &source_id) {
+        return denied;
     }
     if state.whip.release(&source_id, &session_id, &auth) {
         state.audit(

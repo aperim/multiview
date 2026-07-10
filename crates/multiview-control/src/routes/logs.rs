@@ -104,5 +104,79 @@ pub(crate) async fn list_logs(
 ) -> ControlResult<Json<Vec<LogRecord>>> {
     principal.role.require(Action::Read)?;
     let filter = query.into_filter()?;
-    Ok(Json(state.logs.query(&filter)))
+    // BOLA (SEC-12, ADR-W005/W025): an explicit `?resource_id=` is a per-object
+    // probe — authorize it on the axis its `kind` names before returning anything
+    // (an out-of-scope id is a 403, exactly as a single-resource GET would be).
+    if let Some(resource_id) = filter.resource_id.as_deref() {
+        authorize_log_resource(&principal, filter.resource_kind, resource_id)?;
+    }
+    let mut records = state.logs.query(&filter);
+    // Row-filter the tail for a scoped principal (kind-aware; unattributed and
+    // program records fail closed). A no-op for an unscoped principal.
+    if !principal.is_global() {
+        records.retain(|record| log_record_visible(&principal, record));
+    }
+    Ok(Json(records))
+}
+
+/// Authorize an explicit `?resource_id=` log probe on the axis its `kind` names
+/// (BOLA, SEC-12). With no `kind` the id is ambiguous across the object and output
+/// axes, so a scoped principal must clear BOTH; a future/unknown kind fails closed
+/// (only an unrestricted principal may probe it).
+///
+/// # Errors
+///
+/// [`ControlError::Forbidden`] if the principal's relevant axis denies `resource_id`.
+fn authorize_log_resource(
+    principal: &Principal,
+    kind: Option<LogResourceKind>,
+    resource_id: &str,
+) -> ControlResult<()> {
+    match kind {
+        Some(LogResourceKind::Source | LogResourceKind::Layout | LogResourceKind::Device) => {
+            crate::auth::authorize_object(principal, resource_id)?;
+        }
+        Some(LogResourceKind::Output) => {
+            crate::auth::authorize_output(principal, resource_id)?;
+        }
+        // No kind: ambiguous across the object AND output axes — require both so a
+        // principal scoped on either cannot probe the other's id space.
+        None => {
+            crate::auth::authorize_object(principal, resource_id)?;
+            crate::auth::authorize_output(principal, resource_id)?;
+        }
+        // Program (whole-system), or a future/unknown kind (the enum is
+        // `#[non_exhaustive]`): allowed only to an unrestricted principal — fail
+        // closed for a scoped one.
+        Some(_) => {
+            crate::routes::require_unscoped_for_whole_system(principal)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether a scoped principal may see one log record (BOLA row filter, SEC-12).
+///
+/// Kind-aware: Source/Layout/Device → object axis, Output → output axis,
+/// Program → unrestricted-only. A record with no resource id, or an unknown /
+/// future (`#[non_exhaustive]`) kind, is unattributable and **fails closed**
+/// (dropped) — its message may span resources the principal cannot see. Applied
+/// only to a scoped principal; an unscoped one sees every record.
+fn log_record_visible(principal: &Principal, record: &LogRecord) -> bool {
+    let Some(resource_id) = record.resource_id.as_deref() else {
+        return false;
+    };
+    match record.resource_kind {
+        Some(LogResourceKind::Source | LogResourceKind::Layout | LogResourceKind::Device) => {
+            crate::auth::authorize_object(principal, resource_id).is_ok()
+        }
+        Some(LogResourceKind::Output) => {
+            crate::auth::authorize_output(principal, resource_id).is_ok()
+        }
+        // Program is whole-system: only an unrestricted principal sees it (this fn
+        // runs only for scoped principals, so a program record is dropped).
+        Some(LogResourceKind::Program) => principal.is_global(),
+        // Absent or future/unknown kind: unattributable, fail closed.
+        None | Some(_) => false,
+    }
 }

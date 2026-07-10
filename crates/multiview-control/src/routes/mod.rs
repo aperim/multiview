@@ -566,6 +566,10 @@ async fn cmd_swap(
 ) -> ControlResult<Response> {
     principal.role.require(Action::Write)?;
     crate::auth::authorize_object(&principal, &req.tile)?;
+    // Per-object authz on the SOURCE too (BOLA, SEC-09): a swap binds the source
+    // input onto the tile, so a scoped operator may swap in only sources within
+    // its object allowlist (a missing/out-of-scope id fails closed).
+    crate::auth::authorize_object(&principal, &req.source)?;
     let tile = req.tile.clone();
     let source = req.source.clone();
     let response = submit_accepted(&state, &idem, |op| Command::SwapSource {
