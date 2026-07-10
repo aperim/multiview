@@ -14,7 +14,9 @@ mod support;
 
 use axum::http::StatusCode;
 use multiview_telemetry::{LogLevel, LogRecord, LogResourceKind};
-use support::{body_json, get, harness, send, VIEWER_TOKEN};
+use support::{
+    body_json, get, harness, send, OPERATOR_TOKEN, OUTPUT_SCOPED_TOKEN, SCOPED_TOKEN, VIEWER_TOKEN,
+};
 
 fn record(seq: u64, resource_id: Option<&str>, level: LogLevel, message: &str) -> LogRecord {
     LogRecord {
@@ -26,6 +28,28 @@ fn record(seq: u64, resource_id: Option<&str>, level: LogLevel, message: &str) -
         run_id: Some("run-1".to_owned()),
         resource_kind: resource_id.map(|_| LogResourceKind::Source),
         resource_id: resource_id.map(str::to_owned),
+        label: None,
+        component: Some("hevc".to_owned()),
+        repeated: None,
+    }
+}
+
+/// A record with an explicit resource kind + id (SEC-12 kind-aware filter tests).
+fn record_kind(
+    seq: u64,
+    kind: Option<LogResourceKind>,
+    id: Option<&str>,
+    message: &str,
+) -> LogRecord {
+    LogRecord {
+        seq,
+        timestamp_ms: 1_700_000_000_000 + seq,
+        level: LogLevel::Info,
+        target: "libav".to_owned(),
+        message: message.to_owned(),
+        run_id: Some("run-1".to_owned()),
+        resource_kind: kind,
+        resource_id: id.map(str::to_owned),
         label: None,
         component: Some("hevc".to_owned()),
         repeated: None,
@@ -130,6 +154,150 @@ async fn empty_ring_returns_empty_list() {
     assert_eq!(resp.status(), StatusCode::OK);
     let arr = body_json(resp).await;
     assert!(arr.as_array().unwrap().is_empty());
+}
+
+// ---- SEC-12 (BOLA, ADR-W005/W025/W026): kind-aware log-tail scope filter ----
+//
+// GET /api/v1/logs returned EVERY buffered record regardless of the caller's
+// scope, so a scoped principal could read logs (config bodies, error detail) for
+// out-of-scope resources. The filter must be kind-aware: Source/Layout/Device →
+// object axis, Output → output axis, Program → unrestricted-only; and an
+// unattributed / unknown-kind record fails closed for a scoped principal. An
+// explicit resource_id query is a per-object probe (403 out of scope; an
+// ambiguous no-kind query must clear BOTH axes). No-op for an unscoped principal.
+
+#[tokio::test]
+async fn scoped_principal_sees_only_in_scope_object_logs() {
+    let h = harness();
+    // scoped-key is object-scoped to "scoped-layout".
+    h.logs.push(record_kind(
+        0,
+        Some(LogResourceKind::Source),
+        Some("scoped-layout"),
+        "in scope",
+    ));
+    h.logs.push(record_kind(
+        1,
+        Some(LogResourceKind::Source),
+        Some("cnn"),
+        "out of scope",
+    ));
+    h.logs
+        .push(record_kind(2, Some(LogResourceKind::Program), None, "program"));
+    h.logs.push(record_kind(3, None, None, "unattributed"));
+
+    let resp = send(&h.router, get("/api/v1/logs", SCOPED_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let arr = body_json(resp).await;
+    let arr = arr.as_array().unwrap();
+    assert_eq!(
+        arr.len(),
+        1,
+        "only the in-scope source record is visible (cnn, program, unattributed dropped): {arr:?}"
+    );
+    assert_eq!(arr[0]["resource_id"], "scoped-layout");
+}
+
+#[tokio::test]
+async fn output_scoped_principal_filters_by_the_output_axis() {
+    let h = harness();
+    // out-scoped-key is output-scoped to "wall-1".
+    h.logs.push(record_kind(
+        0,
+        Some(LogResourceKind::Output),
+        Some("wall-1"),
+        "in scope output",
+    ));
+    h.logs.push(record_kind(
+        1,
+        Some(LogResourceKind::Output),
+        Some("wall-2"),
+        "out of scope output",
+    ));
+    h.logs
+        .push(record_kind(2, Some(LogResourceKind::Program), None, "program"));
+
+    let resp = send(&h.router, get("/api/v1/logs", OUTPUT_SCOPED_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let arr = body_json(resp).await;
+    let arr = arr.as_array().unwrap();
+    assert_eq!(
+        arr.len(),
+        1,
+        "only the in-scope output record is visible (wall-2 + program dropped): {arr:?}"
+    );
+    assert_eq!(arr[0]["resource_id"], "wall-1");
+}
+
+#[tokio::test]
+async fn explicit_out_of_scope_resource_id_query_is_forbidden() {
+    let h = harness();
+    h.logs
+        .push(record_kind(0, Some(LogResourceKind::Source), Some("cnn"), "cnn"));
+    // A per-object probe for an out-of-scope id is denied, exactly as a
+    // single-object GET of that id would be.
+    let resp = send(
+        &h.router,
+        get("/api/v1/logs?resource_id=cnn&kind=source", SCOPED_TOKEN),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(resp).await["type"], "/problems/forbidden");
+}
+
+#[tokio::test]
+async fn ambiguous_resource_id_query_without_kind_fails_closed() {
+    let h = harness();
+    // No `kind`: the id is ambiguous across the object and output axes, so a
+    // scoped principal must clear BOTH — an out-of-scope object id is denied.
+    let resp = send(
+        &h.router,
+        get("/api/v1/logs?resource_id=cnn", SCOPED_TOKEN),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "an ambiguous id probe fails closed on the object axis"
+    );
+}
+
+#[tokio::test]
+async fn explicit_in_scope_resource_id_query_is_allowed() {
+    let h = harness();
+    h.logs.push(record_kind(
+        0,
+        Some(LogResourceKind::Source),
+        Some("scoped-layout"),
+        "in scope",
+    ));
+    let resp = send(
+        &h.router,
+        get(
+            "/api/v1/logs?resource_id=scoped-layout&kind=source",
+            SCOPED_TOKEN,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unscoped_operator_sees_every_record_including_program_and_unattributed() {
+    let h = harness();
+    h.logs
+        .push(record_kind(0, Some(LogResourceKind::Source), Some("cnn"), "s"));
+    h.logs
+        .push(record_kind(1, Some(LogResourceKind::Program), None, "p"));
+    h.logs.push(record_kind(2, None, None, "u"));
+    let resp = send(&h.router, get("/api/v1/logs", OPERATOR_TOKEN)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(resp).await.as_array().unwrap().len(),
+        3,
+        "an unscoped principal sees every record (the fix is a no-op for it)"
+    );
 }
 
 #[cfg(feature = "openapi")]
