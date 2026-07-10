@@ -39,7 +39,6 @@ pub const PROGRAM_SCOPE_PREFIX: &str = "program:";
 /// dependency runs control→config, never the reverse); `multiview-cli` maps this
 /// to `multiview_control::auth::Role` at registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ApiKeyRole {
@@ -145,8 +144,56 @@ impl ApiConfig {
     ///
     /// Returns [`ConfigError::Validation`] naming the first violation.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        // RED stub: accepts everything so the rejection tests fail first (TDD).
-        let _ = (&self.keys, PROGRAM_SCOPE_PREFIX, BTreeSet::<&str>::new());
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for key in &self.keys {
+            if key.key_id.trim().is_empty() {
+                return Err(ConfigError::Validation(
+                    "api.keys: a key_id must not be empty".to_owned(),
+                ));
+            }
+            if !seen.insert(key.key_id.as_str()) {
+                return Err(ConfigError::Validation(format!(
+                    "api.keys: duplicate key_id {:?}",
+                    key.key_id
+                )));
+            }
+            if key.secret_env.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "api.keys[{}]: secret_env must name the environment variable holding \
+                     the secret (never inline a secret)",
+                    key.key_id
+                )));
+            }
+            if let Some(outputs) = &key.scoped_output_ids {
+                for entry in outputs {
+                    if entry.is_empty() {
+                        return Err(ConfigError::Validation(format!(
+                            "api.keys[{}].scoped_output_ids: an entry must not be empty",
+                            key.key_id
+                        )));
+                    }
+                    // A `program:` grant must name a program after the reserved
+                    // prefix — `"program:"` alone is meaningless.
+                    if let Some(program) = entry.strip_prefix(PROGRAM_SCOPE_PREFIX) {
+                        if program.is_empty() {
+                            return Err(ConfigError::Validation(format!(
+                                "api.keys[{}].scoped_output_ids: {entry:?} names no program \
+                                 after the reserved \"program:\" prefix",
+                                key.key_id
+                            )));
+                        }
+                    }
+                }
+            }
+            if let Some(domains) = &key.scoped_discovery_domains {
+                for domain in domains {
+                    crate::discovery::validate_discovery_domain(
+                        domain,
+                        &format!("api.keys[{}].scoped_discovery_domains", key.key_id),
+                    )?;
+                }
+            }
+        }
         Ok(())
     }
 }

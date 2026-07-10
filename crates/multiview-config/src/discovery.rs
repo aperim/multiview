@@ -84,7 +84,7 @@ impl DiscoveryConfig {
             validate_service_type(ty, "discovery.extra_service_types")?;
         }
         if let Some(domain) = &self.domain {
-            validate_domain(domain)?;
+            validate_discovery_domain(domain, "discovery.domain")?;
         }
         Ok(())
     }
@@ -93,20 +93,22 @@ impl DiscoveryConfig {
 /// Check that `domain` is a DNS-label-like discovery domain (ADR-W026):
 /// non-empty, ≤64 chars, and only lowercase ASCII letters, digits, and `-`.
 /// Rejecting anything else keeps the label operator-legible and unambiguous as
-/// an authz key.
+/// an authz key. Shared by the `[discovery] domain` field and the `[[api.keys]]`
+/// `scoped_discovery_domains` allowlist so the label rules cannot fork; `field`
+/// names the offending config path in the error.
 ///
 /// # Errors
 ///
 /// Returns [`ConfigError::Validation`] describing the violation.
-fn validate_domain(domain: &str) -> Result<(), ConfigError> {
+pub(crate) fn validate_discovery_domain(domain: &str, field: &str) -> Result<(), ConfigError> {
     if domain.is_empty() {
-        return Err(ConfigError::Validation(
-            "discovery.domain: must not be empty (omit the field instead)".to_owned(),
-        ));
+        return Err(ConfigError::Validation(format!(
+            "{field}: must not be empty (omit the field instead)"
+        )));
     }
     if domain.len() > 64 {
         return Err(ConfigError::Validation(format!(
-            "discovery.domain: {domain:?} exceeds 64 characters"
+            "{field}: {domain:?} exceeds 64 characters"
         )));
     }
     if !domain
@@ -114,7 +116,7 @@ fn validate_domain(domain: &str) -> Result<(), ConfigError> {
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     {
         return Err(ConfigError::Validation(format!(
-            "discovery.domain: {domain:?} must contain only lowercase letters, \
+            "{field}: {domain:?} must contain only lowercase letters, \
              digits, and '-' (DNS-label-like)"
         )));
     }
