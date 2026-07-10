@@ -35,11 +35,17 @@ RUN apt-get update \
       ffmpeg \
       # VAAPI (Intel/AMD) userspace + verification + arch-portable runtime drivers
       libva-dev vainfo va-driver-all mesa-va-drivers \
- # The Intel media driver is x86_64-only; it has no arm64 package, so installing
- # it unconditionally breaks `docker buildx build` on Apple Silicon (arm64). Only
- # pull it on amd64, where Intel VAAPI hardware can actually exist.
+ # The Intel media driver is x86_64-only (no arm64 package) AND lives in Debian's
+ # `non-free` component, which the trixie base image does NOT enable (Components:
+ # main only) — so a plain install fails with "has no installation candidate"
+ # (apt exit 100). Enable non-free and refresh the index before pulling it, and
+ # only on amd64 where Intel VAAPI hardware can exist (installing it unconditionally
+ # also breaks `docker buildx build` on Apple Silicon / arm64).
  && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-      apt-get install -y --no-install-recommends intel-media-va-driver-non-free; \
+      sed -i -E 's/^Components:.*/Components: main contrib non-free non-free-firmware/' \
+        /etc/apt/sources.list.d/debian.sources \
+      && apt-get update \
+      && apt-get install -y --no-install-recommends intel-media-va-driver-non-free; \
     fi \
  && rm -rf /var/lib/apt/lists/*
 
