@@ -78,7 +78,7 @@ rustix = { version = "1.1", features = ["event"] }
 # libasound-speaking PCM + `/proc/asound` ELD reader, exercised on hardware.
 # Pulled in ONLY by `multiview-output`'s `display-kms` feature, so the default
 # build links nothing and `cargo deny` (`all-features = false`) never scans it.
-alsa = "0.11"
+alsa = "0.12"
 # Internal crates
 multiview-core = { path = "crates/multiview-core" }
 multiview-hal = { path = "crates/multiview-hal" }
