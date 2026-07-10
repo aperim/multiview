@@ -98,6 +98,37 @@ fn copy_into(dst: &mut [f32], src: &[f32], dst_frame: i64, channels: usize) {
     }
 }
 
+/// Overlay `src` interleaved samples — whose first frame is absolute index
+/// `src_base` — into `dst`, whose first frame is absolute index `dst_base`.
+///
+/// Frames of `src` below `dst_base` are **skipped** (they fall outside the
+/// bounded window — drop-oldest applied *during* the copy, so the caller never
+/// has to allocate space for them); frames past the end of `dst` are clamped by
+/// [`copy_into`]. Panic-free and bounds-checked. Reduces to a plain
+/// [`copy_into`] at `src_base - dst_base` when the whole source is at or above
+/// `dst_base`.
+fn overlay_from(dst: &mut [f32], src: &[f32], src_base: i64, dst_base: i64, channels: usize) {
+    if channels == 0 || src.is_empty() {
+        return;
+    }
+    // Whole frames of `src` that precede the destination base and are therefore
+    // dropped. Non-negative; zero when `src_base >= dst_base`.
+    let skip_frames = dst_base.saturating_sub(src_base).max(0);
+    let skip_samples = usize::try_from(skip_frames)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(channels);
+    let Some(src_tail) = src.get(skip_samples..) else {
+        return; // the whole source precedes the window — nothing survives.
+    };
+    // The first surviving source frame sits `src_base + skip_frames - dst_base`
+    // frames into `dst`: `src_base - dst_base` (>= 0) when nothing was skipped, or
+    // exactly 0 when `skip_frames` consumed the below-base prefix.
+    let dst_frame = src_base
+        .saturating_add(skip_frames)
+        .saturating_sub(dst_base);
+    copy_into(dst, src_tail, dst_frame, channels);
+}
+
 /// A bounded, lock-free, gap-free last-good audio store for one source.
 ///
 /// Construct with [`AudioStore::new`]; a decode thread feeds it with
@@ -215,6 +246,21 @@ impl AudioStore {
     pub fn buffered_frames(&self) -> usize {
         let channels = self.format.channel_count().max(1);
         self.window.load().samples.len() / channels
+    }
+
+    /// The **allocated capacity** (in frames) of the current window's backing
+    /// buffer — the size of the last transient allocation a publish made, which
+    /// [`publish_at`](AudioStore::publish_at) bounds to `capacity_frames` by
+    /// applying drop-oldest *before* it allocates. This exposes the transient the
+    /// live length ([`buffered_frames`](AudioStore::buffered_frames)) hides:
+    /// `Vec::drain` shifts elements but never reclaims capacity, so an
+    /// over-allocated union span would remain visible here even after the
+    /// post-merge clamp. For the bounded-memory regression test (inv #2/#5/#9).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn window_backing_capacity_frames(&self) -> usize {
+        let channels = self.format.channel_count().max(1);
+        self.window.load().samples.capacity() / channels
     }
 
     /// The reader's current **absolute** frame position — the next absolute
@@ -345,8 +391,10 @@ impl AudioStore {
     /// store's absolute coordinate. An unwritten span between writes is
     /// **silence** (gap-free by construction — the new window covers the union of
     /// the old window and the placed block, with any hole left as zeroes), and a
-    /// frame older than the surviving bounded window is dropped (drop-oldest,
-    /// never grows — invariant #2/#5). The placed block **overwrites** whatever
+    /// frame older than the surviving bounded window is dropped **before the merge
+    /// buffer is allocated** — so the transient allocation is bounded by the store
+    /// capacity, never the (potentially far larger) reorder span (drop-oldest,
+    /// never grows — invariant #2/#5/#9). The placed block **overwrites** whatever
     /// occupied its frames (last write at an index wins). A negative `at` is
     /// clamped to frame `0`.
     ///
@@ -384,33 +432,42 @@ impl AudioStore {
         // The new window covers the union of the existing window and the placed
         // block, so neither already-buffered frames nor the new block are lost
         // and any hole between them is silence.
-        let new_base = current.base_frame.min(at);
+        let union_base = current.base_frame.min(at);
         let new_head = old_head.max(block_end);
+        // Apply drop-oldest UP FRONT — clamp the working base so the span never
+        // exceeds `capacity_frames` *before* allocating. Frames older than
+        // `new_head - capacity_frames` are dropped either way, so allocating them
+        // would only be zero-then-copy-then-drain busywork. A late/reordered packet
+        // whose index lands far below the head (the RTP rebaser only re-anchors on
+        // jumps past its discontinuity threshold, which is much larger than this
+        // capacity) would otherwise size `merged` to the ~discontinuity-wide union
+        // span — a per-packet zero+memcpy amplification vector that violates "queues
+        // drop, never grow" (invariant #2/#5/#9). Clamping here bounds the transient
+        // allocation to `capacity_frames`, never the union span.
+        let cap_frames = i64::try_from(self.capacity_frames).unwrap_or(i64::MAX);
+        let new_base = union_base.max(new_head.saturating_sub(cap_frames));
         let span_frames = usize::try_from(new_head.saturating_sub(new_base)).unwrap_or(0);
         let mut merged = vec![0.0f32; span_frames.saturating_mul(channels)];
 
-        // Overlay the existing window first, then the new block (last write wins
-        // on overlap — a re-sent packet replaces the stale one at that index).
-        copy_into(
+        // Overlay the existing window first, then the new block (last write wins on
+        // overlap — a re-sent packet replaces the stale one at that index).
+        // `overlay_from` skips any source frames below `new_base`: that is the
+        // drop-oldest, now applied during the copy instead of by a post-merge
+        // `drain`, so `merged` is never larger than capacity and no evicted frame is
+        // ever allocated. `merged.len() <= capacity_frames * channels` by
+        // construction (`new_head - new_base <= cap_frames`), so no trailing clamp
+        // is needed.
+        overlay_from(
             &mut merged,
             &current.samples,
-            current.base_frame.saturating_sub(new_base),
+            current.base_frame,
+            new_base,
             channels,
         );
-        copy_into(&mut merged, incoming, at.saturating_sub(new_base), channels);
-
-        // Drop-oldest past capacity (whole frames only), advancing the base.
-        let cap_samples = self.capacity_frames.saturating_mul(channels);
-        let mut base_frame = new_base;
-        let overflow_samples = merged.len().saturating_sub(cap_samples);
-        if overflow_samples > 0 {
-            let evicted_frames = i64::try_from(overflow_samples / channels).unwrap_or(i64::MAX);
-            merged.drain(0..overflow_samples);
-            base_frame = base_frame.saturating_add(evicted_frames);
-        }
+        overlay_from(&mut merged, incoming, at, new_base, channels);
 
         self.window.store(Arc::new(RingSnapshot {
-            base_frame,
+            base_frame: new_base,
             samples: merged,
         }));
         Ok(())
