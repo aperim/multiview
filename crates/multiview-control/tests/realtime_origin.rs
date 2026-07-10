@@ -18,7 +18,7 @@
 mod support;
 
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{header, HeaderValue, Request, StatusCode};
 use multiview_control::AllowedOrigins;
 use support::{harness_with, send, ADMIN_TOKEN};
 
@@ -226,4 +226,109 @@ async fn configured_allowlist_origin_accepted_on_sse() {
         StatusCode::OK,
         "a configured allow-list origin is accepted cross-Host"
     );
+}
+
+// ---- RED (SEC-13 hardening): the Origin is a real parse, not a raw string ----
+
+/// A configured `null` entry must be UNREPRESENTABLE: `AllowedOrigins` parses +
+/// canonicalizes at construction and drops what does not parse, so `Origin: null`
+/// can never be allowed by ANY construction path — not only the config-validated
+/// one (defect #4).
+#[test]
+fn configured_null_is_never_allowed() {
+    let policy = AllowedOrigins::new(vec!["null".to_owned()]);
+    assert!(
+        !policy.permits("null", Some("mv.local")),
+        "a `null` allow-list entry must not make `Origin: null` allowable"
+    );
+}
+
+/// A configured non-http(s) origin is dropped at construction (defect #4): a bad
+/// scheme can never be stored, so it can never be matched.
+#[test]
+fn configured_bad_scheme_is_never_allowed() {
+    let policy = AllowedOrigins::new(vec!["garbage://mv.local".to_owned()]);
+    assert!(
+        !policy.permits("garbage://mv.local", Some("elsewhere.example")),
+        "a non-http(s) configured entry must not be matchable"
+    );
+}
+
+/// A configured entry carrying userinfo is dropped at construction (defect #4).
+#[test]
+fn configured_userinfo_is_never_allowed() {
+    let policy = AllowedOrigins::new(vec!["https://user@mv.local".to_owned()]);
+    assert!(
+        !policy.permits("https://user@mv.local", Some("mv.local")),
+        "a userinfo-bearing configured entry must not be matchable"
+    );
+}
+
+/// A present request `Origin` carrying a PATH must not be leniently reduced to its
+/// bare host and pass same-origin (defect #2): `https://mv.local/evil` is NOT
+/// same-origin with `Host: mv.local`.
+#[test]
+fn path_bearing_origin_denied_same_origin() {
+    let policy = AllowedOrigins::new(Vec::new());
+    assert!(
+        !policy.permits("https://mv.local/evil", Some("mv.local")),
+        "a path-bearing Origin must not reduce to its host and pass same-origin"
+    );
+}
+
+/// A present `Origin` with a PATH is refused on WS + SSE — the gate must not
+/// reduce it to its bare authority and admit it as same-origin (defect #2), even
+/// with auth disabled.
+#[tokio::test]
+async fn path_bearing_origin_rejected_on_ws_and_sse() {
+    let harness = harness_with(|state| state.with_auth_disabled(true));
+
+    for path in ["/api/v1/ws", "/api/v1/events"] {
+        let resp = send(
+            &harness.router,
+            Request::builder()
+                .method("GET")
+                .uri(path)
+                .header(header::HOST, "mv.local")
+                .header(header::ORIGIN, "https://mv.local/evil")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a path-bearing Origin must be refused on {path} (not reduced to same-origin)"
+        );
+    }
+}
+
+/// A present but non-UTF-8 `Origin` header must FAIL CLOSED (deny), not be folded
+/// into the absent-Origin case and admitted (defect #3). The bytes are valid
+/// header-value obs-text (0xFF is allowed on the wire) but not valid UTF-8, so
+/// `HeaderValue::to_str()` fails — a present-but-unreadable Origin is not a
+/// legitimate browser origin.
+#[tokio::test]
+async fn non_utf8_origin_rejected_on_ws_and_sse() {
+    let harness = harness_with(|state| state.with_auth_disabled(true));
+    let bad = HeaderValue::from_bytes(b"https://\xff.evil").unwrap();
+
+    for path in ["/api/v1/ws", "/api/v1/events"] {
+        let resp = send(
+            &harness.router,
+            Request::builder()
+                .method("GET")
+                .uri(path)
+                .header(header::HOST, "mv.local")
+                .header(header::ORIGIN, bad.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a present but unreadable Origin must fail closed on {path}"
+        );
+    }
 }
