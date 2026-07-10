@@ -79,9 +79,24 @@ async fn output_scoped_principal_denied_every_whole_system_surface() {
     // OUTPUT-only scope (scoped_object_ids = None, scoped_output_ids = Some):
     // the object-only guard used to wave this principal straight through.
     let h = harness();
-    assert_forbidden(&h.router, export(OUTPUT_SCOPED_TOKEN), "output-scoped export").await;
-    assert_forbidden(&h.router, revert(OUTPUT_SCOPED_TOKEN), "output-scoped revert").await;
-    assert_forbidden(&h.router, promote(OUTPUT_SCOPED_TOKEN), "output-scoped promote").await;
+    assert_forbidden(
+        &h.router,
+        export(OUTPUT_SCOPED_TOKEN),
+        "output-scoped export",
+    )
+    .await;
+    assert_forbidden(
+        &h.router,
+        revert(OUTPUT_SCOPED_TOKEN),
+        "output-scoped revert",
+    )
+    .await;
+    assert_forbidden(
+        &h.router,
+        promote(OUTPUT_SCOPED_TOKEN),
+        "output-scoped promote",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -89,8 +104,18 @@ async fn discovery_domain_scoped_principal_denied_every_whole_system_surface() {
     // DISCOVERY-domain-only scope: the new axis W026 adds must be covered by the
     // same generalized predicate, not a two-axis object-or-output check.
     let h = harness();
-    assert_forbidden(&h.router, export(DISCOVERY_SCOPED_TOKEN), "discovery-scoped export").await;
-    assert_forbidden(&h.router, revert(DISCOVERY_SCOPED_TOKEN), "discovery-scoped revert").await;
+    assert_forbidden(
+        &h.router,
+        export(DISCOVERY_SCOPED_TOKEN),
+        "discovery-scoped export",
+    )
+    .await;
+    assert_forbidden(
+        &h.router,
+        revert(DISCOVERY_SCOPED_TOKEN),
+        "discovery-scoped revert",
+    )
+    .await;
     assert_forbidden(
         &h.router,
         promote(DISCOVERY_SCOPED_TOKEN),

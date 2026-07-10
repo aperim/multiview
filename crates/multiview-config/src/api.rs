@@ -349,9 +349,8 @@ mod tests {
         // The non-admin roles remain config-mintable (the guard does not
         // over-restrict): every role the control plane maps still parses.
         for role in ["read_only", "viewer", "operator"] {
-            let toml = format!(
-                "[[keys]]\nkey_id = \"k\"\nsecret_env = \"ENV_K\"\nrole = \"{role}\"\n"
-            );
+            let toml =
+                format!("[[keys]]\nkey_id = \"k\"\nsecret_env = \"ENV_K\"\nrole = \"{role}\"\n");
             let parsed: Result<ApiConfig, _> = toml::from_str(&toml);
             assert!(
                 parsed.is_ok(),

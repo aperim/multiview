@@ -754,7 +754,11 @@ mod tests {
         // never a silent HashMap clobber that swaps the admin's secret +
         // principal (lockout / privilege takeover — auth-panel F3).
         let (mut store, _) = provision_admin_keys(Some("admin-secret".to_owned()));
-        let keys = vec![ApiKeyConfig::new("admin", "ENV_ADMIN", ApiKeyRole::Operator)];
+        let keys = vec![ApiKeyConfig::new(
+            "admin",
+            "ENV_ADMIN",
+            ApiKeyRole::Operator,
+        )];
         let err = register_config_api_keys(&mut store, &keys, |_| Some("attacker".to_owned()))
             .expect_err("a config key colliding with the reserved admin id must be rejected");
         assert!(
@@ -791,7 +795,10 @@ mod tests {
             _ => None,
         })
         .expect_err("a second key reusing an already-registered id must be rejected");
-        assert!(err.contains("dup"), "the error names the colliding id: {err}");
+        assert!(
+            err.contains("dup"),
+            "the error names the colliding id: {err}"
+        );
     }
 
     #[test]
