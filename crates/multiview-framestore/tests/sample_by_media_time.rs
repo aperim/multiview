@@ -238,3 +238,39 @@ fn ring_is_bounded_drop_oldest() {
         Some(u32::try_from(total - 1).unwrap())
     );
 }
+
+#[test]
+fn steady_state_pacing_prunes_consumed_frames() {
+    // BOUNDED-MEMORY guard (invariant #9). In the shipping path the producer is
+    // paced ~1:1 with the output clock (multiview-cli `PtsWallClock`), so the
+    // output latches each frame at ~the instant it was published and advances
+    // past every prior frame. Output `now` is monotonic (inv #1/#3), so a frame
+    // older than the current latch can NEVER be selected again — retaining it is
+    // pure dead weight. The ring must prune those consumed past frames instead of
+    // sitting pinned at a full RING_CAPACITY-deep backlog (~3.2 GB/tile at 2160p).
+    let s = store();
+    let cap = TileStore::<u32>::RING_CAPACITY;
+    // Run well past the ceiling so a count-only bound would stay pinned at `cap`.
+    let iters = cap.saturating_mul(4);
+    for i in 0..iters {
+        let at = MediaTime::from_nanos(i64::try_from(i).unwrap().saturating_mul(40_000_000));
+        s.publish(u32::try_from(i).unwrap(), at);
+        // The output clock latches this frame on this tick (1:1 pacing). This
+        // also proves the just-latched frame is never pruned (a prune bound that
+        // dropped the boundary frame would break this read-back).
+        let r = s.read_at(at);
+        assert_eq!(
+            r.frame().map(|f| **f),
+            Some(u32::try_from(i).unwrap()),
+            "output@i must latch the frame it just published"
+        );
+    }
+    // After steady-state pacing the reader has consumed every past frame, so the
+    // ring holds only a tiny trailing window (the latched frame + at most a
+    // handful), NOT ~RING_CAPACITY frames.
+    let retained = s.retained_frames();
+    assert!(
+        retained <= 4,
+        "steady-state ring must prune consumed frames; retained {retained} of cap {cap}"
+    );
+}

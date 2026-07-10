@@ -454,4 +454,16 @@ impl<T> TileStore<T> {
     pub fn slot(&self) -> &LatestSlot<T> {
         &self.slot
     }
+
+    /// The number of frames currently retained in the media-time ring.
+    ///
+    /// Introspection for bounded-memory tests and soak gates (invariant #9): the
+    /// ring must not accumulate frames the output clock has already advanced
+    /// past. Hidden from the public docs — it exposes an internal buffer's
+    /// occupancy, not a stable API contract.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn retained_frames(&self) -> usize {
+        self.ring.load().len()
+    }
 }
