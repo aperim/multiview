@@ -2,7 +2,10 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    // `event_from` takes the JSON body by value for call-site ergonomics; the
+    // `json!` macro moves it, so a reference would only add noise in a test.
+    clippy::needless_pass_by_value
 )]
 //! Golden classification table for [`multiview_events::Event::authz_scope`]
 //! (ADR-W026): the unified, wildcard-free event scope model. Each case pins one
@@ -134,7 +137,7 @@ fn tile_state_without_input_is_public() {
 fn media_player_state_is_object_scoped_by_player() {
     let e = event_from(
         "media.player_state",
-        json!({ "player": "player:vt1", "state": { "kind": "rewinding" }, "position_frames": 0 }),
+        json!({ "player": "player:vt1", "state": { "kind": "playing" }, "position_frames": 0 }),
     );
     assert_eq!(e.authz_scope(), AuthzScope::Object("player:vt1"));
 }
@@ -181,9 +184,6 @@ fn control_and_telemetry_events_are_public() {
     let ping: Event = serde_json::from_value(json!({ "t": "$ping" })).unwrap();
     assert_eq!(ping.authz_scope(), AuthzScope::Public);
 
-    let output_status = event_from(
-        "output.status",
-        json!({ "output_id": "out-hls", "state": "RUNNING" }),
-    );
+    let output_status = event_from("output.status", json!({ "state": "running" }));
     assert_eq!(output_status.authz_scope(), AuthzScope::Public);
 }

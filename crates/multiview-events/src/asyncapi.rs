@@ -1862,7 +1862,17 @@ fn device_discovered_schema() -> Value {
                 "enum": ["ipv6", "ipv4-legacy"],
                 "description": "Address family — IPv6-first; IPv4 results are labelled legacy."
             },
-            "name": { "type": "string", "description": "The advertised device name, if any." }
+            "name": { "type": "string", "description": "The advertised device name, if any." },
+            "domain": {
+                "type": "string",
+                "description": concat!(
+                    "The discovery domain the observing node stamped on this row (ADR-W026), ",
+                    "sourced solely from that node's operator-declared `[discovery] domain` ",
+                    "config — never from the responder payload or TXT records. Absent when the ",
+                    "observing node declared no domain; a discovery-scoped principal is then ",
+                    "denied the row (fail-closed).",
+                )
+            }
         }
     })
 }
