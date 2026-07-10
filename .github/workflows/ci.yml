@@ -258,6 +258,18 @@ jobs:
           # actually compiles the cosmic-text `Buffer`/`FontSystem` call sites.
           - crate: multiview-compositor
             feature: overlay
+          # The wgpu compositor backend (the DEFAULT GPU backend; ADR-E002, §F inv#5).
+          # Pure Rust at COMPILE time — wgpu/naga/wgpu-hal build GPU-free — and every
+          # wgpu-gated test (tests/gpu_*.rs, backend_select.rs) matches
+          # `Error::NoAdapter`/`DeviceRequest` and SKIPS when no adapter is present
+          # (the real-GPU parity checks carry `#[ignore]`), so this leg lints + tests
+          # on the bare runner. The default `lint`/`test` jobs build NONE of the
+          # `gpu/` module: a wgpu 30 API drift (`RequestAdapterOptions.apply_limit_buckets`
+          # + fallible `get_mapped_range`) sat red on main unnoticed (#55) because no
+          # gate built `--features wgpu`. This leg gates that surface going forward
+          # (same rationale as the `overlay` legs above).
+          - crate: multiview-compositor
+            feature: wgpu
           # The `multiview-cli` umbrella `overlay` feature gates
           # `multiview-compositor/overlay` (it does NOT imply `ffmpeg` — it is the
           # GPU-free, LGPL-clean overlay tier the `nvidia`/`apple`/`linux-vaapi`/
