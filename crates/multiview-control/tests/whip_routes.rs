@@ -25,7 +25,7 @@ use multiview_control::{
 use multiview_engine::EnginePublisher;
 
 mod support;
-use support::{body_json, send, OPERATOR_TOKEN, PEPPER, VIEWER_TOKEN};
+use support::{body_json, send, OPERATOR_TOKEN, PEPPER, SCOPED_TOKEN, VIEWER_TOKEN};
 
 /// A minimal, well-formed SDP offer advertising H.264 + Opus.
 const OFFER: &str = "v=0\r\n\
@@ -141,6 +141,20 @@ fn router_with_whip(whip: Arc<FakeWhip>) -> axum::Router {
             },
         );
     }
+    // A scoped Operator key (object-scoped to "scoped-layout") for the SEC-08
+    // API-key-path BOLA tests; matches `support::seeded_keys` so `SCOPED_TOKEN`
+    // authenticates.
+    keys.register(
+        "scoped-key",
+        "scoped-secret-jkl",
+        Principal {
+            key_id: "scoped-key".to_owned(),
+            role: Role::Operator,
+            scoped_object_ids: Some(vec!["scoped-layout".to_owned()]),
+            scoped_output_ids: None,
+            scoped_discovery_domains: None,
+        },
+    );
     let state = AppState::new(
         engine,
         tx,
@@ -395,4 +409,108 @@ async fn problem_body_is_rfc9457() {
     let resp = send(&router, post_sdp("/api/v1/whip/cam-1", None, OFFER)).await;
     let problem = body_json(resp).await;
     assert_eq!(problem["status"], 401);
+}
+
+// ---- SEC-08 (BOLA, ADR-W005): the API-key credential path honors object scope --
+//
+// A WHIP source is an object (source) id. The alternative Write-API-key path
+// authorized by ROLE only, so a scoped Operator key could publish to / tear down
+// ANY source. These pin per-object authz on the API-key path (POST + DELETE)
+// with zero provider side effect; the per-source *token* path is unchanged
+// (the existing token tests still pass).
+
+#[tokio::test]
+async fn scoped_write_key_is_denied_publishing_to_an_out_of_scope_source() {
+    let whip = Arc::new(FakeWhip::default());
+    let router = router_with_whip(Arc::clone(&whip));
+    // scoped-key is object-scoped to "scoped-layout"; cam-1 is out of scope.
+    let resp = send(
+        &router,
+        post_sdp("/api/v1/whip/cam-1", Some(SCOPED_TOKEN), OFFER),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(resp).await["type"], "/problems/forbidden");
+    assert_eq!(
+        whip.active_sessions(),
+        0,
+        "no session is negotiated on a denied publish"
+    );
+}
+
+#[tokio::test]
+async fn scoped_write_key_may_publish_to_its_in_scope_source() {
+    let whip = Arc::new(FakeWhip::default());
+    let router = router_with_whip(Arc::clone(&whip));
+    // "scoped-layout" is a token-less source in the fake, so the Write-key path
+    // is exercised; it is in scope, so the publish is accepted.
+    let resp = send(
+        &router,
+        post_sdp("/api/v1/whip/scoped-layout", Some(SCOPED_TOKEN), OFFER),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(whip.active_sessions(), 1);
+}
+
+#[tokio::test]
+async fn scoped_write_key_is_denied_tearing_down_an_out_of_scope_session() {
+    let whip = Arc::new(FakeWhip::default());
+    let router = router_with_whip(Arc::clone(&whip));
+    // A session on cam-1 opened via the per-source token (out of the scoped key's
+    // object scope).
+    let created = send(
+        &router,
+        post_sdp("/api/v1/whip/cam-1", Some(SOURCE_TOKEN), OFFER),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let location = created
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .expect("Location present");
+    // The scoped key (scoped-layout) may not tear down cam-1's session.
+    let del = Request::builder()
+        .method("DELETE")
+        .uri(&location)
+        .header(header::AUTHORIZATION, format!("Bearer {SCOPED_TOKEN}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = send(&router, del).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(resp).await["type"], "/problems/forbidden");
+    assert_eq!(
+        whip.active_sessions(),
+        1,
+        "the out-of-scope session is untouched on a denied teardown"
+    );
+}
+
+#[tokio::test]
+async fn scoped_write_key_may_tear_down_its_in_scope_session() {
+    let whip = Arc::new(FakeWhip::default());
+    let router = router_with_whip(Arc::clone(&whip));
+    // Open + release a session on the in-scope, token-less source "scoped-layout".
+    let created = send(
+        &router,
+        post_sdp("/api/v1/whip/scoped-layout", Some(SCOPED_TOKEN), OFFER),
+    )
+    .await;
+    let location = created
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .expect("Location present");
+    let del = Request::builder()
+        .method("DELETE")
+        .uri(&location)
+        .header(header::AUTHORIZATION, format!("Bearer {SCOPED_TOKEN}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = send(&router, del).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(whip.active_sessions(), 0, "the in-scope session is freed");
 }

@@ -25,7 +25,7 @@ use multiview_control::{
 use multiview_engine::EnginePublisher;
 
 mod support;
-use support::{send, OPERATOR_TOKEN, PEPPER, VIEWER_TOKEN};
+use support::{body_json, send, OPERATOR_TOKEN, OUTPUT_SCOPED_TOKEN, PEPPER, VIEWER_TOKEN};
 
 /// A minimal, well-formed WHEP recvonly SDP offer advertising H.264.
 const OFFER: &str = "v=0\r\n\
@@ -38,6 +38,10 @@ a=recvonly\r\n";
 
 /// The per-output bearer the fake provider accepts for `pgm`.
 const OUTPUT_TOKEN: &str = "s3cret-pgm";
+
+/// The bearer for a control-plane API key output-scoped to `pgm` — the in-scope
+/// positive control for the SEC-08 API-key path.
+const PGM_SCOPED_TOKEN: &str = "pgm-scoped-key.pgm-scoped-secret";
 
 /// An in-memory fake [`WhepOutputProvider`]: accepts the per-output token or a
 /// View principal, enforces a per-output `max_viewers`, and records sessions. It
@@ -134,6 +138,31 @@ fn router_with_whep(whep: Arc<FakeWhep>) -> axum::Router {
             },
         );
     }
+    // Scoped keys for the SEC-08 API-key-path BOLA tests: one output-scoped to
+    // "wall-1" (out of scope for the fake's "pgm" output) and one to "pgm" (in
+    // scope). `OUTPUT_SCOPED_TOKEN` matches `support::seeded_keys`.
+    keys.register(
+        "out-scoped-key",
+        "out-scoped-secret-mno",
+        Principal {
+            key_id: "out-scoped-key".to_owned(),
+            role: Role::Operator,
+            scoped_object_ids: None,
+            scoped_output_ids: Some(vec!["wall-1".to_owned()]),
+            scoped_discovery_domains: None,
+        },
+    );
+    keys.register(
+        "pgm-scoped-key",
+        "pgm-scoped-secret",
+        Principal {
+            key_id: "pgm-scoped-key".to_owned(),
+            role: Role::Operator,
+            scoped_object_ids: None,
+            scoped_output_ids: Some(vec!["pgm".to_owned()]),
+            scoped_discovery_domains: None,
+        },
+    );
     let state = AppState::new(
         engine,
         tx,
@@ -343,4 +372,102 @@ async fn default_provider_refuses_503() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ---- SEC-08 (BOLA, ADR-W005/W026): the API-key path honors output scope ----
+//
+// A WHEP-serve output is an output (rendition) id. The alternative View-API-key
+// path authorized by ROLE only, so a scoped key could view / tear down ANY
+// output. These pin per-output authz on the API-key path (POST + DELETE) with
+// zero provider side effect; the per-output *token* path is unchanged.
+
+#[tokio::test]
+async fn scoped_view_key_is_denied_viewing_an_out_of_scope_output() {
+    let whep = Arc::new(FakeWhep::default());
+    let router = router_with_whep(Arc::clone(&whep));
+    // out-scoped-key is output-scoped to "wall-1"; pgm is out of scope.
+    let resp = send(
+        &router,
+        post_sdp("/api/v1/whep/pgm", Some(OUTPUT_SCOPED_TOKEN), OFFER),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(resp).await["type"], "/problems/forbidden");
+    assert_eq!(
+        whep.active_sessions(),
+        0,
+        "no viewer session on a denied view"
+    );
+}
+
+#[tokio::test]
+async fn scoped_view_key_may_view_its_in_scope_output() {
+    let whep = Arc::new(FakeWhep::default());
+    let router = router_with_whep(Arc::clone(&whep));
+    let resp = send(
+        &router,
+        post_sdp("/api/v1/whep/pgm", Some(PGM_SCOPED_TOKEN), OFFER),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(whep.active_sessions(), 1);
+}
+
+#[tokio::test]
+async fn scoped_view_key_is_denied_tearing_down_an_out_of_scope_session() {
+    let whep = Arc::new(FakeWhep::default());
+    let router = router_with_whep(Arc::clone(&whep));
+    // A viewer session on pgm opened via the per-output token.
+    let created = send(
+        &router,
+        post_sdp("/api/v1/whep/pgm", Some(OUTPUT_TOKEN), OFFER),
+    )
+    .await;
+    let location = created
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .expect("Location present");
+    // The output-scoped key (wall-1) may not tear down pgm's viewer session.
+    let del = Request::builder()
+        .method("DELETE")
+        .uri(&location)
+        .header(header::AUTHORIZATION, format!("Bearer {OUTPUT_SCOPED_TOKEN}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = send(&router, del).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(resp).await["type"], "/problems/forbidden");
+    assert_eq!(
+        whep.active_sessions(),
+        1,
+        "the out-of-scope viewer session is untouched on a denied teardown"
+    );
+}
+
+#[tokio::test]
+async fn scoped_view_key_may_tear_down_its_in_scope_session() {
+    let whep = Arc::new(FakeWhep::default());
+    let router = router_with_whep(Arc::clone(&whep));
+    let created = send(
+        &router,
+        post_sdp("/api/v1/whep/pgm", Some(PGM_SCOPED_TOKEN), OFFER),
+    )
+    .await;
+    let location = created
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .expect("Location present");
+    let del = Request::builder()
+        .method("DELETE")
+        .uri(&location)
+        .header(header::AUTHORIZATION, format!("Bearer {PGM_SCOPED_TOKEN}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = send(&router, del).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(whep.active_sessions(), 0, "the in-scope viewer session is freed");
 }
