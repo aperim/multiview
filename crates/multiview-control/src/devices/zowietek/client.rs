@@ -1013,7 +1013,6 @@ mod dial_screen_tests {
     // module, so allow explicitly (rule 20).
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use std::io::ErrorKind;
     use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
     use std::sync::Arc;
     use std::time::Duration;
@@ -1047,9 +1046,14 @@ mod dial_screen_tests {
             let _ = rt.block_on(transport.post("system", RpcVerb::SetInfo, &body));
         }
         // Any connection reqwest opened is queued on the listener's backlog by
-        // now (the TCP handshake completes at connect time, before the POST
-        // times out), so a single non-blocking accept detects a bypass.
-        !matches!(listener.accept(), Err(e) if e.kind() == ErrorKind::WouldBlock)
+        // now (the TCP handshake completes at connect time, before the POST times
+        // out), so a single non-blocking accept detects it. Count ONLY a
+        // successful accept as "reached": a `WouldBlock` means no connection
+        // landed, and any *other* accept error (Interrupted/ConnectionAborted/…)
+        // is treated as not-reached too — so the positive control fails loud on a
+        // spurious error rather than passing vacuously, and a refusal test never
+        // reads a stray error as a reach.
+        listener.accept().is_ok()
     }
 
     /// Discover a routable, non-loopback local interface IP — an address the OS
@@ -1075,7 +1079,21 @@ mod dial_screen_tests {
             }
             if let Ok(local) = sock.local_addr() {
                 let ip = local.ip();
-                if !ip.is_loopback() && !ip.is_unspecified() {
+                // Only an address the screen will actually PERMIT is a valid
+                // positive-control target. `allow_lan()` refuses loopback,
+                // unspecified AND link-local (IPv4 169.254/16, IPv6 fe80::/10) as
+                // never-legit; the kernel never picks a multicast/broadcast source.
+                // Excluding those leaves private/ULA/CGNAT/global unicast — every
+                // one of which `allow_lan()` permits — so a discovered address is
+                // guaranteed reachable through the screen (else this test would
+                // flake on a host whose egress source is link-local).
+                let never_legit = ip.is_loopback()
+                    || ip.is_unspecified()
+                    || match ip {
+                        IpAddr::V4(v4) => v4.is_link_local(),
+                        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+                    };
+                if !never_legit {
                     return Some(ip);
                 }
             }
@@ -1165,7 +1183,7 @@ mod dial_screen_tests {
         let _client = std::net::TcpStream::connect(("127.0.0.1", port))
             .expect("raw connect to the idle loopback listener");
         assert!(
-            !matches!(listener.accept(), Err(e) if e.kind() == ErrorKind::WouldBlock),
+            listener.accept().is_ok(),
             "the non-blocking accept must detect a real connection (else the screen tests are vacuous)"
         );
     }
