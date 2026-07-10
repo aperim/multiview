@@ -18,7 +18,11 @@
 //! external test crate; deserialization is the honest cross-crate construction
 //! path and also proves the wire compat for the new `domain` field).
 
-use multiview_events::{AuthzScope, DeviceDiscovered, Event};
+use multiview_core::stream::StreamInventory;
+use multiview_events::{
+    AuthzScope, DeviceDiscovered, Event, InputConnection, InputStreams, LifecycleState,
+    RistLinkRole, RistLinkStats, SalvoEvent, SalvoPhase,
+};
 use serde_json::json;
 
 fn event_from(t: &str, data: serde_json::Value) -> Event {
@@ -186,4 +190,106 @@ fn control_and_telemetry_events_are_public() {
 
     let output_status = event_from("output.status", json!({ "state": "running" }));
     assert_eq!(output_status.authz_scope(), AuthzScope::Public);
+}
+
+// ---- ADR-W026 leak-set tightenings ---------------------------------------
+// The pre-W026 firehose drafted these object/output-bearing events as `Public`
+// despite their REST twins being BOLA/per-output gated. Each case pins the
+// CORRECT (tightened) classification so the exhaustive `authz_scope()` match can
+// never silently re-ratify the leak. (Cross-vendor auth review, audits
+// a0ac35bd + a13540b3.)
+
+#[test]
+fn rist_link_stats_is_output_scoped_by_link_id() {
+    // `link_id` is the configured RIST source/output id (output axis); `cname`
+    // leaks peer-hostname topology, so it must not firehose to output-scoped
+    // principals. REST twin: RIST stats ride `Topic::Outputs`.
+    let e = Event::RistLinkStats(RistLinkStats {
+        link_id: "srt-egress-1".to_owned(),
+        role: RistLinkRole::Sender,
+        flow_id: 42,
+        cname: "peer.example.invalid".to_owned(),
+        peer_count: 1,
+        rtt_ms: 20,
+        quality: 100.0,
+        bandwidth_bps: 5_000_000,
+        retry_bandwidth_bps: 0,
+        sent: 1_000,
+        received: 0,
+        retransmitted: 0,
+        lost: 0,
+        recovered: 0,
+        since: 1,
+    });
+    assert_eq!(e.authz_scope(), AuthzScope::Output("srt-egress-1"));
+}
+
+#[test]
+fn input_streams_is_object_scoped_by_input_id() {
+    // Same id namespace `TileState` is object-scoped on; the REST twin
+    // `GET /inputs/{id}/streams` is `authorize_object`-gated.
+    let e = Event::InputStreams(InputStreams::new(
+        "input:cam2",
+        StreamInventory::from_streams(vec![]),
+    ));
+    assert_eq!(e.authz_scope(), AuthzScope::Object("input:cam2"));
+}
+
+#[test]
+fn input_connection_is_object_scoped_by_input_id() {
+    // An input's connect/flap lifecycle is the same leak class as its stream
+    // inventory: "input cam2 flapping" must not reach a cam1-scoped principal.
+    let e = Event::InputConnection(InputConnection::new(
+        "input:cam2",
+        LifecycleState::Reconnecting,
+    ));
+    assert_eq!(e.authz_scope(), AuthzScope::Object("input:cam2"));
+}
+
+#[test]
+fn input_connection_carries_input_id_round_trip() {
+    // The new object-axis field must survive the wire so the classifier can read
+    // it (the event is un-attributable without it).
+    let e = InputConnection::new("input:cam2", LifecycleState::Live).with_attempt(3);
+    let wire = serde_json::to_value(&e).unwrap();
+    assert_eq!(wire["input_id"], json!("input:cam2"));
+    let back: InputConnection = serde_json::from_value(wire).unwrap();
+    assert_eq!(back.input_id, "input:cam2");
+    assert_eq!(back.attempt, Some(3));
+}
+
+#[test]
+fn salvo_armed_with_head_is_object_and_output() {
+    // The REST twin gates BOTH axes: `authorize_object(salvo)` +
+    // `authorize_output(head)`. A single-axis scope under-gates; the conjunction
+    // is the faithful classification.
+    let e = Event::SalvoArmed(SalvoEvent::new("preset-a", SalvoPhase::Armed).with_head("out-1"));
+    assert_eq!(
+        e.authz_scope(),
+        AuthzScope::ObjectAndOutput {
+            object: "preset-a",
+            output: "out-1"
+        }
+    );
+}
+
+#[test]
+fn salvo_cancelled_with_head_is_object_and_output() {
+    let e =
+        Event::SalvoCancelled(SalvoEvent::new("preset-a", SalvoPhase::Cancelled).with_head("out-2"));
+    assert_eq!(
+        e.authz_scope(),
+        AuthzScope::ObjectAndOutput {
+            object: "preset-a",
+            output: "out-2"
+        }
+    );
+}
+
+#[test]
+fn salvo_taken_without_head_is_object_scoped() {
+    // No head → the REST twin skips `authorize_output`, so the whole-wall recall
+    // is gated by the salvo object only (matches `submit_for_existing_salvo`).
+    let e = Event::SalvoTaken(SalvoEvent::new("preset-a", SalvoPhase::Taken));
+    assert_eq!(e.authz_scope(), AuthzScope::Object("preset-a"));
 }
