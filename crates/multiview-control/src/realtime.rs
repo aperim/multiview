@@ -841,6 +841,21 @@ impl SessionStream {
                 return None;
             }
         }
+        // Connect-time broadcast watermark (ADR-RT009): an event whose engine seq
+        // is at or before the broadcast frontier captured with the connect
+        // snapshot is ALREADY reflected in that snapshot — drop it so it is not
+        // re-delivered as a delta (duplicate) and a queued pre-snapshot transition
+        // cannot replay after the newer snapshot (transient backward roll). Checked
+        // BEFORE `issue_seq` so the drop leaves no gap in the per-connection seq
+        // (exactly like the resume/conflated/scope skips), and before the
+        // object-scope filter so the two read-side drops compose. A pure per-client
+        // read decision on an event already pulled from the bounded broadcast: no
+        // lock, no await, never touches the engine publish path (invariant #10).
+        if let Some(watermark) = self.snapshot_watermark {
+            if seq_event.seq <= watermark {
+                return None;
+            }
+        }
         // Per-object visibility (BOLA, ADR-W005/ADR-W025): a scoped principal
         // receives a Devices-domain OBJECT delta (device.* / cast.session.*)
         // only when its scope id is in the allowlist — by parity with
@@ -1230,11 +1245,20 @@ pub async fn auth_status_handler(
 async fn run_ws_session(mut socket: WebSocket, state: AppState, object_scope: Option<Vec<String>>) {
     let sub = state.engine.subscribe();
     let session_id = uuid_session_id();
+    // Capture the broadcast watermark BETWEEN subscribing and reading the snapshot
+    // (ADR-RT009). Subscribing first means no event published after the watermark
+    // is missed; capturing the watermark before the snapshot read means — because
+    // the engine publishes state-then-event (runtime.rs) — the snapshot reflects
+    // every event with `seq <= watermark`, so dropping those deltas loses nothing.
+    // Both reads are wait-free atomic loads that never touch the engine publish
+    // path (invariant #10).
+    let watermark = state.engine.events.sequence();
+    let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
     let mut session = SessionStream::new(sub, session_id, None)
         .with_corr_registry(Arc::clone(&state.corr))
-        .with_object_scope(object_scope);
+        .with_object_scope(object_scope)
+        .with_snapshot_watermark(watermark);
 
-    let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
     let hello = session.snapshot_frame(snapshot_seq);
     if let Ok(text) = hello.to_json() {
         if socket.send(Message::Text(text.into())).await.is_err() {
@@ -1309,13 +1333,21 @@ pub async fn sse_handler(
 
     let sub = state.engine.subscribe();
     let session_id = uuid_session_id();
+    // Capture the broadcast watermark between subscribe and the snapshot read, and
+    // pair it with the snapshot (ADR-RT009) — identical to the WebSocket transport:
+    // subscribe-first misses no post-watermark event; watermark-before-snapshot
+    // (state-then-event publish ordering) means the snapshot reflects every event
+    // with `seq <= watermark`; and both reads are wait-free atomic loads that never
+    // touch the engine publish path (invariant #10).
+    let watermark = state.engine.events.sequence();
+    let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
     // The authenticated principal's object scope confines the SSE stream to its
     // in-scope device/cast objects (BOLA visibility, ADR-W005/ADR-W025), exactly
     // as the WebSocket transport; an unscoped principal sees all.
     let mut session = SessionStream::new(sub, session_id, None)
         .with_corr_registry(Arc::clone(&state.corr))
-        .with_object_scope(principal.scoped_object_ids);
-    let (snapshot, snapshot_seq) = current_engine_snapshot(&state);
+        .with_object_scope(principal.scoped_object_ids)
+        .with_snapshot_watermark(watermark);
 
     let stream = async_stream::stream! {
         let hello = session.snapshot_frame(snapshot_seq);
