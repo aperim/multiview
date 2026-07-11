@@ -111,6 +111,33 @@ fn stable_hash_is_deterministic_and_content_sensitive() {
     let _ = stable_hash(b"");
 }
 
+#[test]
+fn stable_hash_matches_pinned_fnv1a_golden_vectors() {
+    // P2-F4: `stable_hash` must be pinned to a DEFINED, cross-version-stable
+    // algorithm (FNV-1a), never `DefaultHasher` — whose output Rust explicitly
+    // does not guarantee across toolchain versions. A drift would change the
+    // message-id hash for UNCHANGED SDP across a restart, so a receiver could not
+    // correlate an announce/delete pair (RFC 2974 §8) and would carry a duplicate
+    // session until timeout. These golden vectors are the FNV-1a-of-SDP contract:
+    // they FAIL against `DefaultHasher` and pin the algorithm against any future
+    // change. Computed from FNV-1a/64 (offset 0xcbf2_9ce4_8422_2325,
+    // prime 0x0000_0100_0000_01b3), XOR-folded to 16 bits, forced non-zero —
+    // independent of the toolchain.
+    assert_eq!(stable_hash(b"").get(), 0xF011, "empty SDP");
+    assert_eq!(stable_hash(b"v=0\r\n").get(), 0xB0F8, "minimal SDP body");
+    let sdp = b"v=0\r\no=- 1 1 IN IP6 2001:db8::1\r\ns=mv\r\nt=0 0\r\nm=audio 5004 RTP/AVP 96\r\n";
+    assert_eq!(stable_hash(sdp).get(), 0xE2FE, "realistic IPv6 SDP");
+    // A one-character change (session-id `1` -> `2`) yields a DIFFERENT pinned
+    // hash, so a modification is still detectable under the stable algorithm.
+    let modified = b"v=0\r\no=- 1 2 IN IP6 2001:db8::1\r\ns=mv\r\nt=0 0\r\nm=audio 5004 RTP/AVP 96\r\n";
+    assert_eq!(stable_hash(modified).get(), 0x581B, "one-byte-diff SDP");
+    assert_ne!(
+        stable_hash(sdp),
+        stable_hash(modified),
+        "a modified SDP is detectable (different stable hash)"
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
