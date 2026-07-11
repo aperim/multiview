@@ -352,8 +352,9 @@ impl<T> SourceRegistry<T> {
     /// returns an [`Arc`] clone of the same store. Growing the supremum does **not**
     /// resize the live store/decode: the metadata tracks the max requested (for a
     /// future decode-ownership hoist), and callers that need the supremum acquire it
-    /// up front. `factory` runs under the registry lock and MUST be non-blocking
-    /// (spawn-and-return) and MUST NOT re-enter the registry.
+    /// up front. `factory` runs **outside** the registry lock (inv #10 — the lock is never
+    /// held across a caller closure) and should be non-blocking (spawn-and-return); it MUST
+    /// NOT re-enter the registry for the same `key`.
     ///
     /// # Errors
     ///
@@ -385,8 +386,9 @@ impl<T> SourceRegistry<T> {
     /// reaper hand-off (nothing to join). Decode-once/use-many and per-axis
     /// supremum growth are identical to [`acquire`](SourceRegistry::acquire); on the **first** reference the
     /// `factory` builds only the shared store, and every later reference shares an
-    /// [`Arc`] clone of it. `factory` runs under the registry lock and MUST be
-    /// non-blocking and MUST NOT re-enter the registry. When the decode lifecycle is
+    /// [`Arc`] clone of it. `factory` runs **outside** the registry lock (inv #10) and should
+    /// be non-blocking; it MUST NOT re-enter the registry for the same `key`. When the decode
+    /// lifecycle is
     /// later hoisted, callers move to [`acquire`](SourceRegistry::acquire) and pass the owning actor.
     ///
     /// # Errors
@@ -407,12 +409,17 @@ impl<T> SourceRegistry<T> {
         })
     }
 
-    /// Shared insert-or-bump for [`acquire`] and [`acquire_store`]. On the **first**
-    /// reference to `key` the `factory` builds the shared store and (optionally) the
-    /// decode actor **under the lock**, so two racing first-references cannot both
-    /// spawn (decode-once, no TOCTOU). Every later reference bumps the refcount,
-    /// grows the recorded supremum to the per-axis max, and returns an [`Arc`] clone
-    /// of the one store.
+    /// Shared insert-or-bump for [`acquire`] and [`acquire_store`]. Every **later** reference
+    /// bumps the refcount under the lock, grows the recorded supremum to the per-axis max, and
+    /// returns an [`Arc`] clone of the one store. On the **first** reference the `factory` runs
+    /// **OUTSIDE** the lock (inv #10 — a slow factory must never block a concurrent
+    /// `release`/`acquire` on another key; the lock is never held across a caller closure),
+    /// then the result is inserted under a re-check: if a concurrent first-reference won the
+    /// race meanwhile, this reference shares the winner's store and **discards** its own
+    /// just-built store + actor (whose `Drop` signals decode termination). Decode-once holds in
+    /// **steady state**; a rare concurrent double-build is self-correcting (only the winner's
+    /// decode is ever registered). In MP-2 production only `acquire_store` (actor-less — a cheap
+    /// `TileStore` alloc) is used, so a lost race just discards one allocation.
     fn acquire_inner<F, E>(
         self: &Arc<Self>,
         key: SourceKey,
@@ -422,14 +429,38 @@ impl<T> SourceRegistry<T> {
     where
         F: FnOnce(RequestedSize) -> Result<(Arc<TileStore<T>>, Option<Box<dyn SourceActor>>), E>,
     {
-        let store = {
+        // Fast path: an existing entry just bumps its refcount + supremum under the lock and
+        // shares its store — the lock is never held across the caller `factory`.
+        {
             let mut entries = lock(&self.entries);
             if let Some(entry) = entries.get_mut(&key) {
                 entry.refcount = entry.refcount.saturating_add(1);
                 entry.supremum = entry.supremum.supremum(requested);
+                let store = Arc::clone(&entry.store);
+                return Ok(SourceHandle {
+                    registry: Arc::clone(self),
+                    key,
+                    store,
+                });
+            }
+        }
+
+        // First reference: build the store (+ optional actor) OUTSIDE the lock, so a slow
+        // `factory` never blocks a concurrent `release`/`acquire` on ANOTHER key (inv #10 — no
+        // lock is held across a caller closure). Then re-check under the lock: if a concurrent
+        // first-reference won the race meanwhile, share the winner's store and DISCARD our
+        // just-built store + actor (the actor's `Drop` signals decode termination — the loser's
+        // decode never joins the registry). Decode-once holds in steady state; the rare
+        // concurrent double-build is self-correcting.
+        let (store, actor) = factory(requested)?;
+        let shared = {
+            let mut entries = lock(&self.entries);
+            if let Some(entry) = entries.get_mut(&key) {
+                // A concurrent first-reference won the race: share its store, discard ours.
+                entry.refcount = entry.refcount.saturating_add(1);
+                entry.supremum = entry.supremum.supremum(requested);
                 Arc::clone(&entry.store)
             } else {
-                let (store, actor) = factory(requested)?;
                 let shared = Arc::clone(&store);
                 entries.insert(
                     key.clone(),
@@ -446,7 +477,7 @@ impl<T> SourceRegistry<T> {
         Ok(SourceHandle {
             registry: Arc::clone(self),
             key,
-            store,
+            store: shared,
         })
     }
 
@@ -1907,7 +1938,7 @@ mod tests {
 
         // Release key B on a helper thread while the factory holds; measure completion.
         let released = Arc::new(AtomicBool::new(false));
-        let releaser = {
+        let dropper = {
             let released = released.clone();
             std::thread::spawn(move || {
                 drop(hb); // release(key-b): must not wait on the key-a factory
@@ -1929,7 +1960,7 @@ mod tests {
 
         // Unblock the factory regardless (no deadlock on the RED path), then settle.
         release_factory.store(true, Ordering::Release);
-        let _ = releaser.join();
+        let _ = dropper.join();
         let ha = acquirer.join().expect("acquirer thread");
 
         assert!(
