@@ -49,6 +49,10 @@ serde_json = { workspace = true }
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["trace", "cors"] }
+# The `http_body::Body` trait, to wrap a response body so a SEC-14 concurrency
+# permit is held for the BODY's lifetime (a held-open SSE stream), not merely the
+# handler's return. Pure Rust; already in the lock via axum.
+http-body = "1.0.1"
 bytes = "1.10.1"
 async-stream = "0.3.6"
 uuid = { version = "1.23.2", features = ["v4"] }
@@ -205,10 +209,6 @@ tokio = { workspace = true, features = [
 ] }
 tower = { version = "0.5.3", features = ["util"] }
 http-body-util = "0.1.3"
-# Hand-roll a never-ending response body in the SEC-14 concurrency-cap tests, to
-# prove the permit is tied to the BODY's lifetime (a held-open SSE/stream), not
-# just the handler's return (already in the lock via axum).
-http-body = "1.0.1"
 # Property tests for the pure value-machines in this crate (the IS-07 tally/GPI
 # codec and the tally mirror/override registry).
 proptest = "1.11.0"

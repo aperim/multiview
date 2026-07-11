@@ -45,16 +45,21 @@
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use axum::extract::{ConnectInfo, Request, State};
+use axum::body::{Body, Bytes};
+use axum::extract::{ConnectInfo, FromRequestParts, Request, State};
+use axum::http::request::Parts;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use http_body::{Body as HttpBody, Frame, SizeHint};
 use multiview_config::limits::ManagementLimits;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::auth::ApiKeyStore;
 use crate::problem::Problem;
@@ -444,26 +449,128 @@ pub(crate) async fn per_api_key_rate_limit(
     }
 }
 
-/// Global concurrent-request cap. Acquires one permit for the duration of the
-/// request; when the cap is reached the request is **shed** with `503` +
-/// Retry-After rather than queued — bounded, never back-pressures (invariant #10).
+/// A response body that owns a concurrency [`OwnedSemaphorePermit`] and delegates to
+/// an inner body. The permit releases exactly when the body ends — its last frame is
+/// polled, or it is dropped (a client disconnect) — so a concurrency permit rides the
+/// RESPONSE's lifetime, not merely the handler's return. A long-lived streaming body
+/// (SSE at `/api/v1/events`) therefore holds its concurrency slot for as long as it
+/// streams (F1), so a flood of held-open streams is shed once the cap is reached.
+struct PermitBody {
+    /// The wrapped response body.
+    inner: Body,
+    /// Released on drop — the whole point; never read.
+    _permit: OwnedSemaphorePermit,
+}
+
+impl HttpBody for PermitBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        // `axum::body::Body` is `Unpin`, so this projection is sound without a
+        // `pin-project` dependency.
+        Pin::new(&mut self.inner).poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// The claim slot the in-flight [`concurrency_cap`] permit rides in. The middleware
+/// puts the acquired permit here and hands a clone to the handler chain via request
+/// extensions; a handler that will outlive its response body — the WebSocket upgrade,
+/// whose `101` body is empty but whose session is a **detached task** — CLAIMS it via
+/// [`ConcurrencyPermitClaim`] and moves it into the session, so the permit is held for
+/// the connection's life. If left unclaimed the middleware reclaims it and ties it to
+/// the response body ([`PermitBody`]) instead. `Arc<Mutex<Option<_>>>` is an
+/// uncontended one-shot hand-off (the lock only ever wraps a `take()`, never held
+/// across an `.await`) — unrelated to the lock-free rate-limiter hot path above.
+#[derive(Clone)]
+struct CarriedPermit(Arc<Mutex<Option<OwnedSemaphorePermit>>>);
+
+/// Extractor that CLAIMS the in-flight concurrency permit for a handler that must hold
+/// it beyond the response body — the WebSocket route, whose upgraded socket runs in a
+/// detached task ([`axum::extract::ws::WebSocketUpgrade::on_upgrade`] spawns it). The
+/// handler moves the claimed permit into the session so the cap counts live sockets.
+/// `None` when limits are disabled (no middleware ⇒ no [`CarriedPermit`]) — the handler
+/// then runs unbounded by this cap, exactly as before SEC-14.
+pub(crate) struct ConcurrencyPermitClaim(pub(crate) Option<OwnedSemaphorePermit>);
+
+impl<St: Send + Sync> FromRequestParts<St> for ConcurrencyPermitClaim {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &St) -> Result<Self, Self::Rejection> {
+        // Take the permit out of the shared slot, if a `concurrency_cap` layer put one
+        // there. A poisoned lock still yields its inner Option (recover, never panic).
+        let permit = parts.extensions.get::<CarriedPermit>().and_then(|carried| {
+            let mut slot = match carried.0.lock() {
+                Ok(slot) => slot,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            slot.take()
+        });
+        Ok(Self(permit))
+    }
+}
+
+/// Global concurrent-request cap. Acquires one permit per request; when the cap is
+/// reached the request is **shed** with `503` + `Retry-After` rather than queued —
+/// bounded, never back-pressures (invariant #10).
+///
+/// The permit is tied to the *work's* lifetime, not merely the handler's return:
+/// - a normal or streaming (SSE) response holds it via [`PermitBody`] until the body
+///   ends, so a held-open stream keeps its slot;
+/// - the WebSocket route CLAIMS it (via [`ConcurrencyPermitClaim`]) and moves it into
+///   the detached upgrade task, so a live socket keeps its slot.
+///
+/// Either way a single acquisition bounds the connection for its whole life, so a
+/// flood of long-lived SSE / WebSocket connections is shed once the cap is reached —
+/// not just a burst of fast handler executions.
 pub(crate) async fn concurrency_cap(
     State(limiters): State<Arc<Limiters>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let Some(semaphore) = limiters.concurrency.as_ref() else {
         return next.run(request).await;
     };
-    match Arc::clone(semaphore).try_acquire_owned() {
-        Ok(permit) => {
-            // Hold the permit across the handler; release it once the response is
-            // produced (drop after the await, never during it).
-            let response = next.run(request).await;
-            drop(permit);
-            response
+    let Ok(permit) = Arc::clone(semaphore).try_acquire_owned() else {
+        return overloaded(CONCURRENCY_RETRY_AFTER);
+    };
+    // Park the permit in a shared one-shot slot and hand a clone to the handler chain,
+    // so a handler that outlives the response body (the WebSocket upgrade) can claim it.
+    let slot = Arc::new(Mutex::new(Some(permit)));
+    request
+        .extensions_mut()
+        .insert(CarriedPermit(Arc::clone(&slot)));
+    let response = next.run(request).await;
+    // Reclaim the permit unless the handler claimed it. Claimed (WebSocket) ⇒ the
+    // session task now owns it; return the response untouched. Unclaimed ⇒ tie it to
+    // the response body so it releases when the body (a stream) ends.
+    let reclaimed = match slot.lock() {
+        Ok(mut slot) => slot.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    };
+    match reclaimed {
+        Some(permit) => {
+            let (parts, body) = response.into_parts();
+            Response::from_parts(
+                parts,
+                Body::new(PermitBody {
+                    inner: body,
+                    _permit: permit,
+                }),
+            )
         }
-        Err(_) => overloaded(CONCURRENCY_RETRY_AFTER),
+        None => response,
     }
 }
 
@@ -942,6 +1049,65 @@ mod middleware_tests {
             .await
             .unwrap();
         assert_eq!(third.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_claimed_permit_bounds_a_detached_task_not_just_the_response() {
+        // The WebSocket pattern: a handler CLAIMS the in-flight permit (as the real
+        // `ws_handler` does, via the same `ConcurrencyPermitClaim` extractor) and moves
+        // it into a DETACHED task, returning an immediate empty-body response. The
+        // permit must be held by the task — not released when the response returns — so
+        // while the task runs a second request is shed `503`. This is the exact fix for
+        // the WebSocket half of F1: axum spawns the upgraded socket detached, so tying
+        // the permit to the (empty `101`) response body would leave a live socket
+        // uncounted.
+        let limiters = Arc::new(Limiters::from_config(&cfg(1, 256, 256)));
+        // Keeps the spawned "session" tasks alive across the assertions.
+        let keep_alive = Arc::new(tokio::sync::Notify::new());
+        let handler_keep = keep_alive.clone();
+        let app = Router::new()
+            .route(
+                "/upgrade",
+                get(move |claim: super::ConcurrencyPermitClaim| {
+                    let keep = handler_keep.clone();
+                    async move {
+                        // Move the claimed permit into a detached task (like on_upgrade).
+                        tokio::spawn(async move {
+                            let _permit = claim.0;
+                            keep.notified().await;
+                        });
+                        axum::response::Response::new(Body::empty())
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                limiters,
+                concurrency_cap,
+            ));
+
+        // First request: the handler claims the permit into a live detached task.
+        let first = app
+            .clone()
+            .oneshot(Request::builder().uri("/upgrade").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // The detached task still holds the permit → a second request is shed `503`,
+        // proving the claim outlives the response (the bug released it at return → 200).
+        let second = app
+            .clone()
+            .oneshot(Request::builder().uri("/upgrade").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            second.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a claimed permit must bound the detached session, not release at response return"
+        );
+
+        // Release the detached tasks so they drop their permits (cleanup).
+        keep_alive.notify_waiters();
     }
 
     #[test]
