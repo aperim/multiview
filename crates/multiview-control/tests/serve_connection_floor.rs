@@ -272,3 +272,180 @@ async fn an_in_flight_connection_is_aborted_at_the_drain_ceiling() {
          outlived serve() (F3 leak)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// F1 (panel round-2): a live, UPGRADED WebSocket must keep counting against the
+// accept-level population caps AND drain when serve() shuts down.
+//
+// hyper's `UpgradeableConnection` future completes at the HTTP/1 Upgrade handshake
+// (not at the WebSocket's end), and axum runs the upgraded socket as a DETACHED
+// task. So an accept-level `ConnectionGuard` held only by the connection task drops
+// at upgrade — the live WebSocket then (i) stops occupying its per-IP population
+// slot (sequential upgrades bypass the per-IP cap) and (ii) is invisible to the
+// shutdown drain, outliving serve(). These tests pin both. RED before the
+// guard-rides-the-IO + shutdown-aware `TrackedStream` fix (+ the cooperative
+// `socket.recv()` arm in `run_ws_session`); GREEN after.
+// ---------------------------------------------------------------------------
+
+/// Like [`test_state`] but with auth disabled, so a credential-less WebSocket
+/// handshake upgrades (as `local_admin`) — these tests exercise the accept-level
+/// per-IP population cap + the shutdown drain, not authentication.
+fn test_state_auth_disabled() -> AppState {
+    test_state().with_auth_disabled(true)
+}
+
+/// Bind an ephemeral IPv6 loopback listener and serve the full control-plane for
+/// `state` with the given [`ServeOptions`] (so `/api/v1/ws` upgrades through the
+/// hand-rolled loop under the accept-level caps).
+async fn serve_control_plane_with(
+    state: AppState,
+    options: ServeOptions,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+) {
+    let listener = TcpListener::bind("[::1]:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    assert!(addr.is_ipv6(), "control plane must bind IPv6 loopback");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(multiview_control::serve_with(
+        listener,
+        state,
+        options,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+    (addr, shutdown_tx, server)
+}
+
+/// Open a raw `/api/v1/ws` upgrade handshake (no `Origin`, no credential — accepted
+/// as `local_admin` under `auth_disabled`), read the response status code, and RETURN
+/// the still-open socket so the caller holds the session open. `"101"` means the
+/// socket upgraded and its detached session task is now live.
+async fn ws_upgrade(addr: std::net::SocketAddr) -> (String, TcpStream) {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    // RFC 6455 example key; the server's accept value is irrelevant to these tests.
+    let req = format!(
+        "GET /api/v1/ws HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    // Read just the status line; any WS frame the session sends after `101` stays
+    // buffered (we never drain it), keeping the socket open.
+    let mut acc = Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+            .await
+            .expect("read the handshake response within 5s")
+            .unwrap();
+        if n == 0 {
+            break;
+        }
+        acc.extend_from_slice(&buf[..n]);
+        if acc.contains(&b'\n') {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&acc).into_owned();
+    let status = text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or_default()
+        .to_owned();
+    (status, stream)
+}
+
+/// F1(i): a live upgraded WebSocket must occupy its source IP's population slot for
+/// its whole life. With the per-IP cap at 1, a held-open WebSocket must cause a SECOND
+/// connection from the same IP to be refused at accept. Under the upgrade-escape bug
+/// the guard drops at the HTTP/1 Upgrade, freeing the slot, so the second connection
+/// is (wrongly) admitted and served — sequential upgrades would bypass the per-IP cap
+/// entirely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_upgraded_websocket_counts_against_the_per_ip_connection_cap() {
+    let options = ServeOptions::default()
+        .with_header_read_timeout(Some(Duration::from_secs(5)))
+        .with_max_connections(Some(64))
+        .with_max_connections_per_ip(Some(1));
+    let (addr, shutdown_tx, server) =
+        serve_control_plane_with(test_state_auth_disabled(), options).await;
+
+    // WS #1: upgrade and HOLD it open — its detached session must hold the per-IP slot.
+    let (status, _ws1) = ws_upgrade(addr).await;
+    assert_eq!(status, "101", "the first WebSocket must upgrade (101)");
+    // Let the accept loop settle the guard across the upgrade.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A SECOND connection from the same IP (::1) must be refused at accept: the loop
+    // accepts the TCP connection then immediately drops it (over the per-IP cap of 1),
+    // so a COMPLETE request gets a prompt EOF with NO response bytes. `Connection:
+    // close` means the admitted (buggy) path also resolves `read_to_end` (response +
+    // close) rather than hanging on keep-alive — so `buf.is_empty()` cleanly
+    // discriminates refused-at-accept from admitted-and-served.
+    let mut second = TcpStream::connect(addr).await.unwrap();
+    second
+        .write_all(b"GET /api/v1/auth/status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    let read = tokio::time::timeout(Duration::from_millis(500), second.read_to_end(&mut buf)).await;
+    assert!(
+        read.is_ok(),
+        "the second same-IP connection neither closed nor responded within 500ms"
+    );
+    assert!(
+        buf.is_empty(),
+        "the second same-IP connection received a response — the live WebSocket's per-IP \
+         population slot was freed at the HTTP/1 upgrade (guard dropped at upgrade); got: {}",
+        String::from_utf8_lossy(&buf)
+    );
+
+    drop(_ws1);
+    shutdown_tx.send(()).unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+}
+
+/// F1(ii): a live upgraded WebSocket must terminate promptly when serve() is shut
+/// down — the shutdown signal must reach the detached socket. Under the escape bug the
+/// upgraded socket is a detached task invisible to the drain, and (its engine
+/// broadcast still held by its own `AppState` clone) it never observes serve()'s
+/// shutdown, so it outlives serve(): the client socket never reaches EOF.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_upgraded_websocket_is_drained_when_serve_shuts_down() {
+    let ceiling = Duration::from_millis(500);
+    let options = ServeOptions::default()
+        .with_header_read_timeout(Some(Duration::from_secs(5)))
+        .with_graceful_shutdown_ceiling(ceiling);
+    let (addr, shutdown_tx, server) =
+        serve_control_plane_with(test_state_auth_disabled(), options).await;
+
+    let (status, mut ws) = ws_upgrade(addr).await;
+    assert_eq!(status, "101", "the WebSocket must upgrade (101)");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Shut down serve().
+    shutdown_tx.send(()).unwrap();
+
+    // serve() must return (its tracked, non-upgraded connections drain within the
+    // ceiling). This alone does NOT prove the WS drained — the upgraded socket is a
+    // detached task serve() does not await — so the close assertion below is the
+    // load-bearing one.
+    let serve_returned = tokio::time::timeout(ceiling + Duration::from_secs(3), server).await;
+    assert!(serve_returned.is_ok(), "serve() did not return after shutdown");
+
+    // The client must observe the WebSocket close promptly (its socket reaches EOF):
+    // the shutdown-aware transport returns EOF into the upgraded socket and the
+    // cooperative session ends. Under the bug the detached session lives on and this
+    // read never EOFs.
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(3), ws.read_to_end(&mut rest)).await;
+    assert!(
+        closed.is_ok(),
+        "the live WebSocket was not drained when serve() shut down — it outlived serve() \
+         (F1 shutdown-escape: the upgraded socket never saw the shutdown signal)"
+    );
+}
