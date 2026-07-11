@@ -988,6 +988,19 @@ mod tests {
         }
     }
 
+    /// A test decode actor whose SHED-path signal (`request_stop`) PANICS — proving a shed,
+    /// which runs on the RELEASING thread (never a `catch_unwind`'d pool worker), CONTAINS the
+    /// panic (RP1) instead of unwinding into the engine and leaking the reserved slot. Its
+    /// `Drop` does **not** panic (a double panic aborts) and `shutdown` is never reached on a
+    /// shed path.
+    struct ShedPanicProbe;
+    impl SourceActor for ShedPanicProbe {
+        fn request_stop(&self) {
+            panic!("request_stop panics on the shed path — the release must CONTAIN it (inv #10)");
+        }
+        fn shutdown(self: Box<Self>) {}
+    }
+
     /// Sets every `stop` flag on drop, so a [`ThreadedProbe`] thread never leaks past the
     /// test — even if an assertion panics on a RED run before the explicit cleanup.
     struct StopAllOnDrop(Vec<Arc<AtomicBool>>);
@@ -1573,6 +1586,123 @@ mod tests {
             "the observable stays bounded through panics (saw {max_pending}, bound {BOUND})"
         );
 
+        reg.shutdown();
+    }
+
+    #[test]
+    fn a_shed_after_shutdown_contains_actor_panic_and_releases_the_slot() {
+        // RP1 (#161, inv #10): a SHED runs on the RELEASING thread (SourceHandle::drop), NOT a
+        // pool worker, so it is NOT covered by the worker's catch_unwind. If the shed actor's
+        // request_stop()/Drop panics it must (a) NOT unwind into the releasing engine thread
+        // and (b) NOT leak the reserved pending slot. Here the pool is GONE (post-shutdown),
+        // so the offer reserves a slot then sheds via Teardown::drop → signal_and_detach on a
+        // PANICKING actor. RED (uncaught): the release thread unwinds (join → Err) AND the
+        // fetch_sub is skipped so the slot leaks; GREEN: contained + slot released.
+        //
+        // Expected stderr: one caught-panic line — the containment working, not a failure.
+        let reg = SourceRegistry::<u64>::new();
+        reg.shutdown(); // pool gone: teardown_tx = None → the next offer sheds via Teardown::drop
+        assert_eq!(reg.pending_teardowns(), 0);
+
+        let h = reg
+            .acquire(
+                SourceKey::from_canonical("rtsp://shed-panic"),
+                size(1, 1),
+                |_r| Ok::<_, Infallible>(SourceInit::new(store("shed-panic"), ShedPanicProbe)),
+            )
+            .unwrap();
+        // Drop on its own thread: a single uncaught panic unwinds THIS thread (join → Err),
+        // standing in for "the panic escaped into the releasing engine thread".
+        let outcome = std::thread::spawn(move || drop(h)).join();
+
+        assert!(
+            outcome.is_ok(),
+            "a shed whose actor panics must be CONTAINED, not unwind into the releasing thread \
+             (inv #10)"
+        );
+        assert_eq!(
+            reg.pending_teardowns(),
+            0,
+            "the reserved pending slot must be released even when the shed's actor panics (no leak)"
+        );
+    }
+
+    #[test]
+    fn a_ceiling_shed_contains_actor_panic() {
+        // RP1 (#161, inv #10): at the D+K ceiling the offer sheds WITHOUT reserving, directly
+        // via signal_and_detach on the releasing thread (offer_teardown's ceiling arm). A
+        // panicking actor there must be CONTAINED too — not unwind into the releasing engine
+        // thread. (No reservation is taken at the ceiling, so there is no slot to leak; the
+        // bug is purely the escaping unwind.)
+        let reg = SourceRegistry::<u64>::new();
+        let gate = Arc::new(AtomicBool::new(true));
+        let _clear = ClearGateOnDrop(gate.clone());
+        let counters = Counters::new();
+        let ceiling = TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS;
+
+        // Saturate to the D+K ceiling deterministically. A sync_channel frees a buffer slot
+        // the instant a worker pulls, so we must first OCCUPY both workers (in-flight, gated)
+        // — pinning in-flight at K — THEN fill the bounded queue to depth D. Reserved =
+        // D + K = ceiling, with no queue-full shed racing the fill.
+        //  (1) Occupy every worker with a gated in-flight teardown.
+        for i in 0..TEARDOWN_WORKERS {
+            let c = counters.clone();
+            let g = gate.clone();
+            let h = reg
+                .acquire(
+                    SourceKey::from_canonical(format!("rtsp://ceil-busy/{i}")),
+                    size(1, 1),
+                    move |_r| Ok::<_, Infallible>(SourceInit::new(store("ceil"), c.probe(Some(g)))),
+                )
+                .unwrap();
+            drop(h);
+        }
+        wait_until(
+            || counters.active.load(Ordering::Acquire) >= TEARDOWN_WORKERS,
+            Duration::from_secs(5),
+            "both teardown workers are occupied (in-flight, gated)",
+        );
+        //  (2) Fill the bounded queue to depth D — workers are gated, so none drains.
+        for i in 0..TEARDOWN_QUEUE_DEPTH {
+            let c = counters.clone();
+            let g = gate.clone();
+            let h = reg
+                .acquire(
+                    SourceKey::from_canonical(format!("rtsp://ceil-q/{i}")),
+                    size(1, 1),
+                    move |_r| Ok::<_, Infallible>(SourceInit::new(store("ceil"), c.probe(Some(g)))),
+                )
+                .unwrap();
+            drop(h);
+        }
+        wait_until(
+            || reg.pending_teardowns() == ceiling,
+            Duration::from_secs(5),
+            "the observable saturates at the D+K ceiling",
+        );
+
+        // The next last-release must reserve→false→ceiling shed→signal_and_detach(panicking).
+        let h = reg
+            .acquire(
+                SourceKey::from_canonical("rtsp://ceil-panic"),
+                size(1, 1),
+                |_r| Ok::<_, Infallible>(SourceInit::new(store("ceil-panic"), ShedPanicProbe)),
+            )
+            .unwrap();
+        let outcome = std::thread::spawn(move || drop(h)).join();
+
+        assert!(
+            outcome.is_ok(),
+            "a ceiling shed whose actor panics must be contained, not unwind into the releasing \
+             thread (inv #10)"
+        );
+        assert_eq!(
+            reg.pending_teardowns(),
+            ceiling,
+            "a ceiling shed reserves nothing, so the observable stays at the bound"
+        );
+
+        gate.store(false, Ordering::Release);
         reg.shutdown();
     }
 }
