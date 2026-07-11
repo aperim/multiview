@@ -318,3 +318,36 @@ async fn announcer_threads_the_interface_index_to_v6_multicast_egress() {
          plumbed to IPV6_MULTICAST_IF, not hardcoded 0) (P2-F9)"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn announcer_run_applies_the_configured_multicast_egress_interface() {
+    use multiview_input::st2110::transport::MulticastInterface;
+
+    // S2 (#156): SapAnnouncer::run must apply the configured IPv6 egress interface
+    // during socket setup. F9 wired configure_multicast_egress but NOTHING on the
+    // run path called it, so a configured interface was silently ignored and
+    // announces fell to the OS default. Proven with a BOGUS index: run() must apply
+    // it, fail, and END — without the call run() announces forever on the OS default
+    // and the timeout elapses (the RED).
+    let announcer = SapAnnouncer::bind(loopback6(0))
+        .await
+        .unwrap()
+        .with_interface(MulticastInterface::Index(0xFFFF_FFF0));
+    let sdp = b"v=0 egress".to_vec();
+    let session = AnnouncedSession {
+        hash: stable_hash(&sdp),
+        origin: IpAddr::V6(Ipv6Addr::LOCALHOST),
+        sdp,
+        dest: loopback6(9999),
+    };
+    let ran = tokio::time::timeout(
+        Duration::from_secs(60),
+        announcer.run(vec![session], AnnounceSchedule::new(Duration::from_secs(30))),
+    )
+    .await;
+    assert!(
+        ran.is_ok(),
+        "run() must apply the configured egress interface and END on a bogus index, \
+         not announce forever on the OS default (S2)"
+    );
+}
