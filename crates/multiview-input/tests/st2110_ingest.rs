@@ -397,6 +397,73 @@ fn paced_st2110_32bit_wrap_crossing_soak() {
     );
 }
 
+/// A [`PacketSource`] that yields `remaining` malformed units — each a counted
+/// poll — then drains to `None`, so a test can prove [`St2110Producer::next_frame`]
+/// never drains an unbounded flood in one call (F1 / inv #1).
+struct FloodSource {
+    polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    remaining: usize,
+}
+
+impl PacketSource for FloodSource {
+    fn poll_packet(&mut self) -> Result<Option<St2110Packet>, multiview_input::Error> {
+        self.polls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        self.remaining -= 1;
+        // A 1-byte payload cannot even hold the 2-byte extended-sequence word, so
+        // `V20Payload::parse` fails and the producer drops the unit without ever
+        // closing a frame — the malformed-flood shape that drove the unbounded loop.
+        Ok(Some(St2110Packet {
+            marker: false,
+            timestamp: 0,
+            sequence: 1,
+            ssrc: 0,
+            payload_type: 96,
+            payload: vec![0u8; 1],
+        }))
+    }
+}
+
+/// A malformed-packet flood makes one `next_frame()` call loop until the source
+/// empties, so a single sample can do unbounded work and delay the output clock
+/// (panel F1, inv #1). One tick over the flood must produce no frame AND poll a
+/// bounded number of units — against the current unbounded loop it polls 5001 of
+/// a 5000-packet flood, blowing past the ceiling.
+#[test]
+fn next_frame_is_bounded_work_under_a_malformed_flood() {
+    use std::sync::atomic::Ordering;
+
+    // Any sane per-poll budget is far below this ceiling; a malformed flood that
+    // drains unbounded work in one call blows past it (F1 / inv #1).
+    const POLL_BUDGET_CEILING: usize = 1_000;
+    const FLOOD: usize = 5_000;
+
+    let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source = FloodSource {
+        polls: std::sync::Arc::clone(&polls),
+        remaining: FLOOD,
+    };
+    let mut producer = St2110Producer::new(Box::new(source), geometry());
+
+    // One tick over a malformed flood: no frame is assembled, and the call must
+    // NOT drain the whole flood — a sample is bounded work so it can never delay
+    // the output clock (inv #1). The pump re-polls next tick; malformed datagrams
+    // are drained at the budget rate, not all at once.
+    let out = producer
+        .next_frame()
+        .expect("a malformed flood is dropped, never faulted");
+    assert!(out.is_none(), "no frame closes in the flood this tick");
+    let polled = polls.load(Ordering::Relaxed);
+    assert!(
+        polled <= POLL_BUDGET_CEILING,
+        "next_frame must be bounded per call (inv #1): polled {polled} of a \
+         {FLOOD}-packet flood, exceeding the {POLL_BUDGET_CEILING} ceiling",
+    );
+}
+
 /// Live ST 2110 UDP receive path — **gated, requires a real ST 2110 network +
 /// PTP-disciplined NIC**.
 ///
