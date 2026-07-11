@@ -149,11 +149,50 @@ impl<S: BuildHasher> RateLimiter<S> {
 
     /// Account for one request from `key` at monotonic time `now_ns`, and report
     /// whether it is [`Decision::Allowed`] or [`Decision::Limited`].
-    pub(crate) fn check<K: Hash + ?Sized>(&self, _key: &K, _now_ns: u64) -> Decision {
-        // STUB (RED): the token-bucket accounting is implemented in the GREEN
-        // commit. Returning `Allowed` unconditionally makes the behavioural tests
-        // below fail, proving they exercise real accounting.
-        Decision::Allowed
+    ///
+    /// Integer nano-token accounting: the bucket accrues `refill_per_sec`
+    /// nano-tokens per nanosecond (capped at the burst ceiling), and one request
+    /// costs one whole token ([`REQUEST_COST`]). Every operation saturates, so a
+    /// frozen, jumped, or wrapped clock can never panic the limiter.
+    pub(crate) fn check<K: Hash + ?Sized>(&self, key: &K, now_ns: u64) -> Decision {
+        let idx = self.cell_of(key);
+        // `idx < cells.len()` by construction; fail **open** (never limit) on the
+        // impossible out-of-range rather than panic — a DoS floor must not become
+        // a self-inflicted outage on an internal accounting slip.
+        let Some(cell) = self.cells.get(idx) else {
+            return Decision::Allowed;
+        };
+        // A poisoned cell holds only two always-valid `u64`s; recover its inner
+        // value rather than propagate a panic through the limiter.
+        let mut bucket = match cell.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        // Fold the time since the last update into the bucket (clamped to the
+        // burst ceiling), then spend or refuse one token.
+        let elapsed = now_ns.saturating_sub(bucket.last_ns);
+        let refill = elapsed.saturating_mul(self.refill_per_sec);
+        let available = bucket
+            .tokens
+            .saturating_add(refill)
+            .min(self.capacity_nano);
+        bucket.last_ns = now_ns;
+
+        if available >= REQUEST_COST {
+            bucket.tokens = available - REQUEST_COST;
+            Decision::Allowed
+        } else {
+            bucket.tokens = available;
+            // Time to accrue the shortfall: `deficit` nano-tokens at
+            // `refill_per_sec` nano-tokens per nanosecond, rounded up. The rate is
+            // clamped to at least 1 at construction, so this never divides by zero.
+            let deficit = REQUEST_COST - available;
+            let retry_after_ns = deficit.div_ceil(self.refill_per_sec);
+            Decision::Limited {
+                retry_after: Duration::from_nanos(retry_after_ns),
+            }
+        }
     }
 }
 
@@ -162,6 +201,8 @@ mod tests {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::BuildHasherDefault;
     use std::time::Duration;
+
+    use proptest::prelude::*;
 
     use super::{Decision, Rate, RateLimiter};
 
@@ -262,5 +303,42 @@ mod tests {
         }
         // The fixed table is the whole memory footprint — it must not have grown.
         assert_eq!(l.cell_count(), 128);
+    }
+
+    proptest! {
+        /// At a frozen instant a fresh key admits **exactly** `capacity` requests,
+        /// then every further request is limited with a strictly-positive
+        /// `retry_after` no larger than the time to refill the whole bucket.
+        /// Exercised across arbitrary capacities, rates, keys, and start instants
+        /// — this kills off-by-one / mis-accounting mutants in the bucket math.
+        #[test]
+        fn frozen_burst_admits_exactly_capacity_then_limits(
+            capacity in 1_u32..64,
+            refill_per_sec in 1_u32..10_000,
+            key in any::<u64>(),
+            now_ns in any::<u64>(),
+            extra in 0_u32..8,
+        ) {
+            let l = limiter(97, capacity, refill_per_sec);
+            // Exactly `capacity` admitted at a single frozen instant.
+            for _ in 0..capacity {
+                prop_assert_eq!(l.check(&key, now_ns), Decision::Allowed);
+            }
+            // The next `1 + extra` requests at the same instant are all limited.
+            let max_wait_ns = u64::from(capacity)
+                .saturating_mul(1_000_000_000)
+                .div_ceil(u64::from(refill_per_sec));
+            for _ in 0..=extra {
+                match l.check(&key, now_ns) {
+                    Decision::Allowed => {
+                        prop_assert!(false, "an over-capacity request was allowed");
+                    }
+                    Decision::Limited { retry_after } => {
+                        prop_assert!(retry_after > Duration::ZERO);
+                        prop_assert!(retry_after <= Duration::from_nanos(max_wait_ns));
+                    }
+                }
+            }
+        }
     }
 }
