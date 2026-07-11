@@ -13368,3 +13368,93 @@ mod media_player_handle_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod mp2_slice2_registry_adoption {
+    //! MP-2 SLICE 2 (ADR-0030 §3): the CLI `Pipeline` adopts the engine
+    //! `SourceRegistry` as the owner of per-source `TileStore` creation + sizing.
+    //!  * `cell_pixel_size` sizes a source's decode to the **per-axis supremum**
+    //!    across ALL cells that bind it — never just the first-found cell.
+    //!  * `Pipeline::build` mints ONE registry that OWNS the shared store (the
+    //!    `stores` map + the ingest plan just hold `Arc` clones of it), sized to
+    //!    that supremum — the single-program output path is otherwise unchanged.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    /// A 2x2 grid where source `cam1` is bound by two cells of DIFFERENT sizes:
+    /// area `a` = 400x480 and area `d` = 800x240 on a 1200x720 canvas. The
+    /// per-axis supremum is 800x480 — a size NEITHER binding cell has, so a
+    /// first-found (`.find`) result can never equal it: the test discriminates
+    /// the bug regardless of which binding cell iterates first.
+    fn two_cells_one_source_config() -> multiview_config::MultiviewConfig {
+        let doc = r##"schema_version = 1
+[canvas]
+width = 1200
+height = 720
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "2fr"]
+rows = ["2fr", "1fr"]
+areas = ["a b", "c d"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[cells]]
+id = "small"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[cells]]
+id = "wide"
+area = "d"
+[cells.source]
+input_id = "cam1"
+[[outputs]]
+kind = "hls"
+path = "/tmp/mp2-slice2-two-cells.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##;
+        multiview_config::MultiviewConfig::load_from_toml(doc).expect("test config parses")
+    }
+
+    #[test]
+    fn cell_pixel_size_is_the_per_axis_supremum_across_all_binding_cells() {
+        let config = two_cells_one_source_config();
+        let layout = config.solve_layout().expect("layout solves");
+
+        // Every cell that binds `cam1`, in layout order — the order `.find` walks.
+        let bound: Vec<(u32, u32)> = layout
+            .cells
+            .iter()
+            .filter(|c| c.source.as_deref() == Some("cam1"))
+            .map(|c| cell_dims(c, layout.canvas.width, layout.canvas.height))
+            .collect();
+        assert!(bound.len() >= 2, "config must bind cam1 from >= 2 cells");
+
+        let supremum = bound
+            .iter()
+            .copied()
+            .reduce(|(aw, ah), (bw, bh)| (aw.max(bw), ah.max(bh)))
+            .unwrap();
+        let first = *bound.first().unwrap();
+        assert_ne!(
+            first, supremum,
+            "test precondition: the first-found cell must differ from the supremum \
+             so the assertion discriminates the .find() bug"
+        );
+
+        let got = cell_pixel_size(&layout, "cam1").expect("cam1 is bound");
+        assert_eq!(
+            got, supremum,
+            "cell_pixel_size must decode at the per-axis supremum across ALL binding \
+             cells (ADR-0030 §3), not the first-found cell {first:?}"
+        );
+    }
+}
