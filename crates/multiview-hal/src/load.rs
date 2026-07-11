@@ -1194,14 +1194,18 @@ mod nvml {
 #[cfg(any(feature = "vaapi", feature = "qsv"))]
 pub use self::linux_sysfs::{
     parse_fdinfo_merged_media_frac, parse_fdinfo_pdev, FdinfoMediaSnapshot, FdinfoMediaTracker,
-    FdinfoSample, SysfsLoadProbe,
+    FdinfoSample, SysfsLoadPoller, SysfsLoadProbe,
 };
 
 #[cfg(any(feature = "vaapi", feature = "qsv"))]
 mod linux_sysfs {
-    use super::{percent_to_busy_frac, DeviceId, DeviceLoad, LoadProbe, LoadSample, Vendor};
+    use super::{
+        percent_to_busy_frac, DeviceId, DeviceLoad, LoadProbe, LoadSample, LoadSource, Vendor,
+    };
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::time::Instant;
 
     /// The canonical Linux DRM sysfs root the probe walks (`/sys/class/drm`),
     /// where each physical GPU appears as a `cardN/device/` directory exposing
@@ -1294,8 +1298,9 @@ mod linux_sysfs {
         ///
         /// This is the off-hot-path poll the engine's load thread calls (ADR-0017
         /// §2): it takes one sysfs `sample_all`, walks `/proc/<pid>/fdinfo` for
-        /// `pids`, differences the merged media-ns against the previous snapshot
-        /// over `interval_ns`, and folds the resulting `0.0..=1.0` fraction into
+        /// `pids`, timestamps that snapshot at its read, differences the merged
+        /// media-ns against the previous snapshot over the elapsed between the two
+        /// snapshot instants, and folds the resulting `0.0..=1.0` fraction into
         /// **both** `enc_util_frac` and `dec_util_frac` of the matching device —
         /// AMD VCN4+ merges decode+encode into one figure, so we report the same
         /// combined term for both rather than fabricating a split
@@ -1305,14 +1310,17 @@ mod linux_sysfs {
         /// stateful; it is **never** called on the data plane. The walk reads only
         /// the caller's own PIDs.
         #[must_use]
-        pub fn sample_all_with_media(&mut self, pids: &[u32], interval_ns: u64) -> Vec<DeviceLoad> {
+        pub fn sample_all_with_media(&mut self, pids: &[u32]) -> Vec<DeviceLoad> {
             let mut loads = self.sample_all();
             let snapshot = FdinfoMediaSnapshot::walk_proc(&self.proc_root, pids);
+            // Timestamp the snapshot at its read (not at poll entry) so the
+            // tracker's divisor matches the counter delta it divides (F1).
+            let snapshot_at = Instant::now();
             for load in &mut loads {
                 let pdev = load.device_id.stable_id();
                 if let Some(frac) =
                     self.media_tracker
-                        .merged_media_frac(pdev, &snapshot, interval_ns)
+                        .merged_media_frac(pdev, &snapshot, snapshot_at)
                 {
                     // VCN4+ merges decode+encode — report the combined media term
                     // for both engines, never a fabricated per-engine split.
@@ -1344,10 +1352,9 @@ mod linux_sysfs {
         pub fn sample_all_with_media_and_pmu(
             &mut self,
             pids: &[u32],
-            interval_ns: u64,
             pmu: &mut super::IntelPmuMediaTracker,
         ) -> Vec<DeviceLoad> {
-            let mut loads = self.sample_all_with_media(pids, interval_ns);
+            let mut loads = self.sample_all_with_media(pids);
             for load in &mut loads {
                 if load.device_id.vendor() == Vendor::Intel {
                     let frac = pmu.merged_media_frac(&load.device_id);
@@ -1387,6 +1394,73 @@ mod linux_sysfs {
                     reason: "DRM device no longer present",
                 },
             }
+        }
+    }
+
+    /// A bounded, off-hot-path [`LoadSource`] over [`SysfsLoadProbe`] that folds
+    /// the per-process DRM fdinfo merged media-engine term into each AMD/Intel
+    /// [`DeviceLoad`] (ADR-0017 ENG-4b).
+    ///
+    /// [`SysfsLoadProbe::sample_all_with_media`] is stateful (`&mut self`: it
+    /// differences two `/proc/<pid>/fdinfo` snapshots and times each at its read)
+    /// and needs the caller's own PIDs — which the object-safe
+    /// [`LoadSource::poll`]`(&self)` seam does not carry. This poller owns that
+    /// state behind a [`Mutex`] (interior mutability for the `&mut` media pass)
+    /// and drives it once per metrics tick; the snapshot-to-snapshot interval is
+    /// measured inside the probe's media tracker, so the poller holds no timing
+    /// state of its own. It runs on the `multiview-cli` system-metrics task (off
+    /// the output-clock thread), so the lock is uncontended and never touches the
+    /// data plane (inv #1 / #10). A poisoned lock (a prior panic) or a no-DRM host
+    /// degrades to an empty snapshot — never a panic, never a fabricated device.
+    /// The fdinfo walk reads only our **own** PIDs.
+    #[derive(Debug)]
+    pub struct SysfsLoadPoller {
+        probe: Mutex<SysfsLoadProbe>,
+        self_pids: Vec<u32>,
+    }
+
+    impl SysfsLoadPoller {
+        /// Try to construct the poller bound to the real `/sys/class/drm` +
+        /// `/proc` roots, walking this process's own PID for the fdinfo media
+        /// term.
+        ///
+        /// Returns `None` when no DRM GPU is visible (a no-DRM host / CI) so the
+        /// caller cleanly falls back to the no-GPU source — mirroring the NVML
+        /// poller's `try_init`. The one-off `/sys/class/drm` enumeration runs at
+        /// construction, off the output-clock thread.
+        #[must_use]
+        pub fn try_init() -> Option<Self> {
+            let probe = SysfsLoadProbe::new();
+            if probe.devices().is_empty() {
+                return None;
+            }
+            Some(Self::from_probe(probe, vec![std::process::id()]))
+        }
+
+        /// Wrap a probe with the PID set the fdinfo walk targets.
+        ///
+        /// `self_pids` are the caller's own processes (we only ever read our own
+        /// `/proc/<pid>/fdinfo`). Tests inject a synthetic probe + fixed PIDs.
+        #[must_use]
+        pub(crate) fn from_probe(probe: SysfsLoadProbe, self_pids: Vec<u32>) -> Self {
+            Self {
+                probe: Mutex::new(probe),
+                self_pids,
+            }
+        }
+    }
+
+    impl LoadSource for SysfsLoadPoller {
+        fn poll(&self) -> Vec<DeviceLoad> {
+            // Off the output-clock thread; the lock is uncontended. The media
+            // tracker inside the probe times each snapshot at its read and
+            // differences over the snapshot-to-snapshot interval, so the poll
+            // itself holds no timing state. A poisoned lock degrades to an empty
+            // snapshot (never a panic, never a fabricated device).
+            let Ok(mut probe) = self.probe.lock() else {
+                return Vec::new();
+            };
+            probe.sample_all_with_media(&self.self_pids)
         }
     }
 
@@ -1796,41 +1870,66 @@ mod linux_sysfs {
     ///
     /// The DRM media-engine counter is a monotonically increasing busy-ns total,
     /// so a fraction needs **two** samples a known wall interval apart. The
-    /// tracker holds the previous snapshot; each poll differences the new one
-    /// against it ([`parse_fdinfo_merged_media_frac`]) and then retains the new
-    /// one for next time. The first poll (no prior) is `None` — unknown until
-    /// two samples exist, never a fabricated zero. The tracker is the off-hot-path
-    /// state the load poll thread owns (ADR-0017 §2); it does no I/O itself.
+    /// tracker holds the previous snapshot **and the instant it was captured**;
+    /// each poll differences the new snapshot against it over the elapsed between
+    /// the two capture instants ([`parse_fdinfo_merged_media_frac`]) and then
+    /// retains the new snapshot + instant for next time. Timing each snapshot at
+    /// its own read (rather than at poll entry) keeps the divisor matched to the
+    /// counter delta it divides — variable `/sys`+`/proc` traversal latency would
+    /// otherwise over/under-report utilization. The first poll (no prior) is
+    /// `None` — unknown until two samples exist, never a fabricated zero. The
+    /// tracker is the off-hot-path state the load poll thread owns (ADR-0017 §2);
+    /// it does no I/O itself.
     #[derive(Debug, Clone, Default)]
     pub struct FdinfoMediaTracker {
-        previous: Option<FdinfoMediaSnapshot>,
+        previous: Option<PrevSnapshot>,
+    }
+
+    /// The previous fdinfo media snapshot + the wall instant it was captured, so
+    /// the next poll divides the counter delta by the elapsed between the two
+    /// snapshot reads (not the poll-entry delta). Mirrors the i915-PMU
+    /// `PrevSample { busy_ns, at }`.
+    #[derive(Debug, Clone)]
+    struct PrevSnapshot {
+        snapshot: FdinfoMediaSnapshot,
+        at: Instant,
     }
 
     impl FdinfoMediaTracker {
-        /// Difference `latest` against the retained previous snapshot for one
-        /// device and return its merged media busy fraction (`0.0..=1.0`) over
-        /// `interval_ns`, then retain `latest` for the next poll.
+        /// Difference `latest` (captured at `latest_at`) against the retained
+        /// previous snapshot for one device and return its merged media busy
+        /// fraction (`0.0..=1.0`) over the elapsed between the two snapshot
+        /// instants, then retain `latest` + `latest_at` for the next poll.
         ///
         /// Returns `None` on the first call (no prior), when this device had no
-        /// attributable media fd in either snapshot, when the interval is
-        /// non-positive (a divide guard), or when the counter went backwards (a
-        /// reset — unknown this tick). Never panics, never blocks.
+        /// attributable media fd in either snapshot, when the two snapshots share
+        /// an instant (a zero-length interval — divide guard), or when the counter
+        /// went backwards (a reset — unknown this tick). Never panics, never blocks.
         pub fn merged_media_frac(
             &mut self,
             pdev: &str,
             latest: &FdinfoMediaSnapshot,
-            interval_ns: u64,
+            latest_at: Instant,
         ) -> Option<f32> {
             let frac = self.previous.as_ref().and_then(|prev| {
+                // The divisor is the elapsed between the two SNAPSHOT reads —
+                // saturating so a backwards or implausibly long gap never panics
+                // or overflows (mirrors the i915-PMU `elapsed_ns`).
+                let interval_ns =
+                    u64::try_from(latest_at.saturating_duration_since(prev.at).as_nanos())
+                        .unwrap_or(u64::MAX);
                 let earlier = FdinfoSample {
-                    media_ns: prev.media_ns(pdev),
+                    media_ns: prev.snapshot.media_ns(pdev),
                 };
                 let later = FdinfoSample {
                     media_ns: latest.media_ns(pdev),
                 };
                 parse_fdinfo_merged_media_frac(&earlier, &later, interval_ns)
             });
-            self.previous = Some(latest.clone());
+            self.previous = Some(PrevSnapshot {
+                snapshot: latest.clone(),
+                at: latest_at,
+            });
             frac
         }
     }
@@ -2646,6 +2745,7 @@ mod tests {
             parse_fdinfo_pdev, DrmRoot, FdinfoMediaSnapshot, FdinfoMediaTracker,
         };
         use super::super::Vendor;
+        use std::time::{Duration, Instant};
 
         #[test]
         fn pdev_line_extracts_the_pci_bus_id() {
@@ -2695,9 +2795,11 @@ mod tests {
 
         #[test]
         fn tracker_differences_two_snapshots_into_a_fraction() {
-            // The tracker holds the previous snapshot + capture instant; each
-            // poll diffs the new snapshot against it. media delta 500_000 ns over
-            // a 1_000_000 ns (1 ms) interval => 0.5 busy for the merged engine.
+            // The tracker holds the previous snapshot + the instant it was
+            // captured; each poll diffs the new snapshot against it over the
+            // elapsed between the two SNAPSHOT instants (not a poll-entry delta —
+            // F1). media delta 500_000 ns over a 1 ms snapshot interval => 0.5
+            // busy for the merged engine.
             let earlier = {
                 let mut s = FdinfoMediaSnapshot::default();
                 s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000 ns\n");
@@ -2708,18 +2810,21 @@ mod tests {
                 s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1500000 ns\n");
                 s
             };
+            let t0 = Instant::now();
+            let t1 = t0 + Duration::from_millis(1);
             let mut tracker = FdinfoMediaTracker::default();
             // First poll has no prior snapshot => unknown (need two samples).
             assert!(tracker
-                .merged_media_frac("0000:03:00.0", &earlier, 1_000_000)
+                .merged_media_frac("0000:03:00.0", &earlier, t0)
                 .is_none());
             let frac = tracker
-                .merged_media_frac("0000:03:00.0", &later, 1_000_000)
+                .merged_media_frac("0000:03:00.0", &later, t1)
                 .expect("a second snapshot yields a fraction");
             assert!((frac - 0.5).abs() < 1e-4, "0.5 expected, got {frac}");
-            // A non-positive interval is a divide guard => None, never a panic.
+            // Two snapshots at the same instant is a zero-length interval — a
+            // divide guard => None, never a panic. (`previous` now holds t1.)
             assert!(tracker
-                .merged_media_frac("0000:03:00.0", &later, 0)
+                .merged_media_frac("0000:03:00.0", &later, t1)
                 .is_none());
         }
 
@@ -2737,13 +2842,52 @@ mod tests {
                 s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t10000 ns\n");
                 s
             };
+            let t0 = Instant::now();
+            let t1 = t0 + Duration::from_millis(1);
             let mut tracker = FdinfoMediaTracker::default();
             assert!(tracker
-                .merged_media_frac("0000:03:00.0", &high, 1_000_000)
+                .merged_media_frac("0000:03:00.0", &high, t0)
                 .is_none());
             assert!(tracker
-                .merged_media_frac("0000:03:00.0", &low, 1_000_000)
+                .merged_media_frac("0000:03:00.0", &low, t1)
                 .is_none());
+        }
+
+        #[test]
+        fn tracker_fraction_scales_with_the_snapshot_interval() {
+            // F1 regression: the divisor is the elapsed between the two SNAPSHOT
+            // instants the tracker retains, so the SAME counter delta over a
+            // LONGER snapshot interval yields a proportionally SMALLER fraction.
+            // A regression that divided by a fixed or poll-entry interval would
+            // instead report the same fraction for both.
+            let base = {
+                let mut s = FdinfoMediaSnapshot::default();
+                s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t0 ns\n");
+                s
+            };
+            let advanced = {
+                let mut s = FdinfoMediaSnapshot::default();
+                s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t500000 ns\n");
+                s
+            };
+
+            // 500_000 ns of busy over a 1 ms snapshot interval => 0.5.
+            let t0 = Instant::now();
+            let mut fast = FdinfoMediaTracker::default();
+            assert!(fast.merged_media_frac("0000:03:00.0", &base, t0).is_none());
+            let quick = fast
+                .merged_media_frac("0000:03:00.0", &advanced, t0 + Duration::from_millis(1))
+                .expect("a second snapshot yields a fraction");
+            assert!((quick - 0.5).abs() < 1e-4, "0.5 over 1 ms, got {quick}");
+
+            // The SAME 500_000 ns of busy over a 2 ms snapshot interval => 0.25.
+            let u0 = Instant::now();
+            let mut slow = FdinfoMediaTracker::default();
+            assert!(slow.merged_media_frac("0000:03:00.0", &base, u0).is_none());
+            let gentle = slow
+                .merged_media_frac("0000:03:00.0", &advanced, u0 + Duration::from_millis(2))
+                .expect("a second snapshot yields a fraction");
+            assert!((gentle - 0.25).abs() < 1e-4, "0.25 over 2 ms, got {gentle}");
         }
 
         /// Build a synthetic `<root>/<pid>/fdinfo/<fd>` tree (NOT real `/proc`)
@@ -2849,28 +2993,39 @@ mod tests {
                 "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000 ns\n",
             )
             .expect("fd v1");
-            let first = probe.sample_all_with_media(&[4242], 1_000_000);
+            let first = probe.sample_all_with_media(&[4242]);
             assert_eq!(first.len(), 1, "the one synthetic AMD card");
             assert!(
                 first[0].enc_util_frac.is_none() && first[0].dec_util_frac.is_none(),
                 "first poll has no prior snapshot => unknown, not a fabricated zero"
             );
 
-            // Poll 2: counter advanced 500_000 ns over the 1 ms interval => 0.5.
+            // Poll 2: the counter jumps by a large delta; over the sub-ms real
+            // interval between the two snapshot reads this saturates the merged
+            // media fraction to 1.0, folded into BOTH enc and dec. The probe now
+            // times each snapshot at its walk (not at poll entry — F1), so the
+            // exact-arithmetic proof lives in the tracker unit tests; here we
+            // prove the probe wires a real walk-instant snapshot through the fold.
             std::fs::write(
                 proc.join("4242").join("fdinfo").join("3"),
-                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1500000 ns\n",
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000000000000 ns\n",
             )
             .expect("fd v2");
-            let second = probe.sample_all_with_media(&[4242], 1_000_000);
+            let second = probe.sample_all_with_media(&[4242]);
             assert_eq!(second.len(), 1);
             let load = &second[0];
             assert_eq!(load.device_id.vendor(), Vendor::Amd);
             let enc = load.enc_util_frac.expect("enc folded from merged media");
             let dec = load.dec_util_frac.expect("dec folded from merged media");
             // VCN4+ merges decode+encode — both carry the same combined term.
-            assert!((enc - 0.5).abs() < 1e-4, "0.5 enc expected, got {enc}");
-            assert!((dec - 0.5).abs() < 1e-4, "0.5 dec expected, got {dec}");
+            assert!(
+                (enc - 1.0).abs() < 1e-4,
+                "saturated enc expected, got {enc}"
+            );
+            assert!(
+                (dec - 1.0).abs() < 1e-4,
+                "saturated dec expected, got {dec}"
+            );
 
             let _ = std::fs::remove_dir_all(&drm);
             let _ = std::fs::remove_dir_all(&proc);
@@ -2904,13 +3059,13 @@ mod tests {
             .expect("fd");
 
             let mut probe = DrmRoot::at(&drm).into_probe().with_proc_root(&proc);
-            let _ = probe.sample_all_with_media(&[4243], 1_000_000);
+            let _ = probe.sample_all_with_media(&[4243]);
             std::fs::write(
                 proc.join("4243").join("fdinfo").join("3"),
                 "drm-pdev:\t0000:09:00.0\ndrm-engine-enc:\t1500000 ns\n",
             )
             .expect("fd v2");
-            let loads = probe.sample_all_with_media(&[4243], 1_000_000);
+            let loads = probe.sample_all_with_media(&[4243]);
             assert_eq!(loads.len(), 1);
             assert!(
                 loads[0].enc_util_frac.is_none() && loads[0].dec_util_frac.is_none(),
@@ -2919,6 +3074,114 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&drm);
             let _ = std::fs::remove_dir_all(&proc);
+        }
+
+        #[test]
+        fn sysfs_poller_folds_media_across_polls_and_exposes_base_load() {
+            // The rule-6 wire: `SysfsLoadPoller` drives `SysfsLoadProbe`'s
+            // stateful two-snapshot media path through the real `LoadSource::poll`
+            // seam, retaining the prior snapshot + its capture instant across
+            // polls behind interior mutability. The base sysfs load (gpu-busy,
+            // VRAM) flows on every poll; the merged media term appears once a
+            // prior snapshot exists — proving the whole AMD/Intel sysfs probe is
+            // wired, not just parsed.
+            use super::super::{LoadSource, SysfsLoadPoller};
+
+            let drm = std::env::temp_dir().join(format!(
+                "mv-eng4b-poller-drm-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let proc = std::env::temp_dir().join(format!(
+                "mv-eng4b-poller-proc-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&drm);
+            let _ = std::fs::remove_dir_all(&proc);
+            write_amd_card(&drm).expect("amd card");
+            write_proc_fd(
+                &proc,
+                4242,
+                3,
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000 ns\n",
+            )
+            .expect("fd v1");
+
+            let probe = DrmRoot::at(&drm).into_probe().with_proc_root(&proc);
+            let poller = SysfsLoadPoller::from_probe(probe, vec![4242]);
+
+            // Poll 1: base load present, media unknown (no prior snapshot yet —
+            // honest None, never a fabricated zero).
+            let first = LoadSource::poll(&poller);
+            assert_eq!(first.len(), 1, "the one synthetic AMD card");
+            assert!(
+                (first[0].gpu_busy_frac.expect("busy known") - 0.30).abs() < 1e-4,
+                "base sysfs gpu-busy flows through the poller"
+            );
+            assert_eq!(first[0].vram_total_bytes, Some(17_163_091_968));
+            assert!(
+                first[0].enc_util_frac.is_none() && first[0].dec_util_frac.is_none(),
+                "first poll has no prior media snapshot"
+            );
+
+            // Poll 2: the counter jumps by a large delta; over the sub-ms real
+            // interval between the two snapshot reads the merged media fraction
+            // saturates to 1.0, folded into BOTH enc and dec (VCN4+ merges the
+            // media engines). The exact arithmetic is proven in the tracker unit
+            // tests; here we prove the LoadSource::poll seam wires it end-to-end.
+            std::fs::write(
+                proc.join("4242").join("fdinfo").join("3"),
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000000000000 ns\n",
+            )
+            .expect("fd v2");
+            let second = LoadSource::poll(&poller);
+            assert_eq!(second.len(), 1);
+            let load = &second[0];
+            let enc = load.enc_util_frac.expect("enc folded from merged media");
+            let dec = load.dec_util_frac.expect("dec folded from merged media");
+            assert!(
+                (enc - 1.0).abs() < 1e-4,
+                "saturated enc expected, got {enc}"
+            );
+            assert!(
+                (dec - 1.0).abs() < 1e-4,
+                "saturated dec expected, got {dec}"
+            );
+
+            let _ = std::fs::remove_dir_all(&drm);
+            let _ = std::fs::remove_dir_all(&proc);
+        }
+
+        #[test]
+        fn sysfs_poller_poll_trait_yields_base_load_and_is_send_sync() {
+            // The `LoadSource::poll(&self)` seam (the one `default_load_source`
+            // hands the metrics task) yields the base sysfs load on a
+            // live-interval poll; and the poller is `Send + Sync`, so it fits the
+            // `Box<dyn LoadSource + Send + Sync>` the task stores.
+            use super::super::{LoadSource, SysfsLoadPoller};
+
+            fn assert_send_sync<T: Send + Sync>() {}
+            assert_send_sync::<SysfsLoadPoller>();
+
+            let drm = std::env::temp_dir().join(format!(
+                "mv-eng4b-poller-trait-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&drm);
+            write_amd_card(&drm).expect("amd card");
+
+            let probe = DrmRoot::at(&drm).into_probe();
+            let poller = SysfsLoadPoller::from_probe(probe, vec![std::process::id()]);
+            let loads: Vec<_> = LoadSource::poll(&poller);
+            assert_eq!(loads.len(), 1, "the one synthetic AMD card via the trait");
+            assert!(
+                (loads[0].gpu_busy_frac.expect("busy") - 0.30).abs() < 1e-4,
+                "base sysfs load via LoadSource::poll"
+            );
+
+            let _ = std::fs::remove_dir_all(&drm);
         }
     }
 
