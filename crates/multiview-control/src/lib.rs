@@ -58,6 +58,11 @@ pub mod jwt;
 /// request-concurrency + rate middleware backing the control-plane `DoS` floor.
 pub(crate) mod limits;
 pub mod live_apply;
+/// The shutdown-aware, guard-owning transport wrapper the hand-rolled serve loop wraps
+/// each accepted connection in (SEC-14 #126 R2): it carries the accept-level admission
+/// guard across an HTTP/1 upgrade (so a live WebSocket keeps its population-cap slot)
+/// and drains the connection when serve shuts down.
+mod serve_stream;
 pub mod nmos;
 pub mod notify;
 pub mod pending_actions;
@@ -99,6 +104,8 @@ pub mod sqlite;
 
 use axum::routing::{get, post};
 use axum::Router;
+
+use serve_stream::TrackedStream;
 
 pub use account_audit::{
     AccountAuditEntry, AccountAuditKind, AccountAuditPage, AccountAuditRepository,
@@ -693,11 +700,15 @@ where
                 };
                 let builder = builder.clone();
                 let app = app.clone();
-                let io = TokioIo::new(stream);
                 let conn_shutdown = shutdown_watch.clone();
                 connections.spawn(async move {
-                    // Hold the admission guard for the connection's whole life.
-                    let _guard = guard;
+                    // Wrap the accepted stream so the admission `guard` rides the whole
+                    // connection — including into an upgraded WebSocket, since hyper moves
+                    // the IO into its `Upgraded` — and releases only when the socket finally
+                    // closes (so a live WS keeps occupying its population-cap slot); and so
+                    // the serve-shutdown signal reaches even the detached upgraded socket
+                    // through the transport (SEC-14 #126 R2 F1).
+                    let io = TokioIo::new(TrackedStream::new(stream, guard, conn_shutdown.clone()));
                     drive_connection(builder, io, app, peer_addr, conn_shutdown).await;
                 });
             }
@@ -938,10 +949,12 @@ where
                 let app = app.clone();
                 let conn_shutdown = shutdown_watch.clone();
                 connections.spawn(async move {
-                    // Hold the admission guard across the handshake AND the serve, so a
-                    // client stalled mid-handshake still occupies (and, on timeout,
-                    // recycles) its population-cap slot.
-                    let _guard = guard;
+                    // `guard` is owned by this task, so it holds the admission slot across
+                    // the (costly) handshake; a handshake failure/timeout `return`s and
+                    // drops it, recycling the slot. On success it is handed to the
+                    // `TrackedStream` below so it rides the served connection — including
+                    // into an upgraded WebSocket — and releases only when the socket finally
+                    // closes (SEC-14 #126 R2 F1).
                     let tls_stream = match handshake_timeout {
                         Some(timeout) => {
                             match tokio::time::timeout(timeout, acceptor.accept(stream)).await {
@@ -973,8 +986,9 @@ where
                             }
                         },
                     };
-                    drive_connection(builder, TokioIo::new(tls_stream), app, peer_addr, conn_shutdown)
-                        .await;
+                    let io =
+                        TokioIo::new(TrackedStream::new(tls_stream, guard, conn_shutdown.clone()));
+                    drive_connection(builder, io, app, peer_addr, conn_shutdown).await;
                 });
             }
             () = &mut shutdown => {
