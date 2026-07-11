@@ -509,8 +509,8 @@ fn content_hash(text: &str) -> u64 {
 /// [`Fingerprint`] so change detection does not depend on filesystem `stat`
 /// granularity. Not an adversarial boundary (whoever writes the config file
 /// already controls it), so `DefaultHasher` is ample; hashing BYTES (not a
-/// `&str`) keeps a non-UTF-8 file detectable as a change — the settled
-/// `read_to_string` in [`watch_loop`] does the UTF-8 gate.
+/// `&str`) keeps a non-UTF-8 file detectable as a change — the settled UTF-8
+/// decode in [`watch_loop`] does the UTF-8 gate.
 fn fingerprint_content_hash(bytes: &[u8]) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -518,14 +518,21 @@ fn fingerprint_content_hash(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// Folded into a [`Fingerprint`] when the watched path exists (its `stat`
-/// succeeded) but its bytes cannot be read this poll — a permissions problem,
-/// or a delete racing the stat. It gates nothing (a real file that happens to
-/// hash to it is harmless); it merely keeps a transient unreadable blip from
-/// aliasing unchanged content, so two such polls settle to the `read_to_string`
-/// reject in [`watch_loop`] ("the file cannot be read") rather than the
-/// already-applied short-circuit.
-const CONTENT_UNREADABLE: u64 = u64::MAX;
+/// The content axis of a [`Fingerprint`]: a hash of the file's bytes when they
+/// could be read this poll, or `Unreadable` when the path exists (its `stat`
+/// succeeded) but its bytes could not be read — a permissions problem, or a
+/// swap racing the stat. A distinct, typed state rather than an in-band hash
+/// value: two `Unreadable` polls compare equal (so they settle to the "cannot
+/// be read" reject in [`watch_loop`]), and a real file's `Readable` hash can
+/// never alias "unreadable" — there is no sentinel value to collide with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentFingerprint {
+    /// A stable hash of the file's bytes ([`fingerprint_content_hash`]).
+    Readable(u64),
+    /// The path exists (its `stat` succeeded) but its bytes could not be read
+    /// this poll.
+    Unreadable,
+}
 
 /// Spawn the config-file watcher over `path` on the control-plane tokio
 /// runtime. `baseline` is the document the run booted with (the currently
@@ -576,33 +583,60 @@ impl Drop for ActiveGuard {
 }
 
 /// A content-change fingerprint of the watched path: length + mtime + inode +
-/// a hash of the file's bytes. The byte hash makes detection
-/// filesystem-independent — a same-length in-place rewrite (identical
+/// a hash of the file's bytes ([`ContentFingerprint`]). The byte hash makes
+/// detection filesystem-independent — a same-length in-place rewrite (identical
 /// len/mtime/inode, e.g. a shell `>` redirect or a non-atomic editor landing
 /// within the filesystem's mtime granularity) still produces a distinct
 /// fingerprint, so the already-applied short-circuit in [`watch_loop`] cannot
-/// silently drop it. Re-`stat`ing + re-reading the PATH (never a held fd) also
-/// makes a write-temp + `rename(2)` land as a change (new inode); a rename that
-/// does not alter the bytes then adopts without re-applying (the
-/// `last_observed == text` arm).
+/// silently drop it. `len` and `content` are derived from ONE read (see
+/// [`probe`]), so together with the bytes carried forward for the apply they
+/// are a single coherent snapshot — the fingerprint recorded as `applied`
+/// always matches the content actually applied. A write-temp + `rename(2)`
+/// lands as a change (new inode); a rename that does not alter the bytes then
+/// adopts without re-applying (the `last_observed == text` arm).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     len: u64,
     modified: Option<std::time::SystemTime>,
     inode: u64,
-    content: u64,
+    content: ContentFingerprint,
 }
 
-/// Probe the path's fingerprint; [`None`] when the file is (transiently)
-/// missing (its `stat` fails). `tokio::fs` so the `stat(2)` and the byte read
-/// ride the blocking pool, never the control-plane reactor (review m6).
+/// A single coherent snapshot of the watched path this poll: its change
+/// [`Fingerprint`] plus the exact bytes the fingerprint was computed from. The
+/// settled apply in [`watch_loop`] uses THESE bytes — never a second read that
+/// could observe different content — so the fingerprint recorded as `applied`
+/// always matches the content actually applied (the probe→apply TOCTOU is
+/// closed by construction).
+struct Probed {
+    /// The change fingerprint (`len` + `content` derived from `bytes`).
+    fingerprint: Fingerprint,
+    /// The bytes read this poll, or the read error's message when the path was
+    /// present but its bytes could not be read (`Err(_)` iff
+    /// `fingerprint.content == ContentFingerprint::Unreadable`). The error is
+    /// carried, not the fingerprint's `Unreadable`, so the settled reject keeps
+    /// the errno detail the old settled read surfaced — the message never enters
+    /// the fingerprint, so a varying error string can't unsettle the debounce.
+    bytes: Result<Vec<u8>, String>,
+}
+
+/// Probe the path this poll: read its bytes ONCE and derive the change
+/// [`Fingerprint`] (`len` + `content`) from that single read, plus mtime/inode
+/// from its `stat`. Returns [`None`] only when the file is (transiently) missing
+/// (its `stat` fails); a present-but-unreadable file yields a fingerprint with
+/// [`ContentFingerprint::Unreadable`] and no bytes. `tokio::fs` so the `stat(2)`
+/// and the read ride the blocking pool, never the control-plane reactor
+/// (review m6).
 ///
-/// The fingerprint folds a hash of the file's bytes so a same-length in-place
-/// rewrite that aliases len+mtime+inode is still seen as a change. The config
-/// file is small and this runs once per ~1–2 s poll, so the extra read is
-/// negligible; it reads the RAW bytes — a non-UTF-8 file still fingerprints and
-/// settles to the `read_to_string` reject in [`watch_loop`].
-async fn probe(path: &Path) -> Option<Fingerprint> {
+/// Reading once — rather than stat-then-hash and then re-reading to apply —
+/// keeps `len`, `content`, and the carried `bytes` a single coherent snapshot:
+/// a same-length in-place rewrite is still a distinct fingerprint, AND the
+/// settled apply uses the very bytes the fingerprint identifies, so no
+/// concurrent write can make the applied content diverge from the recorded
+/// fingerprint. The config file is small and this runs once per ~1–2 s poll, so
+/// the read is negligible; it reads the RAW bytes — a non-UTF-8 file still
+/// fingerprints and settles to the UTF-8-decode reject in [`watch_loop`].
+async fn probe(path: &Path) -> Option<Probed> {
     let meta = tokio::fs::metadata(path).await.ok()?;
     #[cfg(unix)]
     let inode = {
@@ -611,19 +645,34 @@ async fn probe(path: &Path) -> Option<Fingerprint> {
     };
     #[cfg(not(unix))]
     let inode = 0_u64;
-    // The file exists (stat succeeded); fold a hash of its bytes. If it cannot
-    // be read right now (permissions, or a delete racing the stat) fold the
-    // unreadable sentinel, so two such polls settle to the reject path instead
-    // of aliasing the already-applied content.
-    let content = match tokio::fs::read(path).await {
-        Ok(bytes) => fingerprint_content_hash(&bytes),
-        Err(_) => CONTENT_UNREADABLE,
+    // The file exists (stat succeeded). Read its bytes and derive `len` +
+    // `content` from that ONE read, so they are mutually coherent and coherent
+    // with the bytes carried forward for the apply. A present-but-unreadable
+    // file (permissions, or a delete racing the stat) yields the typed
+    // `Unreadable` content and no bytes, so two such polls settle to the reject
+    // path instead of aliasing the already-applied content.
+    let (len, content, bytes) = match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            // `usize` → `u64` never truncates on a 64-/32-bit target; the
+            // fallback is unreachable and only avoids an `as` cast.
+            let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            let content = ContentFingerprint::Readable(fingerprint_content_hash(&bytes));
+            (len, content, Ok(bytes))
+        }
+        Err(error) => (
+            meta.len(),
+            ContentFingerprint::Unreadable,
+            Err(error.to_string()),
+        ),
     };
-    Some(Fingerprint {
-        len: meta.len(),
-        modified: meta.modified().ok(),
-        inode,
-        content,
+    Some(Probed {
+        fingerprint: Fingerprint {
+            len,
+            modified: meta.modified().ok(),
+            inode,
+            content,
+        },
+        bytes,
     })
 }
 
@@ -711,7 +760,11 @@ async fn watch_loop(
             tracing::debug!(path = %path.display(), "config-file watcher stopped");
             return;
         }
-        let Some(now) = probe(&path).await else {
+        let Some(Probed {
+            fingerprint: now,
+            bytes: now_bytes,
+        }) = probe(&path).await
+        else {
             // Mid-rename ENOENT is normal; a file that STAYS missing is
             // reported once (the running configuration is unchanged).
             candidate = None;
@@ -777,18 +830,39 @@ async fn watch_loop(
             candidate = Some(now);
             continue;
         }
-        // Stable across two polls: act on it. Read the content once — the
-        // expected-write check is content-paired (review m3). `tokio::fs` so
-        // the read rides the blocking pool (review m6).
+        // Stable across two polls: act on the SAME bytes the fingerprint was
+        // built from — carried out of `probe`, never a second read — so the
+        // content applied is exactly the content the recorded fingerprint
+        // identifies (no probe→apply TOCTOU). The expected-write check is
+        // content-paired (review m3).
         candidate = None;
-        let text = match tokio::fs::read_to_string(&path).await {
-            Ok(text) => text,
+        // `probe` found the path present but its bytes unreadable
+        // (`ContentFingerprint::Unreadable`): reject, exactly as a failed settled
+        // read did.
+        let bytes = match now_bytes {
+            Ok(bytes) => bytes,
             Err(error) => {
                 rejected = Some(now);
                 reject(
                     &state,
                     &path,
                     &format!("the file cannot be read: {error}"),
+                    &mut invalid_active,
+                );
+                continue;
+            }
+        };
+        // `probe` read these bytes and folded their hash into `now.content`;
+        // decode them here (the UTF-8 gate). A non-UTF-8 file is rejected,
+        // exactly as the old settled `read_to_string` did.
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(error) => {
+                rejected = Some(now);
+                reject(
+                    &state,
+                    &path,
+                    &format!("the file is not valid UTF-8: {error}"),
                     &mut invalid_active,
                 );
                 continue;

@@ -3256,6 +3256,75 @@ async fn a_write_racing_the_probe_never_desyncs_the_applied_fingerprint() {
     watch.stop();
 }
 
+/// Characterisation (task #7, cross-vendor finding 2 — the typed unreadable
+/// sentinel + recovery): a watched path that exists but whose BYTES cannot be
+/// read this poll must NOT alias the already-applied content and must NOT apply.
+/// Two such polls settle to the "cannot be read" reject; when the path becomes a
+/// readable file again the watcher resumes and applies the new content. Models
+/// the present-but-unreadable branch (`ContentFingerprint::Unreadable`)
+/// deterministically and root-independently by swapping the file for a directory
+/// at the same path — `stat` succeeds, but `read` returns `EISDIR` regardless of
+/// privilege (a chmod-000 test would be a no-op under a root CI runner).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_path_rejects_then_recovers_on_next_readable_content() {
+    let r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        options,
+    );
+    settle_initial(&mut poll, &r.state).await;
+
+    // Present-but-unreadable: replace the file with a directory at the SAME
+    // path. No poll runs during the swap (manual tick), so the loop never sees a
+    // transient ENOENT — it sees a path whose stat succeeds but whose byte read
+    // fails (EISDIR). Two polls debounce it to the reject.
+    std::fs::remove_file(&r.boot_path).expect("remove the boot file");
+    std::fs::create_dir(&r.boot_path).expect("put a directory in its place");
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        0,
+        "an unreadable path must never alias the applied content or apply"
+    );
+    // The reject publishes an event the warning-ingest task folds into the store
+    // on a separate task, so await it (the debounce itself is deterministic).
+    assert!(
+        wait_until(SETTLE, || has_active_warning(
+            &r.warnings,
+            "config-file-invalid"
+        ))
+        .await,
+        "two unreadable polls must settle to the cannot-be-read reject"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#101418"),
+        "the running store is unchanged while the path is unreadable"
+    );
+
+    // Recovery: the path becomes a readable file again, carrying a new edit.
+    std::fs::remove_dir(&r.boot_path).expect("remove the placeholder directory");
+    let recovered = BOOT_DOC.replace("#101418", "#123456");
+    std::fs::write(&r.boot_path, &recovered).expect("write the recovered content");
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
+        "once readable again the watcher resumes and applies the new content"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#123456"),
+        "the recovered edit hot-applies"
+    );
+    watch.stop();
+}
+
 /// A boot document carrying two equal-`z` overlays (the reorder fixture).
 const BOOT_DOC_TWO_OVERLAYS: &str = r##"schema_version = 1
 [canvas]
