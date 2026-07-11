@@ -121,8 +121,8 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 "st2110" = ["tokio/net", "dep:socket2"]
 # WebRTC ingest seam. OFF by default: a real session needs an application-layer
 # ICE/DTLS/SRTP media engine and a network stack (str0m, in `multiview-webrtc`),
-# neither of which exists in CI here, so the live-transport path is
-# compile-verified only. This crate never parses SDP: SDP
+# neither of which lives in this crate: str0m owns the live transport, so there
+# is no transport path here to compile-verify. This crate never parses SDP: SDP
 # offer/answer negotiation is str0m's, in `multiview-webrtc` (ADR-0048). The PURE
 # negotiated-session value model (`NegotiatedSession` and friends in
 # `webrtc::sdp`) is always compiled; this feature only adds the thin

@@ -1,4 +1,4 @@
-//! WebRTC ingest transport — **feature `webrtc`**.
+//! WebRTC ingest — the RTP-receive seam — **feature `webrtc`**.
 //!
 //! This module owns the *testable core* of a WebRTC receive session: the
 //! application-layer **[`MediaEngine`] seam** that a concrete ICE/DTLS/SRTP engine
