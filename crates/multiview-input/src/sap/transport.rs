@@ -51,6 +51,38 @@ pub const MAX_SAP_DATAGRAM: usize = 65_536;
 /// (panel F4, inv #10).
 pub const PURGE_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Bind a UDP socket for a SAP transport with IPv6-first **dual-stack** semantics
+/// (ADR-0042, panel S4), mirroring the webrtc media bind.
+///
+/// An IPv6 (`[::]`) bind sets `IPV6_V6ONLY=false` so it also accepts IPv4-mapped
+/// peers, and every bind sets `SO_REUSEADDR` so multiple SAP listeners can share
+/// the well-known port and a restart can re-bind promptly. tokio's
+/// `UdpSocket::bind` sets **neither** — dual-stack is left to the host
+/// `bindv6only` sysctl and `SO_REUSEADDR` is off — so the socket is built through
+/// `socket2` (the crate stays `unsafe_code = forbid`; `SockRef`/`Socket`, never
+/// raw FFI) and adopted as an async socket.
+fn bind_dual_stack(local: SocketAddr) -> std::io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let domain = if local.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    if local.is_ipv6() {
+        // Dual-stack: accept IPv4-mapped peers on the same v6 socket (never pin to
+        // v6-only, whatever the host `bindv6only` default).
+        socket.set_only_v6(false)?;
+    }
+    // Share the well-known SAP port across listeners and re-bind promptly after a
+    // restart (the webrtc media bind sets this too).
+    socket.set_reuse_address(true)?;
+    // tokio adopts the fd, which must be non-blocking.
+    socket.set_nonblocking(true)?;
+    socket.bind(&local.into())?;
+    UdpSocket::from_std(socket.into())
+}
+
 /// A supervised SAP receive listener: a bound UDP socket folding discovered
 /// announcements into a wait-free, bounded session table.
 #[derive(Debug)]
@@ -76,8 +108,9 @@ impl SapListener {
     ///
     /// [`Error::Ingest`] if the socket cannot be bound.
     pub async fn bind(local: SocketAddr) -> Result<Self> {
-        let socket = UdpSocket::bind(local)
-            .await
+        // Dual-stack, SO_REUSEADDR (panel S4): a `[::]` listener also accepts
+        // IPv4-mapped SAP, not left to the host `bindv6only` default.
+        let socket = bind_dual_stack(local)
             .map_err(|e| Error::Ingest(format!("sap bind {local}: {e}")))?;
         Ok(Self {
             socket: Arc::new(socket),
@@ -283,8 +316,8 @@ impl SapAnnouncer {
     ///
     /// [`Error::Ingest`] if the socket cannot be bound.
     pub async fn bind(local: SocketAddr) -> Result<Self> {
-        let socket = UdpSocket::bind(local)
-            .await
+        // Dual-stack, SO_REUSEADDR (panel S4), mirroring the listener bind.
+        let socket = bind_dual_stack(local)
             .map_err(|e| Error::Ingest(format!("sap announcer bind {local}: {e}")))?;
         // SAP uses TTL/hop-limit 255 (scope is carried by the group address, not
         // the TTL). Best-effort: a v6-only socket has no v4 multicast TTL.
