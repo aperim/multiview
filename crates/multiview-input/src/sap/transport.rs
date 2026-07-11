@@ -28,6 +28,8 @@ use tokio::net::UdpSocket;
 
 use crate::error::{Error, Result};
 
+use crate::st2110::transport::MulticastInterface;
+
 use super::announce::{announcement, deletion, AnnounceSchedule};
 use super::groups::{receive_group_set, SAP_TTL};
 use super::packet::SapPacket;
@@ -57,6 +59,9 @@ pub struct SapListener {
     accept_burst: u32,
     /// The fixed window the `accept_burst` applies over.
     accept_window: Duration,
+    /// The IPv6 multicast interface the receive-group join uses (panel F6);
+    /// unspecified (OS default) unless set via `with_interface`.
+    interface: MulticastInterface,
 }
 
 impl SapListener {
@@ -76,7 +81,18 @@ impl SapListener {
             started: Instant::now(),
             accept_burst: DEFAULT_ACCEPT_BURST,
             accept_window: DEFAULT_ACCEPT_WINDOW,
+            interface: MulticastInterface::Unspecified,
         })
+    }
+
+    /// Set the IPv6 multicast interface the receive-group join uses (default
+    /// [`MulticastInterface::Unspecified`] → the OS default). IPv6 SAP groups are
+    /// link/site-local, so a real deployment supplies the intended interface
+    /// rather than relying on index 0 (panel F6); IPv4 joins via `INADDR_ANY`.
+    #[must_use]
+    pub fn with_interface(mut self, interface: MulticastInterface) -> Self {
+        self.interface = interface;
+        self
     }
 
     /// Use a caller-provided (shared) session table instead of a fresh one, so
@@ -122,6 +138,11 @@ impl SapListener {
     /// listener; each joins only its own family's groups (a single socket cannot
     /// join the other family).
     ///
+    /// The IPv6 SAP groups are link/site-local, so the join uses the configured
+    /// [`interface`](Self::with_interface) index rather than a hardcoded `0`
+    /// (panel F6); IPv4 joins via `INADDR_ANY`. **Live validation on a real IPv6
+    /// multicast network is hardware-gated** (rule 26).
+    ///
     /// # Errors
     ///
     /// [`Error::Ingest`] if a membership cannot be joined.
@@ -136,7 +157,7 @@ impl SapListener {
                 }
                 IpAddr::V6(v6) if want_v6 => {
                     self.socket
-                        .join_multicast_v6(&v6, 0)
+                        .join_multicast_v6(&v6, self.interface.index())
                         .map_err(|e| Error::Ingest(format!("sap join {v6}: {e}")))?;
                 }
                 _ => {} // the other family — joined by that family's listener

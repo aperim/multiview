@@ -68,6 +68,41 @@ pub const VIDEO_CLOCK_RATE: u32 = 90_000;
 /// ~1500-byte standard MTU (or up to ~9000 jumbo); 9 KiB covers both with margin.
 pub const MAX_DATAGRAM: usize = 9216;
 
+/// Which network interface to join an IPv6 multicast group on.
+///
+/// IPv6 multicast is **interface-scoped** (RFC 4291 scope-id): the OS index `0`
+/// ("unspecified" — let the kernel pick) is not portable and commonly fails for
+/// **link-local** (`ff02::/16`) and **site-local** (`ff05::/16`) groups, which
+/// must name a concrete interface. A deployment supplies the intended interface
+/// (from config or the SDP), so the RX wiring is not silently pinned to index 0
+/// (panel F6). Applies to the IPv6 path only — IPv4 multicast joins via
+/// `INADDR_ANY`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MulticastInterface {
+    /// Let the OS pick the default multicast interface (IPv6 index `0`).
+    /// Portable for a global-scope group on a single-homed host; NOT reliable
+    /// for link/site-local groups or a multi-homed host.
+    #[default]
+    Unspecified,
+    /// A specific IPv6 interface by its OS index / scope-id (e.g. resolved from
+    /// an interface name or supplied by config). Required for link/site-local
+    /// groups and to pin the join on a multi-homed host.
+    Index(u32),
+}
+
+impl MulticastInterface {
+    /// The IPv6 interface index this selection passes to
+    /// [`join_multicast_v6`](RtpReceiver::join_multicast_v6): `0` for
+    /// [`Unspecified`](Self::Unspecified), else the explicit index.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        match self {
+            MulticastInterface::Unspecified => 0,
+            MulticastInterface::Index(index) => index,
+        }
+    }
+}
+
 /// A single-path ST 2110 RTP receive socket.
 ///
 /// Binds a UDP socket and (optionally) joins a source-specific multicast group,
@@ -120,20 +155,29 @@ impl RtpReceiver {
             .map_err(|e| Error::Ingest(format!("st2110 join {group}: {e}")))
     }
 
-    /// Join a multicast `group` of either family on the default interface,
-    /// dispatching on the address family so the pipeline wiring makes one
-    /// family-agnostic `rx.join_multicast(group)` call regardless of an SDP
-    /// `c=IN IP4` / `c=IN IP6` line (ADR-0042 IPv6-first). IPv4 joins via
-    /// `INADDR_ANY`; IPv6 via interface index `0`.
+    /// Join a multicast `group` of either family, dispatching on the address
+    /// family so the pipeline wiring makes one family-agnostic
+    /// `rx.join_multicast(group, interface)` call regardless of an SDP
+    /// `c=IN IP4` / `c=IN IP6` line (ADR-0042 IPv6-first).
+    ///
+    /// `interface` selects the IPv6 multicast interface (its scope-id / OS index)
+    /// — required for link/site-local IPv6 groups, where the OS default
+    /// ([`MulticastInterface::Unspecified`] → index `0`) is not portable
+    /// (panel F6). The IPv4 path always joins via `INADDR_ANY`; the interface
+    /// selection does not apply to it. **Live validation on a real IPv6 multicast
+    /// network is hardware-gated** (rule 26) — the interface-index selection is
+    /// plumbed here and exercised by the join tests on the devcontainer's
+    /// multicast-capable interface.
     ///
     /// # Errors
     ///
     /// [`Error::Ingest`] if the membership cannot be joined (e.g. the group's
-    /// family does not match the bound socket's family).
-    pub fn join_multicast(&self, group: IpAddr) -> Result<()> {
+    /// family does not match the bound socket's family, or the interface index
+    /// names no interface).
+    pub fn join_multicast(&self, group: IpAddr, interface: MulticastInterface) -> Result<()> {
         match group {
             IpAddr::V4(v4) => self.join_multicast_v4(v4, Ipv4Addr::UNSPECIFIED),
-            IpAddr::V6(v6) => self.join_multicast_v6(v6, 0),
+            IpAddr::V6(v6) => self.join_multicast_v6(v6, interface.index()),
         }
     }
 

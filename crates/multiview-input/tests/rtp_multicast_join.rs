@@ -30,16 +30,22 @@ fn any_v6() -> SocketAddr {
 async fn join_multicast_dispatches_ipv4_by_family() {
     let rx = RtpReceiver::bind(any_v4()).await.unwrap();
     // The AES67/Dante local-scope group.
-    rx.join_multicast(IpAddr::V4(Ipv4Addr::new(239, 255, 255, 255)))
-        .expect("v4 group join dispatches to join_multicast_v4");
+    rx.join_multicast(
+        IpAddr::V4(Ipv4Addr::new(239, 255, 255, 255)),
+        MulticastInterface::Unspecified,
+    )
+    .expect("v4 group join dispatches to join_multicast_v4");
 }
 
 #[tokio::test]
 async fn join_multicast_dispatches_ipv6_by_family() {
     let rx = RtpReceiver::bind(any_v6()).await.unwrap();
     // A global-scope IPv6 media group (ADR-0042 c=IN IP6 [ff3e::1]).
-    rx.join_multicast(IpAddr::V6(Ipv6Addr::new(0xff3e, 0, 0, 0, 0, 0, 0, 1)))
-        .expect("v6 group join dispatches to join_multicast_v6");
+    rx.join_multicast(
+        IpAddr::V6(Ipv6Addr::new(0xff3e, 0, 0, 0, 0, 0, 0, 1)),
+        MulticastInterface::Unspecified,
+    )
+    .expect("v6 group join dispatches to join_multicast_v6");
 }
 
 #[tokio::test]
