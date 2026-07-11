@@ -4,12 +4,15 @@
 //! [`crate::placement::PlacementController`] is the pure brain: it *observes* a
 //! wait-free [`DeviceLoad`] snapshot and *proposes* a
 //! [`PlacementProposal`] (`Hold`/`Shed`/`Migrate`/`Split`).
-//! This module is the **execution** half GPU-5c wires: it reads those proposals
-//! on a slow control tick (never the output clock) and *executes* an accepted
-//! migration/split as the five-phase make-before-break lifecycle ADR-R010 pins —
-//! VALIDATE → SPIN-UP → WARM (keepalive) → SWAP (the RT-12 `output ← program`
-//! crosspoint) → DRAIN+STOP — and records the outcome in the
-//! [`PlacementCounters`].
+//! This module is the **execution** half GPU-5c introduces: the make-before-break
+//! primitive that renders an accepted `Migrate`/`Split` as the five-phase lifecycle
+//! ADR-R010 pins — VALIDATE → SPIN-UP → WARM (keepalive) → SWAP (the RT-12
+//! `output ← program` crosspoint) → DRAIN+STOP. The primitive is **built and tested
+//! here**; the slow control tick that reads proposals ([`PlacementCoordinator`],
+//! driven by `multiview-cli`) today observes, records the decision in the
+//! [`PlacementCounters`], and sheds — it does **not** yet drive the cutover for an
+//! accepted migration, whose live wiring is gated on RT-13 carrier convergence + the
+//! MP-5 multi-program run.
 //!
 //! ## The RT-12 crosspoint ([`OutputCrosspoint`])
 //!
@@ -337,16 +340,17 @@ pub async fn drain_stop<P: Pacer + Send + 'static>(
 }
 
 /// The live **placement-execution loop** (GPU-5c): owns the pure
-/// [`PlacementController`], reads the wait-free [`LoadSnapshot`], drives the
-/// [`OutputCrosspoint`] for an accepted migration, and records every decision in
-/// the [`PlacementCounters`].
+/// [`PlacementController`], reads the wait-free [`LoadSnapshot`], holds the
+/// [`OutputCrosspoint`] the make-before-break SWAP re-keys, and records every
+/// decision in the [`PlacementCounters`].
 ///
 /// One [`PlacementCoordinator`] tick is one slow **control** tick (1–4 Hz, the
 /// `LoadPoller` cadence), driven on the CLI's control thread — **never** the
 /// output clock. It is structurally incapable of stalling the engine: it
 /// observes a wait-free snapshot and either holds, drives the existing
-/// degradation ladder (a `Shed`), or runs the make-before-break coordinator (a
-/// `Migrate`/`Split`) on the control plane (inv #1 + #10).
+/// degradation ladder (a `Shed`), or records an accepted `Migrate`/`Split` — all
+/// on the control plane (inv #1 + #10). Executing that `Migrate`/`Split` through the
+/// make-before-break primitive is not yet wired into the live loop.
 ///
 /// `P` is the [`Pacer`] the program set runs (production
 /// [`RealtimePacer`](crate::RealtimePacer)).
@@ -412,7 +416,7 @@ impl PlacementCoordinator {
         self.controller.current_device()
     }
 
-    /// The crosspoint this loop drives (the RT-12 cutover bridge).
+    /// The RT-12 cutover crosspoint the make-before-break SWAP re-keys.
     #[must_use]
     pub fn crosspoint(&self) -> &OutputCrosspoint {
         &self.crosspoint
