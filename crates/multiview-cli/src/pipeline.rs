@@ -14984,8 +14984,7 @@ a=mediaclk:direct=0\r\n";
             aes67_output_named("bzhq", "[ff3e::1]:5004"),
             aes67_output_named("fnmw", "[ff3e::1]:5004"),
         ])
-        .err()
-        .expect("a same-group ssrc collision is rejected");
+        .expect_err("a same-group ssrc collision is rejected");
         let msg = format!("{err:?}");
         assert!(
             msg.contains("bzhq") && msg.contains("fnmw"),
