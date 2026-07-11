@@ -108,7 +108,9 @@ pub trait MeshTransport {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{reassemble_txt, CHUNK_BYTES, CHUNK_COUNT_KEY, MAX_CHUNKS};
+    use super::{chunk_txt, reassemble_txt, CHUNK_BYTES, CHUNK_COUNT_KEY, MAX_CHUNKS};
+
+    use crate::error::MeshError;
 
     #[test]
     fn reassembly_rejects_hostile_count_before_reading_chunks() {
@@ -261,6 +263,55 @@ mod tests {
         assert_eq!(
             decoded, payload,
             "a maximal legitimate announce round-trips through chunk reassembly"
+        );
+    }
+
+    /// The publish side refuses a `wire` that would split into more than
+    /// `MAX_CHUNKS` chunks, returning a typed `MeshError::AnnounceTooLarge`
+    /// rather than emitting an announce every peer's receive-side bound would
+    /// silently drop (which would make this node invisible on the mesh) — the
+    /// publish-side mirror of the receive-side cap.
+    #[test]
+    fn chunk_txt_refuses_a_wire_past_the_chunk_cap() {
+        // One byte past `MAX_CHUNKS` full chunks → `MAX_CHUNKS + 1` chunks.
+        let over_cap = vec![b'x'; MAX_CHUNKS * CHUNK_BYTES + 1];
+        assert_eq!(
+            chunk_txt(&over_cap),
+            Err(MeshError::AnnounceTooLarge {
+                chunks: MAX_CHUNKS + 1,
+                max: MAX_CHUNKS,
+            }),
+            "an over-cap announce must be refused at the publisher, not emitted"
+        );
+    }
+
+    /// A `wire` at exactly the cap publishes (the bound is `>`, not `>=`) and the
+    /// emitted properties reassemble losslessly through the receive-side guard —
+    /// proving publish/receive chunking stays symmetric right up to the limit.
+    #[test]
+    fn chunk_txt_accepts_the_cap_and_round_trips() {
+        let at_cap = vec![b'x'; MAX_CHUNKS * CHUNK_BYTES];
+        let props = chunk_txt(&at_cap).expect("a wire at exactly the cap must publish");
+
+        // `c` = the emitted chunk count, then one `p{i}` per chunk.
+        assert_eq!(
+            props.first(),
+            Some(&(CHUNK_COUNT_KEY.to_owned(), MAX_CHUNKS.to_string())),
+            "the `c` property must carry the emitted chunk count"
+        );
+        assert_eq!(
+            props.len(),
+            MAX_CHUNKS + 1,
+            "one `c` property plus one property per chunk"
+        );
+
+        // Publish → receive symmetry: the guard reassembles the exact wire.
+        let map: HashMap<String, String> = props.into_iter().collect();
+        let reassembled = reassemble_txt(|key| map.get(key).map(String::as_str))
+            .expect("the receive guard accepts an at-cap announce");
+        assert_eq!(
+            reassembled, at_cap,
+            "publish/receive chunking must round-trip at the cap"
         );
     }
 }
