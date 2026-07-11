@@ -176,4 +176,59 @@ mod producer {
             "a sequence gap (1 -> 3) is flagged as a discontinuity"
         );
     }
+
+    /// A [`PacketSource`] that yields `remaining` malformed units — each a
+    /// counted poll — then drains to `None`, so a test can prove the producer
+    /// never drains an unbounded flood in one call (F1 / inv #1).
+    struct FloodSource {
+        polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        remaining: usize,
+    }
+
+    impl PacketSource for FloodSource {
+        fn poll_packet(&mut self) -> Result<Option<St2110Packet>, multiview_input::Error> {
+            self.polls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.remaining == 0 {
+                return Ok(None);
+            }
+            self.remaining -= 1;
+            // A 5-byte payload is never a whole number of 6-byte stereo-L24
+            // groups, so `V30Payload::parse` fails and the producer skips it.
+            Ok(Some(audio_packet(0, 0, 1, vec![0, 1, 2, 3, 4])))
+        }
+    }
+
+    #[test]
+    fn next_audio_is_bounded_work_under_a_malformed_flood() {
+        use std::sync::atomic::Ordering;
+
+        // Any sane per-poll budget is far below this ceiling; a malformed flood
+        // that drains unbounded work in one call blows past it (F1 / inv #1).
+        const POLL_BUDGET_CEILING: usize = 1_000;
+        const FLOOD: usize = 5_000;
+
+        let format = Aes3Format::new(2, SampleDepth::L24).expect("stereo L24");
+        let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source = FloodSource {
+            polls: std::sync::Arc::clone(&polls),
+            remaining: FLOOD,
+        };
+        let mut producer = Aes67AudioProducer::new(Box::new(source), format);
+
+        // One tick over a malformed flood: no valid unit is produced, and the
+        // call must NOT drain the whole flood — a sample is bounded work so it
+        // can never delay the output clock (inv #1). The caller re-polls next
+        // tick; malformed datagrams are drained at the budget rate, not at once.
+        let out = producer
+            .next_audio()
+            .expect("a malformed flood is skipped, never faulted");
+        assert!(out.is_none(), "no valid unit in the flood this tick");
+        let polled = polls.load(Ordering::Relaxed);
+        assert!(
+            polled <= POLL_BUDGET_CEILING,
+            "next_audio must be bounded per call (inv #1): polled {polled} of a \
+             {FLOOD}-packet flood, exceeding the {POLL_BUDGET_CEILING} ceiling",
+        );
+    }
 }
