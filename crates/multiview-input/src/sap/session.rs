@@ -249,11 +249,9 @@ fn oldest_position(
 /// Whether `session` is stale at `now`: unseen for longer than
 /// `max(10 × observed_period, PURGE_FLOOR)`.
 fn is_expired(session: &DiscoveredSession, now: Duration) -> bool {
-    let threshold = session
-        .observed_period
-        .map_or(PURGE_FLOOR, |p| {
-            p.saturating_mul(PURGE_PERIOD_MULTIPLIER).max(PURGE_FLOOR)
-        });
+    let threshold = session.observed_period.map_or(PURGE_FLOOR, |p| {
+        p.saturating_mul(PURGE_PERIOD_MULTIPLIER).max(PURGE_FLOOR)
+    });
     now.checked_sub(session.last_seen)
         .is_some_and(|age| age > threshold)
 }

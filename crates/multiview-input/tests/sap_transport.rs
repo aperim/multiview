@@ -75,7 +75,11 @@ async fn malformed_datagram_is_skipped_and_the_loop_survives() {
     // survived the malformed inputs.
     let announcer = SapAnnouncer::bind(loopback6(0)).await.unwrap();
     let sdp = b"v=0 valid-after-garbage".to_vec();
-    let pkt = announcement(stable_hash(&sdp), IpAddr::V6(Ipv6Addr::LOCALHOST), sdp.clone());
+    let pkt = announcement(
+        stable_hash(&sdp),
+        IpAddr::V6(Ipv6Addr::LOCALHOST),
+        sdp.clone(),
+    );
     announcer.send_to(&pkt, addr).await.unwrap();
 
     assert!(
@@ -144,7 +148,10 @@ async fn announcer_run_loop_emits_the_first_cycle_immediately() {
     };
     // A 30 s cadence means the first announcement is sent immediately, before the
     // first (jittered) sleep — so the table populates without waiting a cycle.
-    tokio::spawn(announcer.run(vec![session], AnnounceSchedule::new(Duration::from_secs(30))));
+    tokio::spawn(announcer.run(
+        vec![session],
+        AnnounceSchedule::new(Duration::from_secs(30)),
+    ));
 
     assert!(
         wait_for(|| table.len() == 1).await,

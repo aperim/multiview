@@ -53,7 +53,10 @@ fn jitter_endpoints_are_two_thirds_and_just_under_four_thirds() {
     // sample MAX → approaches, but never reaches, 4/3·base = 40 s.
     let hi = sched.next_delay(u64::MAX);
     assert!(hi < secs(40), "jitter never reaches the open upper bound");
-    assert!(hi >= secs(39), "sample MAX lands just under 40 s, got {hi:?}");
+    assert!(
+        hi >= secs(39),
+        "sample MAX lands just under 40 s, got {hi:?}"
+    );
     // mid sample → about the base cadence.
     let mid = sched.next_delay(u64::MAX / 2);
     assert!(
@@ -83,7 +86,10 @@ fn deletion_is_a_t1_packet_for_the_same_session() {
     let h = stable_hash(&sdp);
     let pkt = deletion(h, origin(), sdp.clone());
     assert_eq!(pkt.message_type, SapMessageType::Deletion);
-    assert_eq!(pkt.msg_id_hash, h, "the delete carries the announcement's hash");
+    assert_eq!(
+        pkt.msg_id_hash, h,
+        "the delete carries the announcement's hash"
+    );
     assert_eq!(pkt.origin, origin());
     let round = SapPacket::parse(&pkt.encode()).unwrap();
     assert_eq!(round.message_type, SapMessageType::Deletion);
