@@ -31,8 +31,19 @@
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axum::extract::{ConnectInfo, Request, State};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use multiview_config::limits::ManagementLimits;
+use tokio::sync::Semaphore;
+
+use crate::auth::ApiKeyStore;
+use crate::problem::Problem;
 
 /// Nano-tokens per whole token. Chosen equal to nanoseconds-per-second so that
 /// the refill rate in nano-tokens **per nanosecond** is exactly the configured
@@ -193,6 +204,228 @@ impl<S: BuildHasher> RateLimiter<S> {
                 retry_after: Duration::from_nanos(retry_after_ns),
             }
         }
+    }
+}
+
+/// The fixed number of token-bucket cells per keyed limiter. `O(1)` memory that
+/// never grows regardless of how many distinct IPs / keys are ever seen — the
+/// bounded-memory property that keeps the DoS floor from becoming its own
+/// memory-exhaustion vector. Sized generously so a hash collision between the
+/// handful of real operators / keys is astronomically unlikely.
+const RATE_LIMIT_CELLS: usize = 4096;
+
+/// The `Retry-After` hint on a `503` concurrency shed. Unlike a rate limit there
+/// is no exact refill time (a permit frees when some in-flight request
+/// completes), so a short fixed hint is offered.
+const CONCURRENCY_RETRY_AFTER: Duration = Duration::from_secs(1);
+
+/// The runtime management-plane limiters (SEC-14), built once from
+/// [`ManagementLimits`] and shared behind an `Arc` by the middleware.
+///
+/// Isolation-safe (invariant #10): purely control-plane, holds no engine handle;
+/// the concurrency guard **sheds** (returns `503`) rather than queueing, and the
+/// rate guards return `429` — neither ever blocks.
+pub(crate) struct Limiters {
+    /// The concurrent in-flight request cap ([`None`] ⇒ limits disabled).
+    concurrency: Option<Arc<Semaphore>>,
+    /// The per-source-IP token bucket, applied pre-auth.
+    per_ip: Option<RateLimiter>,
+    /// The per-API-key token bucket, applied post-auth.
+    per_api_key: Option<RateLimiter>,
+    /// The monotonic origin the middleware measures `now_ns` against.
+    origin: Instant,
+    /// Whether any limit is enforced.
+    enabled: bool,
+}
+
+impl Limiters {
+    /// Build the limiters from validated config. A disabled config yields the
+    /// inert [`Limiters::disabled`] set.
+    pub(crate) fn from_config(cfg: &ManagementLimits) -> Self {
+        if !cfg.enabled {
+            return Self::disabled();
+        }
+        // Clamp the permit count to tokio's ceiling so an absurd config value can
+        // never panic `Semaphore::new`.
+        let permits = cfg.max_concurrent_requests.min(Semaphore::MAX_PERMITS);
+        Self {
+            concurrency: Some(Arc::new(Semaphore::new(permits))),
+            per_ip: Some(RateLimiter::new(
+                RATE_LIMIT_CELLS,
+                Rate {
+                    capacity: cfg.per_ip.burst,
+                    refill_per_sec: cfg.per_ip.refill_per_sec,
+                },
+            )),
+            per_api_key: Some(RateLimiter::new(
+                RATE_LIMIT_CELLS,
+                Rate {
+                    capacity: cfg.per_api_key.burst,
+                    refill_per_sec: cfg.per_api_key.refill_per_sec,
+                },
+            )),
+            origin: Instant::now(),
+            enabled: true,
+        }
+    }
+
+    /// The inert limiters: the default for the bare [`crate::state::AppState`]
+    /// constructor (tests / embedders) and the result of a disabled config. No
+    /// middleware is installed when disabled, so this is never on the hot path.
+    pub(crate) fn disabled() -> Self {
+        Self {
+            concurrency: None,
+            per_ip: None,
+            per_api_key: None,
+            origin: Instant::now(),
+            enabled: false,
+        }
+    }
+
+    /// Whether any limit is enforced — drives whether [`crate::router`] installs
+    /// the middleware at all.
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// The current monotonic time in nanoseconds since construction (saturating).
+    fn now_ns(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+}
+
+/// The state the per-API-key middleware needs: the shared limiters plus the API
+/// key store it resolves the presented `Bearer` credential against, so only a
+/// **validated** key is rate-limited (a wrong-secret request cannot drain a
+/// victim key's bucket).
+#[derive(Clone)]
+pub(crate) struct PerKeyLimitState {
+    /// The shared runtime limiters.
+    pub(crate) limiters: Arc<Limiters>,
+    /// The API key store used to resolve the presented credential's `key_id`.
+    pub(crate) api_keys: Arc<ApiKeyStore>,
+}
+
+/// Round a retry delay up to whole seconds for the `Retry-After` header (RFC 9110
+/// §10.2.3 delta-seconds), never below one second.
+fn retry_after_secs(retry_after: Duration) -> u64 {
+    let round_up = u64::from(retry_after.subsec_nanos() > 0);
+    retry_after.as_secs().saturating_add(round_up).max(1)
+}
+
+/// Build an RFC-9457 problem response for a limit rejection, with the
+/// `Retry-After` header set from `retry_after`.
+fn limit_response(
+    status: StatusCode,
+    slug: &str,
+    title: &str,
+    detail: &str,
+    retry_after: Duration,
+) -> Response {
+    let mut response = Problem::new(status.as_u16(), slug, title)
+        .with_detail(detail.to_owned())
+        .into_response();
+    // A decimal integer of seconds is always a valid header value; guard anyway.
+    if let Ok(value) = HeaderValue::try_from(retry_after_secs(retry_after).to_string()) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
+}
+
+/// The `429 Too Many Requests` response for a token-bucket rejection.
+fn too_many(retry_after: Duration) -> Response {
+    limit_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        "rate-limited",
+        "Too Many Requests",
+        "Request rate limit exceeded; see the Retry-After header.",
+        retry_after,
+    )
+}
+
+/// The `503 Service Unavailable` response for a concurrency shed.
+fn overloaded(retry_after: Duration) -> Response {
+    limit_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "overloaded",
+        "Service Unavailable",
+        "The management plane is at its concurrent-request capacity; see the Retry-After header.",
+        retry_after,
+    )
+}
+
+/// Pre-auth per-source-IP rate limit. Keyed on the peer IP (from `ConnectInfo`,
+/// wired by [`crate::serve_router`]) so it protects the auth path from
+/// brute-force. A request whose peer IP is unavailable is not limited here (the
+/// concurrency cap + per-key limit still apply — fail open, never a self-inflicted
+/// outage).
+pub(crate) async fn per_ip_rate_limit(
+    State(limiters): State<Arc<Limiters>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(limiter) = limiters.per_ip.as_ref() else {
+        return next.run(request).await;
+    };
+    let peer_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0.ip());
+    let Some(ip) = peer_ip else {
+        return next.run(request).await;
+    };
+    match limiter.check(&ip, limiters.now_ns()) {
+        Decision::Allowed => next.run(request).await,
+        Decision::Limited { retry_after } => too_many(retry_after),
+    }
+}
+
+/// Post-auth per-API-key rate limit. Resolves the presented `Bearer` credential
+/// against the key store and limits only a **validated** key (keyed on its
+/// `key_id`), so one credential cannot monopolise the management plane.
+/// Unauthenticated requests pass through — the per-IP + concurrency limits cover
+/// them.
+pub(crate) async fn per_api_key_rate_limit(
+    State(state): State<PerKeyLimitState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(limiter) = state.limiters.per_api_key.as_ref() else {
+        return next.run(request).await;
+    };
+    let header_value = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    let Ok(principal) = state.api_keys.verify_authorization(header_value) else {
+        return next.run(request).await;
+    };
+    match limiter.check(principal.key_id.as_str(), state.limiters.now_ns()) {
+        Decision::Allowed => next.run(request).await,
+        Decision::Limited { retry_after } => too_many(retry_after),
+    }
+}
+
+/// Global concurrent-request cap. Acquires one permit for the duration of the
+/// request; when the cap is reached the request is **shed** with `503` +
+/// Retry-After rather than queued — bounded, never back-pressures (invariant #10).
+pub(crate) async fn concurrency_cap(
+    State(limiters): State<Arc<Limiters>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(semaphore) = limiters.concurrency.as_ref() else {
+        return next.run(request).await;
+    };
+    match Arc::clone(semaphore).try_acquire_owned() {
+        Ok(permit) => {
+            // Hold the permit across the handler; release it once the response is
+            // produced (drop after the await, never during it).
+            let response = next.run(request).await;
+            drop(permit);
+            response
+        }
+        Err(_) => overloaded(CONCURRENCY_RETRY_AFTER),
     }
 }
 
