@@ -7,11 +7,12 @@
 //! secure defaults below (limits **on**). The runtime limiter lives in
 //! `multiview-control`; this crate only models + validates the knobs.
 //!
-//! These caps engage after a request's headers are parsed, so they bound in-flight
-//! requests (and the long-lived WS/SSE sessions that hold a concurrency permit for
-//! their lifetime) — **not** idle keep-alive connections, which hold no permit, nor
-//! half-open, slow-header connections (slowloris); those are out of scope for this
-//! in-process floor (front the plane with a reverse proxy for that; see
+//! The rate + concurrency caps engage after a request's headers are parsed, so they
+//! bound in-flight requests (and the long-lived WS/SSE sessions that hold a
+//! concurrency permit for their lifetime) — **not** idle keep-alive connections,
+//! which hold no permit. A half-open, slow-header connection (slowloris) is bounded
+//! separately by [`ManagementLimits::header_read_timeout_secs`], which the
+//! `multiview-control` serve loop applies to the header read (SEC-14 / #126; see
 //! [ADR-W028](../../../docs/decisions/ADR-W028.md)).
 
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,11 @@ const DEFAULT_PER_IP_REFILL_PER_SEC: u32 = 40;
 const DEFAULT_PER_API_KEY_BURST: u32 = 240;
 /// Default per-API-key steady-state rate (requests/second), post-auth.
 const DEFAULT_PER_API_KEY_REFILL_PER_SEC: u32 = 80;
+/// Default header-read timeout (seconds): the maximum time the serve loop waits to
+/// read a request's full header block before dropping the connection. Generous for
+/// any legitimate client (headers arrive in milliseconds) while bounding a
+/// slow-header slowloris.
+const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 20;
 
 fn default_enabled() -> bool {
     true
@@ -46,6 +52,10 @@ fn default_enabled() -> bool {
 
 fn default_max_concurrent_requests() -> usize {
     DEFAULT_MAX_CONCURRENT_REQUESTS
+}
+
+fn default_header_read_timeout_secs() -> u64 {
+    DEFAULT_HEADER_READ_TIMEOUT_SECS
 }
 
 fn default_per_ip() -> RateLimitConfig {
@@ -147,6 +157,16 @@ pub struct ManagementLimits {
     /// authenticated key id.
     #[serde(default = "default_per_api_key")]
     pub per_api_key: RateLimitConfig,
+    /// The header-read timeout, in **seconds**: the maximum time the serve loop
+    /// waits to read a request's full header block before dropping the connection.
+    /// Bounds a slow-header ("slowloris") client that dribbles headers to pin a
+    /// connection open — the rate + concurrency caps above engage only *after*
+    /// headers are parsed, so they do not cover it. Applied to every served
+    /// connection **independent of `enabled`** (which gates only the shed layers): a
+    /// generous header-read timeout has no downside for a legitimate client, so it
+    /// stays on even for a trusted-network deployment. Default `20`.
+    #[serde(default = "default_header_read_timeout_secs")]
+    pub header_read_timeout_secs: u64,
 }
 
 impl Default for ManagementLimits {
@@ -156,6 +176,7 @@ impl Default for ManagementLimits {
             max_concurrent_requests: default_max_concurrent_requests(),
             per_ip: default_per_ip(),
             per_api_key: default_per_api_key(),
+            header_read_timeout_secs: default_header_read_timeout_secs(),
         }
     }
 }
@@ -183,6 +204,13 @@ impl ManagementLimits {
                  value cannot be installed and must not be silently clamped to a different cap"
             )));
         }
+        if self.header_read_timeout_secs == 0 {
+            return Err(ConfigError::Validation(
+                "control.limits.header_read_timeout_secs must be >= 1 (0 would drop every \
+                 connection before it can send its headers)"
+                    .to_owned(),
+            ));
+        }
         self.per_ip.validate("per_ip")?;
         self.per_api_key.validate("per_api_key")?;
         Ok(())
@@ -204,9 +232,23 @@ mod tests {
         assert_eq!(limits.per_ip.refill_per_sec, 40);
         assert_eq!(limits.per_api_key.burst, 240);
         assert_eq!(limits.per_api_key.refill_per_sec, 80);
+        assert_eq!(limits.header_read_timeout_secs, 20);
         limits
             .validate()
             .expect("the secure defaults must validate");
+    }
+
+    #[test]
+    fn a_zero_header_read_timeout_is_rejected() {
+        let limits = ManagementLimits {
+            header_read_timeout_secs: 0,
+            ..ManagementLimits::default()
+        };
+        assert!(
+            limits.validate().is_err(),
+            "a zero header-read timeout would drop every connection before it can send its \
+             headers and must fail config load"
+        );
     }
 
     #[test]

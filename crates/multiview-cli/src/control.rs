@@ -400,12 +400,27 @@ where
     // certificate aborts `multiview run` loudly rather than failing inside the
     // spawned server task; a `[control.tls]` config in a build WITHOUT the `tls`
     // feature is a hard startup error — never a silent plain-HTTP downgrade.
+    // SEC-14 #126 (ADR-W028 F-A): the header-read timeout (slowloris guard) is a
+    // serve-loop property, not a router layer, so it is threaded into the serve
+    // helper. It applies to every served connection regardless of the rate/concurrency
+    // `enabled` flag. Absent `[control.limits]` ⇒ the secure default (20 s).
+    let serve_options = match config.control.as_ref() {
+        Some(control) => multiview_control::ServeOptions::default().with_header_read_timeout(Some(
+            std::time::Duration::from_secs(control.limits.header_read_timeout_secs),
+        )),
+        None => multiview_control::ServeOptions::default(),
+    };
     let handle = match config
         .control
         .as_ref()
         .and_then(|control| control.tls.as_ref())
     {
-        None => tokio::spawn(multiview_control::serve_router(listener, app, shutdown)),
+        None => tokio::spawn(multiview_control::serve_router_with(
+            listener,
+            app,
+            serve_options,
+            shutdown,
+        )),
         #[cfg(feature = "tls")]
         Some(tls) => {
             let material = multiview_control::load_tls_material(tls)

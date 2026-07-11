@@ -353,6 +353,13 @@ impl ServeOptions {
     }
 }
 
+/// The graceful-drain ceiling for the plaintext serve loop: after shutdown is
+/// signalled, in-flight connections get up to this long to finish before the
+/// remaining ones are abandoned. Normal teardown (the engine's broadcast close ends
+/// the WS/SSE sessions) completes well within it — this only bounds a genuinely
+/// stuck client so a restart cannot hang forever (safety §3).
+const GRACEFUL_SHUTDOWN_CEILING: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Serve the control-plane [`router`] on an already-bound
 /// [`tokio::net::TcpListener`], shutting down gracefully when `shutdown` resolves.
 ///
@@ -365,7 +372,7 @@ impl ServeOptions {
 /// non-blocking command bus, so no client it serves can back-pressure the engine.
 ///
 /// # Errors
-/// Propagates any I/O error from the underlying [`axum::serve`] accept loop.
+/// Propagates any I/O error from the underlying accept loop.
 pub async fn serve<F>(
     listener: tokio::net::TcpListener,
     state: AppState,
@@ -407,15 +414,13 @@ where
 /// contract as [`serve`] applies: anything mounted must be best-effort and
 /// physically incapable of back-pressuring the engine (invariant #10).
 ///
-/// This helper installs each connection's peer `SocketAddr` as a `ConnectInfo`
-/// request extension (`into_make_service_with_connect_info`), which the SEC-14
-/// pre-auth per-IP rate limit ([`crate::limits`]) REQUIRES to key on the source IP.
-/// Serving [`router`] through a different make-service loses that extension and
-/// silently disables the per-IP guard (it fails open); route control-plane traffic
-/// through this helper (or [`serve`]) to keep it active.
+/// [`serve_router_with`] with the default [`ServeOptions`] — so it installs the
+/// [`DEFAULT_HEADER_READ_TIMEOUT`] slowloris guard and each connection's peer
+/// `SocketAddr` as a `ConnectInfo` extension (the SEC-14 per-IP key). Route
+/// control-plane traffic through this helper (or [`serve`]) to keep both active.
 ///
 /// # Errors
-/// Propagates any I/O error from the underlying [`axum::serve`] accept loop.
+/// Propagates any I/O error from the underlying accept loop.
 pub async fn serve_router<F>(
     listener: tokio::net::TcpListener,
     app: Router,
@@ -424,16 +429,7 @@ pub async fn serve_router<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    // `into_make_service_with_connect_info` records each connection's peer
-    // `SocketAddr` in request extensions so the SEC-14 per-IP rate limit can key
-    // on the source IP (the pre-auth brute-force guard). Handlers that ignore it
-    // are unaffected.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await
+    serve_router_with(listener, app, ServeOptions::default(), shutdown).await
 }
 
 /// Serve an already-built [`Router`] with explicit [`ServeOptions`], shutting down
@@ -441,9 +437,23 @@ where
 /// [`ServeOptions::default`].
 ///
 /// The composition seam the CLI uses to thread the configured header-read timeout
-/// through the mounted app (control plane + per-output HLS routers). Same isolation
-/// contract as [`serve_router`] (invariant #10) and the same
-/// `into_make_service_with_connect_info` wiring (the SEC-14 per-IP guard).
+/// through the mounted app (control plane + per-output HLS routers).
+///
+/// `axum::serve` builds the hyper connection `Builder` internally and exposes no
+/// header-read timeout, so this drives the accept loop directly on
+/// [`hyper_util::server::conn::auto::Builder`]: each accepted connection is served
+/// with `serve_connection_with_upgrades` (so `/api/v1/ws` still upgrades) under a
+/// [`GracefulShutdown`](hyper_util::server::graceful::GracefulShutdown) watcher, and
+/// the peer `SocketAddr` is installed as a `ConnectInfo` request extension exactly
+/// as `into_make_service_with_connect_info` would — the SEC-14 pre-auth per-IP rate
+/// limit ([`crate::limits`]) keys on it. `options.header_read_timeout` bounds the
+/// time to read a request's full header block, dropping a slow-header slowloris
+/// client (SEC-14 / [ADR-W028](../../docs/decisions/ADR-W028.md) F-A); `None`
+/// leaves it unbounded.
+///
+/// Same isolation contract as [`serve_router`] (invariant #10): the loop only
+/// serves HTTP and never awaits the engine, so no client it accepts can
+/// back-pressure the data plane.
 ///
 /// # Errors
 /// Propagates any I/O error from the underlying accept loop.
@@ -456,12 +466,88 @@ pub async fn serve_router_with<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    // NOTE (#126 RED): the header-read timeout is not yet honoured — this delegates
-    // to the axum::serve path so the failing slowloris test compiles and fails on
-    // behaviour. GREEN replaces the body with the hand-rolled hyper serve loop that
-    // applies `options.header_read_timeout`.
-    let _ = &options;
-    serve_router(listener, app, shutdown).await
+    use std::pin::pin;
+
+    use axum::extract::ConnectInfo;
+    use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+    use hyper_util::server::conn::auto::Builder as ConnBuilder;
+    use hyper_util::server::graceful::GracefulShutdown;
+    use tower::ServiceExt as _;
+
+    // One reusable connection builder. `auto` negotiates HTTP/1 and HTTP/2; the
+    // header-read timeout applies to HTTP/1 (an HTTP/2 peer is bounded by the frame
+    // model + SETTINGS instead). `header_read_timeout` panics when armed without a
+    // timer, so the Tokio timer is installed unconditionally.
+    let mut builder = ConnBuilder::new(TokioExecutor::new());
+    builder.http1().timer(TokioTimer::new());
+    if let Some(timeout) = options.header_read_timeout {
+        builder.http1().header_read_timeout(timeout);
+    }
+    // Match `axum::serve`: enable the HTTP/2 CONNECT protocol so HTTP/2 WebSockets
+    // negotiate (the extended-CONNECT upgrade `/api/v1/ws` relies on over h2).
+    builder.http2().enable_connect_protocol();
+
+    let graceful = GracefulShutdown::new();
+    let mut shutdown = pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, peer_addr) = match accepted {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        // A transient accept error (e.g. EMFILE under load) must not
+                        // tear down the control plane; log and keep serving, with a
+                        // brief backoff so a persistent error does not busy-spin.
+                        tracing::debug!(%error, "control-plane accept error; retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                let io = TokioIo::new(stream);
+
+                // Per-connection service: install the peer `SocketAddr` as a
+                // `ConnectInfo` extension (what `into_make_service_with_connect_info`
+                // does — the SEC-14 per-IP key) then dispatch to the shared router.
+                // `Router` is always ready, so `oneshot` (poll-ready then call) is
+                // safe and cheap.
+                let router = app.clone();
+                let service = hyper::service::service_fn(
+                    move |request: hyper::Request<hyper::body::Incoming>| {
+                        let mut request = request.map(axum::body::Body::new);
+                        request.extensions_mut().insert(ConnectInfo(peer_addr));
+                        router.clone().oneshot(request)
+                    },
+                );
+
+                let connection = builder.serve_connection_with_upgrades(io, service);
+                let connection = graceful.watch(connection.into_owned());
+                tokio::spawn(async move {
+                    if let Err(error) = connection.await {
+                        tracing::debug!(error = %error, "control-plane connection ended with error");
+                    }
+                });
+            }
+            () = &mut shutdown => {
+                // Stop accepting; drain the in-flight connections below.
+                drop(listener);
+                break;
+            }
+        }
+    }
+
+    // Bounded graceful drain: give live connections up to the ceiling to finish, so
+    // a wedged client cannot hang a restart forever (safety §3).
+    tokio::select! {
+        () = graceful.shutdown() => {}
+        () = tokio::time::sleep(GRACEFUL_SHUTDOWN_CEILING) => {
+            tracing::debug!(
+                "control-plane graceful-shutdown ceiling reached; abandoning remaining connections"
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Loaded, ready-to-serve rustls TLS material for the control plane (TLS-0,

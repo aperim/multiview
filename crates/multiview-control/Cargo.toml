@@ -49,6 +49,22 @@ serde_json = { workspace = true }
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["trace", "cors"] }
+# The hand-rolled control-plane serve loop (SEC-14 #126 / ADR-W028 F-A): `axum::serve`
+# builds the hyper connection `Builder` internally and exposes no header-read timeout,
+# so the accept loop is driven directly on `hyper_util::server::conn::auto::Builder`
+# with `http1().header_read_timeout(..)` (+ a `TokioTimer`) to drop a slow-header
+# slowloris client, keeping `serve_connection_with_upgrades` (WS) + `GracefulShutdown`
+# + per-connection `ConnectInfo`. Both are pure Rust and already in the lock via axum.
+hyper = { version = "1.10", default-features = false, features = [
+    "server",
+    "http1",
+    "http2",
+] }
+hyper-util = { version = "0.1.20", default-features = false, features = [
+    "server-auto",
+    "server-graceful",
+    "tokio",
+] }
 # The `http_body::Body` trait, to wrap a response body so a SEC-14 concurrency
 # permit is held for the BODY's lifetime (a held-open SSE stream), not merely the
 # handler's return. Pure Rust; already in the lock via axum.
