@@ -2711,6 +2711,38 @@ impl Pipeline {
         self.encode_cfg.audio.is_some()
     }
 
+    /// Fail closed if this run declares an AES67 source or output but carries no
+    /// program audio (#103).
+    ///
+    /// The ST 2110-30 RX publishes into, and the TX taps, the **program-audio
+    /// bus** — which only exists when `enable_program_audio` was called (the
+    /// `--program-audio` invocation). Without it the RX would be spawned to
+    /// nowhere and the TX would multicast silence, both silently. Rather than go
+    /// on air doing neither, refuse the run with a clear message. A no-op when the
+    /// config declares no AES67 endpoint (empty plans/handles) or when program
+    /// audio is on, so non-AES67 and correctly-configured runs are unaffected.
+    ///
+    /// # Errors
+    ///
+    /// [`PipelineError::Config`] when an AES67 endpoint is configured without
+    /// program audio.
+    #[cfg(feature = "aes67")]
+    fn ensure_aes67_has_program_audio(&self) -> Result<(), PipelineError> {
+        if self.encode_cfg.audio.is_some()
+            || (self.aes67_rx_plans.is_empty() && self.aes67_send_handles.is_empty())
+        {
+            return Ok(());
+        }
+        Err(PipelineError::Config(
+            multiview_config::ConfigError::Validation(
+                "an AES67 / ST 2110-30 source or output requires program audio: run \
+                 with `--program-audio` (the ST 2110-30 RX/TX only exists on the \
+                 program-audio bus)"
+                    .to_owned(),
+            ),
+        ))
+    }
+
     /// Attach the **program-audio preview tap** (ADR-P006 audio): the bake
     /// consumer pushes each emitted post-loudnorm program
     /// [`AudioBlock`](multiview_audio::format::AudioBlock) into `slot`, which the
@@ -3064,6 +3096,11 @@ impl Pipeline {
         P: Pacer,
         FC: FnMut(&mut CompositorDrive<Nv12Image>),
     {
+        // #103: an AES67 source/output only functions on the program-audio bus, so
+        // fail closed BEFORE the output clock starts if this run carries none —
+        // never go on air silently receiving/emitting silence.
+        #[cfg(feature = "aes67")]
+        self.ensure_aes67_has_program_audio()?;
         let StreamPlan {
             policy,
             runners,
@@ -7508,7 +7545,7 @@ fn build_aes67_output(
         AES67_TX_CHANNELS,
         pcm_depth,
         AES67_TX_PAYLOAD_TYPE,
-        aes67_ssrc_for(&id),
+        aes67_ssrc_for(&id, dest),
         AES67_STORE_RATE_HZ,
         frames_per_packet,
         AES67_TX_CAPACITY_FRAMES,
@@ -7529,18 +7566,37 @@ fn build_aes67_output(
     Ok((runnable, handle))
 }
 
-/// A stable, non-zero RTP SSRC for an AES67 output, derived from its id (#103): a
-/// deterministic `DefaultHasher` fold (`SipHash` with fixed keys) so the same output
-/// always advertises the same SSRC across runs, and distinct outputs get distinct
-/// streams. Clamped away from `0` (an ambiguous-but-legal SSRC).
+/// A stable, non-zero RTP SSRC for an AES67 output, folded from its id AND its
+/// multicast `group:port` (#103).
+///
+/// Uses **FNV-1a** (a small, fully-specified algorithm — mirroring the SAP
+/// [`stable_hash`](multiview_input::sap::stable_hash) approach, P2-F4) so the
+/// mapping is stable across toolchain versions, targets, and restarts: a receiver
+/// keyed on the SSRC keeps seeing one sender as the same stream across a rebuild.
+/// `DefaultHasher` (`SipHash`) is explicitly **not** a stable cross-version
+/// contract, so it must never back a wire identifier. The multicast group+port is
+/// folded in (not just the id) so two outputs that share an id but send to
+/// different destinations still get distinct SSRCs. Clamped away from `0` (an
+/// ambiguous-but-legal SSRC).
 #[cfg(feature = "aes67")]
-fn aes67_ssrc_for(id: &str) -> u32 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    id.hash(&mut hasher);
-    u32::try_from(hasher.finish() & u64::from(u32::MAX))
-        .unwrap_or(1)
-        .max(1)
+fn aes67_ssrc_for(id: &str, dest: std::net::SocketAddr) -> u32 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for &byte in id.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    // A separator so ("ab", "c…") and ("a", "bc…") cannot alias to one digest.
+    hash ^= u64::from(b'@');
+    hash = hash.wrapping_mul(FNV_PRIME);
+    for &byte in dest.to_string().as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    // Fold the 64-bit digest into 32 bits, then force non-zero.
+    let folded = (hash ^ (hash >> 32)) & u64::from(u32::MAX);
+    u32::try_from(folded).unwrap_or(1).max(1)
 }
 
 /// Build one live NDI output sink (OUT-4b / NDI-L2): enforce the
