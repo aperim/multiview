@@ -237,3 +237,51 @@ async fn the_served_control_plane_caps_concurrent_websocket_connections() {
         .expect("serve task did not panic")
         .expect("serve returned no I/O error");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_limits_falls_back_to_secure_defaults_on_an_invalid_config() {
+    // F-D: the PUBLIC `with_limits` runtime API must not install an INVALID limits
+    // config. A zero concurrency cap is invalid — installed verbatim it builds a
+    // zero-permit `Semaphore` that sheds EVERY request `503` forever (a self-inflicted
+    // outage). The CLI path validates at config load, but an embedder calling
+    // `with_limits` directly bypassed that. `with_limits` now validates and falls back
+    // to the secure defaults (fail-SAFE, never panic), so the served plane still admits
+    // requests.
+    let engine = Arc::new(EnginePublisher::<EngineStateSnapshot, Event>::new(64));
+    let (commands, _rx) = command_bus(8);
+    let mut invalid = ManagementLimits::default();
+    invalid.max_concurrent_requests = 0;
+    let state = AppState::new(
+        engine,
+        commands,
+        Arc::new(InMemoryRepository::new()),
+        Arc::new(ApiKeyStore::new(b"with-limits-validate-pepper".to_vec())),
+    )
+    .with_limits(&invalid);
+
+    let listener = TcpListener::bind("[::1]:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(multiview_control::serve(listener, state, async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    // Installed verbatim, the zero cap sheds this request `503` (the closed semaphore
+    // rejects everything). With the fail-safe fallback to the secure defaults (a 256
+    // cap) it is admitted `200`.
+    assert_eq!(
+        http_get_status(addr, "/api/v1/openapi.json")
+            .await
+            .as_deref(),
+        Some("200"),
+        "with_limits must fall back to the secure defaults on an invalid config, not \
+         install a permanently-closed concurrency cap"
+    );
+
+    shutdown_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("serve returned within 5s of shutdown")
+        .expect("serve task did not panic")
+        .expect("serve returned no I/O error");
+}

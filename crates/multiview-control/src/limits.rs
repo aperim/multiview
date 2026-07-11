@@ -1063,6 +1063,58 @@ mod middleware_tests {
     }
 
     #[tokio::test]
+    async fn a_streaming_body_frees_its_permit_at_end_of_stream_not_only_on_drop() {
+        // cap = 1. A FINITE streaming body (one data frame, then end-of-stream). The
+        // permit must free the instant the body's terminal frame is polled (`None`),
+        // not merely when the body object is dropped — otherwise a consumer that drains
+        // a response but retains the (exhausted) body pins a concurrency slot (F-C).
+        // Proof: drain the first body to completion but KEEP it alive; a second request
+        // must still find a free permit.
+        let limiters = Arc::new(Limiters::from_config(&cfg(1, 256, 256)));
+        let app = Router::new()
+            .route(
+                "/body",
+                // A whole in-memory body: yields one data frame, then `None`.
+                get(|| async { axum::response::Response::new(Body::from("hello")) }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                limiters,
+                concurrency_cap,
+            ));
+
+        // First request: take the response and DRAIN its body to end-of-stream, then
+        // hold the exhausted body alive (do NOT drop it).
+        let first = app
+            .clone()
+            .oneshot(Request::builder().uri("/body").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let mut body = first.into_body();
+        // Poll every frame through to the terminal `None` (which frees the permit under
+        // the fix); the exhausted `body` stays in scope past the loop.
+        while let Some(frame) = body.frame().await {
+            frame.expect("streamed body frame is Ok");
+        }
+
+        // The first body is drained but still held. If the permit only released on
+        // drop, it is still occupied here and this second request would be shed 503.
+        let second = app
+            .clone()
+            .oneshot(Request::builder().uri("/body").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            second.status(),
+            StatusCode::OK,
+            "the concurrency permit must free at end-of-stream (the terminal frame poll), \
+             not only when the body is dropped"
+        );
+
+        drop(body);
+    }
+
+    #[tokio::test]
     async fn a_claimed_permit_bounds_a_detached_task_not_just_the_response() {
         // The WebSocket pattern: a handler CLAIMS the in-flight permit (as the real
         // `ws_handler` does, via the same `ConcurrencyPermitClaim` extractor) and moves
