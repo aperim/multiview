@@ -58,11 +58,6 @@ pub mod jwt;
 /// request-concurrency + rate middleware backing the control-plane `DoS` floor.
 pub(crate) mod limits;
 pub mod live_apply;
-/// The shutdown-aware, guard-owning transport wrapper the hand-rolled serve loop wraps
-/// each accepted connection in (SEC-14 #126 R2): it carries the accept-level admission
-/// guard across an HTTP/1 upgrade (so a live WebSocket keeps its population-cap slot)
-/// and drains the connection when serve shuts down.
-mod serve_stream;
 pub mod nmos;
 pub mod notify;
 pub mod pending_actions;
@@ -75,6 +70,11 @@ pub mod router;
 pub mod routes;
 pub mod routing;
 pub mod salvo_store;
+/// The shutdown-aware, guard-owning transport wrapper the hand-rolled serve loop wraps
+/// each accepted connection in (SEC-14 #126 R2): it carries the accept-level admission
+/// guard across an HTTP/1 upgrade (so a live WebSocket keeps its population-cap slot)
+/// and drains the connection when serve shuts down.
+mod serve_stream;
 pub mod state;
 pub mod support_bundle;
 pub mod support_store;

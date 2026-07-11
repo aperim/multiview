@@ -99,8 +99,7 @@ async fn an_http2_preface_is_rejected_promptly_by_the_http1_parser() {
     // ~LONG_HEADER_READ_TIMEOUT; if h2 were negotiated the read would never resolve.
     const PROMPT_BOUND: Duration = Duration::from_secs(1);
 
-    let options =
-        ServeOptions::default().with_header_read_timeout(Some(LONG_HEADER_READ_TIMEOUT));
+    let options = ServeOptions::default().with_header_read_timeout(Some(LONG_HEADER_READ_TIMEOUT));
     let (addr, shutdown_tx, server) = serve_with(options).await;
 
     // Send the h2 connection preface and nothing else — an h2 server would reply with a
@@ -452,7 +451,10 @@ async fn a_live_upgraded_websocket_is_drained_when_serve_shuts_down() {
     // detached task serve() does not await — so the close assertion below is the
     // load-bearing one.
     let serve_returned = tokio::time::timeout(ceiling + Duration::from_secs(3), server).await;
-    assert!(serve_returned.is_ok(), "serve() did not return after shutdown");
+    assert!(
+        serve_returned.is_ok(),
+        "serve() did not return after shutdown"
+    );
 
     // The client must observe the WebSocket close promptly (its socket reaches EOF):
     // the shutdown-aware transport returns EOF into the upgraded socket and the
