@@ -106,6 +106,7 @@ pub mod pacer;
 pub mod param_probe;
 pub mod reconnect;
 pub mod rtp_audio;
+pub mod sap;
 pub mod scte;
 pub mod source;
 pub mod srt;
