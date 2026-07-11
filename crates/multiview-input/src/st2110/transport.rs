@@ -259,10 +259,16 @@ impl<P> DualPathReceiver<P> {
 pub struct St2110Packet {
     /// The RFC 4175 marker bit: `true` flags the **last packet of a frame**.
     pub marker: bool,
-    /// The 90 kHz RTP media timestamp (one value per video frame).
+    /// The 32-bit RTP media timestamp. Units are essence-specific: 90 kHz for
+    /// ST 2110-20 video (one value per frame), the audio sample rate for
+    /// ST 2110-30 / AES67 (e.g. 48 kHz, advancing by sample-groups per packet).
     pub timestamp: u32,
     /// The 16-bit RTP sequence number (gap detection / 2022-7 dedup / reorder).
     pub sequence: u16,
+    /// The 32-bit RTP synchronization source. The video assembler ignores it;
+    /// the ST 2110-30 / AES67 audio path forwards it to the
+    /// [`RtpAudioRebaser`](crate::rtp_audio) so a genuine SSRC change re-anchors.
+    pub ssrc: u32,
     /// The owned RTP payload bytes (after the fixed header) the SRD segments of
     /// the depacketized [`V20Payload`] index into.
     pub payload: Vec<u8>,
@@ -279,6 +285,7 @@ impl St2110Packet {
             marker: packet.header.marker,
             timestamp: packet.header.timestamp,
             sequence: packet.header.sequence,
+            ssrc: packet.header.ssrc,
             payload: packet.payload.to_vec(),
         }
     }

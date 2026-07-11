@@ -60,6 +60,7 @@ fn line_packet(marker: bool, timestamp: u32, sequence: u16, line: u16, fill: u8)
         marker,
         timestamp,
         sequence,
+        ssrc: 0,
         payload: v20_payload(line, fill),
     }
 }
