@@ -448,11 +448,12 @@ impl PacketSink {
             // propagate (the data plane holds last-good, never crashes).
             return;
         };
-        // RED scaffold (ADR-0033 §7 defect, replaced in the GREEN commit): a full
-        // ring drops the just-arrived NEWEST unit instead of the oldest.
-        if ring.queue.len() >= ring.capacity {
+        // Genuine drop-oldest (ADR-0033 §7): a full ring evicts its OLDEST unit
+        // before appending the newest, so the freshest media is retained and the
+        // ring never grows past capacity.
+        while ring.queue.len() >= ring.capacity {
+            ring.queue.pop_front();
             ring.dropped = ring.dropped.saturating_add(1);
-            return;
         }
         ring.queue.push_back(unit);
     }
