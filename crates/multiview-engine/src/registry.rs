@@ -314,25 +314,26 @@ impl<T> SourceRegistry<T> {
     /// across program threads) automatically when `T: Send + Sync`.
     #[must_use]
     pub fn new() -> Arc<Self> {
+        Self::with_spawner(spawn_teardown_worker)
+    }
+
+    /// [`new`](SourceRegistry::new) parameterized over the worker-spawn strategy — the seam
+    /// that lets a test inject a failing spawner to prove the pool is built **fail-closed**
+    /// (RP2). The public [`new`](SourceRegistry::new) passes the real
+    /// [`spawn_teardown_worker`]; either way the pool is built by [`build_teardown_pool`],
+    /// which guarantees `TEARDOWN_WORKERS` live workers (retrying a transient spawn failure)
+    /// or degrades **loudly**, never silently.
+    fn with_spawner<S>(spawn: S) -> Arc<Self>
+    where
+        S: Fn(usize, &Arc<Mutex<Receiver<Teardown>>>) -> std::io::Result<JoinHandle<()>>,
+    {
         let (tx, rx) = mpsc::sync_channel::<Teardown>(TEARDOWN_QUEUE_DEPTH);
         // One receiver shared by the fixed worker pool. A worker holds this lock only
         // to `recv` the next job — never while running a (possibly wedged) shutdown —
         // so a wedged teardown ties up its worker but never the receiver.
         let rx = Arc::new(Mutex::new(rx));
         let pending = Arc::new(AtomicUsize::new(0));
-        let mut workers = Vec::with_capacity(TEARDOWN_WORKERS);
-        for i in 0..TEARDOWN_WORKERS {
-            let rx = Arc::clone(&rx);
-            // If a worker cannot be spawned (never in practice) the pool is just
-            // smaller; a full queue then sheds via the actor's non-blocking Drop, so
-            // teardown stays bounded and `release` stays infallible either way.
-            if let Ok(handle) = std::thread::Builder::new()
-                .name(format!("mv-source-teardown-{i}"))
-                .spawn(move || teardown_worker(&rx))
-            {
-                workers.push(handle);
-            }
-        }
+        let workers = build_teardown_pool(&spawn, &rx);
         Arc::new(Self {
             entries: Mutex::new(HashMap::new()),
             teardown_tx: Mutex::new(Some(tx)),
@@ -730,6 +731,32 @@ fn teardown_worker(rx: &Arc<Mutex<Receiver<Teardown>>>) {
             Err(_) => return,
         }
     }
+}
+
+/// Spawn one teardown-pool worker thread draining `rx`. The real spawn strategy behind
+/// [`SourceRegistry::new`]; fallible so [`build_teardown_pool`] can retry a transient failure.
+fn spawn_teardown_worker(
+    i: usize,
+    rx: &Arc<Mutex<Receiver<Teardown>>>,
+) -> std::io::Result<JoinHandle<()>> {
+    let rx = Arc::clone(rx);
+    std::thread::Builder::new()
+        .name(format!("mv-source-teardown-{i}"))
+        .spawn(move || teardown_worker(&rx))
+}
+
+/// Build the fixed pool of `TEARDOWN_WORKERS` teardown-worker threads.
+fn build_teardown_pool<S>(spawn: &S, rx: &Arc<Mutex<Receiver<Teardown>>>) -> Vec<JoinHandle<()>>
+where
+    S: Fn(usize, &Arc<Mutex<Receiver<Teardown>>>) -> std::io::Result<JoinHandle<()>>,
+{
+    let mut workers = Vec::with_capacity(TEARDOWN_WORKERS);
+    for i in 0..TEARDOWN_WORKERS {
+        if let Ok(handle) = spawn(i, rx) {
+            workers.push(handle);
+        }
+    }
+    workers
 }
 
 /// Wait up to [`TEARDOWN_GRACE`] for the teardown workers to finish, then **detach**
@@ -1735,6 +1762,40 @@ mod tests {
         );
 
         gate.store(false, Ordering::Release);
+        reg.shutdown();
+    }
+
+    #[test]
+    fn teardown_pool_guarantees_k_workers_despite_transient_spawn_failure() {
+        // RP2 (#162, inv #10 liveness): a teardown worker thread's spawn can fail transiently
+        // (EAGAIN) on a contended host — the product's target environment. Construction must
+        // still GUARANTEE TEARDOWN_WORKERS live workers (a bounded retry absorbs the
+        // transient), never silently accept < K (a short pool weakens the "a sibling worker
+        // keeps draining while one is wedged" guarantee). Inject a spawner that fails the first
+        // few attempts then succeeds; the built pool must still hold K workers. RED
+        // (silent-drop, one attempt per worker): the failed attempts are dropped → < K.
+        use super::{spawn_teardown_worker, SourceRegistry, TEARDOWN_WORKERS};
+        let fails_left = Arc::new(AtomicUsize::new(3)); // fail the first 3 attempts, then succeed
+        let reg = {
+            let fails_left = fails_left.clone();
+            SourceRegistry::<u64>::with_spawner(move |i, rx| {
+                if fails_left.load(Ordering::Acquire) > 0 {
+                    fails_left.fetch_sub(1, Ordering::AcqRel);
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "simulated transient EAGAIN",
+                    ))
+                } else {
+                    spawn_teardown_worker(i, rx)
+                }
+            })
+        };
+        let live_workers = super::lock(&reg.teardown_workers).len();
+        assert_eq!(
+            live_workers, TEARDOWN_WORKERS,
+            "construction must guarantee TEARDOWN_WORKERS live workers despite transient spawn \
+             failures (retry absorbs EAGAIN); saw {live_workers}"
+        );
         reg.shutdown();
     }
 }
