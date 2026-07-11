@@ -19,11 +19,39 @@
 use multiview_input::webrtc::opus::{OpusDepacketizer, MAX_OPUS_PACKET_BYTES};
 use multiview_input::webrtc::route::RtpRouter;
 use multiview_input::webrtc::transport::{H264Depacketizer, RtpFrame};
-use multiview_input::webrtc::{Codec, NegotiatedSession, SessionDescription};
+use multiview_input::webrtc::{
+    Codec, MediaKind, NegotiatedMedia, NegotiatedSession, SdpDirection, SessionDescription,
+};
 use proptest::prelude::*;
 
-/// Negotiate the standard test session (H.264 video PT 98, Opus audio PT 111).
+/// The standard test session (H.264 video PT 98, Opus audio PT 111), hand-built
+/// to the values the (str0m-superseded) SDP negotiator produced;
+/// [`negotiated_av_matches_reference_negotiation`] proves the equivalence.
 fn negotiated_av() -> NegotiatedSession {
+    NegotiatedSession {
+        sections: vec![
+            NegotiatedMedia {
+                kind: MediaKind::Video,
+                payload_type: 98,
+                codec: Codec::H264,
+                direction: SdpDirection::RecvOnly,
+            },
+            NegotiatedMedia {
+                kind: MediaKind::Audio,
+                payload_type: 111,
+                codec: Codec::OPUS,
+                direction: SdpDirection::RecvOnly,
+            },
+        ],
+    }
+}
+
+/// Migration scaffold (rule-19): proves the hand-built [`negotiated_av`] fixture
+/// is byte-identical to what the superseded `SessionDescription::negotiate_answer`
+/// produced. Removed with that negotiator in the removal commit; this commit's
+/// green CI is the preserved proof.
+#[test]
+fn negotiated_av_matches_reference_negotiation() {
     let offer = "v=0\r\n\
                  m=video 9 UDP/TLS/RTP/SAVPF 98\r\n\
                  a=rtpmap:98 H264/90000\r\n\
@@ -31,10 +59,11 @@ fn negotiated_av() -> NegotiatedSession {
                  m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
                  a=rtpmap:111 opus/48000/2\r\n\
                  a=sendonly\r\n";
-    SessionDescription::parse(offer)
+    let reference = SessionDescription::parse(offer)
         .expect("offer parses")
         .negotiate_answer(&[Codec::H264], &[Codec::OPUS])
-        .expect("offer negotiates")
+        .expect("offer negotiates");
+    assert_eq!(negotiated_av(), reference);
 }
 
 /// An arbitrary decrypted RTP packet: any PT, sequence, timestamp, marker, and

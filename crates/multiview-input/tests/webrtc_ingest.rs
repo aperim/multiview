@@ -25,7 +25,9 @@ use multiview_input::webrtc::transport::{
     H264Depacketizer, MediaEngine, RtpFrame, SessionState, WebRtcProducer, WebRtcSession,
     VIDEO_CLOCK_RATE,
 };
-use multiview_input::webrtc::{Codec, NegotiatedSession, SessionDescription};
+use multiview_input::webrtc::{
+    Codec, MediaKind, NegotiatedMedia, NegotiatedSession, SdpDirection, SessionDescription,
+};
 
 /// A scripted media engine: yields a fixed list of injected RTP frames in order,
 /// then signals clean end-of-stream. No sockets, no crypto — exactly the seam the
@@ -53,20 +55,86 @@ const VIDEO_PT: u8 = 98;
 /// The audio payload type the test offers negotiate (Opus).
 const AUDIO_PT: u8 = 111;
 
-/// Negotiate the standard test session: H.264 video on PT 98 + Opus audio on
-/// PT 111, both offered `sendonly` (so we answer `recvonly` — a WHIP publish).
+/// The standard test session: H.264 video on PT 98 + Opus audio on PT 111, both
+/// offered `sendonly` (so we answer `recvonly` — a WHIP publish).
+///
+/// Hand-built to the exact values the (str0m-superseded) SDP negotiator produced;
+/// [`negotiated_fixtures_match_reference_negotiation`] proves byte-equivalence
+/// against `SessionDescription::negotiate_answer` while that model still exists.
 fn negotiated_av() -> NegotiatedSession {
-    let offer = "v=0\r\n\
-                 m=video 9 UDP/TLS/RTP/SAVPF 98\r\n\
-                 a=rtpmap:98 H264/90000\r\n\
-                 a=sendonly\r\n\
-                 m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
-                 a=rtpmap:111 opus/48000/2\r\n\
-                 a=sendonly\r\n";
-    SessionDescription::parse(offer)
+    NegotiatedSession {
+        sections: vec![
+            NegotiatedMedia {
+                kind: MediaKind::Video,
+                payload_type: VIDEO_PT,
+                codec: Codec::H264,
+                direction: SdpDirection::RecvOnly,
+            },
+            NegotiatedMedia {
+                kind: MediaKind::Audio,
+                payload_type: AUDIO_PT,
+                codec: Codec::OPUS,
+                direction: SdpDirection::RecvOnly,
+            },
+        ],
+    }
+}
+
+/// The `audio = false` ingest variant: the audio m-line is answered `inactive`
+/// (ADR-T014 §5), so its section must not route. Hand-built to the values the
+/// negotiator produced from an `a=inactive` audio offer (proven equivalent in
+/// [`negotiated_fixtures_match_reference_negotiation`]).
+fn negotiated_inactive_audio() -> NegotiatedSession {
+    NegotiatedSession {
+        sections: vec![
+            NegotiatedMedia {
+                kind: MediaKind::Video,
+                payload_type: VIDEO_PT,
+                codec: Codec::H264,
+                direction: SdpDirection::RecvOnly,
+            },
+            NegotiatedMedia {
+                kind: MediaKind::Audio,
+                payload_type: AUDIO_PT,
+                codec: Codec::OPUS,
+                direction: SdpDirection::Inactive,
+            },
+        ],
+    }
+}
+
+/// Migration scaffold (rule-19): proves the hand-built [`negotiated_av`] and
+/// [`negotiated_inactive_audio`] fixtures are byte-identical to what the
+/// superseded `SessionDescription::negotiate_answer` produced from the offers
+/// they replaced. Removed together with that negotiator in the removal commit;
+/// this commit's green CI is the preserved equivalence proof.
+#[test]
+fn negotiated_fixtures_match_reference_negotiation() {
+    let av_offer = "v=0\r\n\
+                    m=video 9 UDP/TLS/RTP/SAVPF 98\r\n\
+                    a=rtpmap:98 H264/90000\r\n\
+                    a=sendonly\r\n\
+                    m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+                    a=rtpmap:111 opus/48000/2\r\n\
+                    a=sendonly\r\n";
+    let av_reference = SessionDescription::parse(av_offer)
         .expect("offer parses")
         .negotiate_answer(&[Codec::H264], &[Codec::OPUS])
-        .expect("offer negotiates")
+        .expect("offer negotiates");
+    assert_eq!(negotiated_av(), av_reference);
+
+    let inactive_offer = "v=0\r\n\
+                          m=video 9 UDP/TLS/RTP/SAVPF 98\r\n\
+                          a=rtpmap:98 H264/90000\r\n\
+                          a=sendonly\r\n\
+                          m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+                          a=rtpmap:111 opus/48000/2\r\n\
+                          a=inactive\r\n";
+    let inactive_reference = SessionDescription::parse(inactive_offer)
+        .expect("offer parses")
+        .negotiate_answer(&[Codec::H264], &[Codec::OPUS])
+        .expect("offer negotiates");
+    assert_eq!(negotiated_inactive_audio(), inactive_reference);
 }
 
 /// Build an H.264 single-NAL RTP frame (one NAL unit per packet, no fragmentation).
@@ -526,17 +594,7 @@ fn router_keeps_per_stream_gap_detection_independent() {
 fn router_does_not_bind_an_inactive_media_section() {
     // `audio = false` ingest answers the audio m-line inactive (ADR-T014 §5):
     // an inactive section must not route — its PT counts as unknown.
-    let offer = "v=0\r\n\
-                 m=video 9 UDP/TLS/RTP/SAVPF 98\r\n\
-                 a=rtpmap:98 H264/90000\r\n\
-                 a=sendonly\r\n\
-                 m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
-                 a=rtpmap:111 opus/48000/2\r\n\
-                 a=inactive\r\n";
-    let negotiated = SessionDescription::parse(offer)
-        .expect("offer parses")
-        .negotiate_answer(&[Codec::H264], &[Codec::OPUS])
-        .expect("offer negotiates");
+    let negotiated = negotiated_inactive_audio();
     let mut router = RtpRouter::new(&negotiated);
     assert!(router.route(&single_nal(1, 0, true, IDR_NAL)).is_some());
     assert!(
