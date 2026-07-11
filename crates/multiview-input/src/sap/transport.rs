@@ -409,3 +409,68 @@ fn xorshift(mut x: u64) -> u64 {
     x ^= x << 17;
     x
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use crate::sap::packet::{SapMessageType, SapPacket};
+    use crate::sap::ratelimit::SapRateLimiter;
+    use crate::sap::transport::SapListener;
+    use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+    use std::num::NonZeroU16;
+    use std::time::Duration;
+
+    fn loopback6() -> SocketAddr {
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)
+    }
+
+    /// A minimal well-formed announcement datagram carrying `hash`.
+    fn announce_datagram(hash: u16) -> Vec<u8> {
+        SapPacket {
+            message_type: SapMessageType::Announcement,
+            msg_id_hash: NonZeroU16::new(hash).unwrap(),
+            origin: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            payload_type: None,
+            payload: b"v=0\r\ns=legit\r\n".to_vec(),
+        }
+        .encode()
+    }
+
+    #[tokio::test]
+    async fn a_malformed_flood_does_not_starve_legit_sap_of_rate_budget() {
+        // S3 (#157): the rate limiter must gate the EXPENSIVE fold AFTER a cheap
+        // structural parse, not before. A malformed datagram fails parse cheaply and
+        // must NOT consume budget — otherwise a malformed flood drains the shared
+        // fixed-window bucket and a legit announce in the same window is dropped by
+        // the limiter even though it would parse and fold fine.
+        let listener = SapListener::bind(loopback6()).await.unwrap();
+        let table = listener.table();
+        // A budget of ONE fold per (long) window: if a malformed datagram spends it,
+        // the legit announce that follows in the same window is starved.
+        let mut limiter = SapRateLimiter::new(1, Duration::from_secs(3600));
+        let now = Duration::ZERO;
+
+        // A malformed flood FIRST (version 0 -> BadVersion; a single byte).
+        for _ in 0..64 {
+            let admitted = listener.fold_datagram(&[0x00_u8], now, &mut limiter);
+            assert!(
+                !admitted,
+                "a malformed datagram must not enter the fold nor spend rate budget (S3)"
+            );
+        }
+        // Then one legit announcement, within the SAME window.
+        let admitted = listener.fold_datagram(&announce_datagram(0x1234), now, &mut limiter);
+
+        assert!(
+            admitted,
+            "the legit announce must enter the fold — a malformed flood must not burn \
+             its budget (S3)"
+        );
+        assert_eq!(
+            table.len(),
+            1,
+            "the legit session is observed despite a preceding malformed flood (S3)"
+        );
+    }
+}
