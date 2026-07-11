@@ -599,11 +599,16 @@ jobs:
         # cascading one exit-127 at a time (the aes67 test binary loads the same
         # libav* .so, so this is a faithful pre-flight). LD_LIBRARY_PATH (exported by
         # the extract step) points at the FFmpeg prefix so its own inter-lib deps
-        # resolve; `|| true` keeps `pipefail` from masking the real check.
+        # resolve. `ldd`'s OWN failure (unmatched glob, unreadable/invalid ELF, loader
+        # error) fails the step too — an empty "not found" list must not false-pass a
+        # check that never actually ran.
         run: |
           set -euo pipefail
-          missing="$(ldd "${FFMPEG_PREFIX}"/lib/libav*.so.* 2>/dev/null \
-            | awk '/not found/{print $1}' | sort -u || true)"
+          if ! out=$(ldd "${FFMPEG_PREFIX}"/lib/libav*.so.* 2>&1); then
+            echo "::error::ldd failed to inspect the pinned FFmpeg libs: ${out}"
+            exit 1
+          fi
+          missing=$(printf '%s\n' "${out}" | awk '/not found/{print $1}' | sort -u)
           if [ -n "${missing}" ]; then
             printf 'missing runtime shared libraries:\n%s\n' "${missing}"
             echo "::error::pinned FFmpeg is missing the runtime libs listed above on this runner"
