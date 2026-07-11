@@ -275,4 +275,30 @@ mod tests {
         assert_eq!(parsed.per_ip, ManagementLimits::default().per_ip);
         assert!(parsed.enabled);
     }
+
+    #[test]
+    fn a_partial_rate_sub_table_inherits_the_unset_fields_default() {
+        // A partially specified `per_ip` sub-table names only `burst`; the unset
+        // `refill_per_sec` must fall back to its field-level default rather than fail
+        // deserialization. The documented "every field defaults individually" contract
+        // reaches INTO the rate sub-tables, not just the top level. Before the field
+        // defaults were added this errored with `missing field `refill_per_sec``.
+        let parsed: ManagementLimits = serde_json::from_str(r#"{"per_ip": {"burst": 10}}"#)
+            .expect("a partial per_ip sub-table fills refill_per_sec from its field default");
+        assert_eq!(parsed.per_ip.burst, 10);
+        // The unset field inherits the canonical RateLimitConfig field default — the
+        // stricter per-IP baseline (a partial bucket errs strict).
+        assert_eq!(
+            parsed.per_ip.refill_per_sec,
+            super::DEFAULT_PER_IP_REFILL_PER_SEC
+        );
+
+        // Symmetric: naming only `refill_per_sec` in `per_api_key` inherits the default
+        // `burst` — again the per-IP baseline, not per_api_key's own 240 (err strict).
+        let parsed: ManagementLimits =
+            serde_json::from_str(r#"{"per_api_key": {"refill_per_sec": 7}}"#)
+                .expect("a partial per_api_key sub-table fills burst from its field default");
+        assert_eq!(parsed.per_api_key.refill_per_sec, 7);
+        assert_eq!(parsed.per_api_key.burst, super::DEFAULT_PER_IP_BURST);
+    }
 }
