@@ -14674,6 +14674,74 @@ segment_ms = 1000
         );
     }
 
+    /// Like [`aes67_source_bound_to_a_cell_config`] but the aes67-bound cell
+    /// references an UNKNOWN grid area, so its geometry does not resolve. The
+    /// audio-binding rejection must still fire (and name the source) rather than be
+    /// masked by a generic geometry-resolution error — the guard must key on the
+    /// source binding, not on tile geometry (`solve_layout` errors on the bad area
+    /// first, so a geometry-coupled guard never sees the cell).
+    fn aes67_cell_with_unresolved_geometry_config() -> multiview_config::MultiviewConfig {
+        let doc = format!(
+            r##"schema_version = 1
+[canvas]
+width = 640
+height = 480
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[sources]]
+id = "aes67-in"
+kind = "aes67"
+multicast = "[ff3e::1]:5004"
+sdp = '''
+{AES67_SDP}'''
+[[cells]]
+id = "video"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[cells]]
+id = "oops-audio"
+area = "does-not-exist"
+[cells.source]
+input_id = "aes67-in"
+[[outputs]]
+kind = "hls"
+path = "/tmp/aes67-unresolved-cell.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##
+        );
+        multiview_config::MultiviewConfig::load_from_toml(&doc).expect("test config parses")
+    }
+
+    #[test]
+    fn a_geometry_unresolved_cell_bound_to_an_aes67_source_is_rejected_by_name() {
+        let config = aes67_cell_with_unresolved_geometry_config();
+        let err = Pipeline::build(&config)
+            .err()
+            .expect("a cell bound to an audio-only aes67 source must fail the build");
+        // The rejection must name the AUDIO-BINDING root cause — not be masked by a
+        // generic "unknown grid area" geometry error — so the guard is effective
+        // even when the bound cell's geometry does not resolve (decoupled from
+        // tile-sizing, which `solve_layout` errors on first).
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("aes67-in"),
+            "the rejection names the audio-only source, not just a geometry error: {rendered}"
+        );
+    }
+
     #[test]
     fn an_aes67_source_without_program_audio_is_rejected_before_going_on_air() {
         let config = video_plus_aes67_config();
@@ -14821,14 +14889,16 @@ a=mediaclk:direct=0\r\n";
             aes67_ssrc_for("out-a", g2),
             "a different group yields a different ssrc"
         );
-        // Pinned FNV-1a value: the mapping is a fixed, toolchain-stable contract
-        // (a `DefaultHasher`/SipHash fold is explicitly NOT stable across releases,
-        // so a rebuild could change every sender's advertised SSRC). Changing this
-        // constant is a deliberate, reviewed wire-behaviour change.
+        // Pinned FNV-1a value over STABLE address bytes (family + raw IP octets +
+        // big-endian port), NOT the `SocketAddr` Display string (whose formatting
+        // is not a stable cross-version/-target byte encoding). The mapping is a
+        // fixed contract — a `DefaultHasher`/SipHash fold, or a Display-string fold,
+        // is not stable across releases, so a rebuild could change every sender's
+        // advertised SSRC. Changing this constant is a deliberate, reviewed change.
         assert_eq!(
             aes67_ssrc_for("out", g1),
-            1_363_865_092,
-            "the ssrc is a pinned FNV-1a fold of id + group:port"
+            3_149_784_790,
+            "the ssrc is a pinned FNV-1a fold of id + address family/octets/port"
         );
     }
 
