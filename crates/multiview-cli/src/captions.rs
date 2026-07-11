@@ -123,8 +123,9 @@ const MAX_SUBTITLE_REPOINT_BACKLOG: usize = 256;
 /// sample-boundary apply — the subtitle analogue of the video command-drain at the
 /// frame boundary). Publishing is wait-free and bounded drop-oldest, so the
 /// control plane can never pace or stall the engine (invariants #1/#10). This is
-/// the seam `RouteSubtitle` (RT-11) drives once the command lands; until then it is
-/// exercised directly by the run + tests.
+/// the seam the `RouteSubtitle` command (RT-11) drives: a `RouteSubtitle` on the
+/// command bus re-points the layer through this handle, and the run + tests
+/// exercise the same path.
 #[cfg(feature = "overlay")]
 #[derive(Clone)]
 pub struct SubtitleRouteHandle {
