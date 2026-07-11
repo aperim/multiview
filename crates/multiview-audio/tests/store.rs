@@ -12,8 +12,14 @@
 )]
 // reason: test-only float<->index arithmetic on small exact ranges — the ramp
 // values are integers exactly representable in f32, so the exact comparisons are
-// intentional and the index<->float casts are loss-free here.
-#![allow(clippy::as_conversions, clippy::cast_precision_loss, clippy::float_cmp)]
+// intentional and the index<->float casts are loss-free here; `tick` is a small
+// non-negative loop counter, so the usize->i64 frame-index casts never wrap.
+#![allow(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::float_cmp
+)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
