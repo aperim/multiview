@@ -583,17 +583,18 @@ impl Drop for ActiveGuard {
 }
 
 /// A content-change fingerprint of the watched path: length + mtime + inode +
-/// a hash of the file's bytes ([`ContentFingerprint`]). The byte hash makes
-/// detection filesystem-independent — a same-length in-place rewrite (identical
+/// a hash of the file's bytes ([`ContentFingerprint`]). Every axis is derived
+/// from a SINGLE fd opened once per poll (see [`probe`]): the bytes are read
+/// from that fd (`len` + `content`) and mtime/inode are an `fstat` of the SAME
+/// fd, so a rename between a separate stat and read can never pair one file's
+/// metadata with another file's bytes. The byte hash makes detection
+/// filesystem-independent — a same-length in-place rewrite (identical
 /// len/mtime/inode, e.g. a shell `>` redirect or a non-atomic editor landing
 /// within the filesystem's mtime granularity) still produces a distinct
 /// fingerprint, so the already-applied short-circuit in [`watch_loop`] cannot
-/// silently drop it. `len` and `content` are derived from ONE read (see
-/// [`probe`]), so together with the bytes carried forward for the apply they
-/// are a single coherent snapshot — the fingerprint recorded as `applied`
-/// always matches the content actually applied. A write-temp + `rename(2)`
-/// lands as a change (new inode); a rename that does not alter the bytes then
-/// adopts without re-applying (the `last_observed == text` arm).
+/// silently drop it. Re-opening the PATH each poll lands a write-temp +
+/// `rename(2)` as a change (new inode); a rename that does not alter the bytes
+/// then adopts without re-applying (the `last_observed == text` arm).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     len: u64,
@@ -620,60 +621,101 @@ struct Probed {
     bytes: Result<Vec<u8>, String>,
 }
 
-/// Probe the path this poll: read its bytes ONCE and derive the change
-/// [`Fingerprint`] (`len` + `content`) from that single read, plus mtime/inode
-/// from its `stat`. Returns [`None`] only when the file is (transiently) missing
-/// (its `stat` fails); a present-but-unreadable file yields a fingerprint with
-/// [`ContentFingerprint::Unreadable`] and no bytes. `tokio::fs` so the `stat(2)`
-/// and the read ride the blocking pool, never the control-plane reactor
-/// (review m6).
-///
-/// Reading once — rather than stat-then-hash and then re-reading to apply —
-/// keeps `len`, `content`, and the carried `bytes` a single coherent snapshot:
-/// a same-length in-place rewrite is still a distinct fingerprint, AND the
-/// settled apply uses the very bytes the fingerprint identifies, so no
-/// concurrent write can make the applied content diverge from the recorded
-/// fingerprint. The config file is small and this runs once per ~1–2 s poll, so
-/// the read is negligible; it reads the RAW bytes — a non-UTF-8 file still
-/// fingerprints and settles to the UTF-8-decode reject in [`watch_loop`].
-async fn probe(path: &Path) -> Option<Probed> {
-    let meta = tokio::fs::metadata(path).await.ok()?;
+/// The file's inode — the identity axis that makes a write-temp + `rename(2)`
+/// read as a change — on Unix; `0` on non-Unix, where the content hash carries
+/// change detection alone. Taken from an `fstat` of the open fd, or the fallback
+/// path `stat` when the file could not be opened.
+fn inode_of(meta: &std::fs::Metadata) -> u64 {
     #[cfg(unix)]
-    let inode = {
+    {
         use std::os::unix::fs::MetadataExt as _;
         meta.ino()
-    };
+    }
     #[cfg(not(unix))]
-    let inode = 0_u64;
-    // The file exists (stat succeeded). Read its bytes and derive `len` +
-    // `content` from that ONE read, so they are mutually coherent and coherent
-    // with the bytes carried forward for the apply. A present-but-unreadable
-    // file (permissions, or a delete racing the stat) yields the typed
-    // `Unreadable` content and no bytes, so two such polls settle to the reject
-    // path instead of aliasing the already-applied content.
-    let (len, content, bytes) = match tokio::fs::read(path).await {
-        Ok(bytes) => {
+    {
+        let _ = meta;
+        0_u64
+    }
+}
+
+/// Probe the path this poll by opening it ONCE: read that fd (deriving the
+/// change [`Fingerprint`]'s `len` + `content`) and `fstat` the SAME fd for
+/// mtime/inode, so every axis — and the bytes carried forward for the apply — is
+/// a coherent view of one inode. Returns [`None`] only when the path is
+/// (transiently) missing (open AND `stat` both fail); a present-but-unreadable
+/// path (open denied, or opened but unreadable — e.g. a directory, `EISDIR`)
+/// yields a fingerprint with [`ContentFingerprint::Unreadable`] and the read/open
+/// error in place of bytes. `tokio::fs` so the open/read/`fstat` ride the
+/// blocking pool, never the control-plane reactor (review m6).
+///
+/// Opening once — rather than a path `stat`, then a separate path read to hash,
+/// then a third read to apply — keeps `len`, `content`, mtime, inode, and the
+/// carried `bytes` a single coherent snapshot: a same-length in-place rewrite is
+/// still a distinct fingerprint, AND the settled apply uses the very bytes the
+/// fingerprint identifies, so no concurrent write can make the applied content
+/// diverge from the recorded fingerprint. The config file is small and this runs
+/// once per ~1–2 s poll, so the read is negligible; it reads the RAW bytes — a
+/// non-UTF-8 file still fingerprints and settles to the UTF-8-decode reject in
+/// [`watch_loop`].
+async fn probe(path: &Path) -> Option<Probed> {
+    use tokio::io::AsyncReadExt as _;
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(open_error) => {
+            // Not openable. If its `stat` also fails the path is genuinely
+            // (transiently) missing → `None`; otherwise it is present but
+            // unreadable this poll (e.g. a permissions change), which settles to
+            // the "cannot be read" reject rather than the already-applied
+            // short-circuit — the open error is carried for that message.
+            let meta = tokio::fs::metadata(path).await.ok()?;
+            return Some(Probed {
+                fingerprint: Fingerprint {
+                    len: meta.len(),
+                    modified: meta.modified().ok(),
+                    inode: inode_of(&meta),
+                    content: ContentFingerprint::Unreadable,
+                },
+                bytes: Err(open_error.to_string()),
+            });
+        }
+    };
+    // Read the fd to end (`len` + `content` + the bytes carried to the apply),
+    // then `fstat` the SAME fd for mtime/inode. A read that fails on an opened fd
+    // (e.g. the path is a directory, `EISDIR`) yields the typed `Unreadable`
+    // content and carries the read error. A fresh valid fd's `fstat` does not
+    // fail in practice; if it did, the content hash still drives detection, so
+    // the stat axes fall back to empty rather than mis-reporting the file gone.
+    let mut bytes = Vec::new();
+    let read = file.read_to_end(&mut bytes).await;
+    let meta = file.metadata().await.ok();
+    let modified = meta.as_ref().and_then(|m| m.modified().ok());
+    let inode = meta.as_ref().map_or(0_u64, inode_of);
+    match read {
+        Ok(_) => {
             // `usize` → `u64` never truncates on a 64-/32-bit target; the
             // fallback is unreachable and only avoids an `as` cast.
             let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
             let content = ContentFingerprint::Readable(fingerprint_content_hash(&bytes));
-            (len, content, Ok(bytes))
+            Some(Probed {
+                fingerprint: Fingerprint {
+                    len,
+                    modified,
+                    inode,
+                    content,
+                },
+                bytes: Ok(bytes),
+            })
         }
-        Err(error) => (
-            meta.len(),
-            ContentFingerprint::Unreadable,
-            Err(error.to_string()),
-        ),
-    };
-    Some(Probed {
-        fingerprint: Fingerprint {
-            len,
-            modified: meta.modified().ok(),
-            inode,
-            content,
-        },
-        bytes,
-    })
+        Err(read_error) => Some(Probed {
+            fingerprint: Fingerprint {
+                len: meta.as_ref().map_or(0_u64, std::fs::Metadata::len),
+                modified,
+                inode,
+                content: ContentFingerprint::Unreadable,
+            },
+            bytes: Err(read_error.to_string()),
+        }),
+    }
 }
 
 /// Fire the post-probe interpose test seam, if one is installed: write the

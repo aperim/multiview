@@ -35,39 +35,45 @@ correctness defect rather than fixing it.
 ## Decision
 
 Fold a hash of the file's **bytes** into the watch `Fingerprint` (a fourth axis alongside `len`,
-`mtime`, `inode`), and read the file **exactly once per poll**. `probe()` reads the bytes, derives
-both `len` and the content hash (`fingerprint_content_hash(&bytes)`, `DefaultHasher` — not an
-adversarial boundary; whoever writes the config already controls it) from that **single read**, and
-returns a `Probed { fingerprint, bytes }`. A same-length in-place content change is then a
-**distinct fingerprint**, so it falls through to the existing validate → apply path; the three
-fingerprint comparison sites use the derived `PartialEq`, so they are content-aware with no further
-change.
+`mtime`, `inode`), and read the file **exactly once per poll from a single fd**. `probe()` opens the
+path once, reads that fd — deriving both `len` and the content hash (`fingerprint_content_hash(&bytes)`,
+`DefaultHasher` — not an adversarial boundary; whoever writes the config already controls it) from
+that **single read** — and `fstat`s the SAME fd for `mtime`/`inode`, then returns a
+`Probed { fingerprint, bytes }`. Opening once makes every axis a coherent view of one inode: a rename
+between a separate path `stat` and path read can never pair one file's metadata with another file's
+bytes. A same-length in-place content change is then a **distinct fingerprint**, so it falls through
+to the existing validate → apply path; the three fingerprint comparison sites use the derived
+`PartialEq`, so they are content-aware with no further change.
 
 Crucially, the settling poll **applies the bytes `probe()` already carried** (UTF-8-decoded in
 place), rather than doing a second `read_to_string`. So the fingerprint recorded as `applied` /
 `rejected` is always the fingerprint of the content **actually applied**: `len` and the hash come
-from the same read as the applied bytes, one coherent snapshot. There is no probe-then-reread
-window in which a concurrent writer could make the applied content diverge from the recorded
-fingerprint (the TOCTOU the cross-vendor re-review flagged) — the guarantee is deterministic
-detection *of the content actually applied*, not merely "a content change is noticed".
+from the same read as the applied bytes, and `mtime`/`inode` from the same fd's `fstat` — one
+coherent single-inode snapshot. There is no probe-then-reread window in which a concurrent writer
+could make the applied content diverge from the recorded fingerprint (the TOCTOU the cross-vendor
+re-review flagged) — the guarantee is deterministic detection *of the content actually applied*, not
+merely "a content change is noticed".
 
 * **Raw bytes, not `&str`:** the content axis hashes the raw bytes, so a non-UTF-8 file still
   fingerprints as a change; the settled apply then UTF-8-decodes the carried bytes and, on failure,
   takes the "not valid UTF-8" reject (the UTF-8 gate, formerly done by the settled `read_to_string`).
 * **Unreadable-but-present, typed:** the content axis is a typed
   `ContentFingerprint { Readable(u64), Unreadable }`, **not** an in-band sentinel value. If the
-  bytes cannot be read this poll (a permissions problem, or a delete/swap racing the `stat`),
-  `probe()` yields `Unreadable` and no bytes, so two such polls settle to the "cannot be read"
-  reject rather than aliasing unchanged content — and a real file's `Readable` hash can never
-  collide with "unreadable" (there is no reserved hash value).
+  bytes cannot be read this poll — the open is denied (permissions), or the fd opens but reads fail
+  (e.g. the path is a directory, `EISDIR`) — `probe()` yields `Unreadable` and carries the read/open
+  error in place of bytes, so two such polls settle to the "cannot be read" reject (with that errno)
+  rather than aliasing unchanged content, and a real file's `Readable` hash can never collide with
+  "unreadable" (there is no reserved hash value). A path whose open AND `stat` both fail is instead
+  reported missing (`None`), unchanged from ADR-W020.
 * **Collision:** a `DefaultHasher` `u64` collision is ~2⁻⁶⁴ and, on a **non-adversarial** input
   (the writer already controls the file), cannot be constructed to matter; a widened digest buys
   nothing here.
 * **Cost, re-evaluated:** the config file is small and the single read rides the blocking pool at
-  the 1 s cadence (replacing — not adding to — the old settled read), so it is negligible — the
-  "per-second whole-file read" objection in ADR-W020 §1 is reversed, and the settling poll now does
-  **one** read where the stat-only design did a stat plus a settled read. Even a ~1 MB config hashes
-  in well under a millisecond and is served from the page cache.
+  the 1 s cadence, so it is negligible — the "per-second whole-file read" objection in ADR-W020 §1
+  is reversed. Each poll now **opens the path once** and reads that fd (one path resolution) where
+  the stat-only design did a path `stat` plus, on a settled change, a second path read to apply (two
+  resolutions); even a ~1 MB config hashes in well under a millisecond and is served from the page
+  cache.
 
 ## Consequences
 
