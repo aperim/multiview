@@ -21,17 +21,17 @@ pub enum FitMode {
     Fill,
 }
 
-/// A quarter-turn (90°-step) rotation applied to a tile's source before fit.
+/// A quarter-turn (90°-step) rotation: the shared `none`/`cw90`/`cw180`/`cw270`
+/// vocabulary used by the per-output presentation orientation (ADR-0089).
 ///
-/// Broadcast walls routinely mount portrait monitors; per-tile rotation lets a
-/// landscape source fill a portrait tile (and vice versa). Only quarter turns
-/// are offered so the rotation is lossless and GPU-cheap (a sampling transform,
-/// no resampling artefacts). `#[non_exhaustive]` for forward compatibility.
+/// Only quarter turns are offered so a pixel rotation stays lossless and
+/// GPU-cheap (a sampling transform, no resampling artefacts) and a
+/// display-rotation tag can carry it exactly. `#[non_exhaustive]` for forward
+/// compatibility.
 ///
 /// Serializes in **`snake_case`** (`none`/`cw90`/`cw180`/`cw270`) — the
 /// project-wide serde convention and the authoring spelling the config schema
-/// documents for per-cell `rotation` and per-output `orientation.turn`
-/// (ADR-0089 §2.2).
+/// documents for the per-output `orientation.turn` (ADR-0089 §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -90,24 +90,6 @@ impl Orientation {
     }
 }
 
-/// A normalized source-rectangle (region of interest) cropped from a tile's
-/// source before it is fitted into the cell.
-///
-/// All four fields are fractions of the **source** frame in `0.0..=1.0`; a full
-/// frame is `{ x: 0, y: 0, w: 1, h: 1 }`. Validated by [`Layout::validate`]
-/// (within the unit square, positive extent, finite).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct CropRect {
-    /// Left edge (fraction of source width).
-    pub x: f32,
-    /// Top edge (fraction of source height).
-    pub y: f32,
-    /// Width (fraction of source width).
-    pub w: f32,
-    /// Height (fraction of source height).
-    pub h: f32,
-}
-
 /// The fully-opaque default opacity (`1.0`) for a [`Cell`].
 ///
 /// Used as the serde default and by [`Cell`]'s [`Default`] impl so a cell built
@@ -119,11 +101,10 @@ const fn default_opacity() -> f32 {
 
 /// One multiview cell/tile: a normalized rectangle (`0.0..=1.0`) on the canvas.
 ///
-/// The broadcast extras — [`crop`](Cell::crop), [`rotation`](Cell::rotation),
-/// and [`opacity`](Cell::opacity) — are **additive and defaulted**: a `Cell`
-/// constructed without them (or deserialized from a document predating them)
-/// behaves exactly as before. Use `..Cell::default()` in struct literals to opt
-/// out of the new fields.
+/// The per-tile [`opacity`](Cell::opacity) is **additive and defaulted**: a
+/// `Cell` constructed without it (or deserialized from a document predating it)
+/// composites as a hard-cover, exactly as before. Use `..Cell::default()` in
+/// struct literals to opt out of the new field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
     /// Left edge (fraction of canvas width).
@@ -140,14 +121,6 @@ pub struct Cell {
     pub fit: FitMode,
     /// Bound source id, if any.
     pub source: Option<String>,
-    /// Optional per-tile source crop / region-of-interest. [`None`] (the
-    /// default) uses the full source frame.
-    #[serde(default)]
-    pub crop: Option<CropRect>,
-    /// Per-tile quarter-turn rotation applied to the source before fit.
-    /// Defaults to [`QuarterTurn::None`].
-    #[serde(default)]
-    pub rotation: QuarterTurn,
     /// Per-tile uniform opacity (straight alpha) in the closed interval
     /// `[0.0, 1.0]`, applied in the compositor's premultiplied linear-light
     /// `over` blend. Defaults to `1.0` (fully opaque / hard-cover); a lower
@@ -168,8 +141,6 @@ impl Default for Cell {
             z: 0,
             fit: FitMode::default(),
             source: None,
-            crop: None,
-            rotation: QuarterTurn::default(),
             opacity: default_opacity(),
         }
     }
@@ -291,8 +262,6 @@ impl Layout {
     /// - every cell rectangle is finite, lies within `0.0..=1.0` on both axes
     ///   (`x + w <= 1.0`, `y + h <= 1.0`), and has positive extent (`w > 0`,
     ///   `h > 0`);
-    /// - any per-cell [`crop`](Cell::crop) region-of-interest is finite, lies
-    ///   within the source unit square `0.0..=1.0`, and has positive extent;
     /// - every cell's [`opacity`](Cell::opacity) is finite and within the
     ///   closed straight-alpha interval `0.0..=1.0`.
     ///
@@ -363,57 +332,6 @@ fn validate_cell(index: usize, cell: &Cell) -> Result<()> {
         return Err(Error::Config(format!(
             "cell {index}: opacity must be within 0.0..=1.0 (got {})",
             cell.opacity
-        )));
-    }
-    if let Some(crop) = cell.crop {
-        validate_crop(index, &crop)?;
-    }
-    Ok(())
-}
-
-/// Validate a per-cell source crop rectangle, attributing failures to `index`.
-fn validate_crop(index: usize, crop: &CropRect) -> Result<()> {
-    let fields = [
-        ("crop.x", crop.x),
-        ("crop.y", crop.y),
-        ("crop.w", crop.w),
-        ("crop.h", crop.h),
-    ];
-    for (name, value) in fields {
-        if !value.is_finite() {
-            return Err(Error::Config(format!(
-                "cell {index}: {name} must be finite (got {value})"
-            )));
-        }
-    }
-    if crop.w <= 0.0 {
-        return Err(Error::Config(format!(
-            "cell {index}: crop.w must be > 0 (got {})",
-            crop.w
-        )));
-    }
-    if crop.h <= 0.0 {
-        return Err(Error::Config(format!(
-            "cell {index}: crop.h must be > 0 (got {})",
-            crop.h
-        )));
-    }
-    if crop.x < 0.0 || crop.y < 0.0 {
-        return Err(Error::Config(format!(
-            "cell {index}: crop origin ({}, {}) must be within 0.0..=1.0",
-            crop.x, crop.y
-        )));
-    }
-    if crop.x + crop.w > 1.0 {
-        return Err(Error::Config(format!(
-            "cell {index}: crop.x + crop.w = {} exceeds 1.0",
-            crop.x + crop.w
-        )));
-    }
-    if crop.y + crop.h > 1.0 {
-        return Err(Error::Config(format!(
-            "cell {index}: crop.y + crop.h = {} exceeds 1.0",
-            crop.y + crop.h
         )));
     }
     Ok(())

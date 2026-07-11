@@ -978,10 +978,6 @@ impl MultiviewConfig {
             // it in the premultiplied linear-light `over` blend; out-of-range
             // values are rejected by `Layout::validate` downstream.
             opacity: cell.opacity.unwrap_or(1.0),
-            // Broadcast per-tile crop/rotation are additive, defaulted fields on
-            // the shared `Cell`; this mapper does not yet surface them from the
-            // config schema, so spread their defaults.
-            ..CoreCell::default()
         })
     }
 
