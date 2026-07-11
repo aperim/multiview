@@ -373,6 +373,42 @@ mod tests {
     }
 
     #[test]
+    fn a_max_connections_above_the_runtime_ceiling_is_rejected() {
+        // The runtime installs `max_connections` into a `tokio::sync::Semaphore`
+        // (the accept-level ConnectionAdmission global cap), whose `MAX_PERMITS`
+        // ceiling is `usize::MAX >> 3` — the SAME bound `max_concurrent_requests`
+        // hits. A config value above it cannot be honoured, so fail closed at load
+        // rather than let the runtime silently clamp to a different effective cap
+        // (mirrors the round-1 F4 rule for the request-concurrency cap).
+        let runtime_ceiling = usize::MAX >> 3;
+        let limits = ManagementLimits {
+            max_connections: runtime_ceiling + 1,
+            ..ManagementLimits::default()
+        };
+        assert!(
+            limits.validate().is_err(),
+            "a connection cap above the runtime Semaphore ceiling must fail config load, not be \
+             silently clamped to a different value"
+        );
+    }
+
+    #[test]
+    fn the_max_connections_runtime_ceiling_itself_validates() {
+        // The boundary value (exactly the runtime ceiling) is honourable, so it must
+        // pass — only strictly-larger values are rejected. `max_connections_per_ip`
+        // is pinned to the ceiling too so the per-IP <= global invariant holds.
+        let runtime_ceiling = usize::MAX >> 3;
+        let limits = ManagementLimits {
+            max_connections: runtime_ceiling,
+            max_connections_per_ip: runtime_ceiling,
+            ..ManagementLimits::default()
+        };
+        limits
+            .validate()
+            .expect("a connection cap equal to the runtime ceiling is honourable and must validate");
+    }
+
+    #[test]
     fn a_per_ip_connection_cap_equal_to_the_global_cap_validates() {
         // The boundary (per-IP == global) is honourable — a single trusted source may
         // use the whole budget — so it must pass; only strictly-larger is rejected.
