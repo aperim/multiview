@@ -258,6 +258,9 @@ pub struct AnnouncedSession {
 #[derive(Debug)]
 pub struct SapAnnouncer {
     socket: Arc<UdpSocket>,
+    /// The IPv6 multicast egress interface (panel F9); unspecified (OS default)
+    /// unless set via [`with_interface`](Self::with_interface).
+    interface: MulticastInterface,
 }
 
 impl SapAnnouncer {
@@ -277,7 +280,49 @@ impl SapAnnouncer {
         }
         Ok(Self {
             socket: Arc::new(socket),
+            interface: MulticastInterface::Unspecified,
         })
+    }
+
+    /// Set the IPv6 multicast **egress** interface for scoped announcements
+    /// (default [`MulticastInterface::Unspecified`] → the OS default). IPv6 SAP
+    /// groups are link/site-local, so a multi-homed real deployment supplies the
+    /// intended interface rather than relying on index 0 (panel F9). Applied by
+    /// [`configure_multicast_egress`](Self::configure_multicast_egress).
+    #[must_use]
+    pub fn with_interface(mut self, interface: MulticastInterface) -> Self {
+        self.interface = interface;
+        self
+    }
+
+    /// Apply the IPv6 multicast egress options to the bound socket: select the
+    /// [`interface`](Self::with_interface) (`IPV6_MULTICAST_IF`) and set hop-limit
+    /// [`SAP_TTL`] (`IPV6_MULTICAST_HOPS`). Call once before announcing on a
+    /// scoped-multicast IPv6 dest; family-wise a no-op on a v4 socket (whose
+    /// multicast TTL is set at [`bind`](Self::bind)).
+    ///
+    /// The egress interface index comes from config or the SDP scope and is wired
+    /// by the pipeline (#103); until then it defaults to the OS default rather
+    /// than a hardcoded `0`. **Live validation on a real IPv6 multicast network is
+    /// hardware-gated** (rule 26).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Ingest`] if the local address cannot be read or the OS rejects the
+    /// egress interface / hop-limit (e.g. a nonexistent interface index).
+    pub fn configure_multicast_egress(&self) -> Result<()> {
+        let local = self
+            .socket
+            .local_addr()
+            .map_err(|e| Error::Ingest(format!("sap announcer local_addr: {e}")))?;
+        if local.is_ipv6() {
+            let sock = socket2::SockRef::from(self.socket.as_ref());
+            sock.set_multicast_if_v6(self.interface.index())
+                .map_err(|e| Error::Ingest(format!("sap set multicast egress if v6: {e}")))?;
+            sock.set_multicast_hops_v6(SAP_TTL)
+                .map_err(|e| Error::Ingest(format!("sap set multicast hops v6: {e}")))?;
+        }
+        Ok(())
     }
 
     /// Encode and send one SAP packet to `dest`.

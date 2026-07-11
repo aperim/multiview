@@ -29,6 +29,14 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 
+# IPv6 multicast egress interface + hop-limit selection (IPV6_MULTICAST_IF /
+# IPV6_MULTICAST_HOPS) for the SAP announcer — tokio's UdpSocket does not expose
+# these setsockopts, so we reach them through a `SockRef` over the bound socket
+# (panel F9). Pulled in ONLY by the `st2110` feature (the socket transport);
+# `MIT OR Apache-2.0`, already in the workspace lock (a tokio transitive), no FFI
+# here — the crate stays `unsafe_code = forbid`.
+socket2 = { version = "0.6", optional = true }
+
 # multiview-ffmpeg is pulled in UNCONDITIONALLY but with NO features: its DEFAULT
 # build is pure-Rust / native-dep-free (the libav* `ffmpeg-next` link is opt-in
 # behind ITS `ffmpeg` feature, off here by default), so the default multiview-input
@@ -110,7 +118,7 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 # always compiled and fully tested; this feature only adds the thin tokio
 # `UdpSocket` binding in `st2110::transport`. No native deps, no FFI — the crate
 # stays `unsafe_code = forbid`.
-"st2110" = ["tokio/net"]
+"st2110" = ["tokio/net", "dep:socket2"]
 # WebRTC ingest transport. OFF by default: a real session needs an ICE/DTLS/SRTP
 # media engine and a network stack, none of which exist in CI here, so the
 # transport shell is compile-verified only. The PURE SDP offer/answer model
