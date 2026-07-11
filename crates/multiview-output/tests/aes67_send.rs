@@ -54,13 +54,13 @@ fn packet_duration_derives_the_send_cadence_from_the_media_clock() {
     let one_ms = Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48_000, 48, 4_800).expect("48@48k");
     assert_eq!(
         one_ms.packet_duration(),
-        Duration::from_micros(1_000),
+        Duration::from_millis(1),
         "48 frames @ 48 kHz = 1 ms"
     );
     let two_ms = Aes67Sender::new(2, PcmDepth::L16, 96, 1, 48_000, 96, 4_800).expect("96@48k");
     assert_eq!(
         two_ms.packet_duration(),
-        Duration::from_micros(2_000),
+        Duration::from_millis(2),
         "96 frames @ 48 kHz = 2 ms"
     );
     let half_ms = Aes67Sender::new(2, PcmDepth::L16, 96, 1, 96_000, 48, 4_800).expect("48@96k");
