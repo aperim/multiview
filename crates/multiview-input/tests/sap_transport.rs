@@ -271,7 +271,11 @@ async fn missed_purge_ticks_collapse_to_one_reap_not_a_burst() {
     for _ in 0..8 {
         tokio::task::yield_now().await;
     }
-    assert_eq!(table.purge_count(), 0, "no reap scan before the clock advances");
+    assert_eq!(
+        table.purge_count(),
+        0,
+        "no reap scan before the clock advances"
+    );
 
     // Jump past 5 purge intervals in a SINGLE step — a stall that missed 5 ticks.
     tokio::time::advance(PURGE_INTERVAL * 5 + Duration::from_millis(1)).await;
@@ -342,7 +346,10 @@ async fn announcer_run_applies_the_configured_multicast_egress_interface() {
     };
     let ran = tokio::time::timeout(
         Duration::from_secs(60),
-        announcer.run(vec![session], AnnounceSchedule::new(Duration::from_secs(30))),
+        announcer.run(
+            vec![session],
+            AnnounceSchedule::new(Duration::from_secs(30)),
+        ),
     )
     .await;
     assert!(

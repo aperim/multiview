@@ -110,8 +110,8 @@ impl SapListener {
     pub async fn bind(local: SocketAddr) -> Result<Self> {
         // Dual-stack, SO_REUSEADDR (panel S4): a `[::]` listener also accepts
         // IPv4-mapped SAP, not left to the host `bindv6only` default.
-        let socket = bind_dual_stack(local)
-            .map_err(|e| Error::Ingest(format!("sap bind {local}: {e}")))?;
+        let socket =
+            bind_dual_stack(local).map_err(|e| Error::Ingest(format!("sap bind {local}: {e}")))?;
         Ok(Self {
             socket: Arc::new(socket),
             table: Arc::new(SapSessionTable::new()),
