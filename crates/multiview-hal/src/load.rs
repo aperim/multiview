@@ -1254,6 +1254,46 @@ mod linux_sysfs {
         root: DrmRoot,
         proc_root: PathBuf,
         media_tracker: FdinfoMediaTracker,
+        /// The monotonic clock read to timestamp each fdinfo snapshot at its
+        /// walk (F1). Always [`SnapshotClock::Monotonic`] in production; a unit
+        /// test injects a controllable clock to drive an exact
+        /// snapshot-to-snapshot interval through the real poll seam.
+        clock: SnapshotClock,
+    }
+
+    /// The monotonic clock the media pass reads to timestamp each fdinfo
+    /// snapshot at its walk — the F1 divisor is the elapsed between the two
+    /// SNAPSHOT reads, so the timestamp is taken *after* the walk.
+    ///
+    /// Production always reads the real monotonic clock (`Instant::now()`); a
+    /// unit test injects a controllable clock so the snapshot-to-snapshot
+    /// interval — and thus the exact merged-media fraction — is deterministic
+    /// when driven through the real `sample_all_with_media` / `LoadSource::poll`
+    /// seam, rather than relying on a saturating counter delta.
+    #[derive(Debug, Clone, Default)]
+    pub(crate) enum SnapshotClock {
+        /// The real monotonic clock, used in production.
+        #[default]
+        Monotonic,
+        /// A test clock whose value each read takes from shared state the test
+        /// advances between polls.
+        #[cfg(test)]
+        Manual(std::sync::Arc<std::sync::Mutex<Instant>>),
+    }
+
+    impl SnapshotClock {
+        /// Read the current instant — the real monotonic clock in production,
+        /// the injected value under test. A poisoned test clock degrades to the
+        /// real clock (never panics; a test never leaves it poisoned).
+        fn now(&self) -> Instant {
+            match self {
+                SnapshotClock::Monotonic => Instant::now(),
+                #[cfg(test)]
+                SnapshotClock::Manual(at) => {
+                    at.lock().map_or_else(|_| Instant::now(), |guard| *guard)
+                }
+            }
+        }
     }
 
     impl Default for SysfsLoadProbe {
@@ -1292,6 +1332,17 @@ mod linux_sysfs {
             self
         }
 
+        /// Inject the clock the media pass reads to timestamp each snapshot at
+        /// its walk (tests only — production always reads the real monotonic
+        /// clock). Lets a test drive an exact snapshot-to-snapshot interval
+        /// through the real `sample_all_with_media` / `LoadSource::poll` seam.
+        #[cfg(test)]
+        #[must_use]
+        pub(crate) fn with_clock(mut self, clock: SnapshotClock) -> Self {
+            self.clock = clock;
+            self
+        }
+
         /// Sample every visible device, then enrich each with the merged
         /// media-engine busy fraction derived from the caller's own PIDs'
         /// `/proc/<pid>/fdinfo`.
@@ -1314,8 +1365,10 @@ mod linux_sysfs {
             let mut loads = self.sample_all();
             let snapshot = FdinfoMediaSnapshot::walk_proc(&self.proc_root, pids);
             // Timestamp the snapshot at its read (not at poll entry) so the
-            // tracker's divisor matches the counter delta it divides (F1).
-            let snapshot_at = Instant::now();
+            // tracker's divisor matches the counter delta it divides (F1). The
+            // clock is injectable so a unit test drives an exact interval; it is
+            // the real monotonic clock in production.
+            let snapshot_at = self.clock.now();
             for load in &mut loads {
                 let pdev = load.device_id.stable_id();
                 if let Some(frac) =
@@ -1495,6 +1548,7 @@ mod linux_sysfs {
                 root: self,
                 proc_root: PathBuf::from("/nonexistent/multiview/no-proc-for-test-root"),
                 media_tracker: FdinfoMediaTracker::default(),
+                clock: SnapshotClock::default(),
             }
         }
 
