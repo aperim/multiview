@@ -54,6 +54,9 @@ pub mod devices;
 pub mod error;
 pub mod is07;
 pub mod jwt;
+/// Management-plane rate limiting (SEC-14): the keyed token-bucket + the
+/// connection/rate middleware backing the control-plane DoS floor.
+pub(crate) mod limits;
 pub mod live_apply;
 pub mod nmos;
 pub mod notify;
