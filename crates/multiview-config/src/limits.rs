@@ -195,7 +195,7 @@ pub struct ManagementLimits {
     /// is the population bound the request-level caps miss: `max_concurrent_requests`
     /// and the token buckets engage only *after* a request's headers are parsed, so a
     /// flood of half-open, slow-header (or slow-TLS-handshake) connections pins sockets
-    /// + tasks without ever taking a request permit. Over-cap connections are dropped
+    /// and tasks without ever taking a request permit. Over-cap connections are dropped
     /// at accept. Enforced only while `enabled` (a shed-layer cap, like
     /// `max_concurrent_requests`). Default `1024`.
     #[serde(default = "default_max_connections")]
