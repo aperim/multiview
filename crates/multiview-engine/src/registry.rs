@@ -243,6 +243,58 @@ impl<T> SourceRegistry<T> {
     where
         F: FnOnce(RequestedSize) -> Result<SourceInit<T>, E>,
     {
+        self.acquire_inner(key, requested, |req| {
+            factory(req).map(|init| (init.store, Some(init.actor)))
+        })
+    }
+
+    /// Acquire a ref-counted handle to a source whose decode teardown is owned
+    /// **externally** — the store-only sibling of [`acquire`].
+    ///
+    /// This is the adoption seam for callers (e.g. the CLI `Pipeline`) that own the
+    /// shared store + its sizing here but whose decode thread's stop/join still
+    /// lives elsewhere (the run's `StopRegistry`) until the decode lifecycle is
+    /// hoisted into the registry. At those callers' construction time the decode
+    /// threads do not exist yet, so there is genuinely no actor to own: the entry
+    /// registers with **no** [`SourceActor`], and last-release removes it without a
+    /// reaper hand-off (nothing to join). Decode-once/use-many and per-axis
+    /// supremum growth are identical to [`acquire`]; on the **first** reference the
+    /// `factory` builds only the shared store, and every later reference shares an
+    /// [`Arc`] clone of it. `factory` runs under the registry lock and MUST be
+    /// non-blocking and MUST NOT re-enter the registry. When the decode lifecycle is
+    /// later hoisted, callers move to [`acquire`] and pass the owning actor.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the `factory`'s error `E` when a first reference fails to create
+    /// the store; no entry is inserted.
+    pub fn acquire_store<F, E>(
+        self: &Arc<Self>,
+        key: SourceKey,
+        requested: RequestedSize,
+        factory: F,
+    ) -> Result<SourceHandle<T>, E>
+    where
+        F: FnOnce(RequestedSize) -> Result<Arc<TileStore<T>>, E>,
+    {
+        self.acquire_inner(key, requested, |req| factory(req).map(|store| (store, None)))
+    }
+
+    /// Shared insert-or-bump for [`acquire`] and [`acquire_store`]. On the **first**
+    /// reference to `key` the `factory` builds the shared store and (optionally) the
+    /// decode actor **under the lock**, so two racing first-references cannot both
+    /// spawn (decode-once, no TOCTOU). Every later reference bumps the refcount,
+    /// grows the recorded supremum to the per-axis max, and returns an [`Arc`] clone
+    /// of the one store.
+    fn acquire_inner<F, E>(
+        self: &Arc<Self>,
+        key: SourceKey,
+        requested: RequestedSize,
+        factory: F,
+    ) -> Result<SourceHandle<T>, E>
+    where
+        F: FnOnce(RequestedSize) -> Result<(Arc<TileStore<T>>, Option<Box<dyn SourceActor>>), E>,
+    {
         let store = {
             let mut entries = lock(&self.entries);
             if let Some(entry) = entries.get_mut(&key) {
@@ -250,20 +302,18 @@ impl<T> SourceRegistry<T> {
                 entry.supremum = entry.supremum.supremum(requested);
                 Arc::clone(&entry.store)
             } else {
-                // First reference: build the decode under the lock so two racing
-                // first-references cannot both spawn (decode-once, no TOCTOU).
-                let init = factory(requested)?;
-                let store = Arc::clone(&init.store);
+                let (store, actor) = factory(requested)?;
+                let shared = Arc::clone(&store);
                 entries.insert(
                     key.clone(),
                     Entry {
-                        store: init.store,
-                        actor: Some(init.actor),
+                        store,
+                        actor,
                         refcount: 1,
                         supremum: requested,
                     },
                 );
-                store
+                shared
             }
         };
         Ok(SourceHandle {
@@ -290,6 +340,21 @@ impl<T> SourceRegistry<T> {
     #[must_use]
     pub fn requested_supremum(&self, key: &SourceKey) -> Option<RequestedSize> {
         lock(&self.entries).get(key).map(|entry| entry.supremum)
+    }
+
+    /// The shared [`TileStore`] registered for `key`, or [`None`] if no such source
+    /// is registered.
+    ///
+    /// A **lifecycle / telemetry accessor**: it clones the entry's [`Arc`] under the
+    /// registry lock. It is **not** the sample path — consumers sample lock-free
+    /// through the [`Arc`] a [`SourceHandle`] hands them ([`SourceHandle::store`]),
+    /// never through the registry lock, so a wedged/absent source can never stall a
+    /// sibling's sampling (inv #10).
+    #[must_use]
+    pub fn store(&self, key: &SourceKey) -> Option<Arc<TileStore<T>>> {
+        lock(&self.entries)
+            .get(key)
+            .map(|entry| Arc::clone(&entry.store))
     }
 
     /// Drain and stop the reaper, joining every pending decode teardown.
