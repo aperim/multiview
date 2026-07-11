@@ -9,6 +9,13 @@
 //! wall clock, so it is exhaustively testable offline (the same seam pattern the
 //! rest of this crate uses for clock-driven logic).
 //!
+//! The pre-auth per-IP guard keys on the `ConnectInfo` peer address, which is
+//! installed **only** by [`crate::serve`] / [`crate::serve_router`] (via
+//! `into_make_service_with_connect_info`). Serving [`crate::router`] through any
+//! other make-service leaves that extension absent, silently disabling the per-IP
+//! guard (it fails open — see [`per_ip_rate_limit`]); route the control plane
+//! through the blessed serve helpers to keep it active.
+//!
 //! ## Bounded by construction — the `DoS`-resistance property
 //!
 //! A rate limiter that grows a per-key map is itself a memory-exhaustion vector:
@@ -27,11 +34,14 @@
 //! (`tat`) — the virtual-scheduling (GCRA) formulation of a token bucket, its exact
 //! dual: a `tat` running ahead of `now` by up to the burst tolerance `tau` is a
 //! bucket that many requests below full. Because the whole per-cell state is one
-//! word, [`RateLimiter::check`] is a wait-free load plus a single compare-and-swap
-//! — never a mutex. A single-key flood (which concentrates on one cell) serialises
-//! on that one atomic word for a few nanoseconds and can **never park a Tokio
-//! worker holding a lock**, which a blocking `std::sync::Mutex` on the async hot
-//! path could.
+//! word, [`RateLimiter::check`] is **lock-free** — a load plus a single
+//! compare-and-swap, never a mutex. Under contention the CAS can fail and retry, so
+//! the operation is lock-free, not wait-free; but only the *admitting* branch loops,
+//! and once a cell's burst is spent every further request takes the CAS-free reject
+//! path, so the retry window is bounded by the burst and can never spin unboundedly.
+//! A single-key flood (which concentrates on one cell) serialises on that one atomic
+//! word for a few nanoseconds and can **never park a Tokio worker holding a lock**,
+//! which a blocking `std::sync::Mutex` on the async hot path could.
 //!
 //! ## Timekeeping
 //!
@@ -184,9 +194,11 @@ impl<S: BuildHasher> RateLimiter<S> {
     /// Virtual-scheduling (GCRA) accounting: the cell's `tat` is the earliest
     /// virtual time at which the next request may arrive; a request is admitted when
     /// advancing `tat` by one increment keeps it within `tau` of `now`. Lock-free —
-    /// a wait-free load plus a single CAS; a rejected request never advances `tat`.
-    /// Every operation saturates and `now` is clamped, so a frozen, jumped, wrapped,
-    /// or regressed clock can neither panic nor grant a bonus request.
+    /// a load plus a single CAS in the common case; under contention the CAS retries
+    /// (lock-free, not wait-free), but only while admitting: a rejected request returns
+    /// without a CAS and never advances `tat`, so the retry window is bounded by the
+    /// burst. Every operation saturates and `now` is clamped, so a frozen, jumped,
+    /// wrapped, or regressed clock can neither panic nor grant a bonus request.
     pub(crate) fn check<K: Hash + ?Sized>(&self, key: &K, now_ns: u64) -> Decision {
         let idx = self.cell_of(key);
         // `idx < cells.len()` by construction; fail **open** (never limit) on the
@@ -217,8 +229,19 @@ impl<S: BuildHasher> RateLimiter<S> {
                 match cell.compare_exchange_weak(tat, new_tat, Ordering::Relaxed, Ordering::Relaxed)
                 {
                     Ok(_) => return Decision::Allowed,
-                    // Another thread advanced this cell; re-read and retry.
-                    Err(observed) => tat = observed,
+                    Err(observed) => {
+                        // Another thread advanced this cell first. Hint the CPU we are
+                        // in a spin-retry (cheaper contention, better SMT yield), then
+                        // re-read and retry. The loop is bounded: only this admitting
+                        // branch retries, and once the burst is spent every request
+                        // takes the CAS-free reject path below — it never spins
+                        // unboundedly. A bounded retry that fell back to *allowing*
+                        // would be worse: it would let a single-key flood induce
+                        // contention to bypass the very limit it defends, so the natural
+                        // admit-phase bound is the right one.
+                        core::hint::spin_loop();
+                        tat = observed;
+                    }
                 }
             } else {
                 // Over burst: refuse WITHOUT advancing tat (a rejected request never
@@ -393,11 +416,21 @@ fn overloaded(retry_after: Duration) -> Response {
     )
 }
 
-/// Pre-auth per-source-IP rate limit. Keyed on the peer IP (from `ConnectInfo`,
-/// wired by [`crate::serve_router`]) so it protects the auth path from
-/// brute-force. A request whose peer IP is unavailable is not limited here (the
-/// concurrency cap + per-key limit still apply — fail open, never a self-inflicted
-/// outage).
+/// Latches the first time [`per_ip_rate_limit`] sees a request with no `ConnectInfo`
+/// peer address, so a router served without the connect-info make-service (which
+/// silently disables the pre-auth per-IP guard) warns exactly once rather than per
+/// request. Process-global; the guard fails open regardless.
+static MISSING_CONNECT_INFO_WARNED: std::sync::Once = std::sync::Once::new();
+
+/// Pre-auth per-source-IP rate limit — the brute-force guard on the auth path.
+///
+/// Keyed on the peer IP from the `ConnectInfo` request extension. That extension is
+/// installed **only** by [`crate::serve`] / [`crate::serve_router`] (via
+/// `into_make_service_with_connect_info`); serving [`crate::router`] through any other
+/// make-service leaves it absent, which silently disables this guard. A request whose
+/// peer IP is unavailable is therefore **not** limited here — the concurrency cap +
+/// per-key limit still apply (fail open, never a self-inflicted outage) — but a
+/// one-time `warn!` fires so the misconfiguration is diagnosable rather than silent.
 pub(crate) async fn per_ip_rate_limit(
     State(limiters): State<Arc<Limiters>>,
     request: Request,
@@ -411,6 +444,18 @@ pub(crate) async fn per_ip_rate_limit(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|connect_info| connect_info.0.ip());
     let Some(ip) = peer_ip else {
+        // No `ConnectInfo`: the router was served without the connect-info make-service
+        // (i.e. not via `serve`/`serve_router`). Fail open — the concurrency cap +
+        // per-key limit still apply, and a DoS floor must never become a self-inflicted
+        // outage — but warn ONCE so this bypass of the pre-auth per-IP guard is
+        // diagnosable instead of silent.
+        MISSING_CONNECT_INFO_WARNED.call_once(|| {
+            tracing::warn!(
+                "per-IP rate limit inactive: request has no ConnectInfo peer address; serve \
+                 the control plane via multiview_control::serve/serve_router so the pre-auth \
+                 per-IP guard can key on the source IP"
+            );
+        });
         return next.run(request).await;
     };
     match limiter.check(&ip, limiters.now_ns()) {
@@ -446,16 +491,21 @@ pub(crate) async fn per_api_key_rate_limit(
 }
 
 /// A response body that owns a concurrency [`OwnedSemaphorePermit`] and delegates to
-/// an inner body. The permit releases exactly when the body ends — its last frame is
-/// polled, or it is dropped (a client disconnect) — so a concurrency permit rides the
+/// an inner body. The permit releases the instant the stream ends — its terminal
+/// frame is polled (`None`, or an error), or, failing that, when the body is dropped
+/// (a client disconnect before completion) — so a concurrency permit rides the
 /// RESPONSE's lifetime, not merely the handler's return. A long-lived streaming body
 /// (SSE at `/api/v1/events`) therefore holds its concurrency slot for as long as it
 /// streams (F1), so a flood of held-open streams is shed once the cap is reached.
 struct PermitBody {
     /// The wrapped response body.
     inner: Body,
-    /// Released on drop — the whole point; never read.
-    _permit: OwnedSemaphorePermit,
+    /// The held concurrency slot. [`PermitBody::poll_frame`] `take()`s and drops it on
+    /// the terminal `None`/error, so capacity frees exactly when streaming completes —
+    /// not whenever a (possibly-retained) body is finally dropped (F-C). `Option` so
+    /// the terminal poll can release early; a client disconnect that drops the body
+    /// before completion still releases the permit via this field's own `Drop`.
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 impl HttpBody for PermitBody {
@@ -468,7 +518,15 @@ impl HttpBody for PermitBody {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         // `axum::body::Body` is `Unpin`, so this projection is sound without a
         // `pin-project` dependency.
-        Pin::new(&mut self.inner).poll_frame(cx)
+        let polled = Pin::new(&mut self.inner).poll_frame(cx);
+        // Terminal at `Ready(None)` (end-of-stream) or `Ready(Some(Err))` (a body error
+        // ends the stream): release the concurrency slot NOW — the moment the work
+        // completes — rather than waiting for this body to be dropped. `take()` is
+        // idempotent, so polling a body past its end never double-releases.
+        if matches!(polled, Poll::Ready(None | Some(Err(_)))) {
+            drop(self.permit.take());
+        }
+        polled
     }
 
     fn is_end_stream(&self) -> bool {
@@ -562,7 +620,7 @@ pub(crate) async fn concurrency_cap(
                 parts,
                 Body::new(PermitBody {
                     inner: body,
-                    _permit: permit,
+                    permit: Some(permit),
                 }),
             )
         }

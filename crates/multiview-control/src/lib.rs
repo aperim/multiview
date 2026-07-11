@@ -345,6 +345,13 @@ where
 /// contract as [`serve`] applies: anything mounted must be best-effort and
 /// physically incapable of back-pressuring the engine (invariant #10).
 ///
+/// This helper installs each connection's peer `SocketAddr` as a `ConnectInfo`
+/// request extension (`into_make_service_with_connect_info`), which the SEC-14
+/// pre-auth per-IP rate limit ([`crate::limits`]) REQUIRES to key on the source IP.
+/// Serving [`router`] through a different make-service loses that extension and
+/// silently disables the per-IP guard (it fails open); route control-plane traffic
+/// through this helper (or [`serve`]) to keep it active.
+///
 /// # Errors
 /// Propagates any I/O error from the underlying [`axum::serve`] accept loop.
 pub async fn serve_router<F>(
