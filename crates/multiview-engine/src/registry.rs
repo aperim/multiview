@@ -642,6 +642,80 @@ mod tests {
         }
     }
 
+    /// Shared observability for a group of [`Probe`] teardown actors.
+    #[derive(Clone)]
+    struct Counters {
+        /// Concurrent `shutdown()` executions right now (peak = teardown parallelism).
+        active: Arc<AtomicUsize>,
+        /// Total `shutdown()` entries (a fixed pool caps this under a wedge; a
+        /// thread-per-teardown design lets it scale with the stream).
+        shutdown_calls: Arc<AtomicUsize>,
+        /// `shutdown()` calls that ran to completion.
+        completed: Arc<AtomicUsize>,
+        /// Actors whose `Drop` ran on the **shed** path (no `shutdown()`), proving the
+        /// bounded-queue overflow still terminates decode non-blockingly.
+        shed_terminated: Arc<AtomicUsize>,
+    }
+
+    impl Counters {
+        fn new() -> Self {
+            Self {
+                active: Arc::new(AtomicUsize::new(0)),
+                shutdown_calls: Arc::new(AtomicUsize::new(0)),
+                completed: Arc::new(AtomicUsize::new(0)),
+                shed_terminated: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        /// A fresh probe actor sharing these counters. `gate: Some(..)` wedges its
+        /// `shutdown()` until the gate is cleared (a decode-thread join stuck forever).
+        fn probe(&self, gate: Option<Arc<AtomicBool>>) -> Probe {
+            Probe {
+                gate,
+                counters: self.clone(),
+                shutdown_ran: AtomicBool::new(false),
+            }
+        }
+    }
+
+    /// A test ingest/decode actor with two observable teardown paths:
+    ///
+    /// * `shutdown()` (the graceful path a pool worker runs) — bumps `active` for its
+    ///   duration, optionally wedges on `gate`, then records `completed`.
+    /// * `Drop` (the shed / signal-and-detach path) — when it runs **without** a prior
+    ///   `shutdown()` it records `shed_terminated`, standing in for "the decode was
+    ///   signalled to terminate non-blockingly".
+    struct Probe {
+        gate: Option<Arc<AtomicBool>>,
+        counters: Counters,
+        shutdown_ran: AtomicBool,
+    }
+
+    impl SourceActor for Probe {
+        fn shutdown(self: Box<Self>) {
+            self.counters.shutdown_calls.fetch_add(1, Ordering::Release);
+            self.counters.active.fetch_add(1, Ordering::Release);
+            if let Some(gate) = &self.gate {
+                while gate.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            self.counters.active.fetch_sub(1, Ordering::Release);
+            self.shutdown_ran.store(true, Ordering::Release);
+            self.counters.completed.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            // Shed path only: if `shutdown()` never ran, this Drop is the sole teardown
+            // — it must non-blockingly signal decode termination (recorded here).
+            if !self.shutdown_ran.load(Ordering::Acquire) {
+                self.counters.shed_terminated.fetch_add(1, Ordering::Release);
+            }
+        }
+    }
+
     fn store(id: &str) -> Arc<TileStore<u64>> {
         Arc::new(TileStore::new(
             id,
@@ -751,59 +825,155 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_grace_joins_then_detaches_a_wedged_teardown() {
-        // F1: the explicit `shutdown()` (Stop path) must bounded-grace-join
-        // in-flight teardowns then DETACH stragglers — it must NOT block forever on
-        // a wedged decode-thread join. An inline-join reaper makes `shutdown()`
-        // block on the reaper stuck in the wedged join → RED (never returns).
+    fn teardown_pool_bounds_threads_and_queue_under_sustained_pressure() {
+        // F1 REWORK (inv #10): the teardown mechanism must be BOUNDED under SUSTAINED
+        // last-release pressure — not merely "eventually completes one finite burst".
+        //
+        // Every actor's `shutdown()` blocks on one shared gate, so any teardown that
+        // reaches a worker piles up in-flight and stays there. A FIXED worker pool
+        // draining a BOUNDED queue therefore caps (a) concurrent `shutdown()`
+        // executions at the pool size and (b) queued+in-flight teardowns at
+        // queue+workers; every release beyond that SHEDS via the actor's `Drop`
+        // (signal-and-detach — no thread spawned, no join), which must still terminate
+        // decode. A thread-per-teardown design FAILS all three: it spawns one thread
+        // per release and calls `shutdown()` on every one, so concurrent shutdowns and
+        // pending both climb to the full stream length and nothing ever sheds.
+        const N: usize = 96; // >> queue+workers, so the overflow must shed
+        const ACTIVE_BOUND: usize = 16; // >> any fixed pool size, << N
+        const PENDING_BOUND: usize = 64; // >> queue+workers, << N
+        const MIN_SHED: usize = N - 64; // releases beyond queue+workers shed via Drop
+
         let reg = SourceRegistry::<u64>::new();
         let gate = Arc::new(AtomicBool::new(true));
         let _clear = ClearGateOnDrop(gate.clone());
-        let done = Arc::new(AtomicUsize::new(0));
-        let hw = reg
-            .acquire(
-                SourceKey::from_canonical("rtsp://wedged-shutdown"),
-                size(1, 1),
-                {
-                    let completed = done.clone();
-                    let gate = gate.clone();
-                    move |_r| {
-                        Ok::<_, Infallible>(SourceInit::new(
-                            store("wedged-shutdown"),
-                            TestActor {
-                                completed,
-                                gate: Some(gate),
-                            },
-                        ))
-                    }
-                },
-            )
-            .unwrap();
-        drop(hw); // last-release → wedged teardown handed to the reaper
+        let counters = Counters::new();
 
-        // Run shutdown() on a helper thread so a (buggy) forever-block cannot hang
-        // the test; assert it RETURNS within a bounded budget.
-        let returned = Arc::new(AtomicBool::new(false));
+        let mut max_pending = 0;
+        for i in 0..N {
+            let c = counters.clone();
+            let gate = gate.clone();
+            let h = reg
+                .acquire(
+                    SourceKey::from_canonical(format!("rtsp://flood/{i}")),
+                    size(320, 180),
+                    move |_r| {
+                        Ok::<_, Infallible>(SourceInit::new(store("flood"), c.probe(Some(gate))))
+                    },
+                )
+                .unwrap();
+            drop(h); // last release → offered to the bounded teardown pool
+            max_pending = max_pending.max(reg.pending_teardowns());
+        }
+
+        // Sample the peak concurrent shutdowns + pending over a bounded window. With
+        // every teardown gated, a fixed pool holds steady at its bound; a
+        // thread-per-teardown design climbs toward N as it spawns a thread each.
+        let mut max_active = 0;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            max_active = max_active.max(counters.active.load(Ordering::Acquire));
+            max_pending = max_pending.max(reg.pending_teardowns());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let shed = counters.shed_terminated.load(Ordering::Acquire);
+
+        assert!(
+            max_active <= ACTIVE_BOUND,
+            "concurrent teardowns must be bounded by a fixed worker pool, not one \
+             thread per release (saw {max_active} concurrent shutdowns, bound \
+             {ACTIVE_BOUND}, stream {N})"
+        );
+        assert!(
+            max_pending <= PENDING_BOUND,
+            "queued+in-flight teardowns must stay bounded by queue+workers under \
+             sustained pressure (saw {max_pending}, bound {PENDING_BOUND}, stream {N})"
+        );
+        assert!(
+            shed >= MIN_SHED,
+            "the bounded-queue overflow must SHED via Drop (signal-and-detach) and \
+             still terminate decode (saw {shed} shed-terminations, need >= {MIN_SHED})"
+        );
+
+        gate.store(false, Ordering::Release); // let the wedged workers finish
+        drop(reg); // non-blocking detach
+    }
+
+    #[test]
+    fn shutdown_grace_joins_then_detaches_a_wedged_teardown() {
+        // F1: the explicit `shutdown()` must BOUNDED-GRACE-JOIN in-flight teardowns —
+        // proven by BOTH a lower bound (it waited ~TEARDOWN_GRACE before giving up, so
+        // it grace-JOINED rather than detaching instantly) AND an upper bound (it
+        // returned, so a wedged decode-thread join never blocks it forever). One
+        // wedged teardown occupies a pool worker.
+        use super::TEARDOWN_GRACE;
+        let reg = SourceRegistry::<u64>::new();
+        let gate = Arc::new(AtomicBool::new(true));
+        let _clear = ClearGateOnDrop(gate.clone());
+        let counters = Counters::new();
+        let h = reg
+            .acquire(SourceKey::from_canonical("rtsp://wedged-shutdown"), size(1, 1), {
+                let c = counters.clone();
+                let gate = gate.clone();
+                move |_r| {
+                    Ok::<_, Infallible>(SourceInit::new(
+                        store("wedged-shutdown"),
+                        c.probe(Some(gate)),
+                    ))
+                }
+            })
+            .unwrap();
+        drop(h); // last-release → wedged teardown handed to a pool worker
+
+        // Ensure the wedged teardown is actually running in a worker before shutdown(),
+        // so the grace-join has an in-flight teardown to wait on.
+        wait_until(
+            || counters.active.load(Ordering::Acquire) >= 1,
+            Duration::from_secs(5),
+            "the wedged teardown reaches a pool worker",
+        );
+
+        // Run shutdown() on a helper thread and record how long it takes to return.
+        let waited: Arc<Mutex<Option<Duration>>> = Arc::new(Mutex::new(None));
         let reg_bg = Arc::clone(&reg);
-        let returned_bg = returned.clone();
+        let waited_bg = waited.clone();
         let joiner = std::thread::spawn(move || {
+            let started = Instant::now();
             reg_bg.shutdown();
-            returned_bg.store(true, Ordering::Release);
+            *lock_test(&waited_bg) = Some(started.elapsed());
         });
         wait_until(
-            || returned.load(Ordering::Acquire),
-            Duration::from_secs(10),
-            "shutdown() must bounded-grace-join then detach a wedged teardown, not block forever",
+            || lock_test(&waited).is_some(),
+            TEARDOWN_GRACE * 4,
+            "shutdown() must bounded-grace-join then detach, not block forever",
         );
-        // The wedged teardown was detached, never joined — it never completed.
+        let waited = lock_test(&waited).expect("shutdown() returned above");
+
+        // Lower bound: it grace-JOINED (waited ~the grace budget) before detaching —
+        // an instant-detach shutdown() would fail this.
+        assert!(
+            waited >= TEARDOWN_GRACE.mul_f64(0.8),
+            "shutdown() must grace-join up to TEARDOWN_GRACE before detaching a wedged \
+             teardown, not detach instantly (waited {waited:?}, grace {TEARDOWN_GRACE:?})"
+        );
+        // Upper bound: a wedged decode-thread join never blocks shutdown() forever.
+        assert!(
+            waited < TEARDOWN_GRACE * 3,
+            "shutdown() must not block forever on a wedged join (waited {waited:?})"
+        );
+        // The wedged teardown was detached, never joined to completion.
         assert_eq!(
-            done.load(Ordering::Acquire),
+            counters.completed.load(Ordering::Acquire),
             0,
             "the wedged teardown is detached, not joined to completion"
         );
 
         gate.store(false, Ordering::Release); // let the detached straggler exit
         let _ = joiner.join();
+    }
+
+    /// Lock a test mutex, recovering a poisoned guard (a prior test-thread panic).
+    fn lock_test<U>(m: &Mutex<U>) -> std::sync::MutexGuard<'_, U> {
+        m.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     #[test]
