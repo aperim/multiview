@@ -37,8 +37,9 @@ review surfaced:
 For a security **floor** the decisive question is whether a cap slot can be held
 *forever* or is forced to *recycle*: a cap that fills with hold-forever h2 (or stalled-
 handshake) connections is a DoS **amplifier**, not a floor. An HTTP/1-only serve loop
-makes **every** connection — including one that opens with the h2 preface, parsed as a
-bad HTTP/1 request line — subject to the header-read timeout, so every slot recycles.
+bounds every **slow-header** connection by the header-read timeout so its slot recycles,
+and rejects an h2-preface connection immediately (the preface is a complete but invalid
+HTTP/1 request line) — so no slot can be pinned open forever.
 
 ## Decision
 
@@ -53,8 +54,9 @@ a partial floor, rule 6).
    `header_read_timeout(configured)`, and `serve_connection(..).with_upgrades()` so
    `/api/v1/ws` still upgrades over HTTP/1. HTTP/2 is refused: an ALPN-respecting TLS
    client negotiates `http/1.1` (see 3), and a client that sends the h2 preface anyway
-   is parsed as a malformed HTTP/1 request line and dropped at the header-read
-   deadline. Each connection's peer `SocketAddr` is re-injected as a `ConnectInfo`
+   sends a complete but invalid HTTP/1 request line, which the HTTP/1-only parser rejects
+   immediately (never a timeout-free h2 session). Each connection's peer `SocketAddr` is
+   re-injected as a `ConnectInfo`
    request extension — axum's `into_make_service_with_connect_info` cannot be reused
    because its `IncomingStream` constructor is private — so the SEC-14 per-IP guard
    keeps its peer-IP key. One shared connection driver (`drive_connection`) serves both
@@ -76,12 +78,31 @@ a partial floor, rule 6).
    it the (a) TLS cap would fill with stalled handshakes (the fillable-forever failure,
    one layer down). `axum-server` is dropped; `RustlsMaterial` now wraps
    `Arc<rustls::ServerConfig>`.
-4. **Bounded drain (no leaked tasks).** In-flight connection tasks are tracked in a
-   `tokio::task::JoinSet`. At shutdown the loop signals each task (a `watch` channel) to
+4. **Bounded drain + upgrade-safe accounting.** In-flight connection tasks are tracked in
+   a `tokio::task::JoinSet`. At shutdown the loop signals each task (a `watch` channel) to
    begin a graceful shutdown — http1's `UpgradeableConnection` does not implement
    hyper-util's `GracefulConnection`, so it is driven directly — then waits up to a
-   configurable ceiling and `abort_all()`s + reaps any stragglers, so **no connection
-   task outlives `serve`** (the previous detached-`tokio::spawn` loop abandoned them).
+   configurable ceiling and `abort_all()`s + reaps any straggling **tracked** tasks (the
+   previous detached-`tokio::spawn` loop abandoned them). Each accepted stream is wrapped
+   in a `serve_stream::TrackedStream` that (a) **owns** the accept-level admission guard,
+   so when hyper hands the IO to its `Upgraded` at an HTTP/1 upgrade the guard rides into
+   the (detached) WebSocket task and releases only when that socket finally closes — a
+   live WebSocket therefore keeps counting against the global + per-IP population caps for
+   its whole life (without this the guard dropped at the upgrade handshake — the point at
+   which `serve_connection` returns, *not* the WebSocket's end — so sequential upgrades
+   bypassed the per-IP cap); and (b) is **shutdown-aware** — once the shutdown `watch`
+   flips, its reads return EOF and its writes error, with the watch waker registered so a
+   parked read/write wakes the instant shutdown fires, not only on the next byte. An
+   upgraded WebSocket is a detached task the `JoinSet` does not track, so serve() does
+   **not** synchronously await it; instead it drains **cooperatively-and-promptly**:
+   `run_ws_session` selects on `socket.recv()`, which returns end-of-stream on the
+   shutdown-aware EOF, so the session ends and releases its slot + concurrency permit. So
+   serve() synchronously drains + aborts every **tracked** (non-upgraded) connection at
+   the ceiling, while an upgraded WebSocket drains cooperatively and is **not**
+   synchronously awaited — the guarantee is prompt-cooperative, not a synchronous join.
+   This relies on the invariant that **every upgrade handler is cooperative +
+   shutdown-aware** (it reads its socket and ends on end-of-stream); a future
+   non-cooperative upgrade handler would be a reviewable defect.
 5. **Config + `ServeOptions`.** `[control.limits]` gains `max_connections` (default
    **1024**) and `max_connections_per_ip` (default **256**) alongside
    `header_read_timeout_secs` (default **20 s**). `validate()` rejects `0`, a per-IP cap
@@ -124,9 +145,13 @@ loop.
   `accept` error backs off and continues rather than tearing down the plane. The full
   `multiview-control` suite (serve, management_limits, realtime, ws_ticket, tls_serve,
   serve_header_timeout, serve_connection_floor) passes through the new loop.
-- **Behaviourally verified.** RED→GREEN tests: an HTTP/2 preface is dropped instead of
-  held open as a timeout-free session (RED held it ~5 s); plain + TLS slowloris are
-  dropped at the header-read deadline; an over-cap connection is dropped promptly at
+- **Behaviourally verified.** RED→GREEN tests: an HTTP/2 preface is rejected promptly by
+  the HTTP/1-only parser (well within the header-read deadline) instead of held open as a
+  timeout-free session (RED held it ~5 s); plain + TLS slowloris are dropped at the
+  header-read deadline; a live upgraded WebSocket keeps its per-IP population slot and
+  drains when serve() shuts down (RED: the guard dropped at the HTTP/1 upgrade, freeing
+  the slot, and the detached socket outlived serve()); an over-cap connection is dropped
+  promptly at
   accept; an in-flight connection is aborted at the drain ceiling. `ConnectionAdmission`
   unit tests cover the global cap, per-IP cap, drop-frees-both, evict-at-zero, and
   never-exceeds-either-cap. Positive controls prove a complete request is still served.
@@ -134,11 +159,25 @@ loop.
   HTTP/1.1 (WebSocket via the h1 Upgrade mechanism, not h2 extended-CONNECT). No
   management surface needs h2; this is the price of a recycling floor and is stated
   plainly rather than left as an unbounded h2 hole.
+- **Slow request-body is bounded by the concurrency cap, not the header-read timeout.**
+  `header_read_timeout` bounds only the request *header* read; a client that completes its
+  headers then dribbles a request *body* is past that deadline. It is nonetheless bounded:
+  `concurrency_cap` acquires the request-concurrency permit **before**
+  `next.run(request).await` and body extraction runs inside the handler, so a slow body
+  holds one `max_concurrent_requests` permit for its whole read — a flood of dribbled
+  bodies is shed `503` once the cap is reached (and the accept-level population caps bound
+  the connection count independently). A dedicated request-body / total-request deadline
+  is a **separable** mechanism (a distinct hyper knob) and a tracked follow-up, not part
+  of this change — the damage is already bounded.
 - **Dependencies.** `hyper` (features trimmed to `server`+`http1`) + `hyper-util`
   (trimmed to `tokio`) are direct deps; `axum-server` is **removed**; `tokio-rustls`
   moves from dev-only to a normal dep of the `tls` feature — but it is already a normal
   (optional) dep via `cast`, and `deny.toml [graph] all-features = false` keeps both
   off-by-default features out of the scanned default graph, so no `deny.toml` change is
   needed. All pure-Rust, LGPL-clean, `cargo deny`-clean.
-- **Scope.** This closes the W028 F-A residual completely (timeout + h2 refusal +
-  population cap + handshake timeout + bounded drain); W028 is updated to point here.
+- **Scope.** This closes the W028 F-A residual: the slow-header hole (header-read
+  timeout), h2 refusal (immediate parser reject), connection population (accept-level
+  caps), TLS-handshake stall (handshake timeout), and the bounded drain — with slow
+  request-body bounded by the concurrency semaphore (above). A dedicated
+  request-body / total-request deadline is a separable, tracked follow-up, not a hole this
+  leaves open. W028 is updated to point here.

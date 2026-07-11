@@ -351,8 +351,9 @@ pub const DEFAULT_GRACEFUL_SHUTDOWN_CEILING: std::time::Duration =
 /// The control plane is served **HTTP/1-only** (SEC-14 #126 R2 /
 /// [ADR-W031](../../docs/decisions/ADR-W031.md)): hyper's HTTP/2 server has no
 /// header-read timeout, so an HTTP/2 connection could pin a slot forever — serving
-/// HTTP/1-only subjects every connection (the h2 preface included) to the deadlines
-/// below. This struct carries:
+/// HTTP/1-only bounds every slow-header connection by the deadlines below, and the h2
+/// preface (a complete but invalid HTTP/1 request line) is rejected immediately by the
+/// parser rather than negotiated into a timeout-free h2 session. This struct carries:
 ///
 /// * the **header-read timeout** — the request-concurrency + rate caps engage only
 ///   *after* a request's headers are parsed, so they bound in-flight requests but not
@@ -524,10 +525,11 @@ where
 ///
 /// The control plane is served HTTP/1-only (SEC-14 #126 R2 / ADR-W031): hyper's HTTP/2
 /// server has no header-read timeout, so an HTTP/2 connection could pin a slot forever.
-/// Serving on [`hyper::server::conn::http1::Builder`] subjects **every** connection —
-/// including one that opens with the HTTP/2 preface, which is then parsed as a malformed
-/// HTTP/1 request line — to `options.header_read_timeout`. The Tokio timer is installed
-/// unconditionally because `header_read_timeout` panics when armed without one.
+/// Serving on [`hyper::server::conn::http1::Builder`] subjects every **slow-header**
+/// connection to `options.header_read_timeout`; a connection that opens with the HTTP/2
+/// preface is a complete but invalid HTTP/1 request line, so the parser rejects it
+/// immediately (it never negotiates a timeout-free h2 session). The Tokio timer is
+/// installed unconditionally because `header_read_timeout` panics when armed without one.
 fn http1_builder(options: &ServeOptions) -> hyper::server::conn::http1::Builder {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder.timer(hyper_util::rt::TokioTimer::new());
@@ -852,8 +854,9 @@ pub fn load_tls_material(
     // ALPN: offer HTTP/1.1 ONLY. The control plane is served HTTP/1-only (SEC-14 #126 R2
     // / ADR-W031) because hyper's HTTP/2 server has no header-read timeout, so an ALPN-
     // respecting client negotiates h1. Belt-and-braces: even a client that ignores ALPN
-    // and sends the h2 preface post-handshake is parsed as (bad) HTTP/1 by the http1
-    // serve loop and dropped at the header-read deadline.
+    // and sends the h2 preface post-handshake sends a complete but invalid HTTP/1 request
+    // line, which the HTTP/1-only serve loop rejects immediately (never a timeout-free h2
+    // session).
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     Ok(RustlsMaterial(std::sync::Arc::new(config)))
