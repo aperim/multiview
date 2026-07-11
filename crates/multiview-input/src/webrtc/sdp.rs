@@ -83,17 +83,3 @@ pub struct NegotiatedSession {
     /// The negotiated media sections (audio/video only).
     pub sections: Vec<NegotiatedMedia>,
 }
-
-impl NegotiatedSession {
-    /// The negotiated video section, if any.
-    #[must_use]
-    pub fn video(&self) -> Option<&NegotiatedMedia> {
-        self.sections.iter().find(|s| s.kind == MediaKind::Video)
-    }
-
-    /// The negotiated audio section, if any.
-    #[must_use]
-    pub fn audio(&self) -> Option<&NegotiatedMedia> {
-        self.sections.iter().find(|s| s.kind == MediaKind::Audio)
-    }
-}
