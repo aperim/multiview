@@ -14506,6 +14506,70 @@ segment_ms = 1000
         assert!(pipeline.audio_stores.contains_key("aes67-in"));
         assert!(!pipeline.stores.contains_key("aes67-in"));
     }
+
+    /// A config that (wrongly) binds a layout CELL to the audio-only aes67 source.
+    /// An AES67 source decodes no pixels, so a cell referencing it would carry tile
+    /// geometry with NO backing `TileStore` (the source loop skips the video path
+    /// for it). The build must reject this fail-closed rather than leave a dangling
+    /// tile. `cam1` occupies area `a`; `aes67-in` is wrongly bound to area `b`.
+    fn aes67_source_bound_to_a_cell_config() -> multiview_config::MultiviewConfig {
+        let doc = format!(
+            r##"schema_version = 1
+[canvas]
+width = 1200
+height = 720
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr"]
+areas = ["a b"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[sources]]
+id = "aes67-in"
+kind = "aes67"
+multicast = "[ff3e::1]:5004"
+sdp = '''
+{AES67_SDP}'''
+[[cells]]
+id = "video"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[cells]]
+id = "oops-audio"
+area = "b"
+[cells.source]
+input_id = "aes67-in"
+[[outputs]]
+kind = "hls"
+path = "/tmp/aes67-cell-reject.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##
+        );
+        multiview_config::MultiviewConfig::load_from_toml(&doc).expect("test config parses")
+    }
+
+    #[test]
+    fn a_layout_cell_bound_to_an_aes67_source_is_rejected() {
+        let config = aes67_source_bound_to_a_cell_config();
+        let err = Pipeline::build(&config)
+            .err()
+            .expect("a layout cell bound to an audio-only aes67 source must fail the build");
+        // Fail-closed and honest: the error names the offending audio-only source.
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("aes67-in"),
+            "the rejection names the audio-only source wrongly bound to a cell: {rendered}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "aes67"))]
@@ -14725,5 +14789,73 @@ multicast = "[ff3e::1]:5004"
         assert_eq!(block.format().channel_count(), 2, "canonical stereo");
         assert_eq!(block.format().sample_rate(), 48_000, "canonical 48 kHz");
         assert_eq!(block.interleaved(), &[0.1, -0.1, 0.2, -0.2]);
+    }
+
+    /// A well-formed AES67 SDP at an arbitrary L24 clock rate (the parser accepts
+    /// 48 kHz and 96 kHz).
+    fn aes67_source_value_at_rate(clock_rate: u32) -> Source {
+        let sdp = format!(
+            "v=0\r\n\
+o=- 1 1 IN IP6 2001:db8::1\r\n\
+s=Multiview AES67\r\n\
+c=IN IP6 ff3e::1\r\n\
+t=0 0\r\n\
+m=audio 5004 RTP/AVP 98\r\n\
+a=rtpmap:98 L24/{clock_rate}/2\r\n\
+a=ptime:1\r\n\
+a=ts-refclk:ptp=IEEE1588-2008:AA-BB-CC-DD-EE-FF-00-11:0\r\n\
+a=mediaclk:direct=0\r\n"
+        );
+        let mut map = serde_json::Map::new();
+        map.insert("id".to_owned(), serde_json::json!("aes-in"));
+        map.insert("kind".to_owned(), serde_json::json!("aes67"));
+        map.insert("sdp".to_owned(), serde_json::json!(sdp));
+        map.insert("multicast".to_owned(), serde_json::json!("[ff3e::1]:5004"));
+        serde_json::from_value(serde_json::Value::Object(map)).expect("aes67 source parses")
+    }
+
+    #[test]
+    fn resolve_aes67_source_rejects_a_non_48khz_session() {
+        // A 48 kHz session resolves (the canonical store rate).
+        assert!(
+            resolve_aes67_source(&aes67_source_value_at_rate(48_000)).is_ok(),
+            "a 48 kHz aes67 session is supported"
+        );
+        // A 96 kHz session PARSES, but the RX rebaser only rescales the RTP
+        // timestamp onto the 48 kHz store index — it does NOT resample the PCM.
+        // Publishing 96 samples/ms against a +48/ms store anchor overlaps/gaps the
+        // store, so a non-48 kHz session must be rejected fail-closed, not accepted.
+        assert!(
+            resolve_aes67_source(&aes67_source_value_at_rate(96_000)).is_err(),
+            "a non-48 kHz aes67 session is rejected (the RX path does not resample)"
+        );
+    }
+
+    /// An `Output::Aes67` value with an explicit `ptime_ms` (via serde, bypassing
+    /// config validation so degenerate cases reach `build_aes67_output`).
+    fn aes67_output_value_with_ptime(ptime_ms: u32) -> Output {
+        serde_json::from_value(serde_json::json!({
+            "kind": "aes67",
+            "label": "aes-out",
+            "multicast": "[ff3e::1]:5004",
+            "depth": "L24",
+            "ptime_ms": ptime_ms,
+        }))
+        .expect("aes67 output parses")
+    }
+
+    #[test]
+    fn build_aes67_output_rejects_a_zero_ptime() {
+        // A 1 ms ptime builds (48 frames/packet @ 48 kHz).
+        assert!(
+            build_aes67_output(&aes67_output_value_with_ptime(1)).is_ok(),
+            "a 1 ms packet time builds"
+        );
+        // A zero packet time is nonsensical; the framing must reject it fail-closed
+        // rather than silently coerce it to a 1-frame (~0.02 ms) packet flood.
+        assert!(
+            build_aes67_output(&aes67_output_value_with_ptime(0)).is_err(),
+            "a zero packet time is a typed refusal, not a silent coercion to 1 frame"
+        );
     }
 }
