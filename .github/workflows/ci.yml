@@ -246,6 +246,18 @@ jobs:
           # multiview-hal off-by-default features
           - crate: multiview-hal
             feature: i915-pmu
+          # multiview-hal + multiview-cli `vaapi`/`qsv`: the AMD/Intel DRM sysfs +
+          # /proc fdinfo per-GPU load source (`SysfsLoadPoller`, ADR-0017 ENG-4b)
+          # and its `default_load_source` wiring. Pure `std::fs` — no native
+          # VAAPI/QSV lib at compile time — so it lints + tests on the bare
+          # runner. The default `lint`/`test` jobs build NONE of the `linux_sysfs`
+          # module (it is `#[cfg(any(vaapi, qsv))]`), so without this leg the
+          # poller ships un-clippy'd under its own feature. `vaapi` exercises the
+          # shared `any(vaapi, qsv)` code (qsv is symmetric).
+          - crate: multiview-hal
+            feature: vaapi
+          - crate: multiview-cli
+            feature: vaapi
           # multiview-licence off-by-default feature: the Conspect device
           # heartbeat client (CONSPECT-3 / ADR-0096). Pure Rust — p256 + base64 +
           # hex + tokio, no native deps — so it lints + tests on the bare runner.
