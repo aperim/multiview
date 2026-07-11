@@ -14545,15 +14545,14 @@ a=mediaclk:direct=0\r\n";
 
     /// A `SourceKind::Aes67` source value, optionally carrying the multicast override.
     fn aes67_source_value(multicast: Option<&str>) -> Source {
-        let mut v = serde_json::json!({
-            "id": "aes-in",
-            "kind": "aes67",
-            "sdp": AES67_SDP,
-        });
+        let mut map = serde_json::Map::new();
+        map.insert("id".to_owned(), serde_json::json!("aes-in"));
+        map.insert("kind".to_owned(), serde_json::json!("aes67"));
+        map.insert("sdp".to_owned(), serde_json::json!(AES67_SDP));
         if let Some(m) = multicast {
-            v["multicast"] = serde_json::Value::String(m.to_owned());
+            map.insert("multicast".to_owned(), serde_json::json!(m));
         }
-        serde_json::from_value(v).expect("aes67 source parses")
+        serde_json::from_value(serde_json::Value::Object(map)).expect("aes67 source parses")
     }
 
     #[test]
@@ -14571,7 +14570,10 @@ a=mediaclk:direct=0\r\n";
             "[ff3e::1]:5004".parse().unwrap(),
             "dest is the configured multicast group:port"
         );
-        assert!(local.is_ipv6(), "an ipv6 group egresses from an ipv6 wildcard");
+        assert!(
+            local.is_ipv6(),
+            "an ipv6 group egresses from an ipv6 wildcard"
+        );
         assert!(
             local.ip().is_unspecified(),
             "egress binds the family wildcard"
@@ -14692,7 +14694,10 @@ multicast = "[ff3e::1]:5004"
             vec![0.1, 0.2, 0.3, 0.4]
         );
         // Mono duplicates each sample to both L and R.
-        assert_eq!(interleave_to_stereo(&[0.5, 0.6], 1), vec![0.5, 0.5, 0.6, 0.6]);
+        assert_eq!(
+            interleave_to_stereo(&[0.5, 0.6], 1),
+            vec![0.5, 0.5, 0.6, 0.6]
+        );
         // >2 channels keep the first two channels per frame (f0: 1,2 ; f1: 5,6).
         assert_eq!(
             interleave_to_stereo(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 4),
