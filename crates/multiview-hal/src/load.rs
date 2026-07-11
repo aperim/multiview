@@ -1419,11 +1419,21 @@ mod linux_sysfs {
     }
 
     impl SysfsLoadPoller {
-        /// Construct the poller bound to the real `/sys/class/drm` + `/proc`
-        /// roots, walking this process's own PID for the fdinfo media term.
+        /// Try to construct the poller bound to the real `/sys/class/drm` +
+        /// `/proc` roots, walking this process's own PID for the fdinfo media
+        /// term.
+        ///
+        /// Returns `None` when no DRM GPU is visible (a no-DRM host / CI) so the
+        /// caller cleanly falls back to the no-GPU source — mirroring the NVML
+        /// poller's `try_init`. The one-off `/sys/class/drm` enumeration runs at
+        /// construction, off the output-clock thread.
         #[must_use]
-        pub fn new() -> Self {
-            Self::from_probe(SysfsLoadProbe::new(), vec![std::process::id()])
+        pub fn try_init() -> Option<Self> {
+            let probe = SysfsLoadProbe::new();
+            if probe.devices().is_empty() {
+                return None;
+            }
+            Some(Self::from_probe(probe, vec![std::process::id()]))
         }
 
         /// Wrap a probe with the PID set the fdinfo walk targets.
@@ -1452,12 +1462,6 @@ mod linux_sysfs {
                 return Vec::new();
             };
             probe.sample_all_with_media(&self.self_pids, interval_ns)
-        }
-    }
-
-    impl Default for SysfsLoadPoller {
-        fn default() -> Self {
-            Self::new()
         }
     }
 
