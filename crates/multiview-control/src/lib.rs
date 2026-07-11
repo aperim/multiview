@@ -55,7 +55,7 @@ pub mod error;
 pub mod is07;
 pub mod jwt;
 /// Management-plane rate limiting (SEC-14): the keyed token-bucket + the
-/// connection/rate middleware backing the control-plane `DoS` floor.
+/// request-concurrency + rate middleware backing the control-plane `DoS` floor.
 pub(crate) mod limits;
 pub mod live_apply;
 pub mod nmos;
@@ -221,8 +221,8 @@ pub use whip::{no_whip, NoWhip, SharedWhip, WhipAnswer, WhipAuth, WhipProvider, 
 ///
 /// The returned router carries `AppState`, so it is ready to serve.
 pub fn router(state: AppState) -> Router {
-    // SEC-14: install the management-plane connection + rate caps only when the
-    // operator has limits enabled (the default). Disabled ⇒ the router is exactly
+    // SEC-14: install the management-plane request-concurrency + rate caps only when
+    // the operator has limits enabled (the default). Disabled ⇒ the router is exactly
     // what it was before — no middleware, no overhead.
     let limits_enabled = state.limiters.is_enabled();
 

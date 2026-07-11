@@ -8,9 +8,11 @@
 //! `multiview-control`; this crate only models + validates the knobs.
 //!
 //! These caps engage after a request's headers are parsed, so they bound in-flight
-//! requests and established connections — not half-open, slow-header connections
-//! (slowloris), which are out of scope for this in-process floor (front the plane
-//! with a reverse proxy for that; see [ADR-W028](../../../docs/decisions/ADR-W028.md)).
+//! requests (and the long-lived WS/SSE sessions that hold a concurrency permit for
+//! their lifetime) — **not** idle keep-alive connections, which hold no permit, nor
+//! half-open, slow-header connections (slowloris); those are out of scope for this
+//! in-process floor (front the plane with a reverse proxy for that; see
+//! [ADR-W028](../../../docs/decisions/ADR-W028.md)).
 
 use serde::{Deserialize, Serialize};
 

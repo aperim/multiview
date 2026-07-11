@@ -668,8 +668,8 @@ pub struct AppState {
     pub routes: Arc<RouteTable>,
     /// The API-key + RBAC store.
     pub api_keys: Arc<ApiKeyStore>,
-    /// The management-plane connection + rate limiters (SEC-14 control-plane `DoS`
-    /// floor): the concurrent-request cap plus the per-IP (pre-auth) and
+    /// The management-plane request-concurrency + rate limiters (SEC-14 control-plane
+    /// `DoS` floor): the concurrent-request cap plus the per-IP (pre-auth) and
     /// per-API-key (post-auth) token buckets. Built from `control.limits` by the
     /// binary via [`AppState::with_limits`]; the bare constructor defaults to the
     /// inert (disabled) set, so tests and embedders are unlimited unless they opt
