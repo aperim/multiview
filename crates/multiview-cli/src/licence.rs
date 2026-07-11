@@ -124,7 +124,8 @@ pub struct EntitlementPlane {
     /// The shared local-mesh discovery/relay state (Conspect, ADR-0051): the
     /// untrusted discovered-peer inventory + the relay opt-in the control plane's
     /// `/api/v1/mesh/*` routes render + toggle, and (under `mesh-mdns`) the
-    /// always-on announce/browse loop maintains. Always wired so the API serves a
+    /// always-on browse loop maintains (announce awaits the O1/O2/O6 signing
+    /// material — see `spawn_mesh_discovery`). Always wired so the API serves a
     /// real shared store; control-plane only, no engine handle (invariant #10).
     pub mesh: Arc<MeshState>,
     /// The retained device-licensing client, set once when `spawn_heartbeat` builds

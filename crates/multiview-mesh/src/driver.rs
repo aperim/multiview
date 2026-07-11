@@ -1,13 +1,20 @@
 //! The always-on announce + browse **driver** (ADR-0051 §2/§5, brief §9.1) —
 //! the `mdns` feature only (it needs `tokio` for the timed loop).
 //!
-//! The driver is the off-hot-loop task the daemon spawns: it periodically
-//! **announces** this machine's signed [`AnnouncePayload`] over the
-//! [`MeshTransport`] and **browses** for neighbours, folding each received
-//! announcement (untrusted) into the shared [`MeshState`] and aging out peers it
-//! has stopped hearing from. It is generic over the transport, so the pure step
-//! ([`announce_browse_step`]) is unit-testable **offline** with an in-memory fake;
-//! the live mDNS service ([`crate::service::MdnsService`]) is one transport impl.
+//! [`run_announce_loop`] is the off-hot-loop task: it periodically **announces**
+//! this machine's signed [`AnnouncePayload`] over the [`MeshTransport`] and
+//! **browses** for neighbours, folding each received announcement (untrusted) into
+//! the shared [`MeshState`] and aging out peers it has stopped hearing from. It is
+//! generic over the transport, so the pure step ([`announce_browse_step`]) is
+//! unit-testable **offline** with an in-memory fake; the live mDNS service
+//! ([`crate::service::MdnsService`]) is one transport impl.
+//!
+//! **Today the daemon runs the browse side only.** The `multiview-cli` mesh task
+//! (`spawn_mesh_discovery`) polls + folds untrusted announcements and ages out
+//! peers, but does **not** announce: signing needs this machine's Ed25519 key and
+//! salted fingerprint digests, provisioned by the operator-confirm items O1/O2/O6
+//! (conspect brief §14). [`run_announce_loop`] folds the announce side in over the
+//! same transport once that material lands.
 //!
 //! ## Untrusted inventory (ADR-0041 doctrine)
 //!
