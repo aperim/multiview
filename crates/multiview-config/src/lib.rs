@@ -92,8 +92,8 @@ pub use schema::{
     ColorOverride, DisplayModeSpec, Fps, Layout, MetadataCapability, MetadataField,
     OrientationMechanism, OrientationMode, OrientationTagCapability, Output, OutputFlip,
     OutputMetadata, OutputMetadataPlan, OutputOrientation, OutputTimedMetadata, Overlay, Rect,
-    RistAesBits, RistEncryption, RistOptions, RistPeer, RistProfile, RistUrlError, RtspOptions,
-    Source, SourceAuth, SourceKind,
+    RistAesBits, RistEncryption, RistOptions, RistPeer, RistProfile, RistUrlError, Source,
+    SourceAuth, SourceKind,
 };
 pub use sync_group::{SyncGroup, SyncGroupMode, SyncMember};
 pub use tally::{BitColor, IndexCell, TallyProfile};

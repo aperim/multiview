@@ -245,7 +245,7 @@ fn openapi_mirrors_accept_what_the_config_types_accept() {
                 "on_target": "zero_then_up", "format": "auto", "label": "ON AIR IN" }),
         json!({ "id": "s", "kind": "timer", "target": "date_time", "at": "2026-07-01T09:00:00",
                 "timezone": "UTC", "format": "d_hh_mm_ss" }),
-        json!({ "id": "s", "kind": "rtsp", "url": "rtsp://[2001:db8::1]/cam", "rtsp": { "transport": "tcp" } }),
+        json!({ "id": "s", "kind": "rtsp", "url": "rtsp://[2001:db8::1]/cam" }),
         json!({ "id": "s", "kind": "hls", "url": "https://example.com/x.m3u8" }),
         json!({ "id": "s", "kind": "youtube", "url": "https://www.youtube.com/watch?v=abc" }),
         json!({ "id": "s", "kind": "ts", "url": "udp://[ff3e::1]:5000" }),
@@ -273,8 +273,8 @@ fn openapi_mirrors_accept_what_the_config_types_accept() {
     }
 
     let outputs = [
-        json!({ "kind": "rtsp_server", "mount": "/mv", "codec": "h264", "latency_profile": "low" }),
-        json!({ "kind": "ll_hls", "path": "/srv/hls", "codec": "h264", "part_target_ms": 333, "segment_ms": 2000, "gop_ms": 1000 }),
+        json!({ "kind": "rtsp_server", "mount": "/mv", "codec": "h264" }),
+        json!({ "kind": "ll_hls", "path": "/srv/hls", "codec": "h264", "segment_ms": 2000 }),
         json!({ "kind": "hls", "path": "/srv/hls", "codec": "hevc", "segment_ms": 4000 }),
         json!({ "kind": "ndi", "name": "MULTIVIEW" }),
         json!({ "kind": "rtmp", "url": "rtmp://ingest.example/live/k", "codec": "h264" }),

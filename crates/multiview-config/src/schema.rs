@@ -171,14 +171,6 @@ pub struct Canvas {
     pub color: CanvasColor,
 }
 
-/// RTSP-specific ingest options.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct RtspOptions {
-    /// Lower-transport selection (`tcp` / `udp`).
-    pub transport: String,
-}
-
 /// RIST (Reliable Internet Stream Transport, VSF `TR-06`) profile selector.
 ///
 /// Maps to the `FFmpeg` `librist` protocol's `rist_profile` `AVOption`
@@ -550,9 +542,6 @@ pub enum SourceKind {
     Rtsp {
         /// Source URL.
         url: String,
-        /// RTSP transport options.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rtsp: Option<RtspOptions>,
     },
     /// HLS / M3U pull.
     Hls {
@@ -1438,9 +1427,6 @@ pub enum Output {
         mount: String,
         /// Video codec (`h264`, `hevc`, …).
         codec: String,
-        /// Latency profile hint.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        latency_profile: Option<String>,
         /// Operator pin for this output's **encode** stage to a stable GPU
         /// ([`DevicePin`], ADR-0018 §2.1). Absent ⇒ auto-placed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1474,15 +1460,9 @@ pub enum Output {
         path: String,
         /// Video codec.
         codec: String,
-        /// Target part duration (ms).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        part_target_ms: Option<u32>,
         /// Segment duration (ms).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         segment_ms: Option<u32>,
-        /// GOP duration (ms).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        gop_ms: Option<u32>,
         /// Operator pin for this output's **encode** stage to a stable GPU.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gpu_pin: Option<DevicePin>,
