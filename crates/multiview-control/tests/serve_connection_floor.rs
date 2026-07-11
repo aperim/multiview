@@ -90,8 +90,7 @@ async fn serve_with(
 /// a (bad) HTTP/1 request line and is therefore subject to the same deadline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_http2_preface_is_refused_not_held_open_as_a_timeout_free_session() {
-    let options =
-        ServeOptions::default().with_header_read_timeout(Some(TEST_HEADER_READ_TIMEOUT));
+    let options = ServeOptions::default().with_header_read_timeout(Some(TEST_HEADER_READ_TIMEOUT));
     let (addr, shutdown_tx, server) = serve_with(options).await;
 
     // Send the h2 connection preface and nothing else — an h2 server would reply with
@@ -226,7 +225,7 @@ async fn serve_router_with_opts(
 /// in for a live WebSocket / SSE stream) must be ABORTED at the drain ceiling, so no
 /// connection task outlives `serve`. Under the old detached-`tokio::spawn` loop the
 /// task is abandoned (the connection stays alive) when the ceiling is reached; the
-/// JoinSet + `abort_all` fix drops it.
+/// `JoinSet` + `abort_all` fix drops it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_in_flight_connection_is_aborted_at_the_drain_ceiling() {
     let app = Router::new().route(
@@ -256,9 +255,9 @@ async fn an_in_flight_connection_is_aborted_at_the_drain_ceiling() {
     shutdown_tx.send(()).unwrap();
 
     // serve() must return within the ceiling + slack (not hang on the stuck connection).
-    let served = tokio::time::timeout(ceiling + Duration::from_secs(3), server).await;
+    let serve_returned = tokio::time::timeout(ceiling + Duration::from_secs(3), server).await;
     assert!(
-        served.is_ok(),
+        serve_returned.is_ok(),
         "serve() did not return within the drain ceiling after shutdown"
     );
 

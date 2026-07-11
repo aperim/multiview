@@ -405,9 +405,30 @@ where
     // helper. It applies to every served connection regardless of the rate/concurrency
     // `enabled` flag. Absent `[control.limits]` ⇒ the secure default (20 s).
     let serve_options = match config.control.as_ref() {
-        Some(control) => multiview_control::ServeOptions::default().with_header_read_timeout(Some(
-            std::time::Duration::from_secs(control.limits.header_read_timeout_secs),
-        )),
+        Some(control) => {
+            let limits = &control.limits;
+            // The header-read timeout applies to every connection regardless of the
+            // shed-layer `enabled` flag (a generous timeout has no downside for a
+            // legitimate client). Reuse the same budget for the TLS handshake timeout —
+            // both bound "time to get your request in", pre- and post-handshake — so a
+            // client stalled mid-handshake recycles its accept-level cap slot too.
+            let header_read = std::time::Duration::from_secs(limits.header_read_timeout_secs);
+            // The accept-level population caps ARE shed-layer controls (like the
+            // request-concurrency + rate caps): enforced only while `enabled`.
+            let (max_connections, max_connections_per_ip) = if limits.enabled {
+                (
+                    Some(limits.max_connections),
+                    Some(limits.max_connections_per_ip),
+                )
+            } else {
+                (None, None)
+            };
+            multiview_control::ServeOptions::default()
+                .with_header_read_timeout(Some(header_read))
+                .with_tls_handshake_timeout(Some(header_read))
+                .with_max_connections(max_connections)
+                .with_max_connections_per_ip(max_connections_per_ip)
+        }
         None => multiview_control::ServeOptions::default(),
     };
     let handle = match config

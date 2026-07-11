@@ -411,9 +411,9 @@ mod tests {
             max_connections_per_ip: runtime_ceiling,
             ..ManagementLimits::default()
         };
-        limits
-            .validate()
-            .expect("a connection cap equal to the runtime ceiling is honourable and must validate");
+        limits.validate().expect(
+            "a connection cap equal to the runtime ceiling is honourable and must validate",
+        );
     }
 
     #[test]
