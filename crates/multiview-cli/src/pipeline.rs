@@ -7333,6 +7333,14 @@ fn build_outputs(
             reason,
         }
     })?;
+    // #103: distinct AES67 senders on ONE multicast group:port must advertise
+    // distinct RTP SSRCs (a receiver demuxes by SSRC within a group — RFC 3550 §8).
+    // The per-output SSRC is a 32-bit fold of id + group:port, so a same-group
+    // collision is astronomically unlikely but not impossible — reject it
+    // fail-closed here (config-time, off the hot path; inv #1/#10) rather than emit
+    // two ambiguous senders. Senders on DIFFERENT groups may share an SSRC.
+    #[cfg(feature = "aes67")]
+    ensure_no_aes67_ssrc_collision(outputs)?;
     let mut runnable = Vec::new();
     #[cfg(feature = "display-kms")]
     let mut display_plans = Vec::new();
@@ -7610,9 +7618,13 @@ fn build_aes67_output(
 /// restarts: a receiver keyed on the SSRC keeps seeing one sender as the same
 /// stream across a rebuild. `DefaultHasher` (`SipHash`) is explicitly **not** a
 /// stable cross-version contract, so it must never back a wire identifier. The
-/// multicast group+port is folded in (not just the id) so two outputs that share
-/// an id but send to different destinations still get distinct SSRCs. Clamped away
-/// from `0` (an ambiguous-but-legal SSRC).
+/// multicast group+port is folded in (not just the id) so distinct outputs get
+/// distinct SSRCs **with overwhelming probability** (a 32-bit RTP SSRC space). The
+/// 32-bit fold does NOT by itself *guarantee* uniqueness; that hard guarantee is
+/// enforced fail-closed at build time by [`ensure_no_aes67_ssrc_collision`] for
+/// senders sharing one multicast group (the only case a receiver cannot demux),
+/// and RTP's standard SSRC collision resolution (RFC 3550 §8) covers any residual.
+/// Clamped away from `0` (an ambiguous-but-legal SSRC).
 #[cfg(feature = "aes67")]
 fn aes67_ssrc_for(id: &str, dest: std::net::SocketAddr) -> u32 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -7641,6 +7653,51 @@ fn fnv1a_absorb(mut hash: u64, bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
+}
+
+/// Fail closed if two AES67 outputs on the **same multicast group:port** fold to
+/// the **same RTP SSRC** (#103).
+///
+/// [`aes67_ssrc_for`] folds to 32 bits, which is distinct with overwhelming
+/// probability but not *guaranteed* unique. An RTP receiver demuxes by SSRC
+/// **within one multicast group** (RFC 3550 §8), so only a same-`(group:port)`
+/// collision is ambiguous — two senders on **different** groups may share an SSRC
+/// harmlessly and are NOT rejected (no false positives). This runs once at config
+/// time (off the hot path; inv #1/#10). Outputs with a malformed `multicast` are
+/// skipped here — [`build_aes67_output`] reports that separately.
+///
+/// # Errors
+///
+/// [`PipelineError::Config`] naming BOTH colliding output ids and their shared
+/// group + SSRC.
+#[cfg(feature = "aes67")]
+fn ensure_no_aes67_ssrc_collision(outputs: &[Output]) -> Result<(), PipelineError> {
+    // Keyed on (multicast dest, SSRC): a duplicate key is two senders on ONE group
+    // that folded to ONE SSRC — the only ambiguous case.
+    let mut seen: std::collections::HashMap<(std::net::SocketAddr, u32), String> =
+        std::collections::HashMap::new();
+    for output in outputs {
+        let Output::Aes67 { multicast, .. } = output else {
+            continue;
+        };
+        // A malformed multicast is a typed refusal in `build_aes67_output`; this
+        // SSRC-uniqueness pass only considers parseable destinations.
+        let Ok(dest) = multicast.parse::<std::net::SocketAddr>() else {
+            continue;
+        };
+        let id = output.id();
+        let ssrc = aes67_ssrc_for(&id, dest);
+        if let Some(other) = seen.insert((dest, ssrc), id.clone()) {
+            return Err(PipelineError::Config(
+                multiview_config::ConfigError::Validation(format!(
+                    "aes67 outputs `{other}` and `{id}` collide on multicast group \
+                     `{dest}` with the same RTP SSRC {ssrc}: distinct senders on one \
+                     multicast group must have distinct SSRCs — rename one output"
+                )),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Build one live NDI output sink (OUT-4b / NDI-L2): enforce the
@@ -14974,23 +15031,27 @@ a=mediaclk:direct=0\r\n";
             aes67_ssrc_for("out-a", g1),
             "the same id + binding always advertises the same ssrc"
         );
-        // Distinct output ids differ.
+        // The fold mixes id AND group:port, so different inputs map to different
+        // SSRCs with overwhelming probability (a 32-bit space) — NOT a guarantee.
+        // These particular inputs differ (a hard same-group guarantee is enforced
+        // separately by `ensure_no_aes67_ssrc_collision`, tested above).
+        // Distinct output ids on one group differ (here).
         assert_ne!(
             aes67_ssrc_for("out-a", g1),
             aes67_ssrc_for("out-b", g1),
-            "distinct output ids get distinct streams"
+            "these distinct output ids fold to distinct ssrcs"
         );
-        // The multicast group AND port are folded in, so two senders that share an
-        // output id but multicast to different group:ports still get distinct SSRCs.
+        // A different port folds in, so these differ.
         assert_ne!(
             aes67_ssrc_for("out-a", g1),
             aes67_ssrc_for("out-a", g1_alt_port),
-            "a different port yields a different ssrc"
+            "this different port folds to a different ssrc"
         );
+        // A different group folds in, so these differ.
         assert_ne!(
             aes67_ssrc_for("out-a", g1),
             aes67_ssrc_for("out-a", g2),
-            "a different group yields a different ssrc"
+            "this different group folds to a different ssrc"
         );
         // Pinned FNV-1a value over STABLE address bytes (family + raw IP octets +
         // big-endian port), NOT the `SocketAddr` Display string (whose formatting
