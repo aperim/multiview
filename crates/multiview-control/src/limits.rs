@@ -34,14 +34,21 @@
 //! (`tat`) — the virtual-scheduling (GCRA) formulation of a token bucket, its exact
 //! dual: a `tat` running ahead of `now` by up to the burst tolerance `tau` is a
 //! bucket that many requests below full. Because the whole per-cell state is one
-//! word, [`RateLimiter::check`] is **lock-free** — a load plus a single
-//! compare-and-swap, never a mutex. Under contention the CAS can fail and retry, so
-//! the operation is lock-free, not wait-free; but only the *admitting* branch loops,
-//! and once a cell's burst is spent every further request takes the CAS-free reject
-//! path, so the retry window is bounded by the burst and can never spin unboundedly.
-//! A single-key flood (which concentrates on one cell) serialises on that one atomic
-//! word for a few nanoseconds and can **never park a Tokio worker holding a lock**,
-//! which a blocking `std::sync::Mutex` on the async hot path could.
+//! word, [`RateLimiter::check`] is **lock-free** — a load plus a single **strong**
+//! compare-and-swap, never a mutex. The CAS is [`AtomicU64::compare_exchange`] (not
+//! `_weak`), so it never fails *spuriously*: a retry happens **only** on genuine
+//! contention — a concurrent request that advanced this same cell first — and each
+//! retry consumes one such real advance. The limiter is therefore **lock-free but
+//! not wait-free**: under sustained contention on one cell a call may retry a number
+//! of times proportional to the threads concurrently *admitting* on that cell (every
+//! retry means a peer made progress, so the system as a whole never stalls, but there
+//! is no per-call step bound). Only the admitting branch loops; once the cell's burst
+//! is spent every further request takes the CAS-free reject path, and the per-key
+//! rate limit itself bounds the sustained admit rate — so a single-key flood cannot
+//! manufacture unbounded admit-phase contention. A flood concentrated on one cell
+//! serialises on that one atomic word for a few nanoseconds and can **never park a
+//! Tokio worker holding a lock**, which a blocking `std::sync::Mutex` on the async hot
+//! path could.
 //!
 //! ## Timekeeping
 //!
@@ -194,11 +201,13 @@ impl<S: BuildHasher> RateLimiter<S> {
     /// Virtual-scheduling (GCRA) accounting: the cell's `tat` is the earliest
     /// virtual time at which the next request may arrive; a request is admitted when
     /// advancing `tat` by one increment keeps it within `tau` of `now`. Lock-free —
-    /// a load plus a single CAS in the common case; under contention the CAS retries
-    /// (lock-free, not wait-free), but only while admitting: a rejected request returns
-    /// without a CAS and never advances `tat`, so the retry window is bounded by the
-    /// burst. Every operation saturates and `now` is clamped, so a frozen, jumped,
-    /// wrapped, or regressed clock can neither panic nor grant a bonus request.
+    /// a load plus a single **strong** CAS in the common case; under genuine
+    /// contention the CAS retries (lock-free, **not** wait-free — a retry only ever
+    /// follows a concurrent admit on this same cell, so retries are proportional to
+    /// the number of concurrently-admitting threads and never spurious). Only the
+    /// admitting branch loops: a rejected request returns without a CAS and never
+    /// advances `tat`. Every operation saturates and `now` is clamped, so a frozen,
+    /// jumped, wrapped, or regressed clock can neither panic nor grant a bonus request.
     pub(crate) fn check<K: Hash + ?Sized>(&self, key: &K, now_ns: u64) -> Decision {
         let idx = self.cell_of(key);
         // `idx < cells.len()` by construction; fail **open** (never limit) on the
@@ -226,19 +235,25 @@ impl<S: BuildHasher> RateLimiter<S> {
                 // a concurrent admit on the same cell can never be lost (the exact
                 // accounting a lock would give, without the lock).
                 let new_tat = base.saturating_add(self.increment_ns);
-                match cell.compare_exchange_weak(tat, new_tat, Ordering::Relaxed, Ordering::Relaxed)
-                {
+                match cell.compare_exchange(tat, new_tat, Ordering::Relaxed, Ordering::Relaxed) {
                     Ok(_) => return Decision::Allowed,
                     Err(observed) => {
-                        // Another thread advanced this cell first. Hint the CPU we are
-                        // in a spin-retry (cheaper contention, better SMT yield), then
-                        // re-read and retry. The loop is bounded: only this admitting
-                        // branch retries, and once the burst is spent every request
-                        // takes the CAS-free reject path below — it never spins
-                        // unboundedly. A bounded retry that fell back to *allowing*
-                        // would be worse: it would let a single-key flood induce
-                        // contention to bypass the very limit it defends, so the natural
-                        // admit-phase bound is the right one.
+                        // A **strong** CAS, so `Err` means a real concurrent advance of
+                        // this cell — never a spurious failure: another admitting thread
+                        // committed first. Hint the CPU we are in a spin-retry (cheaper
+                        // contention, better SMT yield), then re-read and retry against
+                        // the observed `tat`. This is lock-free, NOT wait-free: a retry
+                        // always follows a peer's real progress, so a call retries a
+                        // number of times proportional to the threads concurrently
+                        // admitting on this one cell — the system as a whole never
+                        // stalls, but there is no per-call step bound. Once the burst is
+                        // spent every request takes the CAS-free reject path below, and
+                        // the per-key rate itself bounds the sustained admit rate, so a
+                        // single-key flood cannot manufacture unbounded admit-phase
+                        // contention. Falling back to *allowing* after a few tries would
+                        // be worse — it would let a flood induce contention to bypass the
+                        // very limit it defends — so re-driving the admit accounting is
+                        // the right call.
                         core::hint::spin_loop();
                         tat = observed;
                     }
