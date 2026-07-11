@@ -14613,6 +14613,25 @@ segment_ms = 1000
             "the rejection names the audio-only source wrongly bound to a cell: {rendered}"
         );
     }
+
+    #[test]
+    fn an_aes67_source_without_program_audio_is_rejected_before_going_on_air() {
+        let config = video_plus_aes67_config();
+        let pipeline = Pipeline::build(&config).expect("pipeline builds with an aes67 source");
+        // No program audio: the ST 2110-30 RX has no `ProgramBus` to publish into,
+        // so the run must fail closed rather than silently receive/emit silence.
+        assert!(
+            pipeline.ensure_aes67_has_program_audio().is_err(),
+            "an aes67 source with no program audio is a fail-closed run error"
+        );
+
+        let mut with_audio = Pipeline::build(&config).expect("pipeline builds");
+        with_audio.enable_program_audio();
+        assert!(
+            with_audio.ensure_aes67_has_program_audio().is_ok(),
+            "with program audio enabled, the aes67 source is accepted"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "aes67"))]
@@ -14708,17 +14727,44 @@ a=mediaclk:direct=0\r\n";
     }
 
     #[test]
-    fn aes67_ssrc_is_deterministic_nonzero_and_distinct() {
-        assert_ne!(aes67_ssrc_for("out-a"), 0, "ssrc is never the ambiguous 0");
+    fn aes67_ssrc_is_stable_nonzero_and_folds_in_the_multicast_binding() {
+        let g1: std::net::SocketAddr = "[ff3e::1]:5004".parse().unwrap();
+        let g1_alt_port: std::net::SocketAddr = "[ff3e::1]:5006".parse().unwrap();
+        let g2: std::net::SocketAddr = "[ff3e::2]:5004".parse().unwrap();
+        // Never the ambiguous 0.
+        assert_ne!(aes67_ssrc_for("out-a", g1), 0, "ssrc is never the ambiguous 0");
+        // Deterministic for the same (id, group:port).
         assert_eq!(
-            aes67_ssrc_for("out-a"),
-            aes67_ssrc_for("out-a"),
-            "the same id always advertises the same ssrc"
+            aes67_ssrc_for("out-a", g1),
+            aes67_ssrc_for("out-a", g1),
+            "the same id + binding always advertises the same ssrc"
+        );
+        // Distinct output ids differ.
+        assert_ne!(
+            aes67_ssrc_for("out-a", g1),
+            aes67_ssrc_for("out-b", g1),
+            "distinct output ids get distinct streams"
+        );
+        // The multicast group AND port are folded in, so two senders that share an
+        // output id but multicast to different group:ports still get distinct SSRCs.
+        assert_ne!(
+            aes67_ssrc_for("out-a", g1),
+            aes67_ssrc_for("out-a", g1_alt_port),
+            "a different port yields a different ssrc"
         );
         assert_ne!(
-            aes67_ssrc_for("out-a"),
-            aes67_ssrc_for("out-b"),
-            "distinct outputs get distinct streams"
+            aes67_ssrc_for("out-a", g1),
+            aes67_ssrc_for("out-a", g2),
+            "a different group yields a different ssrc"
+        );
+        // Pinned FNV-1a value: the mapping is a fixed, toolchain-stable contract
+        // (a `DefaultHasher`/SipHash fold is explicitly NOT stable across releases,
+        // so a rebuild could change every sender's advertised SSRC). Changing this
+        // constant is a deliberate, reviewed wire-behaviour change.
+        assert_eq!(
+            aes67_ssrc_for("out", g1),
+            1_363_865_092,
+            "the ssrc is a pinned FNV-1a fold of id + group:port"
         );
     }
 
