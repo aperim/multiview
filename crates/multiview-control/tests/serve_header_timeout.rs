@@ -116,16 +116,45 @@ async fn a_slow_header_client_is_dropped_when_it_stalls_past_the_deadline() {
         .unwrap();
 
     // The server must give up on the unfinished header block at the deadline and
-    // close the connection: `read_to_end` then resolves (EOF, or a reset error —
-    // either means "server closed it"). If the connection is instead held open
-    // (slowloris unbounded), the read blocks and this outer timeout elapses.
+    // close the connection. Measure WHEN it closes and WHAT (if anything) it returns,
+    // so the drop is provably attributable to the header-read timeout — not a
+    // reject-every-connection bug (too early), an unrelated eventual termination (too
+    // late), or a completed exchange.
     let mut buf = Vec::new();
+    let start = std::time::Instant::now();
     let closed = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buf)).await;
+    let elapsed = start.elapsed();
+
+    // (1) The connection was actually closed (the read resolved) rather than held open
+    // until the 5 s outer bound — the slowloris-unbounded failure.
     assert!(
         closed.is_ok(),
-        "the server held a stalled slow-header connection open past the {TEST_HEADER_READ_TIMEOUT:?} \
-         header-read deadline (slowloris not bounded); it must close the connection when the \
-         deadline elapses"
+        "the server held a stalled slow-header connection open past the \
+         {TEST_HEADER_READ_TIMEOUT:?} header-read deadline (slowloris not bounded); it must close \
+         the connection when the deadline elapses"
+    );
+    // (2) The close lands NEAR the deadline: not well before it (which would mean the
+    // server rejects connections outright, trivially satisfying (1)) and not well
+    // after it (an eventual termination, not the guard). A generous [0.5x, 3x] window
+    // absorbs scheduler/CI jitter while still pinning the drop to the timeout.
+    assert!(
+        elapsed >= TEST_HEADER_READ_TIMEOUT / 2,
+        "the connection was dropped in {elapsed:?}, well before the {TEST_HEADER_READ_TIMEOUT:?} \
+         header-read deadline — not attributable to the timeout (is the server closing every \
+         connection?)"
+    );
+    assert!(
+        elapsed <= TEST_HEADER_READ_TIMEOUT * 3,
+        "the connection survived {elapsed:?}, far past the {TEST_HEADER_READ_TIMEOUT:?} header-read \
+         deadline — the drop is an eventual termination, not the header-read timeout firing"
+    );
+    // (3) The never-completed request was NOT served: no success response came back (a
+    // bare close/reset, or at most a timeout status, is expected — never the requested
+    // resource). Proves the close is the guard firing, not a completed exchange.
+    let response = String::from_utf8_lossy(&buf);
+    assert!(
+        !response.contains("200"),
+        "the server returned a success response to an incomplete header block: {response:?}"
     );
 
     shutdown_tx.send(()).unwrap();

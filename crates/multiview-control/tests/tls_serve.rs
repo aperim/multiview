@@ -193,8 +193,9 @@ async fn a_slow_header_tls_client_is_dropped_at_the_header_read_deadline() {
     // default is 20 s). The per-IP limiter never engages — a stalled header block
     // never reaches the router layer — so `limited_state` is harmless here.
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let options =
-        ServeOptions::default().with_header_read_timeout(Some(Duration::from_millis(500)));
+    // A short header-read deadline keeps the test fast (production default is 20 s).
+    let deadline = Duration::from_millis(500);
+    let options = ServeOptions::default().with_header_read_timeout(Some(deadline));
     let server = tokio::spawn(serve_router_tls_with(
         listener,
         router(limited_state()),
@@ -228,15 +229,34 @@ async fn a_slow_header_tls_client_is_dropped_at_the_header_read_deadline() {
         .await
         .expect("write partial header");
 
-    // The server must close the connection at the deadline: the read then resolves
-    // (EOF or a reset). If the connection is instead held open (slowloris unbounded
-    // under TLS), the read blocks and this outer timeout elapses.
+    // The server must close the connection at the deadline. Measure WHEN it closes and
+    // WHAT (if anything) it returns, so the drop is provably attributable to the
+    // header-read timeout under TLS — not a reject-everything bug (too early), an
+    // unrelated eventual termination (too late), or a completed exchange.
     let mut buf = Vec::new();
+    let start = std::time::Instant::now();
     let closed = tokio::time::timeout(Duration::from_secs(5), tls.read_to_end(&mut buf)).await;
+    let elapsed = start.elapsed();
+
     assert!(
         closed.is_ok(),
-        "the TLS server held a stalled slow-header connection open past the 500ms header-read \
-         deadline; the timeout configured on axum-server's builder must fire under HTTPS too"
+        "the TLS server held a stalled slow-header connection open past the {deadline:?} \
+         header-read deadline (slowloris not bounded under HTTPS)"
+    );
+    assert!(
+        elapsed >= deadline / 2,
+        "the TLS connection was dropped in {elapsed:?}, well before the {deadline:?} header-read \
+         deadline — not attributable to the timeout (is the server closing every connection?)"
+    );
+    assert!(
+        elapsed <= deadline * 3,
+        "the TLS connection survived {elapsed:?}, far past the {deadline:?} header-read deadline — \
+         the drop is an eventual termination, not the header-read timeout firing under HTTPS"
+    );
+    let response = String::from_utf8_lossy(&buf);
+    assert!(
+        !response.contains("200"),
+        "the TLS server returned a success response to an incomplete header block: {response:?}"
     );
 
     let _ = shutdown_tx.send(());
