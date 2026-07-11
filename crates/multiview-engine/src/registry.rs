@@ -1848,4 +1848,97 @@ mod tests {
         );
         reg.shutdown();
     }
+
+    #[test]
+    fn a_slow_first_acquire_factory_does_not_block_release_of_another_key() {
+        // RP3 (#163, inv #10 latent): acquire's first-reference factory must run OUTSIDE the
+        // entries lock, so a slow factory building source A never blocks a concurrent
+        // release() (or acquire) of a DIFFERENT source B. The old code ran the factory UNDER
+        // the lock, so release(B) — which re-takes the same lock — stalled for the whole
+        // factory duration. RED: the release is blocked for the full factory hold.
+        let reg = SourceRegistry::<u64>::new();
+
+        // Pre-acquire key B; timing its handle drop (a release of a DIFFERENT key).
+        let hb = reg
+            .acquire(SourceKey::from_canonical("rtsp://key-b"), size(1, 1), |_r| {
+                Ok::<_, Infallible>(SourceInit::new(
+                    store("b"),
+                    TestActor {
+                        completed: Arc::new(AtomicUsize::new(0)),
+                        gate: None,
+                    },
+                ))
+            })
+            .unwrap();
+
+        // First-acquire of key A whose factory blocks until we release it.
+        let factory_entered = Arc::new(AtomicBool::new(false));
+        let release_factory = Arc::new(AtomicBool::new(false));
+        let acquirer = {
+            let reg = Arc::clone(&reg);
+            let factory_entered = factory_entered.clone();
+            let release_factory = release_factory.clone();
+            std::thread::spawn(move || {
+                reg.acquire(
+                    SourceKey::from_canonical("rtsp://key-a"),
+                    size(1, 1),
+                    move |_r| {
+                        factory_entered.store(true, Ordering::Release);
+                        while !release_factory.load(Ordering::Acquire) {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Ok::<_, Infallible>(SourceInit::new(
+                            store("a"),
+                            TestActor {
+                                completed: Arc::new(AtomicUsize::new(0)),
+                                gate: None,
+                            },
+                        ))
+                    },
+                )
+                .unwrap()
+            })
+        };
+        wait_until(
+            || factory_entered.load(Ordering::Acquire),
+            Duration::from_secs(5),
+            "the slow first-acquire factory for key A is running",
+        );
+
+        // Release key B on a helper thread while the factory holds; measure completion.
+        let released = Arc::new(AtomicBool::new(false));
+        let releaser = {
+            let released = released.clone();
+            std::thread::spawn(move || {
+                drop(hb); // release(key-b): must not wait on the key-a factory
+                released.store(true, Ordering::Release);
+            })
+        };
+        let released_quickly = {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            loop {
+                if released.load(Ordering::Acquire) {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+
+        // Unblock the factory regardless (no deadlock on the RED path), then settle.
+        release_factory.store(true, Ordering::Release);
+        let _ = releaser.join();
+        let ha = acquirer.join().expect("acquirer thread");
+
+        assert!(
+            released_quickly,
+            "release() of key B must not block on a slow first-acquire factory for key A \
+             (inv #10)"
+        );
+
+        drop(ha);
+        reg.shutdown();
+    }
 }
