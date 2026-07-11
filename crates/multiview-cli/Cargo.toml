@@ -263,6 +263,14 @@ software = []
 # `webrtc-native`.
 webrtc = ["multiview-preview/webrtc", "multiview-input/webrtc"]
 
+# AES67 / SMPTE ST 2110-30 open-audio-over-IP (ADR-0033 / ADR-T013 / ADR-0041). RX
+# = the ST 2110 receiver + AES67 L16/L24 depacketizer (`multiview-input/st2110`);
+# TX = the raw-PCM multicast sender (`multiview-output/aes67`). Audio-only — no
+# encode/GPU stage. The config types are always parsed; a document declaring an
+# `Aes67` source/output in a build WITHOUT this feature FAILS validation (the
+# `display-kms` precedent), never a silent skip.
+aes67 = ["multiview-input/st2110", "multiview-output/aes67"]
+
 # WebRTC NATIVE transport (ADR-0048 §11, ADR-T014, ADR-P006): the single str0m
 # ICE/DTLS/SRTP endpoint (`multiview-webrtc/native`) that drives WHIP ingest
 # sources AND WHEP preview/output egress — wired into the control plane so a
