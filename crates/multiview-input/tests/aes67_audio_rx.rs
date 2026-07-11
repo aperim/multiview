@@ -195,7 +195,7 @@ mod producer {
             audio_packet(0, 100, 0xAAAA_AAAA, pcm.clone()), // A anchors
             audio_packet(0, 60_000, 0xBBBB_BBBB, pcm.clone()), // B: new stream anchors
             audio_packet(48, 60_001, 0xBBBB_BBBB, pcm.clone()), // B: contiguous
-            audio_packet(96, 60_003, 0xBBBB_BBBB, pcm), // B: 60001 -> 60003 gap
+            audio_packet(96, 60_003, 0xBBBB_BBBB, pcm),     // B: 60001 -> 60003 gap
         ]);
         let mut producer = Aes67AudioProducer::new(Box::new(source), format);
 
@@ -207,7 +207,10 @@ mod producer {
             "the first packet of a NEW SSRC anchors the new stream, not a gap"
         );
         let b1 = producer.next_audio().unwrap().expect("B contiguous");
-        assert!(!b1.discontinuity, "60000 -> 60001 is contiguous on stream B");
+        assert!(
+            !b1.discontinuity,
+            "60000 -> 60001 is contiguous on stream B"
+        );
         let b2 = producer.next_audio().unwrap().expect("B gap");
         assert!(
             b2.discontinuity,

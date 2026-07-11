@@ -492,7 +492,15 @@ mod tests {
             Err(Aes67ConfigError::FramesPerPacket { .. })
         ));
         assert!(matches!(
-            Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48_000, MAX_FRAMES_PER_PACKET + 1, 4_800),
+            Aes67Sender::new(
+                2,
+                PcmDepth::L24,
+                96,
+                1,
+                48_000,
+                MAX_FRAMES_PER_PACKET + 1,
+                4_800
+            ),
             Err(Aes67ConfigError::FramesPerPacket { .. })
         ));
         // A channel × ptime × depth combo that would exceed one MTU (8ch × 96

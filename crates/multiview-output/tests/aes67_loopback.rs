@@ -63,9 +63,16 @@ async fn aes67_send_loopback_roundtrips_over_a_real_udp_socket() {
         samples.clone(),
     )
     .unwrap();
-    let mut sender =
-        Aes67Sender::new(2, PcmDepth::L24, 97, 0x0BAD_F00D, 48_000, FRAMES_PER_PACKET, 4_800)
-            .expect("valid aes67 config");
+    let mut sender = Aes67Sender::new(
+        2,
+        PcmDepth::L24,
+        97,
+        0x0BAD_F00D,
+        48_000,
+        FRAMES_PER_PACKET,
+        4_800,
+    )
+    .expect("valid aes67 config");
     let handle = sender.handle();
     for _ in 0..PACKETS {
         handle.push(&block);
@@ -75,9 +82,7 @@ async fn aes67_send_loopback_roundtrips_over_a_real_udp_socket() {
     // (1 ms for 48@48k); `pending()` keeps it running until we abort it after
     // receiving every packet (deterministic — no timing-based counting).
     let serve = tokio::spawn(async move {
-        let _ = tx
-            .serve(&mut sender, std::future::pending::<()>())
-            .await;
+        let _ = tx.serve(&mut sender, std::future::pending::<()>()).await;
     });
 
     let format = Aes3Format::new(2, SampleDepth::L24).expect("stereo L24");

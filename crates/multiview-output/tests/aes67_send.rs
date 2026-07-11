@@ -136,8 +136,16 @@ fn rejects_a_payload_type_outside_the_7bit_rtp_range() {
 
 #[test]
 fn sender_payload_roundtrips_through_the_v30_decoder() {
-    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FS, FRAMES_PER_PACKET, 4_800)
-        .expect("valid aes67 config");
+    let mut sender = Aes67Sender::new(
+        2,
+        PcmDepth::L24,
+        97,
+        0x1234_5678,
+        FS,
+        FRAMES_PER_PACKET,
+        4_800,
+    )
+    .expect("valid aes67 config");
     let (samples, block) = ramp_block();
     sender.handle().push(&block);
 
@@ -171,8 +179,16 @@ fn handle_push_feeds_the_serve_side() {
     // F3: the engine-bake producer HANDLE and the serve loop share one FIFO via
     // an Arc, so a block pushed on the handle is drained by the serve side — the
     // two halves run on independent clocks with no `&mut` contention.
-    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FS, FRAMES_PER_PACKET, 4_800)
-        .expect("valid aes67 config");
+    let mut sender = Aes67Sender::new(
+        2,
+        PcmDepth::L24,
+        97,
+        0x1234_5678,
+        FS,
+        FRAMES_PER_PACKET,
+        4_800,
+    )
+    .expect("valid aes67 config");
     let handle: Aes67SenderHandle = sender.handle();
     let (samples, block) = ramp_block();
     handle.push(&block);

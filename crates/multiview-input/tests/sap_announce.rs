@@ -129,7 +129,8 @@ fn stable_hash_matches_pinned_fnv1a_golden_vectors() {
     assert_eq!(stable_hash(sdp).get(), 0xE2FE, "realistic IPv6 SDP");
     // A one-character change (session-id `1` -> `2`) yields a DIFFERENT pinned
     // hash, so a modification is still detectable under the stable algorithm.
-    let modified = b"v=0\r\no=- 1 2 IN IP6 2001:db8::1\r\ns=mv\r\nt=0 0\r\nm=audio 5004 RTP/AVP 96\r\n";
+    let modified =
+        b"v=0\r\no=- 1 2 IN IP6 2001:db8::1\r\ns=mv\r\nt=0 0\r\nm=audio 5004 RTP/AVP 96\r\n";
     assert_eq!(stable_hash(modified).get(), 0x581B, "one-byte-diff SDP");
     assert_ne!(
         stable_hash(sdp),
