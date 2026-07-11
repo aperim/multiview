@@ -32,30 +32,40 @@
 //! that wedges forever ties up **at most one worker** and never stalls the releasing
 //! thread nor its siblings.
 //!
-//! Because both the worker count and the queue depth are **fixed**, the teardown
-//! resource is bounded no matter how many last-releases arrive or how many teardowns
-//! wedge: the observable [`pending_teardowns`](SourceRegistry::pending_teardowns) —
-//! queued **plus** in-flight — can never exceed `TEARDOWN_QUEUE_DEPTH +
-//! TEARDOWN_WORKERS`. This replaces an unbounded queue *and* unbounded threads with a
-//! fixed pool (inv #10). When the queue is full (every worker busy or wedged) the
-//! release **sheds**: it drops the boxed actor instead of enqueuing it — a wait-free,
-//! thread-free bound, never a blocking join inside a Tokio async destructor. The
-//! explicit [`SourceRegistry::shutdown`] (synchronous teardown context) disconnects the
-//! queue, **bounded-grace-joins** the workers for [`TEARDOWN_GRACE`], then **detaches**
-//! any still wedged rather than blocking forever.
+//! Because the worker count and the queue depth are **fixed** *and* every last-release
+//! **reserves** its slot with a bounded CAS before offering, the teardown resource is
+//! bounded no matter how many last-releases arrive concurrently or how many teardowns wedge:
+//! the observable [`pending_teardowns`](SourceRegistry::pending_teardowns) — reserved (queued
+//! **plus** in-flight) — can never exceed `TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS` (a shed at
+//! the ceiling never increments it). This replaces an unbounded queue *and* unbounded threads
+//! with a fixed pool (inv #10). When the queue is full (every worker busy or wedged) or the
+//! pool is at its bound, the release **sheds**: it structurally signals the decode to
+//! terminate ([`request_stop`](SourceActor::request_stop)) then drops the boxed actor instead
+//! of enqueuing it — a wait-free, thread-free bound, never a blocking join inside a Tokio
+//! async destructor. The explicit [`SourceRegistry::shutdown`] (synchronous teardown context)
+//! disconnects the queue, **bounded-grace-joins** the workers for [`TEARDOWN_GRACE`], then
+//! **detaches** any still wedged rather than blocking forever.
 //!
-//! ## Scope today: the shed path is dormant until decode ownership is hoisted
+//! ## Scope: the pool is bounded now; a real decode actor's promptness is forward
 //!
 //! The bounded pool above is the complete, tested isolation fix, and it holds for *any*
-//! number of actors. But in MP-2 **no real decode actor is enqueued yet**: production
+//! number of actors: the **pool** is bounded ≤ D+K structurally (the reservation ceiling),
+//! and a shed **structurally** signals decode termination
+//! ([`request_stop`](SourceActor::request_stop) — a *required* trait method the pool calls)
+//! then detaches. That is present, tested behavior, exercised by the thread-owning
+//! `ThreadedProbe` unit test (a shed terminates its real decode thread via `request_stop`).
+//!
+//! What is **not** present yet is a *real* decode actor: in MP-2 production
 //! (`Pipeline::build`) uses [`acquire_store`](SourceRegistry::acquire_store), whose entry
-//! carries **no** [`SourceActor`] (`actor: None`) — decode stop/join still lives in the
-//! run's external `StopRegistry`. So a last-release offers nothing to the pool and the
-//! shed path never runs in production; only tests inject actors (via
-//! [`acquire`](SourceRegistry::acquire)) to exercise the bound. When decode ownership is
-//! hoisted into the registry (a later milestone), the real actor's teardown must make a
-//! shed non-blockingly **signal decode termination** — the forward contract on
-//! [`SourceActor`], whose dedicated test lands with that hoist.
+//! carries **no** [`SourceActor`] (`actor: None`) — decode stop/join still lives in the run's
+//! external `StopRegistry` — so only tests inject actors (via
+//! [`acquire`](SourceRegistry::acquire)). When decode ownership is hoisted into the registry
+//! (a later milestone), the real actor must make `request_stop` **promptly** wake/interrupt
+//! its decode I/O so the detached thread exits without delay — that bounded-I/O promptness is
+//! the implementor's forward contract (the pool cannot force-kill a wedged OS thread; Rust has
+//! no such primitive). The honest bound: the teardown **pool** is bounded ≤ D+K
+//! unconditionally; a shed decode-thread's exit is prompt to the extent the implementor makes
+//! its I/O interruptible.
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -137,26 +147,33 @@ impl SourceKey {
 ///   **only on a fixed-size teardown-pool worker thread**, never on a program's hot
 ///   path and never inside a Tokio async destructor. A last-release `Drop` only
 ///   *offers* the boxed actor to the pool via a non-blocking, bounded `try_send`.
-/// * **Shed / fallback** — when the bounded teardown queue is full (every worker is
-///   busy or wedged) the actor is **dropped instead of shut down**, keeping the teardown
-///   resource bounded (inv #10). For that shed to bound *decode* — not merely this
-///   struct — a real implementor's teardown MUST (a) be **non-blocking** (never a join —
-///   for the same async-destructor reason) **and** (b) still **signal the decode to
-///   terminate** (set the stop flag / close the command channel the decode loop
-///   observes), so the decode winds down on its own rather than leaking a live thread.
-///   That is "signal-and-detach", not merely "detach".
+/// * **Shed / fallback** — when the bounded teardown queue is full (every worker is busy or
+///   wedged) or the pool is at its `TEARDOWN_CAPACITY` bound, the actor is **shed instead of
+///   shut down**, keeping the teardown resource bounded (inv #10). The pool **structurally**
+///   signals the decode to terminate first — it calls
+///   [`request_stop`](SourceActor::request_stop) (non-blocking) then detaches by dropping the
+///   actor. That is "signal-and-detach", not merely "detach": `request_stop` is a **required**
+///   trait method, so every implementor is compile-forced to provide a wake-decode signal —
+///   the guarantee is structural, not a `Drop` convention.
 ///
-///   Point (b) is a **forward contract, not present behavior.** `SourceActor` cannot
-///   express a `Drop` bound, and in MP-2 no real actor is wired yet: decode ownership is
-///   hoisted into the registry in a later milestone; production's store-only
-///   [`acquire_store`](SourceRegistry::acquire_store) path carries no actor, and the only
-///   implementors today are test doubles. When the real decode actor lands it carries the
-///   signal — made **structural** (a shed/stop method), with its own RED test — at that
-///   hoist. The bounded pool itself needs none of this: it is complete and tested now.
+///   What remains the implementor's **forward** responsibility is *promptness*: a real decode
+///   actor must make `request_stop` actually wake/interrupt its decode I/O so the detached
+///   thread exits without delay (its bounded-I/O contract). The pool cannot force-kill a
+///   wedged OS thread — Rust has no such primitive — so the honest bound is: the teardown
+///   **pool** is bounded ≤ D+K unconditionally; a shed decode-thread's exit is as prompt as
+///   the implementor's I/O is interruptible. In MP-2 no real actor is wired yet (production's
+///   store-only [`acquire_store`](SourceRegistry::acquire_store) path carries no actor; the
+///   only implementors are test doubles, incl. the thread-owning `ThreadedProbe` that proves
+///   a shed terminates its thread via `request_stop`).
 ///
-/// `shutdown(self: Box<Self>)` consumes the actor, so its own `Drop` runs *after*
-/// `shutdown` returns; an idempotent stop-signal — safe to run from both `shutdown`
-/// and `Drop` — satisfies both paths.
+/// The teardown pool calls [`request_stop`](SourceActor::request_stop) FIRST on **both**
+/// paths — before the graceful `shutdown` (so decode is already winding down even if the join
+/// wedges) and before a shed's detach — so an idempotent `request_stop` is all an implementor
+/// needs to make both paths signal decode termination. `request_stop`, the actor's `Drop`,
+/// and (ideally) `shutdown` must **not panic**: the worker's `catch_unwind` keeps the fixed
+/// pool alive through a *single* panic, but a panic in the actor's `Drop` while `shutdown` is
+/// already unwinding is a *double* panic that aborts — a Rust fundamental no `catch_unwind`
+/// can prevent, and one the trait contract forbids.
 pub trait SourceActor: Send + 'static {
     /// Signal the actor to begin terminating its decode — **non-blocking**, safe on any
     /// thread (including a Tokio async destructor). Sets the stop flag / closes the command
@@ -276,12 +293,14 @@ pub struct SourceRegistry<T> {
     /// Join handles for the fixed pool of teardown worker threads, for the explicit
     /// [`SourceRegistry::shutdown`] bounded-grace-join.
     teardown_workers: Mutex<Vec<JoinHandle<()>>>,
-    /// Queued **plus** in-flight teardowns — bounded by `TEARDOWN_QUEUE_DEPTH +
-    /// TEARDOWN_WORKERS` however many last-releases arrive or wedge, and observable via
-    /// [`SourceRegistry::pending_teardowns`]. Incremented when a teardown is offered
-    /// and decremented (exactly once, panic-safe) when it completes or is shed — see
-    /// [`Teardown`]. An [`Arc`] so a detached straggler's guard can still decrement it
-    /// after the registry itself is gone.
+    /// Reserved teardown slots — queued **plus** in-flight — **hard-bounded** at
+    /// `TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS` by a bounded-CAS reservation
+    /// ([`reserve_slot`]): a last-release at the ceiling sheds WITHOUT counting, so no number
+    /// of concurrent last-releases can push this past the bound (inv #10). Reserved when a
+    /// teardown is offered and decremented (exactly once, panic-safe) when it completes or is
+    /// shed — see [`Teardown`]. Observable via [`SourceRegistry::pending_teardowns`]. An
+    /// [`Arc`] so a detached straggler's guard can still decrement it after the registry
+    /// itself is gone.
     pending_teardowns: Arc<AtomicUsize>,
 }
 
@@ -436,12 +455,12 @@ impl<T> SourceRegistry<T> {
         lock(&self.entries).len()
     }
 
-    /// The number of source teardowns currently **queued plus in flight** — a
-    /// telemetry/test observable of the isolation guarantee (inv #10). Because a fixed
-    /// pool of [`TEARDOWN_WORKERS`] workers drains a bounded queue of depth
-    /// [`TEARDOWN_QUEUE_DEPTH`], and the overflow sheds via the actor's `Drop`, this
-    /// count can **never exceed `TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS`** no matter
-    /// how many last-releases arrive or how many teardowns wedge. A wedged `shutdown()`
+    /// The number of source teardowns currently **reserved** (queued plus in flight) — a
+    /// telemetry/test observable of the isolation guarantee (inv #10). A last-release reserves
+    /// a slot with a bounded CAS ([`reserve_slot`]) capped at `TEARDOWN_QUEUE_DEPTH +
+    /// TEARDOWN_WORKERS`; at the cap it sheds without reserving. So this count can **never
+    /// exceed `TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS`** — by construction, however many
+    /// last-releases arrive concurrently or how many teardowns wedge. A wedged `shutdown()`
     /// occupies exactly one worker; it never grows the queue behind it without bound.
     #[must_use]
     pub fn pending_teardowns(&self) -> usize {
@@ -490,9 +509,9 @@ impl<T> SourceRegistry<T> {
     /// workers to join.
     pub fn shutdown(&self) {
         // Take + drop the queue sender: once every sender (this one and any transient
-        // `release` clone) is gone, `recv` returns `Err` and idle workers exit. Any
-        // actors still buffered drop with the channel (non-blocking); a real actor's drop
-        // also signals decode termination per the SourceActor shed contract.
+        // `release` clone) is gone, `recv` returns `Err` and idle workers exit. Any teardowns
+        // still buffered drop with the channel — each Teardown::drop structurally signals its
+        // decode to terminate (request_stop) then detaches, non-blocking.
         drop(lock(&self.teardown_tx).take());
         let workers = std::mem::take(&mut *lock(&self.teardown_workers));
         grace_join(workers);
@@ -525,30 +544,37 @@ impl<T> SourceRegistry<T> {
         }
     }
 
-    /// Offer a decode actor to the bounded teardown pool with a non-blocking
-    /// `try_send`. On success a worker runs the blocking `shutdown()` off every hot
-    /// path. When the queue is full (every worker busy or wedged) or the pool is gone,
-    /// the actor is **shed**: dropping the [`Teardown`] drops the boxed actor and
-    /// decrements the observable — a wait-free, thread-free shed that keeps the teardown
-    /// resource bounded (inv #10). Per the [`SourceActor`] shed contract a real actor's
-    /// drop non-blockingly signals decode termination; today only test doubles are ever
-    /// enqueued (production uses `acquire_store`, `actor: None`). Never blocks; safe on
-    /// any thread.
+    /// Offer a decode actor to the bounded teardown pool. First **reserve** a bounded
+    /// pending slot ([`reserve_slot`]); at the `TEARDOWN_CAPACITY` (D+K) ceiling the offer
+    /// **sheds immediately without counting**, so N concurrent last-releases can never spike
+    /// the observable past the bound (inv #10). Within the bound, a non-blocking `try_send`
+    /// hands the actor to a worker that runs the blocking `shutdown()` off every hot path; if
+    /// the queue is full or the pool is gone the reserved slot is released and the actor is
+    /// shed. Every shed **structurally signals decode termination**
+    /// ([`request_stop`](SourceActor::request_stop)) then detaches — a wait-free, thread-free
+    /// shed. Never blocks; safe on any thread. (Today only test doubles are ever enqueued —
+    /// production uses `acquire_store`, `actor: None`.)
     fn offer_teardown(&self, actor: Box<dyn SourceActor>) {
-        let teardown = Teardown::new(actor, &self.pending_teardowns);
-        let sender = lock(&self.teardown_tx).clone();
-        let shed = match sender {
-            Some(tx) => match tx.try_send(teardown) {
-                Ok(()) => return,
-                Err(TrySendError::Full(t) | TrySendError::Disconnected(t)) => t,
-            },
-            None => teardown,
+        // Reserve BEFORE touching the queue: only a successful reservation is ever counted,
+        // and the reservation is bounded at D+K, so a shed never increments the observable
+        // (finding 1 — no increment-before-try_send overshoot under concurrent releasers).
+        let teardown = match Teardown::reserve(actor, &self.pending_teardowns) {
+            Ok(teardown) => teardown,
+            Err(actor) => return signal_and_detach(actor),
         };
-        // Shed path: dropping the Teardown drops the boxed actor and decrements the
-        // observable (rule 37: a full queue / gone pool is the intended shed signal, not
-        // an error to propagate). A real actor's drop signals decode termination per the
-        // SourceActor shed contract; today the enqueued actors are test doubles.
-        drop(shed);
+        let sender = lock(&self.teardown_tx).clone();
+        match sender {
+            Some(tx) => {
+                // A full channel or gone pool releases the reserved slot (Teardown::drop)
+                // and sheds the actor (signal-and-detach) — never blocks, never over-counts.
+                if let Err(TrySendError::Full(t) | TrySendError::Disconnected(t)) =
+                    tx.try_send(teardown)
+                {
+                    drop(t);
+                }
+            }
+            None => drop(teardown),
+        }
     }
 }
 
@@ -558,9 +584,9 @@ impl<T> Drop for SourceRegistry<T> {
         // drain what is buffered then exit, and DETACH the worker threads (their join
         // handles drop with the struct — no join). A registry `Drop` may run in an
         // async destructor, so we never join here; the explicit `shutdown()` is the
-        // graceful, bounded-grace-joining path. Any actors still buffered drop with the
-        // channel (non-blocking); a real actor's drop also signals decode termination per
-        // the SourceActor shed contract.
+        // graceful, bounded-grace-joining path. Any teardowns still buffered drop with the
+        // channel — each Teardown::drop structurally signals its decode to terminate
+        // (request_stop) then detaches, non-blocking.
         drop(lock(&self.teardown_tx).take());
     }
 }
@@ -578,6 +604,13 @@ const TEARDOWN_WORKERS: usize = 2;
 /// bounded.
 const TEARDOWN_QUEUE_DEPTH: usize = 32;
 
+/// The hard ceiling on the [`pending_teardowns`](SourceRegistry::pending_teardowns)
+/// observable: the bounded queue depth plus the fixed worker pool (D+K). A last-release
+/// reserves one of these slots ([`reserve_slot`]) before offering; at the ceiling it sheds
+/// without counting, so the observable can NEVER exceed this bound however many last-releases
+/// contend concurrently or how many teardowns wedge (inv #10).
+const TEARDOWN_CAPACITY: usize = TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS;
+
 /// Total time the explicit [`SourceRegistry::shutdown`] waits for the teardown
 /// workers to finish before **detaching** any straggler (a wedged decode-thread join)
 /// rather than blocking forever. Generous enough for a healthy join to complete on a
@@ -587,37 +620,50 @@ const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
 /// Poll cadence while grace-joining the teardown workers on shutdown.
 const TEARDOWN_POLL: Duration = Duration::from_millis(1);
 
-/// A single queued source teardown: the owned decode actor plus an RAII guard on the
+/// A single reserved source teardown: the owned decode actor plus an RAII guard on the
 /// [`SourceRegistry::pending_teardowns`] observable.
 ///
-/// Constructed with the counter already incremented; its `Drop` decrements it exactly
-/// once — so the count is correct whether the teardown completes on a worker, is shed
-/// on a full queue, or **unwinds because `shutdown()` panicked** (panic-safe). If the
-/// actor is still present when the guard drops (the shed / buffer-drop path —
-/// [`run`](Teardown::run) was never called) its own non-blocking `Drop` runs,
-/// signalling the decode to terminate and detaching.
+/// Constructed via a **bounded reservation** ([`Teardown::reserve`]) that increments the
+/// observable only within the `TEARDOWN_CAPACITY` bound; its `Drop` decrements it exactly
+/// once — so the count is correct whether the teardown completes on a worker, is shed on a
+/// full queue, or **unwinds because `shutdown()` panicked** (panic-safe). If the actor is
+/// still present when the guard drops (the shed / buffer-drop path — [`run`](Teardown::run)
+/// was never called) it is **signalled to terminate** structurally
+/// ([`request_stop`](SourceActor::request_stop)) then detached, non-blockingly.
 struct Teardown {
     actor: Option<Box<dyn SourceActor>>,
     pending: Arc<AtomicUsize>,
 }
 
 impl Teardown {
-    /// Wrap an actor for teardown, bumping the pending-teardowns observable. The
-    /// returned guard owns the matching decrement (in its `Drop`).
-    fn new(actor: Box<dyn SourceActor>, pending: &Arc<AtomicUsize>) -> Self {
-        pending.fetch_add(1, Ordering::Relaxed);
-        Self {
-            actor: Some(actor),
-            pending: Arc::clone(pending),
+    /// Reserve a bounded pending-teardown slot and wrap `actor`. Returns the actor back
+    /// (`Err`), leaving the observable untouched, when it is already at the
+    /// `TEARDOWN_CAPACITY` (D+K) bound — so the caller sheds without ever counting and the
+    /// observable can never exceed the bound (inv #10). On success the returned guard owns
+    /// the matching decrement (its `Drop`).
+    fn reserve(
+        actor: Box<dyn SourceActor>,
+        pending: &Arc<AtomicUsize>,
+    ) -> Result<Self, Box<dyn SourceActor>> {
+        if reserve_slot(pending) {
+            Ok(Self {
+                actor: Some(actor),
+                pending: Arc::clone(pending),
+            })
+        } else {
+            Err(actor)
         }
     }
 
-    /// Run the graceful stop-and-join on a pool worker, consuming the actor (so its
-    /// own `Drop` does not additionally fire — `shutdown` already joined). The
-    /// observable is decremented when `self` drops at the end of this call, **including
-    /// if `shutdown()` panics and unwinds through here**.
+    /// Run the graceful stop-and-join on a pool worker, consuming the actor (so its own
+    /// `Drop` does not additionally fire — `shutdown` already joined). Signals decode
+    /// termination structurally FIRST ([`request_stop`](SourceActor::request_stop)), so the
+    /// decode is already winding down even if the blocking join then wedges. The observable
+    /// is decremented when `self` drops at the end of this call, **including if
+    /// `request_stop`/`shutdown` panics and unwinds through here**.
     fn run(mut self) {
         if let Some(actor) = self.actor.take() {
+            actor.request_stop();
             actor.shutdown();
         }
     }
@@ -625,12 +671,13 @@ impl Teardown {
 
 impl Drop for Teardown {
     fn drop(&mut self) {
-        // Shed / buffer-drop path: if `run` never took the actor it is still here.
-        // Dropping it is NON-BLOCKING (never a join); per the SourceActor shed contract a
-        // real actor's own drop also signals decode termination (a forward contract — no
-        // real actor exists yet). Then decrement the observable exactly once — panic-safe:
-        // this runs even if `run`'s `shutdown()` unwound.
-        drop(self.actor.take());
+        // Shed / buffer-drop path: if `run` never took the actor it is still here. Signal
+        // its decode to terminate structurally then detach — NON-BLOCKING (never a join).
+        // Then decrement the observable exactly once — panic-safe: this runs even if `run`'s
+        // `shutdown()` unwound.
+        if let Some(actor) = self.actor.take() {
+            signal_and_detach(actor);
+        }
         self.pending.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -639,12 +686,16 @@ impl Drop for Teardown {
 /// and run its blocking `shutdown()` off every hot path.
 ///
 /// The receiver lock is held **only** to `recv` the next job, never while running a
-/// (possibly wedged) `shutdown()`, so a wedged teardown ties up this worker alone and
-/// the sibling workers keep draining. `shutdown()` runs under
-/// [`catch_unwind`](std::panic::catch_unwind) so a panicking actor cannot kill the
-/// worker and shrink the fixed pool; the [`Teardown`] guard still decrements the
-/// observable on the unwind. `recv` returning `Err` (every sender dropped) means the
-/// pool is stopping — the worker exits.
+/// (possibly wedged) `shutdown()`, so a wedged teardown ties up this worker alone and the
+/// sibling workers keep draining. The job runs under
+/// [`catch_unwind`](std::panic::catch_unwind), and it is the **only** operation in the loop
+/// that can panic — `recv` returns a `Result` and [`lock`] recovers a poisoned guard — so a
+/// panicking `request_stop`/`shutdown`/actor-`Drop` cannot kill the worker or shrink the
+/// fixed pool: the worker survives and keeps draining, and the [`Teardown`] guard still
+/// decrements the observable on the unwind. (The one thing no `catch_unwind` can survive is a
+/// *double* panic — an actor that panics in `Drop` while `shutdown` is already unwinding —
+/// which aborts the process; the trait contract forbids a panicking `Drop`.) `recv` returning
+/// `Err` (every sender dropped) means the pool is stopping — the worker exits.
 fn teardown_worker(rx: &Arc<Mutex<Receiver<Teardown>>>) {
     loop {
         let job = lock(rx).recv();
@@ -678,6 +729,35 @@ fn grace_join(mut workers: Vec<JoinHandle<()>>) {
         }
         std::thread::sleep(TEARDOWN_POLL);
     }
+}
+
+/// Claim one of the [`TEARDOWN_CAPACITY`] (D+K) bounded pending-teardown slots, bumping the
+/// observable. Returns `false` — leaving the observable untouched — when the bound is already
+/// reached, so the caller sheds WITHOUT ever counting; the observable can therefore never
+/// exceed the bound however many last-releases contend concurrently (inv #10). A bounded CAS
+/// loop, not increment-then-undo, so a shed at the ceiling never even *transiently*
+/// overshoots the bound.
+fn reserve_slot(pending: &AtomicUsize) -> bool {
+    let mut cur = pending.load(Ordering::Relaxed);
+    loop {
+        if cur >= TEARDOWN_CAPACITY {
+            return false;
+        }
+        match pending.compare_exchange_weak(cur, cur + 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(observed) => cur = observed,
+        }
+    }
+}
+
+/// Shed an actor that will never reach a pool worker (the queue is full or gone, or the pool
+/// is at its bound): structurally signal its decode to terminate
+/// ([`request_stop`](SourceActor::request_stop)) then detach by dropping it. Non-blocking on
+/// any thread — never a join. Promptness of the decode thread's actual exit is the
+/// implementor's bounded-I/O contract (a real actor must make its I/O interruptible).
+fn signal_and_detach(actor: Box<dyn SourceActor>) {
+    actor.request_stop();
+    drop(actor);
 }
 
 /// Lock a mutex, recovering the guard if a previous holder panicked. The registry
@@ -844,7 +924,11 @@ mod tests {
     }
 
     impl ThreadedProbe {
-        fn new(stop: Arc<AtomicBool>, gate: Option<Arc<AtomicBool>>, live: Arc<AtomicUsize>) -> Self {
+        fn new(
+            stop: Arc<AtomicBool>,
+            gate: Option<Arc<AtomicBool>>,
+            live: Arc<AtomicUsize>,
+        ) -> Self {
             live.fetch_add(1, Ordering::Release);
             let handle = {
                 let stop = stop.clone();
@@ -1049,10 +1133,10 @@ mod tests {
         // decode. A thread-per-teardown design FAILS all three: it spawns one thread
         // per release and calls `shutdown()` on every one, so concurrent shutdowns and
         // pending both climb to the full stream length and nothing ever sheds.
-        const N: usize = 96; // >> queue+workers, so the overflow must shed
         // The ACTUAL bounds (finding 3 — tightened from loose 16/64): a fixed pool caps
-        // concurrent shutdowns at the worker count, and queued+in-flight at D+K; every
-        // release beyond D+K sheds. A regression that lets either climb now FAILS.
+        // concurrent shutdowns at the worker count, queued+in-flight at D+K; every release
+        // beyond D+K sheds. A regression that lets either climb now FAILS.
+        const N: usize = 96; // >> queue+workers, so the overflow must shed
         const ACTIVE_BOUND: usize = TEARDOWN_WORKERS;
         const PENDING_BOUND: usize = TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS;
         const MIN_SHED: usize = N - (TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS);
