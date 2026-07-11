@@ -12,8 +12,8 @@
   `crates/multiview-hal/src/failure.rs` cites ADR-0035.
 - **Relates to:** invariant #1 (output clock — placement runs off the clock thread), #2 (last-good
   held across a failure-driven re-select), #9 (closed-loop degradation / hysteresis — the penalty
-  decay **is** the hysteresis here), #10 (isolation — the producer drains on the slow tick and can
-  never back-pressure the data plane).
+  decay **is** the hysteresis here), #10 (isolation — the producer only pushes onto a bounded
+  drop-oldest channel and the slow tick drains it; neither can back-pressure the data plane).
 
 ## Context
 
@@ -34,27 +34,33 @@ sweep. Verified on main `3842b275`:
   consults it.
 - `FailureLedger::record` has **no producer**: nothing folds a signal into the ledger.
 
-Both seams the module doc names, however, **exist and run today** — they were built by ADR-0018
-(the planner) and ADR-0035 (the slow control tick), since landed:
+The two **host sites** the wiring folds into, however, **exist and run today** — they were built by
+ADR-0018 (the planner) and ADR-0035 (the slow control tick), since landed:
 
 - **Consumer** — the placement scorer `select_device` (`crates/multiview-hal/src/select.rs:452`) →
   `score_candidate` (`:697`, the blended DRF-share + Tetris-fit cost) + `passes_hard_gates`
   (`:633`, the candidate-set gate). `select_device` has **6 runtime callers**:
   `cli/pipeline.rs:626/795/1006`, `cli/placement.rs:271`, `engine/placement.rs:479`,
   `engine/migration.rs:318`.
-- **Producer** — the engine slow control tick `cli/placement.rs::run` (`:326-350`), a ~1 Hz
-  `CONTROL_PERIOD` loop (poll `DeviceLoad` → publish snapshot → `coordinator.observe_only()`),
-  spawned live from `cli/main.rs:719` on multi-GPU hosts.
+- **Record / drain seam** — the engine slow control tick `cli/placement.rs::run` (`:326-350`), a
+  ~1 Hz `CONTROL_PERIOD` loop (poll `DeviceLoad` → publish snapshot →
+  `coordinator.observe_only()`), spawned live from `cli/main.rs:719` on multi-GPU hosts — the
+  natural single-writer that will drain the signal channel and fold each into the ledger.
+
+The **producer proper** — `FailureSignal` emission at the `multiview-ffmpeg` fault seams — **does
+not exist yet** (the 0-non-test-emitter gap above); it is the new machinery the Decision's point 1
+builds. So the ledger has two live host sites and one seam still to raise the signal.
 
 So this is a pure **connect** job — not new machinery — but a connect that is **size L** and
 touches an AES67-locked file.
 
 ## Decision
 
-**WIRE** — not REMOVE, not BLOCKED (the task #185 HAL-1 design-pass verdict, concurred
-2026-07-11). This ADR is the committed design; **IMPL is sequenced post-#256 and is
-GPU-validated** (see Consequences), and ships **rule-6-complete** — producer + record + consumer
-land in one PR, never a partial. Three connect points:
+**WIRE** — not REMOVE; the design verdict is WIRE, **with implementation blocked on #256** (a
+file-territory lock, not an unbuilt dependency — the task #185 HAL-1 design-pass verdict, concurred
+2026-07-11). This ADR is the committed design; **IMPL is sequenced post-#256 and is GPU-validated**
+(see Consequences), and ships **rule-6-complete** — producer + record + consumer land in one PR,
+never a partial. Three connect points:
 
 1. **Producer — raise `FailureSignal` at the data-plane fault seams** (`multiview-ffmpeg`,
    feature-gated). The seams the module doc already names: the `*_cuvid`/hwaccel HW→SW fallback
@@ -87,9 +93,10 @@ The `select_device` signature grows `(+ &FailureLedger, + now_ns)`, threaded thr
   planner is the degradation-**ladder** hysteresis, unrelated to per-hardware fault history.
   Deleting the ledger drops the only *"stop retrying a flapping placement"* mechanism, an
   ADR-0018/0035 resilience requirement.
-- **Not BLOCKED.** Unlike the schema.rs REMOVE cluster, both seams are built and running; no
-  unbuilt epic gates the connect — only the file-territory lock and hardware validation gate its
-  *timing*.
+- **Not BLOCKED on design.** Unlike the schema.rs REMOVE cluster, no unbuilt epic gates the
+  connect: both host sites are built and running. The *implementation* is blocked on #256 (the
+  file-territory lock) and gated on hardware validation — a **timing** gate on shared-file
+  contention, not a design gate.
 - **One PR, both ends (rule 6).** A producer with no consumer — or a consumer reading a ledger
   nothing writes — is itself modeled-but-not-wired and unfalsifiable in production. The ledger only
   earns its keep when a real signal raises a real penalty that a real selection reads.
@@ -102,7 +109,7 @@ The `select_device` signature grows `(+ &FailureLedger, + now_ns)`, threaded thr
 | Alternative | Rejected because |
 | ----------- | ---------------- |
 | **REMOVE** the `failure` module as dead code | It is the *only* failure-history exclusion path; nothing supersedes it (contrast I1 / `negotiate_answer`, genuinely superseded by `multiview-webrtc`). Removing it drops an ADR-0018/0035 resilience requirement. |
-| **BLOCKED** — defer to a future placement epic | Both seams exist and run today; there is no unbuilt dependency. Marking it blocked would be inventing a block. |
+| **BLOCKED on an unbuilt placement dependency** — defer to a future epic | The *design* has no unbuilt dependency: both host sites exist and run today. (The *implementation* is sequenced behind the #256 file-territory lock — a timing gate on shared-file contention, not a missing dependency.) |
 | Ship the **consumer only** (scorer reads a ledger nothing writes) | Rule 6 — a penalty that is always 0 changes no behaviour and is unfalsifiable; modeled-but-not-wired by another name. |
 | Ship the **producer only** (raise signals nothing reads) | Same failure — signals into a ledger no selection consults change no placement. |
 | Raise `FailureSignal` **synchronously on the output-clock / data-plane thread** | Violates inv #1/#10 — the data plane must never touch the ledger or block on a channel send. It pushes onto a bounded drop-oldest channel; the slow tick folds it. |
@@ -121,8 +128,8 @@ The `select_device` signature grows `(+ &FailureLedger, + now_ns)`, threaded thr
   Raising and validating them requires a **real-GPU runner leg**, not software CI — bulletproofing
   the bad/contended-input paths is part of "done," not a follow-up.
 
-**Scope / cost.** Size **L**, 3 crates: `multiview-ffmpeg` (producers, feature-gated),
-`multiview-hal` (scorer signature), `multiview-engine` / `multiview-cli` (channel ownership +
+**Scope / cost.** Size **L**, 4 crates: `multiview-ffmpeg` (producers, feature-gated),
+`multiview-hal` (scorer signature), `multiview-engine` + `multiview-cli` (channel ownership +
 slow-tick drain + ledger lifetime). The public `select_device` signature change is the blast
 radius; enabling a hardware feature must not change any *default* public API — the ledger param
 threads through existing callers, and the default pure-Rust build still places nothing.
@@ -131,6 +138,17 @@ threads through existing callers, and the default pure-Rust build still places n
 drop-oldest producer channel, slow-tick drain, `observe_only` still only *proposes*); #9 extended
 (the penalty decay is placement-level hysteresis layered on the degradation ladder); #2 unaffected
 (last-good holds across any re-select a penalty triggers).
+
+**Residual risk (for the IMPL).** The penalty is only as good as its attribution. Every producer
+seam must recover the **exact faulting `(Stage, HardwareId)`** at the async FFI / supervisor
+boundary where the fault surfaces — a boundary where the originating stage and device are easy to
+lose (a `get_format` callback on a decoder thread, a supervisor that already unwound the actor, a
+pooled hwframe whose device context is one hop removed). A **misattributed** signal penalises — and
+at the hard threshold *excludes* — a **healthy** device, forcing exactly the needless migration off
+good hardware the ledger exists to prevent. The IMPL must key each signal to the stable `DeviceId`
+of the device that actually faulted (never the enumeration index, never a neighbouring stage's), and
+the producer's efficiency/correctness review must treat attribution accuracy as a first-class
+correctness property, not a detail.
 
 **Follow-through (rule 27).** On IMPL merge, flip `failure.rs`'s *"wiring is NOT in this crate"*
 module doc to point at the landed producer / record / consumer sites, and advance ADR-0035's
