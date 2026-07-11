@@ -273,6 +273,13 @@ ciborium = "0.2.2"
 # the lock (rcgen 0.14, reqwest via the zowietek backend).
 rcgen = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# TLS-slowloris e2e (`tests/tls_serve.rs`, SEC-14 #126): a RAW rustls client (not
+# `reqwest`, which only sends complete requests) that completes the TLS handshake
+# then dribbles a partial request head, proving the header-read timeout drops the
+# stalled connection under HTTPS. Re-exports `rustls` + `pki_types`, so this one
+# dev-dep covers the client config + danger verifier. Already in the lock (the
+# `cast` backend); `aws-lc-rs` provider to match the server's TLS material.
+tokio-rustls = "0.26"
 
 [features]
 "default" = ["openapi"]

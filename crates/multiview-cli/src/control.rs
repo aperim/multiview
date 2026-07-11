@@ -425,8 +425,12 @@ where
         Some(tls) => {
             let material = multiview_control::load_tls_material(tls)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            tokio::spawn(multiview_control::serve_router_tls(
-                listener, app, material, shutdown,
+            tokio::spawn(multiview_control::serve_router_tls_with(
+                listener,
+                app,
+                material,
+                serve_options,
+                shutdown,
             ))
         }
         #[cfg(not(feature = "tls"))]

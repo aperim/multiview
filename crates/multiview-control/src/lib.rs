@@ -684,25 +684,51 @@ const TLS_GRACEFUL_SHUTDOWN: std::time::Duration = std::time::Duration::from_sec
 
 /// Serve an already-built [`axum::Router`] over **TLS** on an already-bound
 /// [`tokio::net::TcpListener`], terminating rustls with `material` and shutting
-/// down gracefully when `shutdown` resolves (TLS-0, ADR-W029).
-///
-/// The TLS sibling of [`serve_router`]: identical isolation contract (invariant
-/// #10) and — critically — the **same
-/// `into_make_service_with_connect_info::<SocketAddr>`** wiring, so the SEC-14
-/// pre-auth per-IP rate limit ([`crate::limits`]) keeps its peer-IP key under
-/// HTTPS exactly as over plain HTTP. Losing that make-service would silently
-/// disable the per-IP guard under TLS. `axum-server` drives the accept + TLS
-/// handshake; a background task bridges the caller's `shutdown` future to the
-/// [`axum_server::Handle`] graceful drain.
+/// down gracefully when `shutdown` resolves (TLS-0, ADR-W029) — the TLS sibling of
+/// [`serve_router`], with the default [`ServeOptions`] (a
+/// [`DEFAULT_HEADER_READ_TIMEOUT`] slowloris guard).
 ///
 /// # Errors
-/// Propagates any I/O error from the `axum-server` accept/serve loop (including a
-/// failure to adopt the listener).
+/// Propagates any I/O error from the `axum-server` accept/serve loop.
 #[cfg(feature = "tls")]
 pub async fn serve_router_tls<F>(
     listener: tokio::net::TcpListener,
     app: Router,
     material: RustlsMaterial,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_router_tls_with(listener, app, material, ServeOptions::default(), shutdown).await
+}
+
+/// [`serve_router_tls`] with explicit [`ServeOptions`] — the TLS sibling of
+/// [`serve_router_with`].
+///
+/// Identical isolation contract (invariant #10) and the **same
+/// `into_make_service_with_connect_info::<SocketAddr>`** wiring, so the SEC-14
+/// pre-auth per-IP rate limit ([`crate::limits`]) keeps its peer-IP key under HTTPS
+/// exactly as over plain HTTP. `axum-server` drives the accept + TLS handshake; a
+/// background task bridges the caller's `shutdown` future to the
+/// [`axum_server::Handle`] graceful drain.
+///
+/// `options.header_read_timeout` is applied to the **same `hyper_util` connection
+/// builder** axum-server drives — reached via its
+/// [`http_builder`](axum_server::Server::http_builder) — so a slow-header slowloris
+/// client is dropped under HTTPS exactly as over plain HTTP (SEC-14 #126,
+/// [ADR-W028](../../docs/decisions/ADR-W028.md) F-A). `header_read_timeout` panics
+/// when armed without a timer, so a Tokio timer is installed unconditionally.
+///
+/// # Errors
+/// Propagates any I/O error from the `axum-server` accept/serve loop (including a
+/// failure to adopt the listener).
+#[cfg(feature = "tls")]
+pub async fn serve_router_tls_with<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    material: RustlsMaterial,
+    options: ServeOptions,
     shutdown: F,
 ) -> std::io::Result<()>
 where
@@ -724,7 +750,19 @@ where
         drain.graceful_shutdown(Some(TLS_GRACEFUL_SHUTDOWN));
     });
 
-    axum_server::from_tcp_rustls(std_listener, material.0)?
+    let mut server = axum_server::from_tcp_rustls(std_listener, material.0)?;
+    // Header-read timeout (SEC-14 #126): configure the shared `hyper_util`
+    // connection builder axum-server drives. The timer must precede the timeout —
+    // `header_read_timeout` panics when armed without one.
+    server
+        .http_builder()
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new());
+    if let Some(timeout) = options.header_read_timeout {
+        server.http_builder().http1().header_read_timeout(timeout);
+    }
+
+    server
         .handle(handle)
         // The SEC-14 connect-info wiring — MUST match `serve_router` so the
         // per-IP guard keeps keying on the peer `SocketAddr` under TLS.

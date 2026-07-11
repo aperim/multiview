@@ -24,12 +24,13 @@ use std::time::Duration;
 use multiview_config::limits::ManagementLimits;
 use multiview_config::TlsConfig;
 use multiview_control::{
-    command_bus, load_tls_material, serve_tls, ApiKeyStore, AppState, EngineStateSnapshot,
-    InMemoryRepository,
+    command_bus, load_tls_material, router, serve_router_tls_with, serve_tls, ApiKeyStore,
+    AppState, EngineStateSnapshot, InMemoryRepository, ServeOptions,
 };
 use multiview_engine::EnginePublisher;
 use multiview_events::Event;
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 /// A real `AppState` with the SEC-14 limits enabled and a per-IP burst of exactly
 /// one, so the second request from the same loopback client is rejected.
@@ -119,4 +120,125 @@ async fn the_served_tls_control_plane_handshakes_and_rate_limits_per_ip() {
         .expect("serve_tls returned within 5s of shutdown")
         .expect("serve_tls task did not panic")
         .expect("serve_tls returned no I/O error");
+}
+
+/// A rustls client verifier that trusts any certificate — the server presents an
+/// ephemeral self-signed cert, so this proves the header-read timeout, not PKI (the
+/// raw-client analogue of `reqwest`'s `danger_accept_invalid_certs`).
+#[derive(Debug)]
+struct AcceptAnyServerCert;
+
+impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+        _server_name: &tokio_rustls::rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: tokio_rustls::rustls::pki_types::UnixTime,
+    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
+    {
+        Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// A slow-header ("slowloris") client that completes the TLS handshake and then
+/// stalls its request header block must be dropped by the server at the header-read
+/// deadline under HTTPS, exactly as over plain HTTP — proving the timeout configured
+/// on `axum-server`'s hyper builder ([`serve_router_tls_with`]) actually fires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_header_tls_client_is_dropped_at_the_header_read_deadline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (cert, key) = self_signed_pem(dir.path());
+    let material = load_tls_material(&TlsConfig::Static {
+        cert_file: cert,
+        key_file: key,
+    })
+    .expect("load self-signed TLS material");
+
+    let listener = TcpListener::bind("[::1]:0").await.expect("bind [::1]:0");
+    let addr = listener.local_addr().expect("local_addr");
+
+    // Serve with a short header-read deadline so the test is fast (the production
+    // default is 20 s). The per-IP limiter never engages — a stalled header block
+    // never reaches the router layer — so `limited_state` is harmless here.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let options =
+        ServeOptions::default().with_header_read_timeout(Some(Duration::from_millis(500)));
+    let server = tokio::spawn(serve_router_tls_with(
+        listener,
+        router(limited_state()),
+        material,
+        options,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+
+    // Complete the rustls handshake with a RAW client (reqwest only sends complete
+    // requests), then send a partial request head and never the terminating blank
+    // line — the classic slowloris shape over TLS.
+    let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
+    let client_config = tokio_rustls::rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("client protocol versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    let server_name =
+        tokio_rustls::rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let tcp = TcpStream::connect(addr).await.expect("tcp connect");
+    let mut tls = connector
+        .connect(server_name, tcp)
+        .await
+        .expect("tls handshake");
+
+    tls.write_all(b"GET /api/v1/openapi.json HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .expect("write partial header");
+
+    // The server must close the connection at the deadline: the read then resolves
+    // (EOF or a reset). If the connection is instead held open (slowloris unbounded
+    // under TLS), the read blocks and this outer timeout elapses.
+    let mut buf = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(5), tls.read_to_end(&mut buf)).await;
+    assert!(
+        closed.is_ok(),
+        "the TLS server held a stalled slow-header connection open past the 500ms header-read \
+         deadline; the timeout configured on axum-server's builder must fire under HTTPS too"
+    );
+
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
 }
