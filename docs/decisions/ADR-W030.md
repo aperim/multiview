@@ -33,9 +33,12 @@ licensing model (AGENTS.md §G / ADR-0012): default = LGPL-clean & redistributab
 Add `GET /api/v1/system/capabilities` (role: **viewer/read**, system-global — no per-object
 BOLA axis) returning a new `multiview_control::system::SystemCapabilities` DTO:
 
-- `backends: Vec<BackendCapability>` — one per `(kind, stage)` over the codec/compositor backend
-  matrix, each carrying `available` (from `hal::probe(kind, stage)`), plus `max_resolution?` and
-  `decode_resize?` (present only when available; `decode_resize` only on the decode stage).
+- `backends: Vec<BackendCapability>` — the codec backends at the decode + encode stages plus the
+  software composite path, each carrying `available` (from `hal::probe(kind, stage)`), plus
+  `max_resolution?` and `decode_resize?` (present only when available; `decode_resize` only on the
+  decode stage). The hardware compositor tier is **not** emitted as `available: false` codec-style
+  rows — `hal::probe` has no environment probe for the portable compositor backends — it is
+  reported by `compositor` (below).
 - `compositor: { class, device_type?, driver? }` — the SA-0 composite-usability classification
   (`AdapterClass`/`AdapterReport`, ADR-0035) of the resolved wgpu adapter.
 - `build: { effective_license, redistributable, features, ndi }` — the compliance surface,

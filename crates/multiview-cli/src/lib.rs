@@ -71,11 +71,6 @@ pub fn log_ring() -> Option<std::sync::Arc<multiview_telemetry::LogRing>> {
 pub mod boot;
 pub mod capability_warn;
 pub mod cli;
-/// Map the HAL probe + compiled features + resolved compositor adapter onto the
-/// [`multiview_control::system::SystemCapabilities`] DTO for
-/// `GET /api/v1/system/capabilities` (ADR-W030). A static startup snapshot
-/// (invariant #10).
-pub mod system_capabilities;
 /// Config-file watch (ADR-W020): hot-reload the impacted parts of the boot
 /// config when the file changes externally — through the SAME apply machinery
 /// the Web/API uses; an invalid file changes nothing (warn + health event).
@@ -121,6 +116,11 @@ pub mod outputs;
 pub mod placement;
 pub mod preview;
 pub mod run;
+/// Map the HAL probe + compiled features + resolved compositor adapter onto the
+/// [`multiview_control::system::SystemCapabilities`] DTO for
+/// `GET /api/v1/system/capabilities` (ADR-W030). A static startup snapshot
+/// (invariant #10).
+pub mod system_capabilities;
 pub mod system_metrics;
 /// Live WHEP preview egress provider (ADR-P006), gated behind `webrtc-native`:
 /// wires the native `multiview-webrtc` `WhepEgress` into the control plane so a

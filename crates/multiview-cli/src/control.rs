@@ -212,6 +212,14 @@ where
     // allowlist (or the legacy env var).
     let dial_policy = device_dial_policy(config.control.as_ref());
 
+    // Resolve the compositor adapter for the system-capabilities snapshot
+    // (ADR-W030): only a `gpu` build can read a wgpu adapter; other builds report
+    // the CPU-composite tier (compositor class `none`). A one-shot startup read.
+    #[cfg(feature = "gpu")]
+    let compositor_adapter = crate::capability_warn::read_compositor_adapter();
+    #[cfg(not(feature = "gpu"))]
+    let compositor_adapter: Option<multiview_hal::AdapterReport> = None;
+
     let mut state = AppState::new(
         publisher,
         commands,
@@ -264,6 +272,13 @@ where
     // a real ingest spawner backs them. The header consults this before
     // promising `live` (never over-claims).
     .with_live_sources(live_sources)
+    // The static system capability + licence snapshot (ADR-W030): the HAL probe
+    // + compiled features + resolved compositor adapter that
+    // `GET /api/v1/system/capabilities` serves. A one-shot snapshot, never an
+    // engine channel (invariant #10).
+    .with_capabilities(crate::system_capabilities::resolve_system_capabilities(
+        compositor_adapter.as_ref(),
+    ))
     // The `[discovery]` browse configuration: the operator-configured
     // zowietek-control service type (the vendor's type is unverified — only a
     // configured string is ever recognised) plus any extra DNS-SD types.

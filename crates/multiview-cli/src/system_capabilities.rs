@@ -9,9 +9,10 @@
 //! channel (invariant #10).
 
 use multiview_control::system::{
-    BuildInfo, CompositorCapability, CompositorClass, NdiAttribution, SystemCapabilities,
+    BackendCapability, BackendKind, BackendResolution, BuildInfo, CompositorCapability,
+    CompositorClass, CompositorDeviceType, NdiAttribution, PipelineStage, SystemCapabilities,
 };
-use multiview_hal::AdapterReport;
+use multiview_hal::{AdapterClass, AdapterReport, BackendKind as HalKind, Stage};
 
 /// Resolve the honest default-build capability surface from the HAL probe, the
 /// compiled features, and the resolved compositor `adapter` (as read by
@@ -22,23 +23,144 @@ use multiview_hal::AdapterReport;
 /// `available = false` and never panics at startup.
 #[must_use]
 pub fn resolve_system_capabilities(adapter: Option<&AdapterReport>) -> SystemCapabilities {
-    // NOTE (RED): the HAL backend-probe mapping lands in the follow-up commit;
-    // this first cut reports no backends so the failing test pins the required
-    // software-available surface (rule 18).
-    let _ = adapter;
     SystemCapabilities {
-        backends: Vec::new(),
-        compositor: CompositorCapability {
-            class: CompositorClass::None,
-            device_type: None,
-            driver: None,
-        },
+        backends: probe_backends(),
+        compositor: compositor_capability(adapter),
         build: BuildInfo::resolve(
             cfg!(feature = "gpl-codecs"),
             cfg!(feature = "ndi"),
             compiled_features(),
         ),
         ndi_attribution: cfg!(feature = "ndi").then(NdiAttribution::required),
+    }
+}
+
+/// The codec backends probed at the decode/encode stages (`software` is the
+/// universal fallback; the hardware kinds are `Absent` unless the relevant
+/// feature is compiled and a device is present).
+const CODEC_KINDS: &[HalKind] = &[
+    HalKind::Software,
+    HalKind::Cuda,
+    HalKind::Vaapi,
+    HalKind::Qsv,
+    HalKind::VideoToolbox,
+];
+
+/// Probe the codec backends at the decode + encode stages, plus the software
+/// composite path, into DTO rows.
+///
+/// Only the **software** composite backend is probed: `hal::probe` has no
+/// environment probe for the portable *hardware* compositor backends (it returns
+/// `BackendUnavailable`), so their real acceleration tier is reported
+/// authoritatively by [`SystemCapabilities::compositor`] (the resolved adapter)
+/// rather than as a misleading `available: false` row. Graceful: a `probe` error
+/// (feature off / no device) becomes `available: false`, never a panic.
+fn probe_backends() -> Vec<BackendCapability> {
+    let mut backends = Vec::new();
+    for &kind in CODEC_KINDS {
+        backends.push(one_backend(kind, Stage::Decode));
+    }
+    backends.push(one_backend(HalKind::Software, Stage::Composite));
+    for &kind in CODEC_KINDS {
+        backends.push(one_backend(kind, Stage::Encode));
+    }
+    backends
+}
+
+/// Probe one `(kind, stage)` and map the result onto a DTO row.
+fn one_backend(kind: HalKind, stage: Stage) -> BackendCapability {
+    match multiview_hal::probe::probe(kind, stage) {
+        Ok(cap) => BackendCapability {
+            kind: dto_backend_kind(kind),
+            stage: dto_stage(stage),
+            available: true,
+            max_resolution: Some(BackendResolution {
+                width: cap.max_resolution.width,
+                height: cap.max_resolution.height,
+            }),
+            // `decode_resize` is only meaningful on the decode stage.
+            decode_resize: match stage {
+                Stage::Decode => Some(cap.decode_resize),
+                _ => None,
+            },
+        },
+        Err(_) => BackendCapability {
+            kind: dto_backend_kind(kind),
+            stage: dto_stage(stage),
+            available: false,
+            max_resolution: None,
+            decode_resize: None,
+        },
+    }
+}
+
+/// Classify the resolved compositor `adapter` into the DTO tier + device/driver.
+fn compositor_capability(adapter: Option<&AdapterReport>) -> CompositorCapability {
+    let class = dto_compositor_class(AdapterClass::classify(adapter));
+    match adapter {
+        Some(report) => CompositorCapability {
+            class,
+            device_type: Some(dto_device_type(report.device_type)),
+            driver: Some(report.driver.clone()),
+        },
+        None => CompositorCapability {
+            class,
+            device_type: None,
+            driver: None,
+        },
+    }
+}
+
+/// Map the core backend kind onto the wire enum. `Software` and any future
+/// `#[non_exhaustive]` kind fold into the wildcard (the software row).
+fn dto_backend_kind(kind: HalKind) -> BackendKind {
+    match kind {
+        HalKind::Cuda => BackendKind::Cuda,
+        HalKind::VideoToolbox => BackendKind::VideoToolbox,
+        HalKind::Vaapi => BackendKind::Vaapi,
+        HalKind::Qsv => BackendKind::Qsv,
+        HalKind::Wgpu => BackendKind::Wgpu,
+        HalKind::Metal => BackendKind::Metal,
+        // `HalKind::Software` (and any future `#[non_exhaustive]` kind) falls back
+        // to the software row.
+        _ => BackendKind::Software,
+    }
+}
+
+/// Map the HAL stage onto the wire enum. `Composite` and any future stage fold
+/// into the wildcard.
+fn dto_stage(stage: Stage) -> PipelineStage {
+    match stage {
+        Stage::Decode => PipelineStage::Decode,
+        Stage::Encode => PipelineStage::Encode,
+        // `Stage::Composite` (and any future stage) maps to composite.
+        _ => PipelineStage::Composite,
+    }
+}
+
+/// Map the SA-0 adapter class onto the wire enum. `None` and any future class
+/// fold into the wildcard.
+fn dto_compositor_class(class: AdapterClass) -> CompositorClass {
+    match class {
+        AdapterClass::Gpu => CompositorClass::Gpu,
+        AdapterClass::LowConfidenceGpu => CompositorClass::LowConfidenceGpu,
+        AdapterClass::Software => CompositorClass::Software,
+        // `AdapterClass::None` (and any future class) maps to `none`.
+        _ => CompositorClass::None,
+    }
+}
+
+/// Map the adapter device type onto the wire enum. `Other` and any future type
+/// fold into the wildcard.
+fn dto_device_type(device_type: multiview_hal::AdapterDeviceType) -> CompositorDeviceType {
+    use multiview_hal::AdapterDeviceType;
+    match device_type {
+        AdapterDeviceType::DiscreteGpu => CompositorDeviceType::DiscreteGpu,
+        AdapterDeviceType::IntegratedGpu => CompositorDeviceType::IntegratedGpu,
+        AdapterDeviceType::VirtualGpu => CompositorDeviceType::VirtualGpu,
+        AdapterDeviceType::Cpu => CompositorDeviceType::Cpu,
+        // `AdapterDeviceType::Other` (and any future type) maps to `other`.
+        _ => CompositorDeviceType::Other,
     }
 }
 

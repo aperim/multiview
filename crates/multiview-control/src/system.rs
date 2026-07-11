@@ -150,7 +150,7 @@ pub struct CompositorCapability {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[non_exhaustive]
 pub enum EffectiveLicense {
-    /// The default build: FFmpeg linked LGPL, no x264/x265, redistributable.
+    /// The default build: `FFmpeg` linked LGPL, no x264/x265, redistributable.
     #[serde(rename = "LGPL-clean")]
     LgplClean,
     /// `gpl-codecs` is compiled (x264/x265) → the whole product is GPL.
@@ -188,12 +188,17 @@ impl BuildInfo {
     /// GPL; otherwise LGPL-clean. Every shippable build is redistributable.
     #[must_use]
     pub fn resolve(gpl_codecs: bool, ndi: bool, features: Vec<String>) -> Self {
-        // NOTE (RED): the licence mapping is completed in the follow-up commit;
-        // this first cut always reports the default profile so the failing
-        // per-feature-combo test pins the exact required mapping (rule 18).
-        let _ = gpl_codecs;
+        // `gpl-codecs` (x264/x265) relicenses the whole product GPL; otherwise
+        // the default LGPL-clean profile stands (AGENTS.md §G / ADR-0012). Every
+        // shippable build is redistributable — there is no `--enable-nonfree`
+        // Cargo feature, and NDI is runtime-loaded (never linked/vendored).
+        let effective_license = if gpl_codecs {
+            EffectiveLicense::Gpl
+        } else {
+            EffectiveLicense::LgplClean
+        };
         Self {
-            effective_license: EffectiveLicense::LgplClean,
+            effective_license,
             redistributable: true,
             features,
             ndi,
