@@ -11,6 +11,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 
+/// The largest concurrent-request cap the runtime can honour: the
+/// `tokio::sync::Semaphore` `MAX_PERMITS` ceiling (`usize::MAX >> 3`). A configured
+/// value above this cannot be installed, so [`ManagementLimits::validate`] rejects
+/// it **fail-closed** at config load rather than let the runtime silently clamp it
+/// to a different effective cap. `multiview-control` carries a static assertion that
+/// this equals `tokio::sync::Semaphore::MAX_PERMITS`, so the two can never drift.
+pub const MAX_CONCURRENT_REQUESTS_CEILING: usize = usize::MAX >> 3;
+
 /// Default concurrent in-flight request cap: generous for a handful of operators
 /// plus the SPA and its realtime stream, while bounding a request flood.
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 256;
@@ -134,6 +142,13 @@ impl ManagementLimits {
                  request)"
                     .to_owned(),
             ));
+        }
+        if self.max_concurrent_requests > MAX_CONCURRENT_REQUESTS_CEILING {
+            return Err(ConfigError::Validation(format!(
+                "control.limits.max_concurrent_requests must be <= \
+                 {MAX_CONCURRENT_REQUESTS_CEILING} (the runtime Semaphore ceiling); a larger \
+                 value cannot be installed and must not be silently clamped to a different cap"
+            )));
         }
         self.per_ip.validate("per_ip")?;
         self.per_api_key.validate("per_api_key")?;

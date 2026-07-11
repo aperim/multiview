@@ -1,37 +1,51 @@
-//! Management-plane rate limiting — the keyed token-bucket that backs the SEC-14
-//! control-plane `DoS` floor.
+//! Management-plane rate limiting — the keyed, lock-free rate limiter that backs
+//! the SEC-14 control-plane `DoS` floor.
 //!
 //! This module is the **pure, clock-injected** core: a [`RateLimiter`] that
-//! answers "may this key make one more request right now?" with a token-bucket
-//! [`Decision`]. The axum middleware that keys it on the peer IP (pre-auth) and
-//! the API-key id (post-auth), and the global concurrency cap, live alongside it
-//! and are wired in [`crate::router`] — but the accounting here has no socket, no
-//! `AppState`, and no wall clock, so it is exhaustively testable offline (the same
-//! seam pattern the rest of this crate uses for clock-driven logic).
+//! answers "may this key make one more request right now?" with a [`Decision`].
+//! The axum middleware that keys it on the peer IP (pre-auth) and the API-key id
+//! (post-auth), and the global concurrency cap, live alongside it and are wired in
+//! [`crate::router`] — but the accounting here has no socket, no `AppState`, and no
+//! wall clock, so it is exhaustively testable offline (the same seam pattern the
+//! rest of this crate uses for clock-driven logic).
 //!
 //! ## Bounded by construction — the `DoS`-resistance property
 //!
 //! A rate limiter that grows a per-key map is itself a memory-exhaustion vector:
 //! an attacker rotating source addresses inflates the map without bound. This
-//! limiter instead hashes every key into a **fixed-size table** of buckets
+//! limiter instead hashes every key into a **fixed-size table** of cells
 //! ([`RateLimiter::with_hasher`] allocates the cells once and never grows), so
 //! memory is `O(cells)` regardless of how many distinct keys are ever seen. Two
-//! keys that hash to the same cell **share** a bucket — which can only make
+//! keys that hash to the same cell **share** a limiter — which can only make
 //! limiting *stricter* for that pair, never looser, so the floor is preserved.
 //! The hasher is seeded per process (a random [`RandomState`] in production), so
 //! an attacker cannot predict or force a collision to target a specific victim.
+//!
+//! ## Lock-free hot path
+//!
+//! Each cell is a single [`AtomicU64`] holding a **theoretical arrival time**
+//! (`tat`) — the virtual-scheduling (GCRA) formulation of a token bucket, its exact
+//! dual: a `tat` running ahead of `now` by up to the burst tolerance `tau` is a
+//! bucket that many requests below full. Because the whole per-cell state is one
+//! word, [`RateLimiter::check`] is a wait-free load plus a single compare-and-swap
+//! — never a mutex. A single-key flood (which concentrates on one cell) serialises
+//! on that one atomic word for a few nanoseconds and can **never park a Tokio
+//! worker holding a lock**, which a blocking `std::sync::Mutex` on the async hot
+//! path could.
 //!
 //! ## Timekeeping
 //!
 //! [`RateLimiter::check`] takes the current time as an explicit monotonic
 //! nanosecond count, so tests drive it deterministically; the middleware supplies
-//! it from a monotonic clock. Accounting is integer-only (nano-token fixed point)
-//! — never float — so it neither drifts nor panics on overflow (all arithmetic is
-//! saturating).
+//! it from a monotonic clock. Accounting is integer-only virtual time — never float
+//! — and every operation saturates, so a frozen, jumped, wrapped, or **regressed**
+//! clock can neither drift, panic, nor grant a bonus (a rewound clock is absorbed
+//! by `max(tat, now)`, so it never double-refills).
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,16 +59,13 @@ use tokio::sync::Semaphore;
 use crate::auth::ApiKeyStore;
 use crate::problem::Problem;
 
-/// Nano-tokens per whole token. Chosen equal to nanoseconds-per-second so that
-/// the refill rate in nano-tokens **per nanosecond** is exactly the configured
-/// tokens-per-second — the identity that keeps the bucket math integer-only.
-const TOKEN_SCALE: u64 = 1_000_000_000;
+/// Nanoseconds per second — the fixed-point base for the virtual-scheduling clock.
+/// The per-request increment (`increment_ns`) is `NANOS_PER_SEC / refill_per_sec`,
+/// i.e. the emission interval `T` of one request at the configured rate.
+const NANOS_PER_SEC: u64 = 1_000_000_000;
 
-/// The cost of a single request, in nano-tokens (one whole token).
-const REQUEST_COST: u64 = TOKEN_SCALE;
-
-/// Token-bucket parameters: a burst `capacity` (max tokens held) refilled at
-/// `refill_per_sec` tokens per second.
+/// Rate parameters: a burst `capacity` (max requests admitted at once) replenished
+/// at `refill_per_sec` requests per second.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Rate {
     /// The maximum number of requests permitted in an instantaneous burst.
@@ -63,48 +74,48 @@ pub(crate) struct Rate {
     pub refill_per_sec: u32,
 }
 
-/// The verdict for one request against a key's bucket.
+/// The verdict for one request against a key's cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Decision {
-    /// The request is within budget; a token has been spent.
+    /// The request is within budget; the cell has been advanced.
     Allowed,
-    /// The request exceeds the budget. `retry_after` is the time until the
-    /// bucket has accrued enough for one request — surfaced verbatim in the
-    /// `Retry-After` response header.
+    /// The request exceeds the budget. `retry_after` is the time until the cell has
+    /// freed enough for one request — surfaced verbatim in the `Retry-After`
+    /// response header.
     Limited {
         /// How long the caller should wait before retrying.
         retry_after: Duration,
     },
 }
 
-/// One cell of the fixed table: a token bucket's current fill and the instant it
-/// was last updated.
-#[derive(Debug)]
-struct Bucket {
-    /// Tokens currently available, in nano-tokens (see [`TOKEN_SCALE`]).
-    tokens: u64,
-    /// The monotonic nanosecond timestamp of the last [`RateLimiter::check`].
-    last_ns: u64,
-}
-
-/// A bounded, fixed-size, sharded token-bucket rate limiter keyed by an arbitrary
+/// A bounded, fixed-size, sharded, **lock-free** rate limiter keyed by an arbitrary
 /// hashable key.
 ///
-/// See the module docs for the bounded-memory / collision / seeding rationale.
+/// Each cell is one [`AtomicU64`] holding a theoretical arrival time (`tat`) — the
+/// virtual-scheduling (GCRA) dual of a token bucket. See the module docs for the
+/// bounded-memory / collision / seeding / lock-free rationale.
 pub(crate) struct RateLimiter<S = RandomState> {
-    /// The fixed table of buckets. Allocated once; never grows.
-    cells: Box<[Mutex<Bucket>]>,
+    /// The fixed table of cells, each a `tat` timestamp in ns. Allocated once; never
+    /// grows.
+    cells: Box<[AtomicU64]>,
     /// The per-process-seeded hasher that maps a key to a cell.
     hasher: S,
-    /// The burst ceiling, in nano-tokens (`capacity * TOKEN_SCALE`).
-    capacity_nano: u64,
-    /// The refill rate in tokens/second (also nano-tokens per nanosecond),
-    /// clamped to at least 1 so accounting never divides by zero.
-    refill_per_sec: u64,
+    /// The emission interval `T`: nanoseconds of virtual time one request consumes
+    /// (`NANOS_PER_SEC / refill_per_sec`, rounded UP so the effective rate never
+    /// exceeds the configured one). At least 1.
+    increment_ns: u64,
+    /// The burst tolerance `tau = capacity * T`: how far `tat` may run ahead of
+    /// `now` while still admitting — the instantaneous burst.
+    tau_ns: u64,
+    /// The largest `now` the limiter accepts before clamping, so `tat` (bounded by
+    /// `now + tau + T`) always has headroom below [`u64::MAX`] and the accounting
+    /// can never saturate. ~584 years of ns — unreachable by a real monotonic clock,
+    /// this only makes synthetic/adversarial timestamps total.
+    now_ceil: u64,
 }
 
 impl RateLimiter<RandomState> {
-    /// Build a limiter with `cells` buckets and the given [`Rate`], seeded with a
+    /// Build a limiter with `cells` cells and the given [`Rate`], seeded with a
     /// per-process-random hasher so cell placement is not attacker-predictable.
     ///
     /// `cells` is clamped to at least 1.
@@ -117,33 +128,37 @@ impl<S: BuildHasher> RateLimiter<S> {
     /// Build a limiter with an explicit [`BuildHasher`] — the seam tests use to
     /// make cell placement deterministic.
     ///
-    /// `cells` is clamped to at least 1 and `refill_per_sec` to at least 1 (a
-    /// zero rate would never replenish; config validation rejects it upstream,
-    /// this clamp keeps the accounting total).
+    /// `cells` is clamped to at least 1 and `refill_per_sec` to at least 1 (a zero
+    /// rate would never replenish; config validation rejects it upstream, this clamp
+    /// keeps the accounting total).
     pub(crate) fn with_hasher(cells: usize, rate: Rate, hasher: S) -> Self {
         let n = cells.max(1);
-        let capacity_nano = u64::from(rate.capacity).saturating_mul(TOKEN_SCALE);
+        // Emission interval T = ns per request at the configured rate, rounded UP so
+        // the effective steady-state rate is never faster than configured (a DoS
+        // floor errs strict). refill is clamped to >= 1.
+        let increment_ns = NANOS_PER_SEC.div_ceil(u64::from(rate.refill_per_sec.max(1)));
+        // Burst tolerance tau = capacity * T (saturating: an absurd capacity clamps
+        // rather than overflows; config bounds it upstream).
+        let tau_ns = increment_ns.saturating_mul(u64::from(rate.capacity));
+        // Keep tat (<= now + tau + one increment) below u64::MAX for any accepted now.
+        let now_ceil = u64::MAX.saturating_sub(tau_ns.saturating_add(increment_ns));
         let cells = (0..n)
-            .map(|_| {
-                Mutex::new(Bucket {
-                    // Start full: a fresh key gets its whole burst immediately.
-                    tokens: capacity_nano,
-                    last_ns: 0,
-                })
-            })
+            // A fresh cell is `tat = 0` (far in the virtual past ⇒ a full burst).
+            .map(|_| AtomicU64::new(0))
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
             cells,
             hasher,
-            capacity_nano,
-            refill_per_sec: u64::from(rate.refill_per_sec.max(1)),
+            increment_ns,
+            tau_ns,
+            now_ceil,
         }
     }
 
-    /// The number of buckets in the fixed table (never changes after
-    /// construction — the bounded-memory guarantee). Test-only: the accessor
-    /// exists to pin that the table does not grow.
+    /// The number of cells in the fixed table (never changes after construction —
+    /// the bounded-memory guarantee). Test-only: the accessor exists to pin that the
+    /// table does not grow.
     #[cfg(test)]
     pub(crate) fn cell_count(&self) -> usize {
         self.cells.len()
@@ -161,50 +176,63 @@ impl<S: BuildHasher> RateLimiter<S> {
     /// Account for one request from `key` at monotonic time `now_ns`, and report
     /// whether it is [`Decision::Allowed`] or [`Decision::Limited`].
     ///
-    /// Integer nano-token accounting: the bucket accrues `refill_per_sec`
-    /// nano-tokens per nanosecond (capped at the burst ceiling), and one request
-    /// costs one whole token ([`REQUEST_COST`]). Every operation saturates, so a
-    /// frozen, jumped, or wrapped clock can never panic the limiter.
+    /// Virtual-scheduling (GCRA) accounting: the cell's `tat` is the earliest
+    /// virtual time at which the next request may arrive; a request is admitted when
+    /// advancing `tat` by one increment keeps it within `tau` of `now`. Lock-free —
+    /// a wait-free load plus a single CAS; a rejected request never advances `tat`.
+    /// Every operation saturates and `now` is clamped, so a frozen, jumped, wrapped,
+    /// or regressed clock can neither panic nor grant a bonus request.
     pub(crate) fn check<K: Hash + ?Sized>(&self, key: &K, now_ns: u64) -> Decision {
         let idx = self.cell_of(key);
         // `idx < cells.len()` by construction; fail **open** (never limit) on the
-        // impossible out-of-range rather than panic — a DoS floor must not become
-        // a self-inflicted outage on an internal accounting slip.
+        // impossible out-of-range rather than panic — a DoS floor must not become a
+        // self-inflicted outage on an internal accounting slip.
         let Some(cell) = self.cells.get(idx) else {
             return Decision::Allowed;
         };
-        // A poisoned cell holds only two always-valid `u64`s; recover its inner
-        // value rather than propagate a panic through the limiter.
-        let mut bucket = match cell.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-
-        // Fold the time since the last update into the bucket (clamped to the
-        // burst ceiling), then spend or refuse one token.
-        let elapsed = now_ns.saturating_sub(bucket.last_ns);
-        let refill = elapsed.saturating_mul(self.refill_per_sec);
-        let available = bucket.tokens.saturating_add(refill).min(self.capacity_nano);
-        bucket.last_ns = now_ns;
-
-        if available >= REQUEST_COST {
-            bucket.tokens = available - REQUEST_COST;
-            Decision::Allowed
-        } else {
-            bucket.tokens = available;
-            // Time to accrue the shortfall: `deficit` nano-tokens at
-            // `refill_per_sec` nano-tokens per nanosecond, rounded up. The rate is
-            // clamped to at least 1 at construction, so this never divides by zero.
-            let deficit = REQUEST_COST - available;
-            let retry_after_ns = deficit.div_ceil(self.refill_per_sec);
-            Decision::Limited {
-                retry_after: Duration::from_nanos(retry_after_ns),
+        // Clamp `now` so `tat` keeps headroom below u64::MAX; only synthetic or
+        // adversarial timestamps ever reach the ceiling (a real monotonic ns clock
+        // starts near 0 and never approaches ~584 years).
+        let now = now_ns.min(self.now_ceil);
+        let mut tat = cell.load(Ordering::Relaxed);
+        loop {
+            // The effective arrival time is max(stored tat, now): a cell idle past
+            // its tat resets to `now` (a full burst), and — crucially — a REGRESSED
+            // clock can never rewind below the recorded tat, so a wobble grants no
+            // bonus request (F3).
+            let base = tat.max(now);
+            // How far the post-admission tat would sit ahead of `now`, computed as
+            // (base - now) + T to sidestep any `now + tau` overflow near u64::MAX.
+            let excess = base.saturating_sub(now).saturating_add(self.increment_ns);
+            if excess <= self.tau_ns {
+                // Within burst: advance tat by one increment, committed with a CAS so
+                // a concurrent admit on the same cell can never be lost (the exact
+                // accounting a lock would give, without the lock).
+                let new_tat = base.saturating_add(self.increment_ns);
+                match cell.compare_exchange_weak(
+                    tat,
+                    new_tat,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return Decision::Allowed,
+                    // Another thread advanced this cell; re-read and retry.
+                    Err(observed) => tat = observed,
+                }
+            } else {
+                // Over burst: refuse WITHOUT advancing tat (a rejected request never
+                // consumes virtual time). The wait until one increment frees is
+                // `excess - tau` (> 0 here, so saturating_sub cannot underflow).
+                let retry_after_ns = excess.saturating_sub(self.tau_ns);
+                return Decision::Limited {
+                    retry_after: Duration::from_nanos(retry_after_ns),
+                };
             }
         }
     }
 }
 
-/// The fixed number of token-bucket cells per keyed limiter. `O(1)` memory that
+/// The fixed number of rate-limiter cells per keyed limiter. `O(1)` memory that
 /// never grows regardless of how many distinct IPs / keys are ever seen — the
 /// bounded-memory property that keeps the `DoS` floor from becoming its own
 /// memory-exhaustion vector. Sized generously so a hash collision between the
@@ -216,6 +244,16 @@ const RATE_LIMIT_CELLS: usize = 4096;
 /// completes), so a short fixed hint is offered.
 const CONCURRENCY_RETRY_AFTER: Duration = Duration::from_secs(1);
 
+// F4: the config-side ceiling MUST equal the runtime `Semaphore::MAX_PERMITS`, so
+// `ManagementLimits::validate` rejects exactly the concurrency caps `Semaphore::new`
+// would reject (fail-closed at config load) rather than let the runtime silently
+// clamp to a different effective cap. This static assertion fails the build if a
+// tokio upgrade ever moves the ceiling out from under the config crate.
+const _: () = assert!(
+    multiview_config::limits::MAX_CONCURRENT_REQUESTS_CEILING == Semaphore::MAX_PERMITS,
+    "config MAX_CONCURRENT_REQUESTS_CEILING must track tokio Semaphore::MAX_PERMITS"
+);
+
 /// The runtime management-plane limiters (SEC-14), built once from
 /// [`ManagementLimits`] and shared behind an `Arc` by the middleware.
 ///
@@ -225,9 +263,9 @@ const CONCURRENCY_RETRY_AFTER: Duration = Duration::from_secs(1);
 pub(crate) struct Limiters {
     /// The concurrent in-flight request cap ([`None`] ⇒ limits disabled).
     concurrency: Option<Arc<Semaphore>>,
-    /// The per-source-IP token bucket, applied pre-auth.
+    /// The per-source-IP rate limiter, applied pre-auth.
     per_ip: Option<RateLimiter>,
-    /// The per-API-key token bucket, applied post-auth.
+    /// The per-API-key rate limiter, applied post-auth.
     per_api_key: Option<RateLimiter>,
     /// The monotonic origin the middleware measures `now_ns` against.
     origin: Instant,
@@ -242,8 +280,11 @@ impl Limiters {
         if !cfg.enabled {
             return Self::disabled();
         }
-        // Clamp the permit count to tokio's ceiling so an absurd config value can
-        // never panic `Semaphore::new`.
+        // `validate()` rejects `max_concurrent_requests > MAX_PERMITS` at config
+        // load (F4), so this `.min` is unreachable after validation; it stays purely
+        // as a belt-and-suspenders guard so an unvalidated (e.g. test-constructed)
+        // config can never panic `Semaphore::new` — it does NOT silently reshape a
+        // real operator's configured cap, which validation has already bounded.
         let permits = cfg.max_concurrent_requests.min(Semaphore::MAX_PERMITS);
         Self {
             concurrency: Some(Arc::new(Semaphore::new(permits))),
