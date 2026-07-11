@@ -55,6 +55,130 @@ pub const RELEASE_FEATURE_SPECS: &[&str] = &[
     "linux-vaapi,web,ntp,gpl-codecs",
 ];
 
+/// How a [`ShippingSource`] file names its shipped `--features` strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShippingSourceKind {
+    /// A GitHub Actions workflow — the build matrix's `features:` scalars.
+    GithubWorkflow,
+    /// A Dockerfile — the `ARG CARGO_FEATURES=` default(s).
+    Dockerfile,
+}
+
+/// A canonical repository source that pins a shipped artifact's cargo
+/// `--features` string. The drift guard parses each so `RELEASE_FEATURE_SPECS`
+/// cannot silently fall behind what actually ships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShippingSource {
+    /// Repo-root-relative path to the source file.
+    pub path: &'static str,
+    /// How to extract the `--features` strings from it.
+    pub kind: ShippingSourceKind,
+}
+
+/// Every canonical source that defines a shipped artifact's feature set. The
+/// drift guard (see the `release_features_drift` test) parses each and asserts
+/// `RELEASE_FEATURE_SPECS` covers every resulting combo, so adding a shipped
+/// preset/combo to these files without listing it here fails CI.
+pub const SHIPPING_SOURCES: &[ShippingSource] = &[
+    // Release binaries — release.yml build matrix (ffmpeg,linux-vaapi / ffmpeg,apple).
+    ShippingSource {
+        path: ".github/workflows/release.yml",
+        kind: ShippingSourceKind::GithubWorkflow,
+    },
+    // GHCR container images — docker.yml build matrix, threaded into the
+    // CARGO_FEATURES build-arg (ffmpeg,linux-vaapi,web / ffmpeg,nvidia,web).
+    ShippingSource {
+        path: ".github/workflows/docker.yml",
+        kind: ShippingSourceKind::GithubWorkflow,
+    },
+    // Dockerfile CARGO_FEATURES defaults (used for a manual `docker build`
+    // without the docker.yml build-arg override).
+    ShippingSource {
+        path: "deploy/Dockerfile",
+        kind: ShippingSourceKind::Dockerfile,
+    },
+    ShippingSource {
+        path: "deploy/Dockerfile.nvidia",
+        kind: ShippingSourceKind::Dockerfile,
+    },
+];
+
+/// Extract the shipped `--features` strings declared in one source file's text,
+/// dispatching on its [`ShippingSourceKind`].
+#[must_use]
+pub fn extract_shipped_specs(kind: ShippingSourceKind, text: &str) -> Vec<String> {
+    match kind {
+        ShippingSourceKind::GithubWorkflow => feature_specs_in_workflow(text),
+        ShippingSourceKind::Dockerfile => cargo_features_in_dockerfile(text),
+    }
+}
+
+/// Extract the build-matrix `features:` scalars from a GitHub Actions workflow
+/// (e.g. `features: "ffmpeg,nvidia,web"`). Surrounding quotes are stripped;
+/// templated values (`${{ … }}`) and non-`features:` lines (e.g. the
+/// `--features "${{ matrix.features }}"` build step) are skipped.
+#[must_use]
+pub fn feature_specs_in_workflow(workflow_yaml: &str) -> Vec<String> {
+    workflow_yaml
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("features:")?;
+            let spec = rest.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+            if spec.is_empty() || spec.contains("${{") {
+                None
+            } else {
+                Some(spec.to_owned())
+            }
+        })
+        .collect()
+}
+
+/// Extract the `ARG CARGO_FEATURES=<value>` default(s) from a Dockerfile's text.
+/// A `--build-arg CARGO_FEATURES=…` in a comment is not an `ARG` line, so only
+/// the real default is captured; templated values are skipped.
+#[must_use]
+pub fn cargo_features_in_dockerfile(dockerfile: &str) -> Vec<String> {
+    dockerfile
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("ARG CARGO_FEATURES=")?;
+            let spec = rest.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+            if spec.is_empty() || spec.contains("${") {
+                None
+            } else {
+                Some(spec.to_owned())
+            }
+        })
+        .collect()
+}
+
+/// The set of features a `--features` spec names (comma-split, trimmed, deduped),
+/// so coverage comparison is order- and duplicate-insensitive.
+fn feature_set(spec: &str) -> BTreeSet<String> {
+    spec.split(',')
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(|f| f.to_owned())
+        .collect()
+}
+
+/// Every `derived` shipped spec whose feature SET equals no `covered` entry's
+/// (i.e. is not checked by the guard), deduplicated in input order. Empty ⇒
+/// every shipped combo is covered. Order-insensitive: `ffmpeg,linux-vaapi` ≡
+/// `linux-vaapi,ffmpeg`.
+#[must_use]
+pub fn uncovered_specs(derived: &[String], covered: &[&str]) -> Vec<String> {
+    let covered_sets: Vec<BTreeSet<String>> = covered.iter().map(|s| feature_set(s)).collect();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut uncovered = Vec::new();
+    for spec in derived {
+        if !covered_sets.contains(&feature_set(spec)) && seen.insert(spec.clone()) {
+            uncovered.push(spec.clone());
+        }
+    }
+    uncovered
+}
+
 /// Does `feature` name a test-only Cargo seam (the `_test-seams` family) that
 /// must never be enabled in a shipped release build?
 ///
@@ -493,6 +617,105 @@ beta v0.1.0 (/w/beta)|_test-seams,default (*)";
             assert!(
                 RELEASE_FEATURE_SPECS.contains(&preset),
                 "release specs must check the `{preset}` umbrella preset"
+            );
+        }
+    }
+
+    #[test]
+    fn feature_specs_in_workflow_extracts_matrix_features() {
+        // `features:` is its own matrix line (the `-` is on the entry's first
+        // line above). release.yml leaves it unquoted; docker.yml quotes it; the
+        // build step's `--features "${{ matrix.features }}"` must NOT be picked up.
+        let yaml = r#"
+        include:
+          - target: x86_64
+            features: ffmpeg,linux-vaapi
+          - variant: nvidia
+            features: "ffmpeg,nvidia,web"
+      run: cargo build --features "${{ matrix.features }}"
+            features: "${{ matrix.templated }}"
+"#;
+        assert_eq!(
+            feature_specs_in_workflow(yaml),
+            vec![
+                "ffmpeg,linux-vaapi".to_owned(),
+                "ffmpeg,nvidia,web".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn cargo_features_in_dockerfile_extracts_arg_default_only() {
+        let dockerfile = r#"
+        # example: --build-arg CARGO_FEATURES=ffmpeg,linux-vaapi,web,ntp,gpl-codecs
+        ARG CARGO_FEATURES=ffmpeg,linux-vaapi,web,ntp
+        RUN cargo build --features "${CARGO_FEATURES}"
+"#;
+        assert_eq!(
+            cargo_features_in_dockerfile(dockerfile),
+            vec!["ffmpeg,linux-vaapi,web,ntp".to_owned()]
+        );
+    }
+
+    #[test]
+    fn extract_shipped_specs_dispatches_on_kind() {
+        assert_eq!(
+            extract_shipped_specs(ShippingSourceKind::GithubWorkflow, "features: ffmpeg,apple"),
+            vec!["ffmpeg,apple".to_owned()]
+        );
+        assert_eq!(
+            extract_shipped_specs(ShippingSourceKind::Dockerfile, "ARG CARGO_FEATURES=ffmpeg,nvidia,web"),
+            vec!["ffmpeg,nvidia,web".to_owned()]
+        );
+    }
+
+    #[test]
+    fn uncovered_specs_is_empty_when_every_combo_is_covered_order_insensitively() {
+        // `linux-vaapi,ffmpeg` (reordered) is covered by `ffmpeg,linux-vaapi`.
+        let derived = vec!["linux-vaapi,ffmpeg".to_owned(), "ffmpeg,apple".to_owned()];
+        let covered = ["ffmpeg,linux-vaapi", "ffmpeg,apple", "full"];
+        assert!(uncovered_specs(&derived, &covered).is_empty());
+    }
+
+    #[test]
+    fn uncovered_specs_flags_a_missing_shipped_combo() {
+        let derived = vec![
+            "ffmpeg,linux-vaapi".to_owned(),
+            "ffmpeg,nvidia,web".to_owned(),
+        ];
+        // `ffmpeg,nvidia,web` is NOT covered by any entry.
+        let covered = ["ffmpeg,linux-vaapi", "full"];
+        assert_eq!(
+            uncovered_specs(&derived, &covered),
+            vec!["ffmpeg,nvidia,web".to_owned()]
+        );
+    }
+
+    #[test]
+    fn uncovered_specs_dedupes_repeated_missing_combos() {
+        let derived = vec![
+            "ffmpeg,nvidia,web".to_owned(),
+            "ffmpeg,nvidia,web".to_owned(),
+        ];
+        let covered = ["full"];
+        assert_eq!(
+            uncovered_specs(&derived, &covered),
+            vec!["ffmpeg,nvidia,web".to_owned()]
+        );
+    }
+
+    #[test]
+    fn shipping_sources_lists_the_canonical_files() {
+        let paths: Vec<&str> = SHIPPING_SOURCES.iter().map(|s| s.path).collect();
+        for expected in [
+            ".github/workflows/release.yml",
+            ".github/workflows/docker.yml",
+            "deploy/Dockerfile",
+            "deploy/Dockerfile.nvidia",
+        ] {
+            assert!(
+                paths.contains(&expected),
+                "SHIPPING_SOURCES must parse `{expected}`"
             );
         }
     }
