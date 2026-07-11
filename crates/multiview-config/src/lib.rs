@@ -965,6 +965,16 @@ impl MultiviewConfig {
             }
         };
 
+        // `CoreCell` carries only what the compositor drive renders today:
+        // geometry (x/y/w/h), z-order, fit, the `source.input_id` binding, and
+        // per-tile opacity. The remaining schema `Cell` fields — `align`,
+        // `corner_radius`, `scaler`, `visible`, `static_friendly`, `border`, and
+        // `qos` — are intentionally NOT mapped here: ADR-W019 carries them in the
+        // stored/working config document (persisted, exported, round-tripped) and
+        // the `apply-layout` API reports them as `carried_only`, but compositing
+        // them is drive work not yet built. They are BLOCKED-not-dead
+        // (planned-but-unwired), not rule-6 dead fields — do not delete them to
+        // "tidy" this mapper; wire the compositor instead.
         Ok(CoreCell {
             x,
             y,

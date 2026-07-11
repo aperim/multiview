@@ -954,6 +954,14 @@ pub struct CellSource {
 
 /// One cell: placement (by grid `area` or absolute `rect`), fit/z/styling, and
 /// a source binding.
+///
+/// The cosmetic / `QoS` fields (`align`, `corner_radius`, `scaler`, `visible`,
+/// `static_friendly`, `border`, `qos`) are **carried but not yet rendered**
+/// (ADR-W019): the config document persists/exports/round-trips them and the
+/// `apply-layout` API reports them as `carried_only`, but the compositor drive
+/// does not composite them yet, so the config→core cell mapper intentionally
+/// omits them. They are planned-but-unwired, not dead — keep them until the
+/// compositor renders them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Cell {
