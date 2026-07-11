@@ -343,12 +343,26 @@ impl SapAnnouncer {
             .map_err(|e| Error::Ingest(format!("sap send {dest}: {e}")))
     }
 
-    /// Announce every session once immediately, then re-announce on the jittered
-    /// [`AnnounceSchedule`] cadence forever (the supervisor aborts the task on
-    /// shutdown and calls [`send_deletions`](Self::send_deletions)). An
-    /// independent timer that never paces the output clock (inv #1). A per-send
-    /// error is logged, not fatal — the next cycle retries.
+    /// Apply the configured IPv6 multicast egress, then announce every session
+    /// once immediately and re-announce on the jittered [`AnnounceSchedule`]
+    /// cadence forever (the supervisor aborts the task on shutdown and calls
+    /// [`send_deletions`](Self::send_deletions)). An independent timer that never
+    /// paces the output clock (inv #1). A per-send error is logged, not fatal — the
+    /// next cycle retries. If applying the configured egress interface fails (a
+    /// misconfigured index), the task ends with a warning rather than announcing on
+    /// the wrong / OS-default egress.
     pub async fn run(self, sessions: Vec<AnnouncedSession>, schedule: AnnounceSchedule) {
+        // Select the IPv6 multicast egress interface (IPV6_MULTICAST_IF + hop-limit)
+        // before announcing (panel S2): F9 wired `configure_multicast_egress` but
+        // nothing on the run path called it, so a configured interface was silently
+        // ignored and egress fell to the OS default. Unspecified (the default until
+        // #103 supplies the index) configures cleanly; a misconfigured interface
+        // ends the task rather than announcing on the wrong egress — the supervisor
+        // (#103) restarts or the operator fixes the config.
+        if let Err(e) = self.configure_multicast_egress() {
+            tracing::warn!(error = %e, "sap announcer egress config failed; not announcing");
+            return;
+        }
         let mut rng = seed(&sessions);
         loop {
             for s in &sessions {
