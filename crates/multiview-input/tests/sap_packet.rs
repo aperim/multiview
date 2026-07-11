@@ -222,6 +222,72 @@ fn rejects_corrupt_compressed_stream() {
     assert_eq!(SapPacket::parse(&bytes), Err(SapError::DecompressFailed));
 }
 
+/// Frame a `C=1` (compressed) announcement whose body is `zlib(raw)`, using
+/// **real** zlib (`miniz_oxide` deflate — the deflate side of the same library
+/// the codec inflates with). Choosing `raw` chooses the *decompressed* size
+/// exactly, so a test can craft a body that lands right at, one byte past, or
+/// far past the [`MAX_SDP_PAYLOAD`] inflate cap.
+fn c1_datagram(hash: u16, raw: &[u8]) -> Vec<u8> {
+    let mut bytes = v4_header(0x21, 0x00, hash, Ipv4Addr::new(192, 0, 2, 1)); // C=1
+    bytes.extend_from_slice(&miniz_oxide::deflate::compress_to_vec_zlib(raw, 6));
+    bytes
+}
+
+#[test]
+fn rejects_a_bomb_whose_decompressed_size_dwarfs_the_cap() {
+    // A *verified*, not merely asserted, bomb-safety proof (rule 23/25). This is a
+    // valid zlib stream whose decompressed form is 128x the cap (= 8 MiB) — defined
+    // as a multiple of the cap so it can never silently drift below it.
+    // `decompress_to_vec_zlib_with_limit` bounds the output buffer AT the cap and
+    // returns `HasMoreOutput` the instant inflate would write past it, so a
+    // `DecompressedTooLarge` here is a direct witness that the parser halted at
+    // 64 KiB and NEVER materialized the 8 MiB: peak allocation is bounded by the
+    // cap, by construction, on an adversarial input that dwarfs it. Complements
+    // `rejects_compression_bomb_over_the_cap` (a real *external*-zlib 195 KiB bomb).
+    const NOMINAL: usize = 128 * MAX_SDP_PAYLOAD; // 8 MiB
+    let datagram = c1_datagram(0x0005, &vec![0u8; NOMINAL]);
+    // The datagram itself is tiny: a few KiB of zlib carries the 8 MiB bomb — the
+    // definition of a decompression bomb (a small input, an unbounded expansion).
+    assert!(
+        datagram.len() < MAX_SDP_PAYLOAD,
+        "the compressed bomb datagram ({} bytes) is far smaller than its 8 MiB payload",
+        datagram.len()
+    );
+    assert_eq!(
+        SapPacket::parse(&datagram),
+        Err(SapError::DecompressedTooLarge {
+            max: MAX_SDP_PAYLOAD
+        }),
+        "an 8 MiB-nominal C=1 bomb is rejected AT the cap, never inflated in full"
+    );
+}
+
+#[test]
+fn inflates_a_body_exactly_at_the_cap_and_rejects_one_byte_over() {
+    // The cap is an EXACT threshold, not approximate: a body inflating to exactly
+    // MAX_SDP_PAYLOAD is accepted (legitimate near-cap Dante/VLC announcements must
+    // still parse — the guard must not be over-tight), while MAX_SDP_PAYLOAD + 1 is
+    // rejected. Both bodies begin `v=0`, so the whole inflated body is the
+    // (typeless) payload.
+    let mut at_cap = b"v=0\r\n".to_vec();
+    at_cap.resize(MAX_SDP_PAYLOAD, b'.');
+    let pkt = SapPacket::parse(&c1_datagram(0x0006, &at_cap))
+        .expect("a body inflating to exactly the cap is accepted");
+    assert_eq!(pkt.payload_type, None);
+    assert_eq!(pkt.payload.len(), MAX_SDP_PAYLOAD);
+    assert_eq!(pkt.payload.as_slice(), at_cap.as_slice());
+
+    let mut over_cap = at_cap;
+    over_cap.push(b'.'); // one byte past the cap
+    assert_eq!(
+        SapPacket::parse(&c1_datagram(0x0007, &over_cap)),
+        Err(SapError::DecompressedTooLarge {
+            max: MAX_SDP_PAYLOAD
+        }),
+        "one byte past the cap is rejected during inflate"
+    );
+}
+
 #[test]
 fn rejects_zero_message_id_hash() {
     let mut bytes = v4_header(0x20, 0x00, 0x0000, Ipv4Addr::new(192, 0, 2, 1));

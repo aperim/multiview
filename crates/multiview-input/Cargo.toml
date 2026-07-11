@@ -59,6 +59,14 @@ multiview-ndi-sys = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = "1.11.0"
+# Generate adversarial `C=1` (zlib) bombs at test time to *verify* — not merely
+# assert — the SAP inflate cap (ADR-0041 Decision 8): the deflate side of the
+# SAME crate the codec inflates with. `compress_to_vec_zlib` lets a test build a
+# valid zlib stream whose decompressed size dwarfs `MAX_SDP_PAYLOAD` (e.g. 8 MiB
+# vs the 64 KiB cap) without a multi-KiB magic const; the parser must reject it
+# AT the cap. Already a normal dependency at this exact version (deny-neutral),
+# and it is safe code — the crate stays `unsafe_code = forbid`.
+miniz_oxide = "0.8.9"
 # Self-contained ffmpeg-feature tests generate their own tiny clip at runtime
 # (via the `ffmpeg` CLI) into a tempdir — no checked-in media.
 tempfile = "3"
