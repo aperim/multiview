@@ -86,7 +86,45 @@ pub fn build_rtp_header(
 /// whole number of sample groups, so no partial-group check is needed here.
 #[must_use]
 pub fn encode_pcm(samples: &[f32], depth: PcmDepth) -> Vec<u8> {
-    // RED scaffold (ADR-0033 §1, replaced in the GREEN commit): the right byte
-    // length but silence — the real big-endian L16/L24 encode lands next.
-    vec![0u8; samples.len().saturating_mul(depth.bytes_per_sample())]
+    let mut bytes = Vec::with_capacity(samples.len().saturating_mul(depth.bytes_per_sample()));
+    match depth {
+        PcmDepth::L16 => {
+            for &sample in samples {
+                bytes.extend_from_slice(&encode_l16(sample).to_be_bytes());
+            }
+        }
+        PcmDepth::L24 => {
+            for &sample in samples {
+                // The 24-bit code occupies the high three octets of the
+                // sign-extended `i32` shifted left by 8, exactly matching the
+                // decoder's `i32::from_be_bytes([hi, mid, lo, 0]) >> 8`.
+                let [hi, mid, lo, _low] = (encode_l24(sample) << 8).to_be_bytes();
+                bytes.extend_from_slice(&[hi, mid, lo]);
+            }
+        }
+    }
+    bytes
+}
+
+/// Map a unit-range `f32` to a 16-bit PCM code (clamped, round-to-nearest). The
+/// result is in `[-32767, 32767]`; `-32768` is never produced, so the encode is
+/// symmetric and the decoder round-trip preserves sign.
+#[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
+// reason: `sample` is clamped to [-1.0, 1.0] then scaled by 32767 and rounded,
+// so the value is exactly within `i16` range — the narrowing cast cannot
+// truncate or wrap. Mirrors the reviewed pattern in `multiview-input::st2110::packetize`.
+fn encode_l16(sample: f32) -> i16 {
+    (sample.clamp(-1.0, 1.0) * 32_767.0).round() as i16
+}
+
+/// Map a unit-range `f32` to a 24-bit PCM code (clamped, round-to-nearest),
+/// returned in the low 24 bits of an `i32`. Scales by `2^23 - 1` (`8388607`),
+/// **not** `2^23`, so full-scale positive does not wrap to the most-negative
+/// code (an audible click).
+#[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
+// reason: `sample` is clamped to [-1.0, 1.0] then scaled by 8_388_607 and
+// rounded, so the value is within `[-8_388_607, 8_388_607]` — firmly inside
+// `i32`. Mirrors the reviewed pattern in `multiview-input::st2110::packetize`.
+fn encode_l24(sample: f32) -> i32 {
+    (sample.clamp(-1.0, 1.0) * 8_388_607.0).round() as i32
 }
