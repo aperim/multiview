@@ -193,6 +193,14 @@ impl Aes67UdpSender {
         S: std::future::Future<Output = ()>,
     {
         tokio::pin!(stop);
+        // Select the IPv6 multicast egress interface (IPV6_MULTICAST_IF + hop-limit
+        // 255) on the send socket BEFORE the first packet (panel S1): F8 wired
+        // `configure_multicast_egress` but nothing on the serve path called it, so a
+        // configured interface was silently ignored and egress fell to the OS
+        // default. Unspecified (the default until #103 supplies the index) configures
+        // cleanly; a misconfigured interface fails fast here rather than streaming on
+        // the wrong egress. A no-op on a v4 socket.
+        self.configure_multicast_egress()?;
         // Absolute per-packet deadlines from one fixed start (panel T1): packet n
         // is due at start + n×frames_per_packet/sample_rate, floored ONCE from the
         // cumulative index so the rounding never accumulates into drift the way a
