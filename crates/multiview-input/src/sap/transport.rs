@@ -209,6 +209,11 @@ impl SapListener {
         // stays off the per-datagram path, so a flood still cannot amplify the
         // O(n) scan into per-datagram work (panel F4).
         let mut purge_tick = tokio::time::interval(PURGE_INTERVAL);
+        // Skip missed ticks: if the receive branch keeps the loop busy across
+        // several purge periods, reap ONCE on return rather than bursting one
+        // redundant O(n) scan per missed tick (panel I1). Purge is idempotent, so a
+        // skipped tick loses nothing but the wasted scan.
+        purge_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         purge_tick.tick().await;
         loop {
             tokio::select! {
