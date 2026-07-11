@@ -161,7 +161,7 @@ async fn a_datagram_flood_is_rate_limited_before_the_expensive_fold() {
     // Give the listener time to drain the socket and fold whatever the limiter
     // admits. Only the first `burst` (8) can enter the expensive fold path; the
     // rest are dropped cheaply BEFORE the O(n) RCU clone (inv #10).
-    let bounded = wait_for(|| table.len() >= 1).await;
+    let bounded = wait_for(|| !table.is_empty()).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let folded = table.len();
     assert!(bounded && folded >= 1, "at least the burst is folded");

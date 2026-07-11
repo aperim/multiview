@@ -40,7 +40,7 @@ fn refills_at_the_next_window() {
         "burst exhausted in this window"
     );
     assert!(
-        limiter.allow(Duration::from_millis(1000)),
+        limiter.allow(Duration::from_secs(1)),
         "a new window resets the budget"
     );
     assert!(limiter.allow(Duration::from_millis(1500)));
@@ -65,5 +65,5 @@ fn a_same_window_flood_admits_exactly_the_burst() {
 fn zero_burst_denies_every_datagram() {
     let mut limiter = SapRateLimiter::new(0, Duration::from_secs(1));
     assert!(!limiter.allow(Duration::from_millis(0)));
-    assert!(!limiter.allow(Duration::from_millis(5000)));
+    assert!(!limiter.allow(Duration::from_secs(5)));
 }

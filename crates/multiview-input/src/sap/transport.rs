@@ -22,7 +22,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU16;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 
@@ -31,12 +31,19 @@ use crate::error::{Error, Result};
 use super::announce::{announcement, deletion, AnnounceSchedule};
 use super::groups::{receive_group_set, SAP_TTL};
 use super::packet::SapPacket;
+use super::ratelimit::{SapRateLimiter, DEFAULT_ACCEPT_BURST, DEFAULT_ACCEPT_WINDOW};
 use super::session::SapSessionTable;
 
 /// The largest SAP datagram accepted (the max UDP payload). The packet parser
 /// separately caps the SDP body, so a large datagram cannot force an unbounded
 /// allocation.
 pub const MAX_SAP_DATAGRAM: usize = 65_536;
+
+/// How often [`SapListener::run`] purges expired sessions. Purge is decoupled
+/// from per-datagram work — sessions age on the scale of seconds to an hour — so
+/// a datagram flood cannot amplify the O(n) purge scan into per-datagram work
+/// (panel F4, inv #10).
+pub const PURGE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A supervised SAP receive listener: a bound UDP socket folding discovered
 /// announcements into a wait-free, bounded session table.
@@ -45,6 +52,11 @@ pub struct SapListener {
     socket: Arc<UdpSocket>,
     table: Arc<SapSessionTable>,
     started: Instant,
+    /// Datagrams admitted into the expensive parse+fold path per `accept_window`
+    /// (panel F4).
+    accept_burst: u32,
+    /// The fixed window the `accept_burst` applies over.
+    accept_window: Duration,
 }
 
 impl SapListener {
@@ -62,6 +74,8 @@ impl SapListener {
             socket: Arc::new(socket),
             table: Arc::new(SapSessionTable::new()),
             started: Instant::now(),
+            accept_burst: DEFAULT_ACCEPT_BURST,
+            accept_window: DEFAULT_ACCEPT_WINDOW,
         })
     }
 
@@ -70,6 +84,18 @@ impl SapListener {
     #[must_use]
     pub fn with_table(mut self, table: Arc<SapSessionTable>) -> Self {
         self.table = table;
+        self
+    }
+
+    /// Override the fold-path rate limit (default [`DEFAULT_ACCEPT_BURST`] per
+    /// [`DEFAULT_ACCEPT_WINDOW`]): at most `burst` datagrams per `window` enter
+    /// the expensive parse+fold, the rest are dropped cheaply after the `recv`
+    /// (panel F4). A spoofed-origin flood therefore cannot force the O(n) RCU
+    /// clone at line rate and starve the control-plane runtime (inv #10).
+    #[must_use]
+    pub fn with_rate_limit(mut self, burst: u32, window: Duration) -> Self {
+        self.accept_burst = burst;
+        self.accept_window = window;
         self
     }
 
@@ -119,27 +145,29 @@ impl SapListener {
         Ok(())
     }
 
-    /// Receive one datagram and fold it into the table. A malformed or rejected
-    /// datagram is skipped so the loop never dies on bad input (rule 26: bad
-    /// inputs are the purpose).
-    async fn recv_fold_once(&self, buf: &mut [u8]) -> Result<()> {
-        let (n, _peer) = self
-            .socket
-            .recv_from(buf)
-            .await
-            .map_err(|e| Error::Ingest(format!("sap recv: {e}")))?;
-        let now = self.started.elapsed();
-        if let Some(bytes) = buf.get(..n) {
-            if let Ok(pkt) = SapPacket::parse(bytes) {
-                self.table.observe(&pkt, now);
-            }
+    /// Fold one already-received datagram (`bytes`) into the table **iff** the
+    /// rate limiter admits it at `now`; returns whether it entered the expensive
+    /// parse+fold path.
+    ///
+    /// The rate check runs **before** the O(n) RCU clone + publish, so a
+    /// spoofed-origin flood is dropped here (after only the cheap `recv`) rather
+    /// than forcing that expensive work per datagram and starving the shared
+    /// control-plane runtime (panel F4, inv #10). An admitted datagram that is
+    /// malformed or rejected by the parser is skipped, never faulted (rule 26:
+    /// bad inputs are the purpose).
+    fn fold_datagram(&self, bytes: &[u8], now: Duration, limiter: &mut SapRateLimiter) -> bool {
+        if !limiter.allow(now) {
+            return false;
         }
-        Ok(())
+        if let Ok(pkt) = SapPacket::parse(bytes) {
+            self.table.observe(&pkt, now);
+        }
+        true
     }
 
     /// Run the receive loop until the socket faults (then the supervisor restarts
-    /// it), folding announcements into the wait-free table and purging stale
-    /// sessions each datagram. Never blocks a consumer or paces the engine
+    /// it), rate-gating each datagram into the wait-free table and purging stale
+    /// sessions on a cadence. Never blocks a consumer or paces the engine
     /// (inv #1/#10).
     ///
     /// # Errors
@@ -148,12 +176,28 @@ impl SapListener {
     /// fault (the supervisor reconnects) but logs it.
     pub async fn run(self) -> Result<()> {
         let mut buf = vec![0u8; MAX_SAP_DATAGRAM];
+        let mut limiter = SapRateLimiter::new(self.accept_burst, self.accept_window);
+        let mut last_purge = self.started.elapsed();
         loop {
-            if let Err(e) = self.recv_fold_once(&mut buf).await {
-                tracing::debug!(error = %e, "sap listener socket ended; supervisor restarts");
-                return Ok(());
+            let n = match self.socket.recv_from(&mut buf).await {
+                Ok((n, _peer)) => n,
+                Err(e) => {
+                    tracing::debug!(error = %e, "sap listener socket ended; supervisor restarts");
+                    return Ok(());
+                }
+            };
+            let now = self.started.elapsed();
+            if let Some(bytes) = buf.get(..n) {
+                // Rate-gated: a flood is dropped after the cheap recv, before the
+                // expensive fold (panel F4).
+                self.fold_datagram(bytes, now, &mut limiter);
             }
-            self.table.purge(self.started.elapsed());
+            // Purge on a cadence, not per-datagram — sessions age on the scale of
+            // seconds+, so a flood cannot amplify the O(n) purge scan (panel F4).
+            if now.saturating_sub(last_purge) >= PURGE_INTERVAL {
+                self.table.purge(now);
+                last_purge = now;
+            }
         }
     }
 }
