@@ -74,9 +74,11 @@ pub struct WatchOptions {
     /// a test can interpose a concurrent external writer precisely in the
     /// probe→apply window (the TOCTOU the content fingerprint must be immune
     /// to). Because arming it makes the watcher WRITE the config file, the whole
-    /// seam is gated behind the test-only `_test-seams` feature — it does not
-    /// exist in a shipped build, so the production watcher writes the file on NO
-    /// path.
+    /// seam is gated behind the test-only `_test-seams` feature: compiled out of
+    /// the default build and the `multiview-cli` release presets, and — even if
+    /// the feature is enabled — inert until a caller explicitly arms it via
+    /// [`with_post_probe_interpose`](WatchOptions::with_post_probe_interpose),
+    /// which no production code does. No shipped configuration writes the file.
     #[cfg(feature = "_test-seams")]
     interpose: Option<Arc<std::sync::Mutex<Option<Vec<u8>>>>>,
 }
@@ -157,10 +159,11 @@ impl WatchOptions {
     /// fingerprint always matches the content actually applied: a probe-then-
     /// reread would apply the racer's bytes yet record the probe's fingerprint.
     ///
-    /// Test-only (`_test-seams`): the seam WRITES the watched file, so it does
-    /// not exist in a shipped build. Composes with
-    /// [`with_manual_poll`](Self::with_manual_poll): the interposed write lands
-    /// mid-poll, so a plain `poll_once` still drives it.
+    /// Test-only (`_test-seams`): the seam WRITES the watched file, so it is
+    /// compiled out of the default build and the `multiview-cli` release presets
+    /// (and, even when the feature is on, does nothing until armed here). Composes
+    /// with [`with_manual_poll`](Self::with_manual_poll): the interposed write
+    /// lands mid-poll, so a plain `poll_once` still drives it.
     #[cfg(feature = "_test-seams")]
     #[must_use]
     pub fn with_post_probe_interpose(mut self) -> (Self, PostProbeInterpose) {
@@ -173,7 +176,7 @@ impl WatchOptions {
 /// The test-side handle of the post-probe interpose seam
 /// ([`WatchOptions::with_post_probe_interpose`]). Held by the test; a cheap
 /// `Arc` clone shares the one-shot slot with the loop. Test-only
-/// (`_test-seams`) — absent from a shipped build.
+/// (`_test-seams`) — compiled out of the default build and the release presets.
 #[cfg(feature = "_test-seams")]
 #[derive(Debug, Clone)]
 pub struct PostProbeInterpose {
@@ -593,11 +596,15 @@ impl Drop for ActiveGuard {
 }
 
 /// A content-change fingerprint of the watched path: length + mtime + inode +
-/// a hash of the file's bytes ([`ContentFingerprint`]). Every axis is derived
-/// from a SINGLE fd opened once per poll (see [`probe`]): the bytes are read
-/// from that fd (`len` + `content`) and mtime/inode are an `fstat` of the SAME
-/// fd, so a rename between a separate stat and read can never pair one file's
-/// metadata with another file's bytes. The byte hash makes detection
+/// a hash of the file's bytes ([`ContentFingerprint`]). All four axes come from
+/// a SINGLE fd opened once per poll (see [`probe`]): `len` + `content` (and the
+/// bytes carried to the apply) are ONE read of that fd, and mtime/inode are an
+/// `fstat` of the SAME fd. The fd pins one inode, so a rename can never pair one
+/// file's metadata with another file's bytes. It is NOT a point-in-time snapshot
+/// of every axis, though: the `fstat` runs after the read, so a same-inode
+/// in-place rewrite landing between them can move mtime past the bytes just read.
+/// That is benign — `content` (coherent with the applied bytes) is the
+/// authoritative discriminator, not mtime. The byte hash makes detection
 /// filesystem-independent — a same-length in-place rewrite (identical
 /// len/mtime/inode, e.g. a shell `>` redirect or a non-atomic editor landing
 /// within the filesystem's mtime granularity) still produces a distinct
@@ -613,12 +620,14 @@ struct Fingerprint {
     content: ContentFingerprint,
 }
 
-/// A single coherent snapshot of the watched path this poll: its change
-/// [`Fingerprint`] plus the exact bytes the fingerprint was computed from. The
-/// settled apply in [`watch_loop`] uses THESE bytes — never a second read that
-/// could observe different content — so the fingerprint recorded as `applied`
-/// always matches the content actually applied (the probe→apply TOCTOU is
-/// closed by construction).
+/// The watched path as this poll read it: its change [`Fingerprint`] plus the
+/// exact bytes the `len`/`content` axes were computed from. The content axis and
+/// these carried bytes are ONE coherent fd read — the settled apply in
+/// [`watch_loop`] uses THESE bytes, never a second read that could observe
+/// different content — so the fingerprint recorded as `applied` always matches
+/// the content actually applied (the probe→apply TOCTOU is closed by
+/// construction). (mtime/inode are an `fstat` of the same fd, not a point-in-time
+/// snapshot of the bytes; see [`Fingerprint`].)
 struct Probed {
     /// The change fingerprint (`len` + `content` derived from `bytes`).
     fingerprint: Fingerprint,
@@ -650,8 +659,12 @@ fn inode_of(meta: &std::fs::Metadata) -> u64 {
 
 /// Probe the path this poll by opening it ONCE: read that fd (deriving the
 /// change [`Fingerprint`]'s `len` + `content`) and `fstat` the SAME fd for
-/// mtime/inode, so every axis — and the bytes carried forward for the apply — is
-/// a coherent view of one inode. Returns [`None`] only when the path is
+/// mtime/inode. `len` + `content` and the carried apply-bytes are one coherent
+/// read; the fd pins one inode, so mtime/inode belong to the same file as those
+/// bytes (a rename cannot pair another file's metadata with them). It is not a
+/// point-in-time snapshot of every axis — the `fstat` follows the read (see
+/// [`Fingerprint`]) — but that is benign: `content` drives detection and is
+/// coherent with the applied bytes. Returns [`None`] only when the path is
 /// (transiently) missing (open AND `stat` both fail); a present-but-unreadable
 /// path (open denied, or opened but unreadable — e.g. a directory, `EISDIR`)
 /// yields a fingerprint with [`ContentFingerprint::Unreadable`] and the read/open
@@ -659,14 +672,13 @@ fn inode_of(meta: &std::fs::Metadata) -> u64 {
 /// blocking pool, never the control-plane reactor (review m6).
 ///
 /// Opening once — rather than a path `stat`, then a separate path read to hash,
-/// then a third read to apply — keeps `len`, `content`, mtime, inode, and the
-/// carried `bytes` a single coherent snapshot: a same-length in-place rewrite is
-/// still a distinct fingerprint, AND the settled apply uses the very bytes the
-/// fingerprint identifies, so no concurrent write can make the applied content
-/// diverge from the recorded fingerprint. The config file is small and this runs
-/// once per ~1–2 s poll, so the read is negligible; it reads the RAW bytes — a
-/// non-UTF-8 file still fingerprints and settles to the UTF-8-decode reject in
-/// [`watch_loop`].
+/// then a third read to apply — makes `len`/`content` and the carried `bytes` one
+/// coherent read: a same-length in-place rewrite is still a distinct fingerprint,
+/// AND the settled apply uses the very bytes the fingerprint identifies, so no
+/// concurrent write can make the applied content diverge from the recorded
+/// fingerprint. The config file is small and this runs once per ~1–2 s poll, so
+/// the read is negligible; it reads the RAW bytes — a non-UTF-8 file still
+/// fingerprints and settles to the UTF-8-decode reject in [`watch_loop`].
 async fn probe(path: &Path) -> Option<Probed> {
     use tokio::io::AsyncReadExt as _;
     let mut file = match tokio::fs::File::open(path).await {
@@ -732,8 +744,9 @@ async fn probe(path: &Path) -> Option<Probed> {
 /// scheduled bytes to the watched path once (draining the one-shot slot). This
 /// models a concurrent external writer landing between a poll's fingerprint
 /// probe and its settled read/apply. Test-only (`_test-seams`): the whole seam,
-/// this function included, is compiled out of a shipped build, so the production
-/// watcher never has a code path that writes the config file.
+/// this function included, is compiled out of the default build and the release
+/// presets, so no shipped configuration of the watcher has a code path that
+/// writes the config file.
 #[cfg(feature = "_test-seams")]
 async fn maybe_interpose(options: &WatchOptions, path: &Path) {
     let Some(slot) = options.interpose.as_ref() else {
@@ -835,8 +848,9 @@ async fn watch_loop(
         };
         missing_polls = 0;
         missing_reported = false;
-        // TEST-ONLY seam (the `_test-seams` feature, compiled out of a shipped
-        // build): interpose a concurrent external writer here — after this poll's
+        // TEST-ONLY seam (the `_test-seams` feature, compiled out of the default
+        // build and the release presets): interpose a concurrent external writer
+        // here — after this poll's
         // fingerprint probe, before its settled read/apply — to exercise the
         // probe→apply TOCTOU. Absent from the production binary entirely.
         #[cfg(feature = "_test-seams")]

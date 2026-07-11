@@ -39,20 +39,24 @@ Fold a hash of the file's **bytes** into the watch `Fingerprint` (a fourth axis 
 path once, reads that fd — deriving both `len` and the content hash (`fingerprint_content_hash(&bytes)`,
 `DefaultHasher` — not an adversarial boundary; whoever writes the config already controls it) from
 that **single read** — and `fstat`s the SAME fd for `mtime`/`inode`, then returns a
-`Probed { fingerprint, bytes }`. Opening once makes every axis a coherent view of one inode: a rename
-between a separate path `stat` and path read can never pair one file's metadata with another file's
-bytes. A same-length in-place content change is then a **distinct fingerprint**, so it falls through
+`Probed { fingerprint, bytes }`. `len` + the content hash and the carried apply-bytes are ONE
+coherent read; the fd pins one inode, so `mtime`/`inode` belong to the same file as those bytes — a
+rename can never pair one file's metadata with another file's bytes. (This is not a point-in-time
+snapshot of *every* axis: the `fstat` follows the read, so a same-inode in-place rewrite landing
+between them can move `mtime` past the bytes just read. That is benign — the content hash, coherent
+with the applied bytes, is the authoritative discriminator, not `mtime`.) A same-length in-place
+content change is then a **distinct fingerprint**, so it falls through
 to the existing validate → apply path; the three fingerprint comparison sites use the derived
 `PartialEq`, so they are content-aware with no further change.
 
 Crucially, the settling poll **applies the bytes `probe()` already carried** (UTF-8-decoded in
 place), rather than doing a second `read_to_string`. So the fingerprint recorded as `applied` /
 `rejected` is always the fingerprint of the content **actually applied**: `len` and the hash come
-from the same read as the applied bytes, and `mtime`/`inode` from the same fd's `fstat` — one
-coherent single-inode snapshot. There is no probe-then-reread window in which a concurrent writer
-could make the applied content diverge from the recorded fingerprint (the TOCTOU the cross-vendor
-re-review flagged) — the guarantee is deterministic detection *of the content actually applied*, not
-merely "a content change is noticed".
+from the same read as the applied bytes (`mtime`/`inode` are that fd's `fstat`, pinned to the same
+inode). There is no probe-then-reread window in which a concurrent writer could make the applied
+content diverge from the recorded fingerprint (the TOCTOU the cross-vendor re-review flagged) — the
+guarantee is deterministic detection *of the content actually applied*, not merely "a content change
+is noticed".
 
 * **Raw bytes, not `&str`:** the content axis hashes the raw bytes, so a non-UTF-8 file still
   fingerprints as a change; the settled apply then UTF-8-decodes the carried bytes and, on failure,
@@ -79,9 +83,10 @@ merely "a content change is noticed".
 
 * A legitimate same-length in-place rewrite now hot-applies like any other edit; detection no
   longer depends on filesystem `stat` granularity or on the writer changing the inode/mtime.
-* The content the watcher applies always matches the fingerprint it records as `applied` (single-
-  read snapshot), so a settled apply can never leave `applied` pointing at content that was never
-  applied — closing the class of silent drop a probe-then-reread would reopen.
+* The content the watcher applies always matches the fingerprint it records as `applied` (the
+  content axis and the applied bytes come from ONE read), so a settled apply can never leave
+  `applied` pointing at content that was never applied — closing the class of silent drop a
+  probe-then-reread would reopen.
 * **Resume / self-write suppression are unperturbed** (ADR-W020 §5–§7): an atomic rename carrying
   identical bytes still adopts-without-applying via the `last_observed == text` arm (inode differs,
   hash matches); a `touch` (mtime moves, bytes unchanged) stays a no-op; an expected server-side
