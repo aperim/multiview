@@ -24,10 +24,9 @@ use crate::error::ConfigError;
 
 /// The `[control.tls]` section: how the control plane terminates TLS.
 ///
-/// Internally tagged by `mode`:
-/// * `mode = "static"` — [`TlsConfig::Static`]: operator-managed PEM certificate
-///   + private key (the TLS-0 floor; renewal is a drop-in replacement + restart,
-///   no automation).
+/// Internally tagged by `mode`. The only TLS-0 mode is `mode = "static"`
+/// ([`TlsConfig::Static`]): an operator-managed PEM certificate + private key (the
+/// TLS-0 floor; renewal is a drop-in file replacement + restart, no automation).
 ///
 /// Absent from `[control]` ⇒ plain HTTP. `#[non_exhaustive]` because later TLS
 /// phases add modes (e.g. ACME DNS-01) as new variants; the existing wire shape
