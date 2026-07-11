@@ -366,8 +366,10 @@ pub const DEFAULT_GRACEFUL_SHUTDOWN_CEILING: std::time::Duration =
 /// * the accept-level **connection population caps** — `max_connections` (global) and
 ///   `max_connections_per_ip`, enforced *at accept* before any header parse (the
 ///   population bound the request-level caps miss). `None` = no in-process cap.
-/// * the **graceful-shutdown ceiling** — how long in-flight connections get to drain
-///   before they are aborted, so none outlives `serve` (F3).
+/// * the **graceful-shutdown ceiling** — how long tracked (non-upgraded) connections get
+///   to drain before they are aborted, so no tracked task outlives `serve`; an upgraded
+///   WebSocket is detached and instead drains cooperatively via the shutdown-aware
+///   transport (F3, ADR-W031 §4).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct ServeOptions {
@@ -603,9 +605,11 @@ async fn drive_connection<I>(
     }
 }
 
-/// Drain the tracked connection tasks at shutdown: signal them to begin a graceful
-/// shutdown, then wait up to `ceiling`; any still running are **aborted** and reaped so
-/// none outlives `serve` (F3, safety §3).
+/// Drain the **tracked** (non-upgraded) connection tasks at shutdown: signal them to begin
+/// a graceful shutdown, then wait up to `ceiling`; any still running are **aborted** and
+/// reaped so no tracked task outlives `serve` (F3, safety §3). An upgraded WebSocket is a
+/// detached task the `JoinSet` does not track; it drains cooperatively via the
+/// shutdown-aware transport (ADR-W031 §4), not by a join here.
 async fn drain_connections(
     connections: &mut tokio::task::JoinSet<()>,
     shutdown: &tokio::sync::watch::Sender<bool>,
@@ -644,9 +648,11 @@ async fn drain_connections(
 /// `serve_connection(..).with_upgrades()` (so `/api/v1/ws` still upgrades) with the peer
 /// `SocketAddr` installed as a `ConnectInfo` request extension exactly as
 /// `into_make_service_with_connect_info` would (the SEC-14 pre-auth per-IP rate limit
-/// keys on it). In-flight connections are tracked in a
+/// keys on it). Non-upgraded connections are tracked in a
 /// [`JoinSet`](tokio::task::JoinSet) and aborted after
-/// `options.graceful_shutdown_ceiling`, so none outlives this function.
+/// `options.graceful_shutdown_ceiling`, so no tracked task outlives this function; an
+/// upgraded WebSocket is a detached task that instead drains cooperatively via the
+/// shutdown-aware transport (ADR-W031 §4), not synchronously joined here.
 ///
 /// Same isolation contract as [`serve_router`] (invariant #10): the loop only serves
 /// HTTP and never awaits the engine, so no client it accepts can back-pressure the data

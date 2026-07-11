@@ -13,8 +13,10 @@
 //!   pinned open past the deadline.
 //! * **F2 — accept-level population cap.** A flood of half-open connections is bounded
 //!   at accept (global + per-IP), before any request headers parse.
-//! * **F3 — bounded drain.** At shutdown, in-flight connection tasks are tracked and
-//!   aborted after a ceiling, so none outlives `serve`.
+//! * **F3 — bounded drain.** At shutdown, tracked (non-upgraded) connection tasks are
+//!   aborted after a ceiling, so no tracked task outlives `serve`; an upgraded WebSocket
+//!   is a detached task that drains cooperatively via the shutdown-aware transport, not
+//!   joined.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -237,9 +239,9 @@ async fn serve_router_with_opts(
     (addr, shutdown_tx, server)
 }
 
-/// F3: an in-flight connection whose response never completes (a pending body, standing
-/// in for a live WebSocket / SSE stream) must be ABORTED at the drain ceiling, so no
-/// connection task outlives `serve`. Under the old detached-`tokio::spawn` loop the
+/// F3: a tracked in-flight connection whose response never completes (a pending body, the
+/// non-upgraded analogue of a long-lived SSE stream) must be ABORTED at the drain ceiling,
+/// so no tracked connection task outlives `serve`. Under the old detached-`tokio::spawn` loop the
 /// task is abandoned (the connection stays alive) when the ceiling is reached; the
 /// `JoinSet` + `abort_all` fix drops it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
