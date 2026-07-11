@@ -27,9 +27,17 @@
 //!
 //! The signed payload (JSON, all-ASCII) can exceed a single 255-byte mDNS TXT
 //! string, so it is split into byte-chunks across numbered properties
-//! (`c` = chunk count, `p0`, `p1`, …) and reassembled on receipt. JSON of the
-//! payload is pure ASCII (hex/integer arrays + field names), so byte-chunking
-//! never splits a multi-byte char.
+//! (`c` = chunk count, `p0`, `p1`, …) and reassembled on receipt. The publish
+//! side (`chunk_txt`) enforces a TOTAL contract before it emits anything: it
+//! refuses more than `MAX_CHUNKS` chunks with a typed
+//! [`MeshError::AnnounceTooLarge`], and refuses any chunk that is not valid UTF-8
+//! with [`MeshError::AnnounceNotText`] rather than skip it. Either fault would
+//! otherwise emit an announce every peer's receive-side reassembly bound silently
+//! drops (an over-cap `c`, or a `c` count larger than the `p{index}` properties
+//! present), so it is failed observably at the source. Today's payload is
+//! pure-ASCII JSON (integer/hex arrays, kebab-case enums, RFC3339 instants — no
+//! free-form string field), so neither fault fires in practice; the guards are
+//! defence in depth against future payload growth.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -38,9 +46,7 @@ use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::announce::AnnouncePayload;
 use crate::error::MeshError;
-use crate::transport::{
-    reassemble_txt, MeshTransport, ReceivedAnnouncement, CHUNK_BYTES, CHUNK_COUNT_KEY,
-};
+use crate::transport::{chunk_txt, reassemble_txt, MeshTransport, ReceivedAnnouncement};
 
 /// The Conspect mDNS service type (RFC 6763). The leading `_conspect-mesh`
 /// service name + `_udp` (mesh announcements are connectionless) under the mDNS
@@ -97,22 +103,6 @@ impl MdnsService {
         })
     }
 
-    /// Split the wire bytes into the numbered TXT properties (`c` + `p0`…`pN`).
-    fn chunk_properties(wire: &[u8]) -> Vec<(String, String)> {
-        let chunks: Vec<&[u8]> = wire.chunks(CHUNK_BYTES).collect();
-        let mut props: Vec<(String, String)> = Vec::with_capacity(chunks.len() + 1);
-        props.push((CHUNK_COUNT_KEY.to_owned(), chunks.len().to_string()));
-        for (i, chunk) in chunks.iter().enumerate() {
-            // The chunk is ASCII JSON bytes; `from_utf8` cannot fail here, but the
-            // guardrails forbid `unwrap`, so a non-UTF8 chunk (impossible) is
-            // skipped rather than panicking.
-            if let Ok(text) = std::str::from_utf8(chunk) {
-                props.push((format!("p{i}"), text.to_owned()));
-            }
-        }
-        props
-    }
-
     /// Reassemble the wire bytes from a resolved service's TXT properties, or
     /// `None` if the chunking is absent/inconsistent (a foreign or malformed
     /// announcement is ignored, never panicked on).
@@ -123,7 +113,11 @@ impl MdnsService {
 
 impl MeshTransport for MdnsService {
     fn announce(&self, wire: &[u8]) -> Result<(), MeshError> {
-        let props = Self::chunk_properties(wire);
+        // Encode the wire into the numbered TXT properties, refusing (with a typed
+        // error the announce loop logs) any payload `chunk_txt` cannot emit — an
+        // over-cap chunk count, or a chunk that is not valid UTF-8 — rather than
+        // emit an announce every peer's receive-side bound would silently drop.
+        let props = chunk_txt(wire)?;
         let info = ServiceInfo::new(
             SERVICE_TYPE,
             &self.instance,

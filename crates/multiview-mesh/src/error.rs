@@ -27,4 +27,37 @@ pub enum MeshError {
     /// a mesh failure never stalls anything).
     #[error("mdns transport error: {0}")]
     Transport(String),
+
+    /// The encoded announce payload would split into more than the mesh's
+    /// `MAX_CHUNKS` mDNS TXT chunk cap — larger than the receive-side reassembly
+    /// bound accepts. The publish side refuses to emit it, returning this typed
+    /// error (which the announce loop logs) rather than announce a payload every
+    /// peer would silently drop, leaving this node invisible on the mesh
+    /// (invariant #10 — best-effort + observable, never a panic). Defence in
+    /// depth: today's payload shape keeps a legitimate announce far under the cap.
+    #[error("announce payload too large: {chunks} chunks exceeds the {max}-chunk mDNS TXT cap")]
+    AnnounceTooLarge {
+        /// The number of chunks the encoded payload would split into.
+        chunks: usize,
+        /// The maximum chunk count the mesh accepts.
+        max: usize,
+    },
+
+    /// A chunk of the encoded announce is not valid UTF-8, so it cannot ride an
+    /// mDNS TXT string property. The publish side refuses to emit the announce
+    /// (returning this typed error the announce loop logs) rather than skip the
+    /// chunk — a skipped chunk would leave the `c` count larger than the
+    /// `p{index}` properties present, and every peer's receive-side reassembly
+    /// would then miss `p{chunk_index}` and silently drop the whole announce,
+    /// leaving this node invisible on the mesh (invariant #10 — best-effort +
+    /// observable, never a panic). Today's announce is pure-ASCII JSON
+    /// (integer/hex arrays, kebab-case enums, RFC3339 instants — no free-form
+    /// string field), so this never fires in practice; the guard keeps the
+    /// chunking contract total against future payload growth.
+    #[error("announce chunk {chunk_index} is not valid UTF-8 for an mDNS TXT value")]
+    AnnounceNotText {
+        /// The index of the chunk (its `p{chunk_index}` property) that is not
+        /// valid UTF-8.
+        chunk_index: usize,
+    },
 }
