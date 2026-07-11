@@ -391,7 +391,7 @@ async fn a_live_upgraded_websocket_counts_against_the_per_ip_connection_cap() {
         serve_control_plane_with(test_state_auth_disabled(), options).await;
 
     // WS #1: upgrade and HOLD it open — its detached session must hold the per-IP slot.
-    let (status, _ws1) = ws_upgrade(addr).await;
+    let (status, ws1) = ws_upgrade(addr).await;
     assert_eq!(status, "101", "the first WebSocket must upgrade (101)");
     // Let the accept loop settle the guard across the upgrade.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -420,16 +420,16 @@ async fn a_live_upgraded_websocket_counts_against_the_per_ip_connection_cap() {
         String::from_utf8_lossy(&buf)
     );
 
-    drop(_ws1);
+    drop(ws1);
     shutdown_tx.send(()).unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
 }
 
-/// F1(ii): a live upgraded WebSocket must terminate promptly when serve() is shut
+/// F1(ii): a live upgraded WebSocket must terminate promptly when `serve()` is shut
 /// down — the shutdown signal must reach the detached socket. Under the escape bug the
 /// upgraded socket is a detached task invisible to the drain, and (its engine
-/// broadcast still held by its own `AppState` clone) it never observes serve()'s
-/// shutdown, so it outlives serve(): the client socket never reaches EOF.
+/// broadcast still held by its own `AppState` clone) it never observes `serve()`'s
+/// shutdown, so it outlives `serve()`: the client socket never reaches EOF.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_live_upgraded_websocket_is_drained_when_serve_shuts_down() {
     let ceiling = Duration::from_millis(500);

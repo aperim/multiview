@@ -2086,7 +2086,7 @@ async fn run_ws_session(
             // read-only transport, so it is dropped and the engine is never touched
             // (invariant #10).
             incoming = socket.recv() => match incoming {
-                None | Some(Ok(Message::Close(_))) | Some(Err(_)) => break,
+                None | Some(Ok(Message::Close(_)) | Err(_)) => break,
                 Some(Ok(_)) => continue,
             },
         };
