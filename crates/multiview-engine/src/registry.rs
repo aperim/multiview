@@ -184,6 +184,13 @@ pub trait SourceActor: Send + 'static {
     ///
     /// This is the **structural** wake-decode signal the teardown pool calls before both a
     /// graceful `shutdown` and a shed, so every implementor must provide one (inv #10).
+    ///
+    /// Implementors MUST make it wake/interrupt the decode I/O **promptly** so a detached decode
+    /// thread winds down without accumulating: the teardown pool's `TEARDOWN_CAPACITY` (D+K)
+    /// ceiling bounds reserved teardown *slots* (queued plus in-flight), **not** the number of
+    /// detached decode threads still exiting — so a non-prompt `request_stop` can never overshoot
+    /// the slot bound but *can* let detached threads linger (the pool cannot force-kill a wedged OS
+    /// thread; Rust has no such primitive).
     fn request_stop(&self);
 
     /// Stop the actor and block until its decode thread has fully stopped. Called at
