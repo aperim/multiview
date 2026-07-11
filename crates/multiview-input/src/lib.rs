@@ -64,8 +64,8 @@
 //! * [`webrtc`] — **WebRTC** ingest: a pure, testable model of a *negotiated*
 //!   media session (SDP offer/answer negotiation is str0m's, in `multiview-webrtc`,
 //!   ADR-0048) plus the gated depacketizer/router seam that turns decrypted RTP
-//!   into typed media events; the ICE/DTLS/SRTP transport lives behind the
-//!   off-by-default `webrtc` feature.
+//!   into typed media events. No ICE/DTLS/SRTP transport lives in this crate —
+//!   that is str0m's; the off-by-default `webrtc` feature gates only the seam.
 //! * [`srt`] — **SRT** caller/listener/rendezvous + AES-encryption + stream-id
 //!   connection model and option parsing (pure); the socket lives behind the
 //!   `ffmpeg`/`srt` gating.

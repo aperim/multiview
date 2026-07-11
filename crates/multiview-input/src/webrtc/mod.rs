@@ -1,5 +1,6 @@
-//! WebRTC ingest: a pure, testable model of a **negotiated** media session, with
-//! the ICE/DTLS/SRTP transport behind the off-by-default `webrtc` feature.
+//! WebRTC ingest: a pure, testable model of a **negotiated** media session plus a
+//! gated pure depacketizer/router seam. No ICE/DTLS/SRTP transport lives in this
+//! crate — that is str0m's, in `multiview-webrtc` (ADR-0048).
 //!
 //! WHIP-style WebRTC contribution negotiates its media session with an SDP
 //! offer/answer exchange. Production negotiation is performed by **str0m** in the
@@ -10,10 +11,12 @@
 //!
 //! ## Feature gating (no socket here)
 //!
-//! The ICE agent, DTLS handshake, and SRTP depacketization need a real network
-//! stack and a crypto stack; they live behind the off-by-default **`webrtc`**
-//! feature (compiled only with that feature enabled), keeping the default
-//! build pure-Rust, native-dep-free, and LGPL-clean. The gated half is still
+//! No ICE agent, DTLS handshake, SRTP, or socket lives in this crate: the real
+//! transport is str0m in `multiview-webrtc`, which decrypts SRTP and feeds this
+//! crate plain RTP. The off-by-default **`webrtc`** feature gates only the pure
+//! depacketizer/router seam and the `MediaEngine` application-seam trait the
+//! transport plugs into — pure-Rust, native-dep-free, and LGPL-clean either way.
+//! The gated half is still
 //! itself pure and exhaustively tested over *injected* packets: the
 //! [`transport`] module owns the application-layer `MediaEngine` seam and the
 //! keyframe-gated H.264 depacketizer (RFC 6184); the [`opus`] module owns the

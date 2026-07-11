@@ -1,5 +1,5 @@
-//! Tests for the gated WebRTC **ingest media seam** (feature `webrtc`): the
-//! connection-state lifecycle, the H.264 RTP depacketize -> access-unit seam
+//! Tests for the gated WebRTC **ingest media seam** (feature `webrtc`): the H.264
+//! RTP depacketize -> access-unit seam
 //! (keyframe-gated, FU-A reassembly, STAP-A, bounded), the pure Opus RTP
 //! depacketizer (RFC 7587), the payload-type [`RtpRouter`], and the
 //! [`WebRtcProducer`]: an honest **compressed media-event** producer driven by
@@ -650,7 +650,7 @@ fn producer_counts_and_drops_unknown_payload_types() {
 /// socket from inside this crate's test. This test is therefore `#[ignore]`d and
 /// only runs when an operator points it at a real peer via
 /// `MULTIVIEW_WEBRTC_PEER`. Absent that, it skips honestly (it never asserts a
-/// fake pass) — the injected-engine tests above carry the depacketize/lifecycle
+/// fake pass) — the injected-engine tests above carry the depacketize/routing
 /// correctness load.
 #[test]
 #[ignore = "needs a real WebRTC peer + application-layer ICE/DTLS/SRTP engine (set MULTIVIEW_WEBRTC_PEER)"]

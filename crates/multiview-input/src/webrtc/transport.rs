@@ -1,8 +1,8 @@
 //! WebRTC ingest transport — **feature `webrtc`**.
 //!
 //! This module owns the *testable core* of a WebRTC receive session: the
-//! connection-state lifecycle, the application-layer **[`MediaEngine`] seam** that
-//! a concrete ICE/DTLS/SRTP engine plugs into, the H.264 RTP **depacketize ->
+//! application-layer **[`MediaEngine`] seam** that a concrete ICE/DTLS/SRTP engine
+//! plugs into, the H.264 RTP **depacketize ->
 //! access-unit** seam ([`H264Depacketizer`]), and the [`WebRtcProducer`]: an
 //! honest **compressed media-event producer** that turns decrypted RTP into
 //! typed [`MediaEvent`]s — keyframe-gated H.264 access units and Opus audio
