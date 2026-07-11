@@ -56,6 +56,16 @@ pub const MAX_CAPACITY_FRAMES: usize = 48_000;
 /// construction (fail-closed) rather than sent oversized.
 pub const MAX_PACKET_PAYLOAD_BYTES: usize = 1_440;
 
+/// The lowest audio sample rate an [`Aes67Sender`] accepts (Hz). AES67 / ST
+/// 2110-30 run at 44.1/48/96 kHz; this floor rejects `0` (which would make the
+/// derived packet cadence a division by zero) and other sub-audio nonsense.
+pub const MIN_SAMPLE_RATE_HZ: u32 = 8_000;
+
+/// The highest audio sample rate an [`Aes67Sender`] accepts (Hz) — above any real
+/// AES67 / ST 2110-30 rate; a larger value is rejected fail-closed rather than
+/// used to derive a nonsensical send cadence.
+pub const MAX_SAMPLE_RATE_HZ: u32 = 192_000;
+
 /// Why an [`Aes67Sender`] could not be constructed from the requested
 /// configuration (panel F5): a bound was exceeded, so construction fails closed
 /// rather than clamping, over-allocating, or emitting an oversized packet.
@@ -69,6 +79,19 @@ pub enum Aes67ConfigError {
         got: usize,
         /// The enforced maximum ([`MAX_CHANNELS`]).
         max: usize,
+    },
+    /// The sample rate was outside
+    /// [`MIN_SAMPLE_RATE_HZ`]`..=`[`MAX_SAMPLE_RATE_HZ`] — it defines the RTP media
+    /// clock and the derived send cadence, so an unusable rate is rejected rather
+    /// than used to compute a nonsensical (or division-by-zero) packet duration.
+    #[error("aes67 sender sample rate {got} Hz is outside {min}..={max}")]
+    SampleRate {
+        /// The requested sample rate in Hz.
+        got: u32,
+        /// The enforced minimum ([`MIN_SAMPLE_RATE_HZ`]).
+        min: u32,
+        /// The enforced maximum ([`MAX_SAMPLE_RATE_HZ`]).
+        max: u32,
     },
     /// `frames_per_packet` (the ptime in sample groups) was `0` or above
     /// [`MAX_FRAMES_PER_PACKET`].
@@ -176,6 +199,10 @@ pub struct Aes67Sender {
     depth: PcmDepth,
     payload_type: u8,
     ssrc: u32,
+    /// The RTP media clock rate in Hz (the audio sample rate). The send cadence is
+    /// derived from this and `frames_per_packet`, so the wall-clock packet
+    /// interval always matches the advertised clock (panel F1).
+    sample_rate: u32,
     /// Audio frames (samples per channel) emitted per packet (`ptime` worth).
     frames_per_packet: usize,
     /// The RTP timestamp increment per packet (`= frames_per_packet`, precomputed
@@ -188,27 +215,33 @@ pub struct Aes67Sender {
 }
 
 impl Aes67Sender {
-    /// Build a sender for `channels`-channel interleaved audio at `depth`,
-    /// emitting `frames_per_packet` frames per packet on RTP payload type
-    /// `payload_type` with the constant `ssrc`, buffering up to `capacity_frames`
-    /// frames (raised to at least one packet).
+    /// Build a sender for `channels`-channel interleaved audio at `depth` and
+    /// `sample_rate` Hz, emitting `frames_per_packet` frames per packet on RTP
+    /// payload type `payload_type` with the constant `ssrc`, buffering up to
+    /// `capacity_frames` frames (raised to at least one packet). The `sample_rate`
+    /// is the RTP media clock: the send cadence
+    /// ([`packet_duration`](Self::packet_duration)) is derived from it and
+    /// `frames_per_packet`, so the wire interval always matches the advertised
+    /// clock (panel F1).
     ///
     /// **Fallible / fail-closed (panel F5):** the configuration is validated
-    /// against [`MAX_CHANNELS`], `1..=`[`MAX_FRAMES_PER_PACKET`],
-    /// [`MAX_CAPACITY_FRAMES`], and the [`MAX_PACKET_PAYLOAD_BYTES`] single-MTU
-    /// bound. An out-of-range value is **rejected**, never clamped or allowed to
-    /// over-allocate / emit an oversized UDP packet / overflow the RTP timestamp
-    /// increment.
+    /// against [`MAX_CHANNELS`], [`MIN_SAMPLE_RATE_HZ`]`..=`[`MAX_SAMPLE_RATE_HZ`],
+    /// `1..=`[`MAX_FRAMES_PER_PACKET`], [`MAX_CAPACITY_FRAMES`], and the
+    /// [`MAX_PACKET_PAYLOAD_BYTES`] single-MTU bound. An out-of-range value is
+    /// **rejected**, never clamped or allowed to over-allocate / emit an oversized
+    /// UDP packet / overflow the RTP timestamp increment / derive a nonsensical
+    /// send cadence.
     ///
     /// # Errors
     ///
-    /// [`Aes67ConfigError`] when the channel count, ptime, capacity, or resulting
-    /// per-packet payload size is outside the supported bounds.
+    /// [`Aes67ConfigError`] when the channel count, sample rate, ptime, capacity,
+    /// or resulting per-packet payload size is outside the supported bounds.
     pub fn new(
         channels: usize,
         depth: PcmDepth,
         payload_type: u8,
         ssrc: u32,
+        sample_rate: u32,
         frames_per_packet: usize,
         capacity_frames: usize,
     ) -> Result<Self, Aes67ConfigError> {
@@ -216,6 +249,13 @@ impl Aes67Sender {
             return Err(Aes67ConfigError::Channels {
                 got: channels,
                 max: MAX_CHANNELS,
+            });
+        }
+        if !(MIN_SAMPLE_RATE_HZ..=MAX_SAMPLE_RATE_HZ).contains(&sample_rate) {
+            return Err(Aes67ConfigError::SampleRate {
+                got: sample_rate,
+                min: MIN_SAMPLE_RATE_HZ,
+                max: MAX_SAMPLE_RATE_HZ,
             });
         }
         if !(1..=MAX_FRAMES_PER_PACKET).contains(&frames_per_packet) {
@@ -246,6 +286,7 @@ impl Aes67Sender {
             depth,
             payload_type,
             ssrc,
+            sample_rate,
             frames_per_packet,
             // `frames_per_packet <= MAX_FRAMES_PER_PACKET` (well inside `u32`),
             // so this widening never saturates — the defensive fallback is dead.
@@ -340,6 +381,29 @@ impl Aes67Sender {
     pub const fn frames_per_packet(&self) -> usize {
         self.frames_per_packet
     }
+
+    /// The RTP media clock rate in Hz this sender advertises.
+    #[must_use]
+    pub const fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// The packet-time (`ptime`) this sender must be driven at: exactly
+    /// `frames_per_packet / sample_rate`, the interval that keeps the wire cadence
+    /// locked to the RTP media clock (panel F1). The send loop
+    /// ([`Aes67UdpSender::serve`](super::transport::Aes67UdpSender::serve)) derives
+    /// its timer from this rather than an arbitrary caller-supplied duration.
+    ///
+    /// Computed in exact integer nanoseconds (never float fps — invariant #3);
+    /// `sample_rate` is a validated non-zero rate, so there is no division by zero
+    /// and `frames_per_packet ≤ `[`MAX_FRAMES_PER_PACKET`] keeps the product well
+    /// inside `u64`.
+    #[must_use]
+    pub fn packet_duration(&self) -> std::time::Duration {
+        let frames = u64::try_from(self.frames_per_packet).unwrap_or(u64::MAX);
+        let nanos = frames.saturating_mul(1_000_000_000) / u64::from(self.sample_rate);
+        std::time::Duration::from_nanos(nanos)
+    }
 }
 
 #[cfg(test)]
@@ -364,35 +428,45 @@ mod tests {
     fn rejects_out_of_range_config() {
         // Zero and oversized channel count.
         assert!(matches!(
-            Aes67Sender::new(0, PcmDepth::L24, 96, 1, 48, 4_800),
+            Aes67Sender::new(0, PcmDepth::L24, 96, 1, 48_000, 48, 4_800),
             Err(Aes67ConfigError::Channels { .. })
         ));
         assert!(matches!(
-            Aes67Sender::new(MAX_CHANNELS + 1, PcmDepth::L24, 96, 1, 48, 4_800),
+            Aes67Sender::new(MAX_CHANNELS + 1, PcmDepth::L24, 96, 1, 48_000, 48, 4_800),
             Err(Aes67ConfigError::Channels { .. })
+        ));
+        // Zero and oversized sample rate (would derive a nonsensical / div-by-zero
+        // cadence).
+        assert!(matches!(
+            Aes67Sender::new(2, PcmDepth::L24, 96, 1, 0, 48, 4_800),
+            Err(Aes67ConfigError::SampleRate { .. })
+        ));
+        assert!(matches!(
+            Aes67Sender::new(2, PcmDepth::L24, 96, 1, MAX_SAMPLE_RATE_HZ + 1, 48, 4_800),
+            Err(Aes67ConfigError::SampleRate { .. })
         ));
         // Zero and oversized frames-per-packet (oversized ptime).
         assert!(matches!(
-            Aes67Sender::new(2, PcmDepth::L24, 96, 1, 0, 4_800),
+            Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48_000, 0, 4_800),
             Err(Aes67ConfigError::FramesPerPacket { .. })
         ));
         assert!(matches!(
-            Aes67Sender::new(2, PcmDepth::L24, 96, 1, MAX_FRAMES_PER_PACKET + 1, 4_800),
+            Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48_000, MAX_FRAMES_PER_PACKET + 1, 4_800),
             Err(Aes67ConfigError::FramesPerPacket { .. })
         ));
         // A channel × ptime × depth combo that would exceed one MTU (8ch × 96
         // frames × 3 bytes = 2304 > MAX_PACKET_PAYLOAD_BYTES): oversized UDP.
         assert!(matches!(
-            Aes67Sender::new(8, PcmDepth::L24, 96, 1, 96, 4_800),
+            Aes67Sender::new(8, PcmDepth::L24, 96, 1, 48_000, 96, 4_800),
             Err(Aes67ConfigError::PayloadTooLarge { .. })
         ));
         // Oversized capacity (would pre-allocate a huge FIFO).
         assert!(matches!(
-            Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48, MAX_CAPACITY_FRAMES + 1),
+            Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48_000, 48, MAX_CAPACITY_FRAMES + 1),
             Err(Aes67ConfigError::Capacity { .. })
         ));
         // A realistic config still constructs.
-        assert!(Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48, 4_800).is_ok());
+        assert!(Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48_000, 48, 4_800).is_ok());
     }
 
     /// F3: while the shared FIFO lock is held, a concurrent handle `push` (the
@@ -403,7 +477,7 @@ mod tests {
     #[test]
     fn handle_push_never_blocks_on_a_held_fifo() {
         let sender =
-            Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480).expect("valid aes67 config");
+            Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48_000, 48, 480).expect("valid aes67 config");
         let handle = sender.handle();
         // Hold the shared FIFO lock on this thread (same module → private field).
         let fifo = Arc::clone(&sender.fifo);
@@ -426,7 +500,7 @@ mod tests {
     #[test]
     fn next_packet_never_blocks_on_a_held_fifo() {
         let mut sender =
-            Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480).expect("valid aes67 config");
+            Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48_000, 48, 480).expect("valid aes67 config");
         let fifo = Arc::clone(&sender.fifo);
         let guard = fifo.lock().expect("uncontended lock");
         let (tx, rx) = mpsc::channel();

@@ -83,7 +83,7 @@ fn packet_duration_derives_the_send_cadence_from_the_media_clock() {
 
 #[test]
 fn sender_payload_roundtrips_through_the_v30_decoder() {
-    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FRAMES_PER_PACKET, 4_800)
+    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FS, FRAMES_PER_PACKET, 4_800)
         .expect("valid aes67 config");
     let (samples, block) = ramp_block();
     sender.handle().push(&block);
@@ -118,7 +118,7 @@ fn handle_push_feeds_the_serve_side() {
     // F3: the engine-bake producer HANDLE and the serve loop share one FIFO via
     // an Arc, so a block pushed on the handle is drained by the serve side — the
     // two halves run on independent clocks with no `&mut` contention.
-    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FRAMES_PER_PACKET, 4_800)
+    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FS, FRAMES_PER_PACKET, 4_800)
         .expect("valid aes67 config");
     let handle: Aes67SenderHandle = sender.handle();
     let (samples, block) = ramp_block();
@@ -145,7 +145,7 @@ fn handle_push_feeds_the_serve_side() {
 #[test]
 fn sender_emits_continuous_marker0_with_advancing_seq_and_ts() {
     // Stereo L24, 1 ms packets: ADR-0033 §2 says the payload is 288 bytes.
-    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 96, 0xABCD, FRAMES_PER_PACKET, 4_800)
+    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 96, 0xABCD, FS, FRAMES_PER_PACKET, 4_800)
         .expect("valid aes67 config");
 
     let mut prev_seq: Option<u16> = None;
@@ -183,7 +183,7 @@ fn sender_emits_continuous_marker0_with_advancing_seq_and_ts() {
 fn absent_feed_emits_continuous_silence_never_a_gap() {
     // A sender that is never pushed still emits full marker=0 packets forever
     // (silence-fill), so the RTP stream is continuous (invariant #1).
-    let mut sender = Aes67Sender::new(1, PcmDepth::L16, 96, 1, FRAMES_PER_PACKET, 4_800)
+    let mut sender = Aes67Sender::new(1, PcmDepth::L16, 96, 1, FS, FRAMES_PER_PACKET, 4_800)
         .expect("valid aes67 config");
     for _ in 0..4 {
         let packet = sender.next_packet();
@@ -205,7 +205,7 @@ fn push_is_bounded_drop_oldest_and_never_back_pressures() {
     // oldest and accounted (invariants #10 / #5). This is the "sender can never
     // back-pressure the program bus" property.
     let capacity = 96; // frames
-    let sender = Aes67Sender::new(2, PcmDepth::L24, 96, 7, FRAMES_PER_PACKET, capacity)
+    let sender = Aes67Sender::new(2, PcmDepth::L24, 96, 7, FS, FRAMES_PER_PACKET, capacity)
         .expect("valid aes67 config");
     let handle = sender.handle();
     let (_samples, block) = ramp_block(); // 48 frames per push
@@ -231,7 +231,7 @@ fn sender_cadence_is_independent_of_the_program_feed() {
     // media clock is driven by the send timer, never paced by the input feed
     // (invariant #1).
     let drain = |feed: &dyn Fn(&Aes67SenderHandle, usize)| -> (usize, u16) {
-        let mut sender = Aes67Sender::new(2, PcmDepth::L24, 96, 9, FRAMES_PER_PACKET, 4_800)
+        let mut sender = Aes67Sender::new(2, PcmDepth::L24, 96, 9, FS, FRAMES_PER_PACKET, 4_800)
             .expect("valid aes67 config");
         let handle = sender.handle();
         let mut count = 0usize;

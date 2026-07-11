@@ -81,24 +81,34 @@ impl Aes67UdpSender {
             .map_err(|e| Error::Output(format!("aes67 send_to {}: {e}", self.dest)))
     }
 
-    /// Drive `sender` on an independent `ptime` timer, sending one continuous
+    /// Drive `sender` on its **media-clock cadence**, sending one continuous
     /// marker=0 packet per tick until `stop` resolves or the socket faults.
+    ///
+    /// The send interval is [`sender.packet_duration()`](Aes67Sender::packet_duration)
+    /// — `frames_per_packet / sample_rate` — **not** a caller-supplied duration, so
+    /// the wire cadence always matches the RTP media clock (which advances
+    /// `+frames_per_packet` per packet); an unrelated timer would drift the
+    /// receiver buffer (panel F1).
     ///
     /// This is the off-hot-path send loop: it samples the sender's bounded
     /// drop-oldest FIFO and never paces the engine (invariants #1 / #10). The
-    /// engine wires the program bus into `sender` (via
-    /// [`Aes67Sender::push`](super::sender::Aes67Sender::push)); this loop only
-    /// drains and transmits.
+    /// engine feeds the program bus in through an
+    /// [`Aes67SenderHandle`](super::sender::Aes67SenderHandle::push); this loop
+    /// only drains and transmits.
     ///
     /// # Errors
     ///
     /// [`Error::Output`] if a `send_to` fails (the supervisor reconnects).
-    pub async fn serve<S>(&self, sender: &mut Aes67Sender, ptime: Duration, stop: S) -> Result<()>
+    pub async fn serve<S>(&self, sender: &mut Aes67Sender, stop: S) -> Result<()>
     where
         S: std::future::Future<Output = ()>,
     {
         tokio::pin!(stop);
-        let mut ticker = tokio::time::interval(ptime.max(Duration::from_micros(1)));
+        // The cadence IS the media clock (panel F1): derive it from the sender's
+        // validated (sample_rate, frames_per_packet), clamped to a sane floor so a
+        // degenerate config can never spin a zero-duration timer.
+        let ptime = sender.packet_duration().max(Duration::from_micros(1));
+        let mut ticker = tokio::time::interval(ptime);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
