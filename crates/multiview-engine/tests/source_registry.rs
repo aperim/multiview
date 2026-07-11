@@ -139,12 +139,13 @@ fn two_consumers_of_one_key_share_a_single_store() {
         .unwrap();
     // A second reference to the SAME key must NOT create a new decode.
     let h2 = reg
-        .acquire(key.clone(), size(1920, 1080), |_r| -> Result<
-            SourceInit<u64>,
-            Infallible,
-        > {
-            panic!("second reference to an existing key must NOT run the factory");
-        })
+        .acquire(
+            key.clone(),
+            size(1920, 1080),
+            |_r| -> Result<SourceInit<u64>, Infallible> {
+                panic!("second reference to an existing key must NOT run the factory");
+            },
+        )
         .unwrap();
 
     assert!(
@@ -175,10 +176,13 @@ fn entry_created_on_first_reference_and_torn_down_on_last_release() {
     assert!(reg.contains(&key), "entry created on first reference");
 
     let h2 = reg
-        .acquire(key.clone(), size(1920, 1080), |_r| -> Result<
-            SourceInit<u64>,
-            Infallible,
-        > { panic!("existing key must not re-create") })
+        .acquire(
+            key.clone(),
+            size(1920, 1080),
+            |_r| -> Result<SourceInit<u64>, Infallible> {
+                panic!("existing key must not re-create")
+            },
+        )
         .unwrap();
 
     // Drop ONE handle: the entry (and its decode) MUST survive — a reference remains.
@@ -259,16 +263,23 @@ fn decode_supremum_grows_to_the_per_axis_max() {
     let shut = Arc::new(AtomicBool::new(false));
 
     let h_small = reg
-        .acquire(key.clone(), size(640, 360), init("cam3", shut.clone(), None))
+        .acquire(
+            key.clone(),
+            size(640, 360),
+            init("cam3", shut.clone(), None),
+        )
         .unwrap();
     assert_eq!(reg.requested_supremum(&key), Some(size(640, 360)));
 
     // A larger consumer grows the supremum (per-axis max).
     let h_big = reg
-        .acquire(key.clone(), size(1920, 720), |_r| -> Result<
-            SourceInit<u64>,
-            Infallible,
-        > { panic!("existing key must not re-create") })
+        .acquire(
+            key.clone(),
+            size(1920, 720),
+            |_r| -> Result<SourceInit<u64>, Infallible> {
+                panic!("existing key must not re-create")
+            },
+        )
         .unwrap();
     assert_eq!(
         reg.requested_supremum(&key),
@@ -278,10 +289,13 @@ fn decode_supremum_grows_to_the_per_axis_max() {
 
     // A taller-but-narrower consumer grows only the height axis.
     let h_tall = reg
-        .acquire(key.clone(), size(320, 1080), |_r| -> Result<
-            SourceInit<u64>,
-            Infallible,
-        > { panic!("existing key must not re-create") })
+        .acquire(
+            key.clone(),
+            size(320, 1080),
+            |_r| -> Result<SourceInit<u64>, Infallible> {
+                panic!("existing key must not re-create")
+            },
+        )
         .unwrap();
     assert_eq!(
         reg.requested_supremum(&key),
@@ -291,10 +305,13 @@ fn decode_supremum_grows_to_the_per_axis_max() {
 
     // A smaller consumer does NOT shrink the supremum.
     let h_smaller = reg
-        .acquire(key.clone(), size(160, 90), |_r| -> Result<
-            SourceInit<u64>,
-            Infallible,
-        > { panic!("existing key must not re-create") })
+        .acquire(
+            key.clone(),
+            size(160, 90),
+            |_r| -> Result<SourceInit<u64>, Infallible> {
+                panic!("existing key must not re-create")
+            },
+        )
         .unwrap();
     assert_eq!(reg.requested_supremum(&key), Some(size(1920, 1080)));
 
@@ -337,7 +354,10 @@ fn a_wedged_source_teardown_never_stalls_a_sibling_consumer() {
         .unwrap();
     hb.store().publish(99_u64, MediaTime::from_nanos(0));
     assert_eq!(
-        hb.store().read_at(MediaTime::from_nanos(0)).frame().map(|f| **f),
+        hb.store()
+            .read_at(MediaTime::from_nanos(0))
+            .frame()
+            .map(|f| **f),
         Some(99)
     );
 
@@ -360,7 +380,10 @@ fn a_wedged_source_teardown_never_stalls_a_sibling_consumer() {
     let sample_start = Instant::now();
     for _ in 0..2000 {
         assert_eq!(
-            hb.store().read_at(MediaTime::from_nanos(0)).frame().map(|f| **f),
+            hb.store()
+                .read_at(MediaTime::from_nanos(0))
+                .frame()
+                .map(|f| **f),
             Some(99),
             "sibling B's lock-free sample must never stall while A is wedged (inv #10)"
         );
