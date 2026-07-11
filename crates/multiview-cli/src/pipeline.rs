@@ -1960,6 +1960,13 @@ impl Pipeline {
     // ingest plan per source, wires native captions, and assembles the outputs —
     // each step is in-scope and splitting it would only scatter the wiring.
     pub fn build(config: &MultiviewConfig) -> Result<Self, PipelineError> {
+        // Fail-closed (#103): an AES67 PCM-audio source in a non-`aes67` build is a
+        // config this binary cannot honour — reject it clearly up front, never wire
+        // it dark (the same contract as a `display` source/output in a non-
+        // `display-kms` build).
+        crate::outputs::ensure_aes67_sources_supported(&config.sources).map_err(|reason| {
+            PipelineError::Config(multiview_config::ConfigError::Validation(reason))
+        })?;
         let layout = Arc::new(config.solve_layout()?);
         let cadence = config.canvas.fps.rational();
         let canvas_color = CanvasColor::default();
@@ -6842,6 +6849,14 @@ fn build_outputs(
     crate::outputs::ensure_display_outputs_supported(outputs).map_err(|reason| {
         PipelineError::Output {
             kind: "display",
+            reason,
+        }
+    })?;
+    // Same fail-closed contract for an AES67 raw-PCM output in a non-`aes67` build
+    // (#103): reject clearly rather than warn-skip it into a dead stream.
+    crate::outputs::ensure_aes67_outputs_supported(outputs).map_err(|reason| {
+        PipelineError::Output {
+            kind: "aes67",
             reason,
         }
     })?;
