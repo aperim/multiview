@@ -1999,6 +1999,41 @@ struct Aes67RxPlan {
 /// # Errors
 /// [`PipelineError::Ingest`] when the source is not AES67, the SDP does not parse,
 /// the `multicast` override is absent, or it is not a valid `group:port`.
+/// Reject a layout cell bound to an audio-only AES67 source (#103).
+///
+/// An AES67 / ST 2110-30 source decodes no pixels — it has no `TileStore` — so a
+/// layout cell referencing it would carry tile geometry with nothing to
+/// composite. This checks the RAW config bindings (`cells[].source.input_id`),
+/// independent of geometry solving, so the audio-binding is rejected with a clear
+/// message even when the cell's area does not resolve — which `solve_layout` would
+/// otherwise report as a generic "unknown grid area" error, masking the root
+/// cause. Fail-closed, and decoupled from any tile-sizing predicate.
+///
+/// # Errors
+///
+/// [`PipelineError::Config`] naming the source when any cell binds an AES67 source.
+#[cfg(feature = "aes67")]
+fn ensure_no_cell_binds_an_aes67_source(config: &MultiviewConfig) -> Result<(), PipelineError> {
+    for cell in &config.cells {
+        let Some(bound) = cell.source.input_id.as_deref() else {
+            continue;
+        };
+        let binds_aes67 = config
+            .sources
+            .iter()
+            .any(|source| source.id == bound && matches!(source.kind, SourceKind::Aes67 { .. }));
+        if binds_aes67 {
+            return Err(PipelineError::Config(
+                multiview_config::ConfigError::Validation(format!(
+                    "layout cell bound to audio-only AES67 source `{bound}`: an AES67 / \
+                     ST 2110-30 source carries no video and cannot occupy a layout tile"
+                )),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "aes67")]
 fn resolve_aes67_source(
     source: &Source,
@@ -2110,6 +2145,14 @@ impl Pipeline {
         crate::outputs::ensure_aes67_sources_supported(&config.sources).map_err(|reason| {
             PipelineError::Config(multiview_config::ConfigError::Validation(reason))
         })?;
+        // #103: an AES67 / ST 2110-30 source is AUDIO-ONLY (no TileStore). Reject a
+        // layout cell bound to one here — on the RAW config bindings, BEFORE
+        // `solve_layout` — so the audio-binding is named clearly and rejected
+        // whether or not the cell's geometry resolves (a bad-geometry cell would
+        // otherwise be masked by `solve_layout`'s generic area error, and the guard
+        // must not depend on tile-sizing at all). Fail-closed.
+        #[cfg(feature = "aes67")]
+        ensure_no_cell_binds_an_aes67_source(config)?;
         let layout = Arc::new(config.solve_layout()?);
         let cadence = config.canvas.fps.rational();
         let canvas_color = CanvasColor::default();
@@ -2181,22 +2224,11 @@ impl Pipeline {
             // in `drive_streaming`). Skip the entire video path for it.
             #[cfg(feature = "aes67")]
             if matches!(source.kind, SourceKind::Aes67 { .. }) {
+                // An AES67 source decodes no pixels, so it takes NO video path (no
+                // TileStore / registry entry / layout tile). A cell bound to it is
+                // already rejected up front by `ensure_no_cell_binds_an_aes67_source`
+                // (before `solve_layout`), so here it is purely audio-only.
                 let (session, group) = resolve_aes67_source(source)?;
-                // An AES67 source decodes no pixels, so it has NO backing
-                // `TileStore`. A layout cell bound to it would carry tile geometry
-                // with nothing to composite — reject fail-closed rather than leave a
-                // dangling tile (the video path below is only reached for pixel
-                // sources).
-                if cell_pixel_size(&layout, &source.id).is_some() {
-                    return Err(PipelineError::Config(
-                        multiview_config::ConfigError::Validation(format!(
-                            "layout cell bound to audio-only AES67 source `{}`: an \
-                             AES67 / ST 2110-30 source carries no video and cannot \
-                             occupy a layout tile",
-                            source.id
-                        )),
-                    ));
-                }
                 let store = crate::audio::new_store();
                 audio_stores.insert(source.id.clone(), Arc::clone(&store));
                 aes67_rx_plans.push(Aes67RxPlan {
