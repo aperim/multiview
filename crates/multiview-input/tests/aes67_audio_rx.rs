@@ -124,7 +124,7 @@ mod producer {
         let payload = packetizer.encode(&samples).expect("encode whole groups");
 
         let source = ScriptedSource::new(vec![audio_packet(1_000, 7, 0xDEAD_BEEF, payload)]);
-        let mut producer = Aes67AudioProducer::new(Box::new(source), format);
+        let mut producer = Aes67AudioProducer::new(Box::new(source), format, SESSION_PT);
 
         let frame = producer
             .next_audio()
@@ -160,7 +160,7 @@ mod producer {
             audio_packet(10, 1, 1, vec![0, 1, 2, 3, 4]),
             audio_packet(20, 2, 1, good),
         ]);
-        let mut producer = Aes67AudioProducer::new(Box::new(source), format);
+        let mut producer = Aes67AudioProducer::new(Box::new(source), format, SESSION_PT);
 
         // The malformed unit is skipped; the next good unit is yielded — the
         // producer never faults on a single bad datagram (inv #1 / #2).
@@ -218,7 +218,7 @@ mod producer {
             audio_packet(0, 1, 1, payload.clone()),
             audio_packet(48, 3, 1, payload),
         ]);
-        let mut producer = Aes67AudioProducer::new(Box::new(source), format);
+        let mut producer = Aes67AudioProducer::new(Box::new(source), format, SESSION_PT);
 
         let first = producer.next_audio().unwrap().expect("first unit");
         assert!(!first.discontinuity, "the first unit anchors, no gap");
@@ -249,7 +249,7 @@ mod producer {
             audio_packet(48, 60_001, 0xBBBB_BBBB, pcm.clone()), // B: contiguous
             audio_packet(96, 60_003, 0xBBBB_BBBB, pcm),     // B: 60001 -> 60003 gap
         ]);
-        let mut producer = Aes67AudioProducer::new(Box::new(source), format);
+        let mut producer = Aes67AudioProducer::new(Box::new(source), format, SESSION_PT);
 
         let a = producer.next_audio().unwrap().expect("A anchors");
         assert!(!a.discontinuity, "first packet of stream A anchors, no gap");
@@ -308,7 +308,7 @@ mod producer {
             polls: std::sync::Arc::clone(&polls),
             remaining: FLOOD,
         };
-        let mut producer = Aes67AudioProducer::new(Box::new(source), format);
+        let mut producer = Aes67AudioProducer::new(Box::new(source), format, SESSION_PT);
 
         // One tick over a malformed flood: no valid unit is produced, and the
         // call must NOT drain the whole flood — a sample is bounded work so it

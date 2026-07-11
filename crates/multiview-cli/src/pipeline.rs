@@ -9767,7 +9767,11 @@ fn drive_aes67_rx(plan: &Aes67RxPlan, stop: &AtomicBool) {
         tracing::info!(source = %plan.id, group = %plan.group, "aes67 rx receiving");
         let (packet_source, receive_loop) = receiver.channel_bridge(AES67_RX_BRIDGE_CAP);
         let mut receive_loop = receive_loop;
-        let mut producer = Aes67AudioProducer::new(Box::new(packet_source), plan.session.format);
+        let mut producer = Aes67AudioProducer::new(
+            Box::new(packet_source),
+            plan.session.format,
+            plan.session.payload_type,
+        );
         // The ADR-T013 rebaser maps each packet's 32-bit RTP media timestamp onto
         // the store's absolute 48 kHz frame index. Wire rate is the SDP clock; the
         // store is canonical 48 kHz.

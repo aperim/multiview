@@ -101,8 +101,9 @@ async fn aes67_producer_decodes_ffmpeg_l24_rtp() {
         packets.len()
     );
 
-    // Our producer decodes ffmpeg's real AES67 L24 into non-silent audio.
-    let mut producer = Aes67AudioProducer::new(Box::new(Collected { packets }), format);
+    // Our producer decodes ffmpeg's real AES67 L24 into non-silent audio. ffmpeg
+    // advertises `a=rtpmap:97 L24/48000/2`, so the RTP payload type is 97.
+    let mut producer = Aes67AudioProducer::new(Box::new(Collected { packets }), format, 97);
     let mut total_frames = 0usize;
     let mut peak = 0.0_f32;
     while let Some(frame) = producer.next_audio().expect("decode never faults") {

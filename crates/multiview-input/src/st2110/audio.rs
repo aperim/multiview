@@ -110,6 +110,10 @@ use crate::st2110::transport::PacketSource;
 pub struct Aes67AudioProducer {
     source: Box<dyn PacketSource + Send>,
     format: Aes3Format,
+    /// The SDP-negotiated RTP payload type this session decodes. A packet whose
+    /// payload type differs is a stray / multiplexed stream on the same 5-tuple and
+    /// is dropped, not decoded as PCM (RFC 3550 §5.1).
+    expected_payload_type: u8,
     /// The SSRC the [`last_sequence`](Self::last_sequence) watermark belongs to.
     /// Sequence numbers are only comparable within one synchronization source, so
     /// a change resets the watermark (a new SSRC is a new sequence space).
@@ -125,6 +129,7 @@ impl core::fmt::Debug for Aes67AudioProducer {
         // `Box<dyn PacketSource>` is not `Debug` (like the video St2110Producer).
         f.debug_struct("Aes67AudioProducer")
             .field("format", &self.format)
+            .field("expected_payload_type", &self.expected_payload_type)
             .field("last_ssrc", &self.last_ssrc)
             .field("last_sequence", &self.last_sequence)
             .finish_non_exhaustive()
@@ -145,12 +150,22 @@ impl Aes67AudioProducer {
     pub const MAX_PACKETS_PER_POLL: usize = 64;
 
     /// Build a producer over an application-supplied packet source, decoding
-    /// against the SDP-negotiated [`Aes3Format`].
+    /// against the SDP-negotiated [`Aes3Format`] and filtering to the
+    /// SDP-negotiated RTP `payload_type`.
+    ///
+    /// A packet whose RTP payload type differs from `payload_type` is a stray /
+    /// multiplexed stream on the same 5-tuple and is dropped (not decoded as PCM),
+    /// exactly like a malformed payload — see [`next_audio`](Self::next_audio).
     #[must_use]
-    pub fn new(source: Box<dyn PacketSource + Send>, format: Aes3Format) -> Self {
+    pub fn new(
+        source: Box<dyn PacketSource + Send>,
+        format: Aes3Format,
+        payload_type: u8,
+    ) -> Self {
         Self {
             source,
             format,
+            expected_payload_type: payload_type,
             last_ssrc: None,
             last_sequence: None,
         }
@@ -166,11 +181,13 @@ impl Aes67AudioProducer {
     /// ready this tick.
     ///
     /// Non-blocking: an empty source yields `Ok(None)` (the caller re-polls next
-    /// tick) and never blocks the data plane (invariant #1). A malformed payload
-    /// (not a whole number of sample groups for the configured format) is
-    /// **skipped**, never faulted — a single bad datagram must not stall the
-    /// stream (invariants #1 / #2). A gap against the last accepted RTP sequence
-    /// sets [`Aes67AudioFrame::discontinuity`].
+    /// tick) and never blocks the data plane (invariant #1). A packet whose RTP
+    /// payload type is not the session's, or whose payload is malformed (not a
+    /// whole number of sample groups for the configured format), is **skipped**,
+    /// never faulted — a stray/multiplexed stream on the same 5-tuple or a single
+    /// bad datagram must not be decoded as PCM or stall the stream (invariants
+    /// #1 / #2). A gap against the last accepted RTP sequence sets
+    /// [`Aes67AudioFrame::discontinuity`].
     ///
     /// **Bounded work (inv #1):** the skip loop pulls at most
     /// [`MAX_PACKETS_PER_POLL`] units per call. A malformed-packet flood is drained
@@ -189,6 +206,12 @@ impl Aes67AudioProducer {
             let Some(packet) = self.source.poll_packet()? else {
                 return Ok(None);
             };
+            // A packet from a DIFFERENT RTP payload type is a stray / multiplexed
+            // stream on the same 5-tuple — drop it (never decode it as our PCM),
+            // like a malformed payload. Counts against the per-poll budget below.
+            if packet.payload_type != self.expected_payload_type {
+                continue;
+            }
             // A malformed / partial-group payload is dropped, not faulted.
             let Ok(payload) = V30Payload::parse(&packet.payload, self.format) else {
                 continue;

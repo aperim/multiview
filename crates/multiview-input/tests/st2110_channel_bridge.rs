@@ -28,6 +28,7 @@ fn unit(seq: u16) -> St2110Packet {
         timestamp: u32::from(seq),
         sequence: seq,
         ssrc: 0,
+        payload_type: 96,
         payload: Vec::new(),
     }
 }

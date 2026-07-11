@@ -339,6 +339,10 @@ pub struct St2110Packet {
     /// the ST 2110-30 / AES67 audio path forwards it to the
     /// [`RtpAudioRebaser`](crate::rtp_audio) so a genuine SSRC change re-anchors.
     pub ssrc: u32,
+    /// The 7-bit RTP payload type (RFC 3550 §5.1). The video assembler ignores it
+    /// (like `ssrc`); the ST 2110-30 / AES67 audio producer filters on it so a
+    /// stray / multiplexed RTP stream sharing the 5-tuple is not decoded as PCM.
+    pub payload_type: u8,
     /// The owned RTP payload bytes (after the fixed header) the SRD segments of
     /// the depacketized [`V20Payload`] index into.
     pub payload: Vec<u8>,
@@ -356,6 +360,7 @@ impl St2110Packet {
             timestamp: packet.header.timestamp,
             sequence: packet.header.sequence,
             ssrc: packet.header.ssrc,
+            payload_type: packet.header.payload_type,
             payload: packet.payload.to_vec(),
         }
     }
@@ -777,6 +782,7 @@ mod tests {
             timestamp: 0,
             sequence,
             ssrc: 0,
+            payload_type: 96,
             payload: vec![0u8; 4],
         }
     }
