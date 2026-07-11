@@ -196,6 +196,56 @@ fn purge_threshold_is_ten_periods_when_that_exceeds_one_hour() {
     );
 }
 
+#[test]
+fn concurrent_observers_do_not_lose_sessions() {
+    // P2-F2: observe() is a load -> clone -> mutate -> store read-modify-write.
+    // A `with_table`-shared table is written by multiple concurrent tasks (a
+    // dual-stack v4 + v6 listener; the purge tick). ArcSwap makes the STORE
+    // atomic, not the whole RMW: two writers can each clone the SAME snapshot and
+    // the second store clobbers the first, silently losing a session. Hammer one
+    // shared table from many threads with wholly-distinct sessions and assert
+    // every one survives — a shortfall is a lost update.
+    use std::sync::{Arc, Barrier};
+
+    const THREADS: usize = 8;
+    const PER_THREAD: u16 = 250;
+    let total = THREADS * usize::from(PER_THREAD);
+
+    // Caps well above the total, so nothing is dropped for capacity/per-origin
+    // reasons — any shortfall is a clobbered insert, not a bounded eviction.
+    let table = Arc::new(SapSessionTable::with_limits(
+        total + 16,
+        usize::from(PER_THREAD) + 16,
+    ));
+    let barrier = Arc::new(Barrier::new(THREADS));
+
+    let workers: Vec<_> = (0..THREADS)
+        .map(|t| {
+            let table = Arc::clone(&table);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                // Each thread owns a distinct origin; hashes 1..=PER_THREAD are
+                // distinct within it, so every (hash, origin) key is unique.
+                let origin = v4(198, 51, 100, u8::try_from(t).unwrap());
+                barrier.wait();
+                for h in 1..=PER_THREAD {
+                    table.observe(&announce(h, origin, "v=0\r\n"), secs(0));
+                }
+            })
+        })
+        .collect();
+    for w in workers {
+        w.join().expect("worker thread panicked");
+    }
+
+    assert_eq!(
+        table.len(),
+        total,
+        "every distinct session from every concurrent writer must survive — a \
+         shortfall means one observe() read-modify-write clobbered a peer (P2-F2)"
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
