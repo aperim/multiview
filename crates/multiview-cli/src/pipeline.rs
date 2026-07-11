@@ -85,7 +85,8 @@ use multiview_core::time::{MediaTime, Rational};
 use multiview_core::traits::SourceState;
 use multiview_engine::{
     CompositedFrame, CompositorDrive, EnginePublisher, MonotonicTimeSource, MultiviewProgram,
-    OutputClock, Pacer, RealtimePacer, StopSignal, TimeSource,
+    OutputClock, Pacer, RealtimePacer, RequestedSize, SourceHandle, SourceKey, SourceRegistry,
+    StopSignal, TimeSource,
 };
 use multiview_events::Event;
 use multiview_ffmpeg::{
@@ -1593,7 +1594,24 @@ pub struct Pipeline {
     overlay_apply: crate::live_overlays::OverlayApplySlot,
     /// Per-source last-good-frame stores, keyed by source id. Shared (`Arc`)
     /// between the engine's drive loop (reader) and the ingest threads (writers).
+    /// Each entry is an `Arc` clone of the store the [`source_registry`](Self::source_registry)
+    /// owns (MP-2, ADR-0030 §3) — this map is a lock-free reader, not the owner.
     stores: HashMapStores,
+    /// MP-2 (ADR-0030 §3): the source registry that OWNS each source's shared
+    /// [`TileStore`] and its decode sizing (the per-axis supremum across that
+    /// source's cells). [`stores`](Self::stores) and each ingest plan hold `Arc`
+    /// clones of the registry's stores; the registry is the single owner. Keyed by
+    /// source id in this single-program build (one entry per id, exactly the old
+    /// `stores` map); the URL-canonical cross-id share is a later milestone.
+    source_registry: Arc<SourceRegistry<Nv12Image>>,
+    /// The registry references this pipeline holds — one [`SourceHandle`] per
+    /// startup source — keeping each registry entry (and its shared store) alive for
+    /// the pipeline's lifetime (the program's reference to the source). Dropping the
+    /// pipeline drops these, releasing each reference (last-release removes the entry).
+    // reason: held purely for that RAII `Drop`; it is never read, and the dead_code
+    // lint cannot observe a Drop side-effect (rule 20 justification).
+    #[allow(dead_code)]
+    source_handles: Vec<SourceHandle<Nv12Image>>,
     /// The per-source producer stop flags (ADR-W018): every startup ingest
     /// thread registers its flag here, and the live-source hub shares the same
     /// registry, so a live `RemoveSource` can tear down exactly one producer.
@@ -1984,14 +2002,39 @@ impl Pipeline {
         #[cfg(feature = "overlay")]
         let mut prefetched_captions = prefetch_caption_plans(config);
 
+        // MP-2 (ADR-0030 §3): the SourceRegistry owns each source's shared TileStore
+        // and its decode sizing. In this single-program build it keys by source id —
+        // one entry per id, exactly today's `stores` map; a later milestone folds the
+        // URL-canonical StableStreamId so two ids at one location share ONE decode.
+        // The decode threads spawn later (drive_streaming) and their stop/join stays
+        // with the run's StopRegistry, so store creation goes through `acquire_store`
+        // (no decode actor to own yet). Holding each handle keeps its entry alive for
+        // the pipeline's lifetime (the program's reference); dropping it releases.
+        let source_registry = SourceRegistry::<Nv12Image>::new();
+        let mut source_handles: Vec<SourceHandle<Nv12Image>> =
+            Vec::with_capacity(config.sources.len());
+
         for source in &config.sources {
             let (tile_w, tile_h) = cell_pixel_size(&layout, &source.id)
                 .unwrap_or((config.canvas.width, config.canvas.height));
-            let store = Arc::new(TileStore::new(
-                source.id.clone(),
-                TileThresholds::default(),
-                NoSignalPolicy::HoldForever,
-            ));
+            // The registry owns the shared store, sized to the per-axis supremum;
+            // `stores` + the ingest plan below hold Arc clones (lock-free readers).
+            let source_handle = source_registry.acquire_store(
+                SourceKey::from_canonical(source.id.as_str()),
+                RequestedSize {
+                    width: tile_w,
+                    height: tile_h,
+                },
+                |_requested| -> Result<Arc<TileStore<Nv12Image>>, PipelineError> {
+                    Ok(Arc::new(TileStore::new(
+                        source.id.clone(),
+                        TileThresholds::default(),
+                        NoSignalPolicy::HoldForever,
+                    )))
+                },
+            )?;
+            let store = Arc::clone(source_handle.store());
+            source_handles.push(source_handle);
             #[cfg_attr(not(feature = "overlay"), allow(unused_mut))]
             let mut plan = ingest_plan_for(
                 source,
@@ -2212,6 +2255,8 @@ impl Pipeline {
             cadence,
             program_spec,
             stores,
+            source_registry,
+            source_handles,
             stop_registry: crate::live_sources::stop_registry(),
             #[cfg(feature = "gpu")]
             live_island: Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -2615,6 +2660,15 @@ impl Pipeline {
     #[must_use]
     pub fn preview_stores(&self) -> HashMapStores {
         self.stores.clone()
+    }
+
+    /// The source registry that owns this pipeline's per-source shared stores +
+    /// their decode sizing (MP-2, ADR-0030 §3). The run/drive path reads it to
+    /// resolve a source's shared decode; `stores` holds `Arc` clones of the same
+    /// stores for lock-free sampling.
+    #[must_use]
+    pub fn source_registry(&self) -> &Arc<SourceRegistry<Nv12Image>> {
+        &self.source_registry
     }
 
     /// DEV-C1 (ADR-M010): the shared outbound presentation-epoch cell this
