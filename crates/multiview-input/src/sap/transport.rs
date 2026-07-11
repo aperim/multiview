@@ -107,6 +107,11 @@ impl SapListener {
     /// # Errors
     ///
     /// [`Error::Ingest`] if the socket cannot be bound.
+    // `bind_dual_stack` is synchronous — the dual-stack / SO_REUSEADDR options must
+    // be set BEFORE bind, so it cannot use tokio's async `UdpSocket::bind`; `bind`
+    // stays `async` for API stability (every caller, and #103, awaits it, matching
+    // the peer transports and the output `Aes67UdpSender::bind`).
+    #[allow(clippy::unused_async)]
     pub async fn bind(local: SocketAddr) -> Result<Self> {
         // Dual-stack, SO_REUSEADDR (panel S4): a `[::]` listener also accepts
         // IPv4-mapped SAP, not left to the host `bindv6only` default.
@@ -315,6 +320,11 @@ impl SapAnnouncer {
     /// # Errors
     ///
     /// [`Error::Ingest`] if the socket cannot be bound.
+    // `bind_dual_stack` is synchronous — the dual-stack / SO_REUSEADDR options must
+    // be set BEFORE bind, so it cannot use tokio's async `UdpSocket::bind`; `bind`
+    // stays `async` for API stability (every caller, and #103, awaits it, matching
+    // the peer transports and the output `Aes67UdpSender::bind`).
+    #[allow(clippy::unused_async)]
     pub async fn bind(local: SocketAddr) -> Result<Self> {
         // Dual-stack, SO_REUSEADDR (panel S4), mirroring the listener bind.
         let socket = bind_dual_stack(local)
