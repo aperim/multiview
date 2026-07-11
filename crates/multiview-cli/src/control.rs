@@ -232,7 +232,7 @@ where
     .with_device_pollers(device_poller_registry(delivery.as_ref(), &dial_policy))
     .with_dial_policy(Arc::clone(&dial_policy))
     .with_auth_disabled(auth_disabled)
-    // The management-plane connection + rate caps (SEC-14 control-plane DoS
+    // The management-plane request-concurrency + rate caps (SEC-14 control-plane DoS
     // floor): map `control.limits` (secure defaults when the section is absent)
     // onto the served API. Config-driven; the guards shed `429`/`503` and never
     // touch the engine (invariant #10).

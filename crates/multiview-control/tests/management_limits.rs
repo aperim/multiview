@@ -1,5 +1,5 @@
 //! End-to-end (SEC-14): the *served* control plane installs the management-plane
-//! connection + rate caps and keys the per-IP limit on the real peer address.
+//! request-concurrency + rate caps and keys the per-IP limit on the real peer address.
 //!
 //! The middleware behaviour is unit-tested in-process (`src/limits.rs`); this test
 //! adds the real TCP bind + `into_make_service_with_connect_info` wiring, so it

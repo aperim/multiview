@@ -39,10 +39,10 @@
 //! `_weak`), so it never fails *spuriously*: a retry happens **only** on genuine
 //! contention — a concurrent request that advanced this same cell first — and each
 //! retry consumes one such real advance. The limiter is therefore **lock-free but
-//! not wait-free**: under sustained contention on one cell a call may retry a number
-//! of times proportional to the threads concurrently *admitting* on that cell (every
-//! retry means a peer made progress, so the system as a whole never stalls, but there
-//! is no per-call step bound). Only the admitting branch loops; once the cell's burst
+//! not wait-free**: every failed CAS witnesses another thread's successful update, so
+//! the system as a whole always makes progress, but there is **no per-call progress
+//! bound** — an individual call can be lapped indefinitely while peers keep winning.
+//! Only the admitting branch loops; once the cell's burst
 //! is spent every further request takes the CAS-free reject path, and the per-key
 //! rate limit itself bounds the sustained admit rate — so a single-key flood cannot
 //! manufacture unbounded admit-phase contention. A flood concentrated on one cell
@@ -202,9 +202,10 @@ impl<S: BuildHasher> RateLimiter<S> {
     /// virtual time at which the next request may arrive; a request is admitted when
     /// advancing `tat` by one increment keeps it within `tau` of `now`. Lock-free —
     /// a load plus a single **strong** CAS in the common case; under genuine
-    /// contention the CAS retries (lock-free, **not** wait-free — a retry only ever
-    /// follows a concurrent admit on this same cell, so retries are proportional to
-    /// the number of concurrently-admitting threads and never spurious). Only the
+    /// contention the CAS retries (lock-free, **not** wait-free — every failed CAS
+    /// witnesses another thread's successful update and is never spurious, but there
+    /// is **no per-call progress bound**; the per-key rate limit bounds the sustained
+    /// admit *rate*, not the liveness of any individual call). Only the
     /// admitting branch loops: a rejected request returns without a CAS and never
     /// advances `tat`. Every operation saturates and `now` is clamped, so a frozen,
     /// jumped, wrapped, or regressed clock can neither panic nor grant a bonus request.
@@ -242,11 +243,11 @@ impl<S: BuildHasher> RateLimiter<S> {
                         // this cell — never a spurious failure: another admitting thread
                         // committed first. Hint the CPU we are in a spin-retry (cheaper
                         // contention, better SMT yield), then re-read and retry against
-                        // the observed `tat`. This is lock-free, NOT wait-free: a retry
-                        // always follows a peer's real progress, so a call retries a
-                        // number of times proportional to the threads concurrently
-                        // admitting on this one cell — the system as a whole never
-                        // stalls, but there is no per-call step bound. Once the burst is
+                        // the observed `tat`. This is lock-free, NOT wait-free: every
+                        // failed CAS witnesses a peer's successful update, so the system
+                        // as a whole always makes progress, but there is NO per-call
+                        // progress bound — an individual call can be lapped indefinitely
+                        // while peers keep winning. Once the burst is
                         // spent every request takes the CAS-free reject path below, and
                         // the per-key rate itself bounds the sustained admit rate, so a
                         // single-key flood cannot manufacture unbounded admit-phase
