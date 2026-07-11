@@ -132,6 +132,47 @@ async fn listener_binds_ipv6_unspecified_dual_stack() {
 }
 
 #[tokio::test]
+async fn a_datagram_flood_is_rate_limited_before_the_expensive_fold() {
+    use multiview_input::sap::SapSessionTable;
+    use std::sync::Arc;
+
+    // A high-capacity table so `len()` reflects the number of *folds* (not the
+    // default 256 cap), and a TIGHT rate limit with a window far longer than the
+    // test, so exactly `burst` datagrams are folded regardless of send timing —
+    // fully deterministic (panel F4).
+    let table = Arc::new(SapSessionTable::with_limits(100_000, 100_000));
+    let listener = SapListener::bind(loopback6(0))
+        .await
+        .unwrap()
+        .with_table(Arc::clone(&table))
+        .with_rate_limit(8, Duration::from_secs(30));
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(listener.run());
+
+    // Flood 200 DISTINCT valid announcements (distinct hashes) as fast as we can.
+    let announcer = SapAnnouncer::bind(loopback6(0)).await.unwrap();
+    let origin = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    for i in 0..200u32 {
+        let sdp = format!("v=0\r\no=- {i} {i} IN IP6 ff3e::1\r\ns=flood-{i}\r\n").into_bytes();
+        let pkt = announcement(stable_hash(&sdp), origin, sdp);
+        announcer.send_to(&pkt, addr).await.unwrap();
+    }
+
+    // Give the listener time to drain the socket and fold whatever the limiter
+    // admits. Only the first `burst` (8) can enter the expensive fold path; the
+    // rest are dropped cheaply BEFORE the O(n) RCU clone (inv #10).
+    let bounded = wait_for(|| table.len() >= 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let folded = table.len();
+    assert!(bounded && folded >= 1, "at least the burst is folded");
+    assert!(
+        folded <= 8,
+        "a same-window flood folds at most the rate-limit burst (8), got {folded} of 200 — \
+         the expensive fold is gated BEFORE it runs (F4 / inv #10)"
+    );
+}
+
+#[tokio::test]
 async fn announcer_run_loop_emits_the_first_cycle_immediately() {
     let listener = SapListener::bind(loopback6(0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
