@@ -185,6 +185,24 @@ tempfile = "3"
 # (ADR-W024 MAJOR-A). Permissive (Apache-2.0/MIT/BSD), already in the lock.
 rustix = { version = "1", features = ["process"] }
 
+# Control-plane TLS termination (TLS-0, ADR-W029): OFF by default (`tls`). The
+# `[control.tls]` schema + the plain-HTTP serve path are ALWAYS compiled; only
+# the rustls termination (`serve_router_tls`) needs these. `axum-server`
+# (`tls-rustls`) drives the accept loop over the shared listener + graceful
+# `Handle`; `rustls` builds the `ServerConfig` with an EXPLICIT `aws-lc-rs`
+# provider (mirroring `devices/cast/net.rs` — never the process-default, which
+# panics when both `ring` and `aws-lc-rs` are linked, e.g. a `full` build);
+# `rustls-pki-types` (`pem`) loads the cert chain + key from PEM files. All
+# rustls 0.23 / aws-lc-rs, already in the lock via the `cast` (`tokio-rustls`)
+# and `reqwest` rustls backends; MIT/Apache-2.0, and `deny.toml [graph]
+# all-features = false` keeps this off-by-default dep out of the scanned default
+# graph (the `tokio-rustls`/`reqwest`/`ring` posture already documented above).
+axum-server = { version = "0.8", default-features = false, features = [
+    "tls-rustls",
+], optional = true }
+rustls = { version = "0.23", optional = true }
+rustls-pki-types = { version = "1", features = ["std"], optional = true }
+
 [dev-dependencies]
 # Self dev-dependency: the canonical way to enable a TEST-ONLY feature for this
 # crate's OWN tests without pulling it into the default build or a downstream
@@ -230,6 +248,15 @@ ed25519-dalek = { version = "3", default-features = false, features = [
 ] }
 getrandom = { version = "0.4", default-features = false, features = ["sys_rng"] }
 ciborium = "0.2.2"
+# TLS-0 serve e2e (`tests/tls_serve.rs`, gated `required-features = ["tls"]`):
+# generate an ephemeral self-signed cert (`rcgen`, with IPv6/IPv4 loopback SANs)
+# and drive a REAL HTTPS client (`reqwest` rustls-tls, `danger_accept_invalid_certs`)
+# against the served TLS listener — proving the rustls handshake succeeds AND the
+# SEC-14 per-IP rate limiter still engages through `axum-server` + `ConnectInfo`.
+# Test-only (dev-deps never ship, never affect the public API); both already in
+# the lock (rcgen 0.14, reqwest via the zowietek backend).
+rcgen = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [features]
 "default" = ["openapi"]
@@ -293,6 +320,19 @@ ciborium = "0.2.2"
 # feature (an explicit `--features _test-seams` can still turn it on), so keep it
 # out of shipped builds. Underscore-prefixed to mark it internal.
 "_test-seams" = []
+# Control-plane TLS termination (TLS-0, ADR-W029): OFF by default. Adds the
+# rustls `serve_router_tls` path (`axum-server` + an explicit `aws-lc-rs`
+# `ServerConfig`) alongside the always-compiled plain-HTTP `serve_router`, and
+# the `RustlsMaterial` PEM loader. No native lib beyond the aws-lc-rs crypto blob
+# already in the lock (via the `cast`/`reqwest` backends), LGPL-clean; kept out of
+# the CI-green default build and the deny default graph (`[graph]
+# all-features = false`). Wired into the `multiview-cli` umbrella presets.
+"tls" = ["dep:axum-server", "dep:rustls", "dep:rustls-pki-types"]
+
+[[test]]
+# The TLS-0 serve e2e needs the rustls termination path compiled in.
+name = "tls_serve"
+required-features = ["tls"]
 
 [lints]
 workspace = true
