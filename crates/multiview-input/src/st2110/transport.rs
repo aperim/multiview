@@ -679,3 +679,66 @@ impl FrameProducer for St2110Producer {
         WrapBits::Rtp32
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn sample_packet(sequence: u16) -> St2110Packet {
+        St2110Packet {
+            marker: false,
+            timestamp: 0,
+            sequence,
+            ssrc: 0,
+            payload: vec![0u8; 4],
+        }
+    }
+
+    /// While the ring lock is held, a concurrent `poll_packet` on the ingest
+    /// data plane must NOT block on it: it sheds (`Ok(None)`) and the caller
+    /// re-polls next tick (inv #10 — the sync consumer never blocks behind the
+    /// tokio producer). A blocking `.lock()` waits for the guard, so the result
+    /// never arrives within the deadline.
+    #[test]
+    fn poll_packet_never_blocks_on_a_held_ring_lock() {
+        let (sink, mut source) = ChannelPacketSource::bounded(4);
+        let guard = sink.ring.lock().expect("uncontended lock");
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(source.poll_packet());
+        });
+        let received = rx.recv_timeout(Duration::from_secs(2));
+        drop(guard);
+        let _ = worker.join();
+        let outcome =
+            received.expect("contended poll_packet must not block on the ring lock (inv #10)");
+        assert!(
+            matches!(outcome, Ok(None)),
+            "a contended poll sheds to None, never a unit: {outcome:?}"
+        );
+    }
+
+    /// While the ring lock is held, a concurrent `push` from the receive task
+    /// must NOT block on it: it sheds the unit (never grows, never waits) and
+    /// returns immediately (inv #10 — a stalled reader can never back-pressure
+    /// the wire). A blocking `.lock()` waits for the guard.
+    #[test]
+    fn push_never_blocks_on_a_held_ring_lock() {
+        let (sink, _source) = ChannelPacketSource::bounded(4);
+        let guard = sink.ring.lock().expect("uncontended lock");
+        let producer = sink.clone();
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            producer.push(sample_packet(1));
+            let _ = tx.send(());
+        });
+        let received = rx.recv_timeout(Duration::from_secs(2));
+        drop(guard);
+        let _ = worker.join();
+        received.expect("contended push must not block on the ring lock (inv #10)");
+    }
+}
