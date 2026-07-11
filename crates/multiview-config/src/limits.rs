@@ -62,14 +62,36 @@ fn default_per_api_key() -> RateLimitConfig {
     }
 }
 
+/// Field-level default for a partially specified [`RateLimitConfig`] sub-table: the
+/// conservative per-IP baseline. A field-level serde default is context-free — it
+/// cannot tell `per_ip` from `per_api_key` — so an unset `burst` / `refill_per_sec`
+/// in a partial bucket falls back to this single stricter baseline: a partial bucket
+/// errs strict, never looser than intended for a `DoS` floor. Name both fields of a
+/// bucket to set it exactly.
+fn default_rate_burst() -> u32 {
+    DEFAULT_PER_IP_BURST
+}
+
+fn default_rate_refill_per_sec() -> u32 {
+    DEFAULT_PER_IP_REFILL_PER_SEC
+}
+
 /// A token-bucket rate: a `burst` ceiling replenished at `refill_per_sec`
 /// requests per second. Over-budget requests get `429` + `Retry-After`.
+///
+/// Each field carries its own serde default (the conservative per-IP baseline), so a
+/// partially specified sub-table inherits any unset field rather than failing to
+/// deserialize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RateLimitConfig {
-    /// The maximum number of requests admitted in an instantaneous burst.
+    /// The maximum number of requests admitted in an instantaneous burst. Unset in a
+    /// partial sub-table ⇒ the conservative per-IP baseline ([`default_rate_burst`]).
+    #[serde(default = "default_rate_burst")]
     pub burst: u32,
-    /// The steady-state replenishment rate, in requests per second.
+    /// The steady-state replenishment rate, in requests per second. Unset in a partial
+    /// sub-table ⇒ the conservative per-IP baseline ([`default_rate_refill_per_sec`]).
+    #[serde(default = "default_rate_refill_per_sec")]
     pub refill_per_sec: u32,
 }
 
@@ -100,7 +122,11 @@ impl RateLimitConfig {
 /// caps (SEC-14 control-plane `DoS` floor).
 ///
 /// Absent ⇒ the secure defaults (limits enabled). Every field defaults
-/// individually, so a partial section overrides only the knobs it names.
+/// individually — including `burst` / `refill_per_sec` inside the `per_ip` and
+/// `per_api_key` sub-tables — so a partial section OR a partial sub-table overrides
+/// only the knobs it names; an unset rate field in a partial sub-table falls back to
+/// the conservative per-IP baseline (erring strict). Name both fields of a bucket to
+/// set that bucket exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ManagementLimits {
