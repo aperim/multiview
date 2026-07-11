@@ -2076,13 +2076,17 @@ mod tests {
 
     #[test]
     fn persistent_spawn_failure_yields_degraded_pool_that_still_sheds_safely() {
-        // PF2b (#167, RP2 degraded-but-safe): when teardown-worker spawn NEVER succeeds (a
-        // permanently thread-exhausted host — the product's target failure mode), construction
-        // must still RETURN (never hang) with a degraded pool of < K workers, and that degraded
-        // pool must remain SAFE: last-releases reserve bounded slots, the bounded queue fills,
-        // and further releases SHED via signal_and_detach — the reserved-slot observable stays
-        // within the D+K (`TEARDOWN_CAPACITY`) ceiling and never grows unbounded, with no
-        // deadlock. (This exercises the retry-exhausted branch of RP2's `build_teardown_pool`.)
+        // PF2b (#167, RP2 degraded-but-safe) + PF5 (#170, prove shed STOPS the decode): when
+        // teardown-worker spawn NEVER succeeds (a permanently thread-exhausted host — the
+        // product's target failure mode), construction must still RETURN (never hang) with a
+        // degraded pool of < K workers, and that degraded pool must remain SAFE. With no worker
+        // holding the receiver the teardown queue is disconnected, so every last-release SHEDS at
+        // once via `signal_and_detach` — the reserved-slot observable stays within the D+K
+        // (`TEARDOWN_CAPACITY`) ceiling and never grows unbounded, with no deadlock, AND every
+        // shed decode is actually `request_stop`'d (its thread exits → `live` falls to 0). The
+        // count bound alone would still pass if a shed bare-dropped its actor and leaked the
+        // thread; the `live == 0` bounded watchdog is what catches that regression. (This
+        // exercises the retry-exhausted branch of RP2's `build_teardown_pool`.)
         use super::{SourceRegistry, TEARDOWN_CAPACITY, TEARDOWN_WORKERS};
         let reg = SourceRegistry::<u64>::with_spawner(|_i, _rx| {
             Err(std::io::Error::new(
@@ -2100,6 +2104,9 @@ mod tests {
 
         // With the pool degraded, a burst of last-releases larger than the ceiling must still
         // complete (no deadlock) and keep the reserved-slot observable within the hard bound.
+        // Each probe owns a real decode thread that bumps `live` on spawn and exits ONLY on the
+        // structural `request_stop`, so `live` returning to 0 proves every shed actually signalled
+        // its decode (its `Drop` alone would NOT stop the thread — a bare-drop shed would leak).
         let live = Arc::new(AtomicUsize::new(0));
         let stops: Vec<Arc<AtomicBool>> = (0..(TEARDOWN_CAPACITY * 2))
             .map(|_| Arc::new(AtomicBool::new(false)))
@@ -2117,7 +2124,7 @@ mod tests {
                     ))
                 })
                 .unwrap();
-            drop(handle); // last release → teardown offered; a degraded pool queues then sheds
+            drop(handle); // last release → offered; degraded pool has no receiver → sheds at once
             assert!(
                 reg.pending_teardowns() <= TEARDOWN_CAPACITY,
                 "reserved teardown slots must stay within the D+K ceiling even with a degraded \
@@ -2125,6 +2132,19 @@ mod tests {
                 reg.pending_teardowns()
             );
         }
+
+        // PF5: the D+K count bound above holds even for a bare-drop-on-shed regression that leaks
+        // every shed decode thread. Prove the shed path actually STOPS each decode — the degraded
+        // pool sheds all N via `signal_and_detach`, whose `request_stop` drives every
+        // `ThreadedProbe` thread to exit, so `live` falls to 0. A BOUNDED-completion watchdog: on
+        // a leak or deadlock it fails fast at the deadline instead of hanging indefinitely.
+        wait_until(
+            || live.load(Ordering::Acquire) == 0,
+            Duration::from_secs(10),
+            "every shed decode thread is request_stop'd by the degraded pool (live == 0) — a \
+             bare-drop-on-shed regression would leak them and fail this bounded watchdog",
+        );
+
         reg.shutdown();
     }
 }
