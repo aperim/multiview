@@ -46,6 +46,10 @@ struct TestActor {
 }
 
 impl SourceActor for TestActor {
+    // This acceptance double records only shutdown; it owns no decode thread, so the
+    // structural stop signal is a no-op here (the in-crate `ThreadedProbe` unit test proves
+    // request_stop actually terminates a real thread on both the graceful and shed paths).
+    fn request_stop(&self) {}
     fn shutdown(self: Box<Self>) {
         if let Some(gate) = &self.gate {
             while gate.load(Ordering::Acquire) {

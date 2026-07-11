@@ -158,6 +158,17 @@ impl SourceKey {
 /// `shutdown` returns; an idempotent stop-signal — safe to run from both `shutdown`
 /// and `Drop` — satisfies both paths.
 pub trait SourceActor: Send + 'static {
+    /// Signal the actor to begin terminating its decode — **non-blocking**, safe on any
+    /// thread (including a Tokio async destructor). Sets the stop flag / closes the command
+    /// channel the decode loop observes and returns at once; it does **not** wait for the
+    /// decode thread to stop (that is [`shutdown`](SourceActor::shutdown)'s job on the
+    /// graceful path, or the thread winding down on its own after a shed). Idempotent —
+    /// safe to call more than once and before [`shutdown`](SourceActor::shutdown).
+    ///
+    /// This is the **structural** wake-decode signal the teardown pool calls before both a
+    /// graceful `shutdown` and a shed, so every implementor must provide one (inv #10).
+    fn request_stop(&self);
+
     /// Stop the actor and block until its decode thread has fully stopped. Called at
     /// most once, on a fixed-size teardown-pool worker thread — never on a hot path
     /// and never inside a Tokio async destructor (safety rule §4).
@@ -682,10 +693,13 @@ fn lock<U>(m: &Mutex<U>) -> MutexGuard<'_, U> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RequestedSize, SourceActor, SourceInit, SourceKey, SourceRegistry};
+    use super::{
+        RequestedSize, SourceActor, SourceInit, SourceKey, SourceRegistry, TEARDOWN_QUEUE_DEPTH,
+        TEARDOWN_WORKERS,
+    };
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Barrier, Mutex};
     use std::time::{Duration, Instant};
 
     use multiview_core::time::MediaTime;
@@ -701,6 +715,9 @@ mod tests {
     }
 
     impl SourceActor for TestActor {
+        // A counting double owns no decode thread, so the structural stop signal is a
+        // no-op here; the thread-owning `ThreadedProbe` exercises request_stop's effect.
+        fn request_stop(&self) {}
         fn shutdown(self: Box<Self>) {
             if let Some(gate) = &self.gate {
                 while gate.load(Ordering::Acquire) {
@@ -780,6 +797,9 @@ mod tests {
     }
 
     impl SourceActor for Probe {
+        // Counting double: no decode thread to signal (see `ThreadedProbe` for the
+        // structural request_stop → thread-termination proof).
+        fn request_stop(&self) {}
         fn shutdown(self: Box<Self>) {
             self.counters.shutdown_calls.fetch_add(1, Ordering::Release);
             self.counters.active.fetch_add(1, Ordering::Release);
@@ -802,6 +822,95 @@ mod tests {
                 self.counters
                     .shed_terminated
                     .fetch_add(1, Ordering::Release);
+            }
+        }
+    }
+
+    /// A test decode actor that owns a **real** "decode" thread — so the SHED path can be
+    /// PROVEN to *terminate* that thread non-blockingly (inv #10), not merely counted.
+    ///
+    /// The decode thread bumps `live` on spawn and loops until its `stop` flag is set, then
+    /// decrements `live` and exits. It exits **only** on the structural
+    /// [`request_stop`](SourceActor::request_stop) signal — the actor's own `Drop` does
+    /// **not** set `stop` and does **not** join. So a shed that fails to call `request_stop`
+    /// LEAKS the thread and `live` never returns to zero. `shutdown` (the graceful path)
+    /// sets `stop`, optionally wedges the worker on `gate`, then JOINs.
+    struct ThreadedProbe {
+        stop: Arc<AtomicBool>,
+        /// When `Some`, `shutdown` wedges the pool worker until the gate clears (a stuck
+        /// decode-thread join) — used to force the bounded queue to overflow and shed.
+        gate: Option<Arc<AtomicBool>>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl ThreadedProbe {
+        fn new(stop: Arc<AtomicBool>, gate: Option<Arc<AtomicBool>>, live: Arc<AtomicUsize>) -> Self {
+            live.fetch_add(1, Ordering::Release);
+            let handle = {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    live.fetch_sub(1, Ordering::Release);
+                })
+            };
+            Self {
+                stop,
+                gate,
+                handle: Some(handle),
+            }
+        }
+    }
+
+    impl SourceActor for ThreadedProbe {
+        fn request_stop(&self) {
+            // The one path that stops the decode thread: a non-blocking flag store.
+            self.stop.store(true, Ordering::Release);
+        }
+        fn shutdown(mut self: Box<Self>) {
+            // Graceful: signal, optionally wedge the worker on the gate, then JOIN.
+            self.stop.store(true, Ordering::Release);
+            if let Some(gate) = &self.gate {
+                while gate.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    impl Drop for ThreadedProbe {
+        fn drop(&mut self) {
+            // Shed / detach path: DELIBERATELY do NOT set `stop` and do NOT join. The
+            // decode thread must be terminated by the structural request_stop() the teardown
+            // calls before dropping us; it then exits on its own (non-blocking detach —
+            // dropping `handle` detaches). If request_stop was never called the thread leaks
+            // and `live` never hits zero, which is exactly what the RED run catches.
+        }
+    }
+
+    /// A test decode actor whose graceful `shutdown()` PANICS — proving a panicking teardown
+    /// cannot shrink the fixed worker pool (the worker's `catch_unwind` keeps it alive). Its
+    /// `request_stop`/`Drop` do **not** panic (a double panic would abort — a Rust
+    /// fundamental the trait contract forbids).
+    struct PanicProbe;
+    impl SourceActor for PanicProbe {
+        fn request_stop(&self) {}
+        fn shutdown(self: Box<Self>) {
+            panic!("teardown shutdown() panics — the pool must survive and keep draining");
+        }
+    }
+
+    /// Sets every `stop` flag on drop, so a [`ThreadedProbe`] thread never leaks past the
+    /// test — even if an assertion panics on a RED run before the explicit cleanup.
+    struct StopAllOnDrop(Vec<Arc<AtomicBool>>);
+    impl Drop for StopAllOnDrop {
+        fn drop(&mut self) {
+            for s in &self.0 {
+                s.store(true, Ordering::Release);
             }
         }
     }
@@ -841,7 +950,9 @@ mod tests {
         // *unbounded* design — the panel-mandated bounded design instead SHEDS the
         // overflow, so the contract is now "completed-or-shed", not "all run".)
         const HEALTHY: usize = 500;
-        const PENDING_BOUND: usize = 64; // >> queue+workers, << HEALTHY
+        // The HARD ceiling: queued + in-flight can never exceed D+K, no matter how long the
+        // healthy stream nor how a straggler wedges (finding 4 — tightened from a loose 64).
+        const PENDING_BOUND: usize = TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS;
         let reg = SourceRegistry::<u64>::new();
 
         // A wedged teardown, offered FIRST (FIFO) so a worker picks it up before the
@@ -939,9 +1050,12 @@ mod tests {
         // per release and calls `shutdown()` on every one, so concurrent shutdowns and
         // pending both climb to the full stream length and nothing ever sheds.
         const N: usize = 96; // >> queue+workers, so the overflow must shed
-        const ACTIVE_BOUND: usize = 16; // >> any fixed pool size, << N
-        const PENDING_BOUND: usize = 64; // >> queue+workers, << N
-        const MIN_SHED: usize = N - 64; // releases beyond queue+workers shed via Drop
+        // The ACTUAL bounds (finding 3 — tightened from loose 16/64): a fixed pool caps
+        // concurrent shutdowns at the worker count, and queued+in-flight at D+K; every
+        // release beyond D+K sheds. A regression that lets either climb now FAILS.
+        const ACTIVE_BOUND: usize = TEARDOWN_WORKERS;
+        const PENDING_BOUND: usize = TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS;
+        const MIN_SHED: usize = N - (TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS);
 
         let reg = SourceRegistry::<u64>::new();
         let gate = Arc::new(AtomicBool::new(true));
@@ -1184,6 +1298,197 @@ mod tests {
             drops.load(Ordering::Acquire) >= 1,
             "the store's held frame was dropped synchronously on the calling thread"
         );
+        reg.shutdown();
+    }
+
+    #[test]
+    fn pending_stays_bounded_under_concurrent_last_releases() {
+        // Finding 1 (inv #10): the observable must stay ≤ D+K even when MANY threads hit a
+        // last-release SIMULTANEOUSLY. A design that bumps the counter BEFORE the bounded
+        // `try_send` lets each concurrent shed spike `pending_teardowns()` while the
+        // releasers contend, so it climbs toward the thread count (>> D+K). The bounded
+        // reservation caps the counter at D+K no matter how many releasers race: a shed at
+        // the ceiling never increments.
+        const THREADS: usize = 64; // >> D+K, all releasing at once
+        const BOUND: usize = TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS;
+        let reg = SourceRegistry::<u64>::new();
+        // Gate every teardown so the pool fills and stays full — maximising the contention
+        // window a broken (increment-before-send) counter would overshoot in.
+        let gate = Arc::new(AtomicBool::new(true));
+        let _clear = ClearGateOnDrop(gate.clone());
+        let counters = Counters::new();
+
+        // Pre-acquire THREADS distinct handles; each drop is a last-release.
+        let handles: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let c = counters.clone();
+                let gate = gate.clone();
+                reg.acquire(
+                    SourceKey::from_canonical(format!("rtsp://concurrent/{i}")),
+                    size(1, 1),
+                    move |_r| Ok::<_, Infallible>(SourceInit::new(store("c"), c.probe(Some(gate)))),
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // A concurrent sampler records the PEAK observable across the release storm.
+        let sampling = Arc::new(AtomicBool::new(true));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let sampler = {
+            let reg = Arc::clone(&reg);
+            let sampling = sampling.clone();
+            let peak = peak.clone();
+            std::thread::spawn(move || {
+                while sampling.load(Ordering::Acquire) {
+                    peak.fetch_max(reg.pending_teardowns(), Ordering::AcqRel);
+                }
+            })
+        };
+
+        // Release ALL handles at the SAME instant (barrier), each on its own thread.
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let droppers: Vec<_> = handles
+            .into_iter()
+            .map(|h| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    drop(h); // last release → offered/shed under contention
+                })
+            })
+            .collect();
+        for d in droppers {
+            let _ = d.join();
+        }
+        // One final sample after the storm, then stop the sampler.
+        peak.fetch_max(reg.pending_teardowns(), Ordering::AcqRel);
+        sampling.store(false, Ordering::Release);
+        let _ = sampler.join();
+
+        let observed_peak = peak.load(Ordering::Acquire);
+        assert!(
+            observed_peak <= BOUND,
+            "pending_teardowns must stay bounded by D+K under concurrent last-releases \
+             (peak {observed_peak}, bound {BOUND}, {THREADS} concurrent releasers)"
+        );
+
+        gate.store(false, Ordering::Release);
+        reg.shutdown();
+    }
+
+    #[test]
+    fn a_shed_teardown_terminates_the_decode_thread_via_request_stop() {
+        // Finding 5 (inv #10): the SHED path must PROVE it TERMINATES the decode thread, not
+        // merely count it. Each ThreadedProbe owns a REAL "decode" thread that exits ONLY on
+        // the structural request_stop() signal (its Drop neither stops nor joins it). Flood
+        // the bounded pool with GATED probes so the overflow SHEDS; a shed that fails to call
+        // request_stop leaks its thread. After clearing the gate + shutdown, EVERY decode
+        // thread — graceful, queued, and shed — must have terminated (`live` back to zero).
+        const N: usize = 50; // >> D+K=34, so the overflow must shed
+        let reg = SourceRegistry::<u64>::new();
+        let gate = Arc::new(AtomicBool::new(true)); // wedge graceful shutdowns → force sheds
+        let _clear = ClearGateOnDrop(gate.clone());
+        let live = Arc::new(AtomicUsize::new(0));
+        let stops: Vec<Arc<AtomicBool>> =
+            (0..N).map(|_| Arc::new(AtomicBool::new(false))).collect();
+        // Safety net: on ANY exit (including a RED assertion panic) stop every decode thread.
+        let _stopper = StopAllOnDrop(stops.clone());
+
+        for (i, stop) in stops.iter().enumerate() {
+            let stop = stop.clone();
+            let gate = gate.clone();
+            let live = live.clone();
+            let h = reg
+                .acquire(
+                    SourceKey::from_canonical(format!("rtsp://threaded/{i}")),
+                    size(1, 1),
+                    move |_r| {
+                        Ok::<_, Infallible>(SourceInit::new(
+                            store("t"),
+                            ThreadedProbe::new(stop, Some(gate), live),
+                        ))
+                    },
+                )
+                .unwrap();
+            drop(h); // last release → offered; the overflow sheds
+        }
+
+        // Clear the wedge so the graceful (in-flight + queued) shutdowns can join, then drain.
+        gate.store(false, Ordering::Release);
+        reg.shutdown();
+
+        // Every decode thread must terminate — graceful joins AND shed request_stops. A shed
+        // that only detaches (no request_stop) leaves its thread running → live never zeroes.
+        wait_until(
+            || live.load(Ordering::Acquire) == 0,
+            Duration::from_secs(10),
+            "every decode thread terminates after teardown — graceful joins and sheds signalled",
+        );
+    }
+
+    #[test]
+    fn repeated_shutdown_panics_keep_the_pool_draining() {
+        // Finding 2 (inv #10): a panicking teardown must NOT shrink the fixed pool. The
+        // worker runs shutdown() under catch_unwind, so a panic is contained and the worker
+        // survives; the pool stays at TEARDOWN_WORKERS and keeps draining. Interleave a
+        // stream of PANICKING teardowns with HEALTHY ones: every healthy teardown must still
+        // complete (the pool never stalls) and the observable stays bounded. (A design where
+        // a panic kills the worker stalls once both workers die → the stream never finishes.)
+        //
+        // Expected stderr: each panicking shutdown prints one caught-panic line — that is the
+        // mechanism working, not a failure.
+        const TOTAL: usize = 48;
+        const HEALTHY: usize = 36; // every non-4th offer is healthy
+        const BOUND: usize = TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS;
+        let reg = SourceRegistry::<u64>::new();
+        let healthy = Counters::new();
+        let mut max_pending = 0;
+
+        for i in 0..TOTAL {
+            if i % 4 == 0 {
+                // A panicking teardown (12 of them, ~6 per worker → "repeatedly").
+                let h = reg
+                    .acquire(
+                        SourceKey::from_canonical(format!("rtsp://panic/{i}")),
+                        size(1, 1),
+                        |_r| Ok::<_, Infallible>(SourceInit::new(store("p"), PanicProbe)),
+                    )
+                    .unwrap();
+                drop(h);
+            } else {
+                let hc = healthy.clone();
+                let h = reg
+                    .acquire(
+                        SourceKey::from_canonical(format!("rtsp://ok/{i}")),
+                        size(1, 1),
+                        move |_r| Ok::<_, Infallible>(SourceInit::new(store("ok"), hc.probe(None))),
+                    )
+                    .unwrap();
+                drop(h);
+            }
+            max_pending = max_pending.max(reg.pending_teardowns());
+        }
+
+        // The pool survived every panic and drained every healthy teardown.
+        wait_until(
+            || {
+                healthy.completed.load(Ordering::Acquire)
+                    + healthy.shed_terminated.load(Ordering::Acquire)
+                    >= HEALTHY
+            },
+            Duration::from_secs(10),
+            "every healthy teardown completes-or-sheds despite repeated shutdown() panics",
+        );
+        assert!(
+            healthy.completed.load(Ordering::Acquire) >= 1,
+            "the pool must keep draining gracefully through the panics (not merely shed)"
+        );
+        assert!(
+            max_pending <= BOUND,
+            "the observable stays bounded through panics (saw {max_pending}, bound {BOUND})"
+        );
+
         reg.shutdown();
     }
 }
