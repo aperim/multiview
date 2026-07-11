@@ -482,16 +482,25 @@ jobs:
         # Installed BEFORE the extract step so the modversion assertion below has
         # a guaranteed pkg-config (the ubuntu image ships one, but don't rely on it).
         #
-        # libva2 + libva-drm2 are the VAAPI RUNTIME libs (libva.so.2 /
-        # libva-drm.so.2): the pinned LGPL FFmpeg links VAAPI, so an ffmpeg-linked
-        # TEST binary (the aes67 leg below) fails to LOAD with exit 127 without them
-        # on the bare runner. Clippy never loads the binary, so it did not need
-        # these; the test step does.
+        # The RUNTIME libs the pinned LGPL FFmpeg 8.1.1 links (per
+        # deploy/ffmpeg-build.sh: --enable-vaapi/--enable-libdrm, --enable-libopus,
+        # --enable-libsrt [gnutls], --enable-libvpl): an ffmpeg-linked TEST binary
+        # (the aes67 leg below) fails to LOAD with exit 127 without them on the bare
+        # runner; clippy never loads the binary, so it did not need them. Mapping
+        # soname -> ubuntu-noble package:
+        #   libva.so.2 / libva-drm.so.2 -> libva2 / libva-drm2  (VAAPI)
+        #   libopus.so.0                -> libopus0
+        #   libsrt.so.1.5               -> libsrt1.5-gnutls      (matches --enable-gnutls; universe)
+        #   libvpl.so.2                 -> libvpl2               (oneVPL)
+        # gnutls + libdrm are preinstalled on ubuntu-latest; NO x264/x265 (GPL-gated,
+        # absent from the -lgpl build). The `ldd` completeness guard below fails fast
+        # if this list ever drifts, naming the exact missing soname.
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config clang libclang-dev nasm libva2 libva-drm2
+            pkg-config clang libclang-dev nasm \
+            libva2 libva-drm2 libopus0 libsrt1.5-gnutls libvpl2
       - name: Extract pinned FFmpeg 8.1.1 from the base image
         # The base is `FROM scratch` (only /opt/multiview-ffmpeg), so we create a
         # (never-run) container from it and `docker cp` the prefix out — the same
@@ -583,17 +592,35 @@ jobs:
           --features ffmpeg,aes67
           --all-targets
           -- -D warnings
+      - name: Assert the pinned-FFmpeg runtime libs all resolve
+        # Fail fast BEFORE the test if any pinned-FFmpeg .so has an unresolved
+        # runtime dependency on this bare runner — prints the exact missing soname,
+        # so a drifted/incomplete apt list above is diagnosed in ONE run rather than
+        # cascading one exit-127 at a time (the aes67 test binary loads the same
+        # libav* .so, so this is a faithful pre-flight). LD_LIBRARY_PATH (exported by
+        # the extract step) points at the FFmpeg prefix so its own inter-lib deps
+        # resolve; `|| true` keeps `pipefail` from masking the real check.
+        run: |
+          set -euo pipefail
+          missing="$(ldd "${FFMPEG_PREFIX}"/lib/libav*.so.* 2>/dev/null \
+            | awk '/not found/{print $1}' | sort -u || true)"
+          if [ -n "${missing}" ]; then
+            printf 'missing runtime shared libraries:\n%s\n' "${missing}"
+            echo "::error::pinned FFmpeg is missing the runtime libs listed above on this runner"
+            exit 1
+          fi
+          echo "OK: all pinned-FFmpeg runtime deps resolve on this runner"
       - name: test multiview-cli --features ffmpeg,aes67 (aes67 lib tests)
         # Runs the aes67 cli lib unit tests (RX resolve/plan + non-48kHz reject,
-        # TX build + zero-ptime reject, stable ssrc, payload-type/program-audio
-        # guards, audio-block framing, and the audio-store-not-video-tile +
-        # cell-binding RED guardrails) on the real ffmpeg-linked build — these
-        # `#[cfg(feature = "aes67")]` tests never execute on the libav-free matrix,
-        # so without this step the aes67 regressions are compiled but never run.
-        # The VAAPI runtime libs installed above (libva2 / libva-drm2) let the
-        # ffmpeg-linked test binary LOAD on the bare runner (else exit 127).
-        # `--lib aes67` filters to the lib target's aes67-named tests; --locked
-        # enforces the committed Cargo.lock (rule 33).
+        # TX build + zero-ptime reject, stable ssrc + same-group collision reject,
+        # payload-type/program-audio guards, audio-block framing, and the
+        # audio-store-not-video-tile + cell-binding RED guardrails) on the real
+        # ffmpeg-linked build — these `#[cfg(feature = "aes67")]` tests never execute
+        # on the libav-free matrix, so without this step the aes67 regressions are
+        # compiled but never run. The FFmpeg runtime libs installed above (VAAPI +
+        # opus/srt/oneVPL) let the ffmpeg-linked test binary LOAD (else exit 127),
+        # and the guard step above proves that on every run. `--lib aes67` filters to
+        # the lib target's aes67-named tests; --locked enforces Cargo.lock (rule 33).
         run: >
           cargo test
           --locked
