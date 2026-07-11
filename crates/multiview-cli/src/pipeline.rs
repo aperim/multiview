@@ -5966,13 +5966,21 @@ fn duration_from_nanos(nanos: i64) -> Duration {
     Duration::from_nanos(u64::try_from(nanos.max(0)).unwrap_or(u64::MAX))
 }
 
-/// The pixel size of the cell that binds `source_id`, if any.
+/// The decode size for `source_id`: the **per-axis supremum** of the pixel sizes
+/// of every cell that binds it, or [`None`] if no cell binds it.
+///
+/// A source can tile into several cells of different sizes (e.g. a big PGM cell
+/// plus a small PIP). Decoding once at the per-axis max satisfies the largest
+/// consumer on each axis (ADR-0030 §3); each cell then scales down at composite.
+/// Taking the FIRST binding cell would under-decode every larger tile bound to
+/// the same source.
 fn cell_pixel_size(layout: &Layout, source_id: &str) -> Option<(u32, u32)> {
-    let cell = layout
+    layout
         .cells
         .iter()
-        .find(|c| c.source.as_deref() == Some(source_id))?;
-    Some(cell_dims(cell, layout.canvas.width, layout.canvas.height))
+        .filter(|c| c.source.as_deref() == Some(source_id))
+        .map(|c| cell_dims(c, layout.canvas.width, layout.canvas.height))
+        .reduce(|(aw, ah), (bw, bh)| (aw.max(bw), ah.max(bh)))
 }
 
 /// Convert a cell's normalized `w`/`h` into even pixel dimensions (NV12 needs
