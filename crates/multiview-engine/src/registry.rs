@@ -416,9 +416,12 @@ impl<T> SourceRegistry<T> {
     /// `release`/`acquire` on another key; the lock is never held across a caller closure),
     /// then the result is inserted under a re-check: if a concurrent first-reference won the
     /// race meanwhile, this reference shares the winner's store and **discards** its own
-    /// just-built store + actor (whose `Drop` signals decode termination). Decode-once holds in
+    /// just-built store while **stopping** its own just-built decode at once via
+    /// [`signal_and_detach`] (`request_stop` then a `catch_unwind`-contained drop, off-lock — so
+    /// the loser's detached decode thread exits and a panicking/blocking actor destructor can
+    /// never unwind or stall the acquiring, possibly engine, thread; PF1). Decode-once holds in
     /// **steady state**; a rare concurrent double-build is self-correcting (only the winner's
-    /// decode is ever registered). In MP-2 production only `acquire_store` (actor-less — a cheap
+    /// decode stays registered). In MP-2 production only `acquire_store` (actor-less — a cheap
     /// `TileStore` alloc) is used, so a lost race just discards one allocation.
     fn acquire_inner<F, E>(
         self: &Arc<Self>,
@@ -447,20 +450,22 @@ impl<T> SourceRegistry<T> {
 
         // First reference: build the store (+ optional actor) OUTSIDE the lock, so a slow
         // `factory` never blocks a concurrent `release`/`acquire` on ANOTHER key (inv #10 — no
-        // lock is held across a caller closure). Then re-check under the lock: if a concurrent
-        // first-reference won the race meanwhile, share the winner's store and DISCARD our
-        // just-built store + actor (the actor's `Drop` signals decode termination — the loser's
-        // decode never joins the registry). Decode-once holds in steady state; the rare
-        // concurrent double-build is self-correcting.
+        // lock is held across a caller closure). Then re-check under the lock: the WINNER inserts
+        // its store + actor and returns; a LOSER (a concurrent first-reference beat it) shares the
+        // winner's store and, once the lock is released, stops its own now-redundant decode
+        // (below). Decode-once holds in steady state; the rare concurrent double-build is
+        // self-correcting.
         let (store, actor) = factory(requested)?;
-        let shared = {
+        let winner_store = {
             let mut entries = lock(&self.entries);
             if let Some(entry) = entries.get_mut(&key) {
-                // A concurrent first-reference won the race: share its store, discard ours.
+                // Lost the race: share the winner's store; fall through (lock released) to stop
+                // OUR redundant decode.
                 entry.refcount = entry.refcount.saturating_add(1);
                 entry.supremum = entry.supremum.supremum(requested);
                 Arc::clone(&entry.store)
             } else {
+                // Won the race: our store + actor become the shared entry.
                 let shared = Arc::clone(&store);
                 entries.insert(
                     key.clone(),
@@ -471,13 +476,30 @@ impl<T> SourceRegistry<T> {
                         supremum: requested,
                     },
                 );
-                shared
+                return Ok(SourceHandle {
+                    registry: Arc::clone(self),
+                    key,
+                    store: shared,
+                });
             }
         };
+        // Lost the first-acquire race (the entries lock is now released). If we built an actor
+        // (the `acquire` path), stop OUR redundant decode so its detached thread exits — a bare
+        // `Drop` would NOT (an actor whose `Drop` only detaches leaks the decode) — AND contain
+        // the destructor: this runs on the acquiring thread, which may be an engine/Tokio thread,
+        // so a panicking/blocking `request_stop`/`Drop` must never unwind or stall into it (inv
+        // #10). `signal_and_detach` is the same instance-scoped primitive the shed path uses
+        // (request_stop, then a catch_unwind-wrapped drop); it acts on OUR loser actor alone and
+        // can never touch the winner. The actor-less `acquire_store` loser (MP-2 production) owns
+        // no registry decode to stop, so it just drops its redundant store `Arc` (a non-blocking
+        // `TileStore` drop; F3) when this frame returns. (PF1)
+        if let Some(actor) = actor {
+            signal_and_detach(actor);
+        }
         Ok(SourceHandle {
             registry: Arc::clone(self),
             key,
-            store: shared,
+            store: winner_store,
         })
     }
 
