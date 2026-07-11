@@ -181,6 +181,14 @@ tempfile = "3"
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
+# Self dev-dependency: the canonical way to enable a TEST-ONLY feature for this
+# crate's OWN tests without leaking it into the default build or any downstream
+# consumer. Dev-dependencies are inactive for a normal `cargo build`/`check` and
+# for `multiview-cli`'s build of this crate (resolver v2 keeps dev-dep features
+# out of the non-test graph), so `_test-seams` — which exposes the config-watch
+# post-probe interpose hook that WRITES the watched file — is present only when
+# building this crate's tests, never in the shipped API.
+multiview-control = { path = ".", features = ["_test-seams"] }
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",
@@ -268,6 +276,14 @@ ciborium = "0.2.2"
 # flag): the `zowietek` HTTP transport, the `cast` CASTV2 wire layer, and the
 # `discovery` mDNS browse.
 "devices-net" = ["zowietek", "cast", "discovery"]
+# TEST-ONLY seam — NEVER enable in a shipped build. Exposes the config-watch
+# post-probe interpose hook (`WatchOptions::with_post_probe_interpose`) the
+# probe→apply TOCTOU regression test uses to WRITE the watched file mid-poll.
+# Because the hook makes the watcher write the config file, it must not exist in
+# the production API; it is compiled in ONLY for this crate's own tests, enabled
+# via the self dev-dependency above, and is absent from the default build and
+# every downstream consumer. Underscore-prefixed to mark it internal.
+"_test-seams" = []
 
 [lints]
 workspace = true

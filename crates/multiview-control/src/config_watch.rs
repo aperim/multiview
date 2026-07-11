@@ -73,8 +73,11 @@ pub struct WatchOptions {
     /// successful [`probe`] and BEFORE the settled read/apply. It exists only so
     /// a test can interpose a concurrent external writer precisely in the
     /// probe→apply window (the TOCTOU the content fingerprint must be immune
-    /// to). `None` in production — the watcher writes the config file on NO
-    /// path; the slot stays untaken and the loop never touches the file.
+    /// to). Because arming it makes the watcher WRITE the config file, the whole
+    /// seam is gated behind the test-only `_test-seams` feature — it does not
+    /// exist in a shipped build, so the production watcher writes the file on NO
+    /// path.
+    #[cfg(feature = "_test-seams")]
     interpose: Option<Arc<std::sync::Mutex<Option<Vec<u8>>>>>,
 }
 
@@ -85,6 +88,7 @@ impl Default for WatchOptions {
             initial_observed: None,
             handle: None,
             manual_poll: None,
+            #[cfg(feature = "_test-seams")]
             interpose: None,
         }
     }
@@ -153,9 +157,11 @@ impl WatchOptions {
     /// fingerprint always matches the content actually applied: a probe-then-
     /// reread would apply the racer's bytes yet record the probe's fingerprint.
     ///
-    /// Production never installs one; the watcher writes the config file on no
-    /// path. Composes with [`with_manual_poll`](Self::with_manual_poll): the
-    /// interposed write lands mid-poll, so a plain `poll_once` still drives it.
+    /// Test-only (`_test-seams`): the seam WRITES the watched file, so it does
+    /// not exist in a shipped build. Composes with
+    /// [`with_manual_poll`](Self::with_manual_poll): the interposed write lands
+    /// mid-poll, so a plain `poll_once` still drives it.
+    #[cfg(feature = "_test-seams")]
     #[must_use]
     pub fn with_post_probe_interpose(mut self) -> (Self, PostProbeInterpose) {
         let slot = Arc::new(std::sync::Mutex::new(None));
@@ -166,7 +172,9 @@ impl WatchOptions {
 
 /// The test-side handle of the post-probe interpose seam
 /// ([`WatchOptions::with_post_probe_interpose`]). Held by the test; a cheap
-/// `Arc` clone shares the one-shot slot with the loop.
+/// `Arc` clone shares the one-shot slot with the loop. Test-only
+/// (`_test-seams`) — absent from a shipped build.
+#[cfg(feature = "_test-seams")]
 #[derive(Debug, Clone)]
 pub struct PostProbeInterpose {
     /// The shared one-shot slot the loop drains post-probe (see
@@ -174,6 +182,7 @@ pub struct PostProbeInterpose {
     slot: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
 }
 
+#[cfg(feature = "_test-seams")]
 impl PostProbeInterpose {
     /// Schedule `content` to be written to the watched path once, on the loop's
     /// next poll, in the probe→apply window. One-shot: the loop takes and
@@ -184,7 +193,8 @@ impl PostProbeInterpose {
 }
 
 /// Lock the interpose one-shot slot, recovering from a poisoned lock (a
-/// panicked test thread must not wedge the watcher).
+/// panicked test thread must not wedge the watcher). Test-only (`_test-seams`).
+#[cfg(feature = "_test-seams")]
 fn lock_interpose(
     slot: &std::sync::Mutex<Option<Vec<u8>>>,
 ) -> std::sync::MutexGuard<'_, Option<Vec<u8>>> {
@@ -721,9 +731,10 @@ async fn probe(path: &Path) -> Option<Probed> {
 /// Fire the post-probe interpose test seam, if one is installed: write the
 /// scheduled bytes to the watched path once (draining the one-shot slot). This
 /// models a concurrent external writer landing between a poll's fingerprint
-/// probe and its settled read/apply. Production installs no slot, so this is a
-/// single un-taken lock and an immediate return — the watcher writes the config
-/// file on no other path.
+/// probe and its settled read/apply. Test-only (`_test-seams`): the whole seam,
+/// this function included, is compiled out of a shipped build, so the production
+/// watcher never has a code path that writes the config file.
+#[cfg(feature = "_test-seams")]
 async fn maybe_interpose(options: &WatchOptions, path: &Path) {
     let Some(slot) = options.interpose.as_ref() else {
         return;
@@ -824,10 +835,11 @@ async fn watch_loop(
         };
         missing_polls = 0;
         missing_reported = false;
-        // TEST SEAM (never armed in production): interpose a concurrent external
-        // writer here — after this poll's fingerprint probe, before its settled
-        // read/apply — to exercise the probe→apply TOCTOU. A no-op when the slot
-        // is empty, which it always is outside tests.
+        // TEST-ONLY seam (the `_test-seams` feature, compiled out of a shipped
+        // build): interpose a concurrent external writer here — after this poll's
+        // fingerprint probe, before its settled read/apply — to exercise the
+        // probe→apply TOCTOU. Absent from the production binary entirely.
+        #[cfg(feature = "_test-seams")]
         maybe_interpose(&options, &path).await;
         if applied.as_ref() == Some(&now) {
             candidate = None;
