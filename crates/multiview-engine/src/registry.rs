@@ -171,6 +171,27 @@ impl<T> SourceHandle<T> {
     }
 }
 
+/// Dropping a [`SourceHandle`] is **non-blocking on any thread** — safe inside a
+/// Tokio async destructor (safety rule §4). It does two things, both non-blocking:
+///
+/// 1. `release` — a brief O(1) registry-lock update plus, on the last release of a
+///    source that owns a decode actor, a wait-free channel hand-off to the reaper.
+///    The blocking decode-thread join runs on a reaper helper thread, **never
+///    here** (see the module "Teardown off the hot path" docs).
+/// 2. The handle's own `Arc<TileStore<T>>` drops; when it is the last reference the
+///    [`TileStore`] drops with any held frame `Arc<T>`. [`TileStore`] has **no**
+///    explicit `Drop` — its frame slot is an `arc_swap::ArcSwapOption<T>` plus a
+///    bounded `ArcSwap<Vec<..>>` ring, so teardown just drops the held `Arc<T>`s.
+///
+/// For the production `T = Nv12Image` that final frame drop is non-blocking. A
+/// **source** frame — the only kind a *source* store ever holds, since the public
+/// constructors leave the pool-return path `None` — drops as a no-op early return,
+/// freeing its two plain `Vec<u8>` planes to the global allocator with **no device
+/// call, no pool round-trip, and no thread join** (`Nv12Image::drop`, in
+/// `multiview-compositor`). Only **pooled OUTPUT** frames carry a return path (via
+/// the *private* `Nv12Image::new_pooled`, used exclusively by the CPU compositor and
+/// therefore never present in a source store), and even that path is just two
+/// uncontended one-slot `std::sync::Mutex` swaps. Either way the drop cannot block.
 impl<T> Drop for SourceHandle<T> {
     fn drop(&mut self) {
         self.registry.release(&self.key);
@@ -579,6 +600,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    use multiview_core::time::MediaTime;
     use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
 
     /// A test ingest/decode actor. Its `shutdown` (the reaper's blocking join)
@@ -608,6 +630,15 @@ mod tests {
     impl Drop for ClearGateOnDrop {
         fn drop(&mut self) {
             self.0.store(false, Ordering::Release);
+        }
+    }
+
+    /// A store payload whose `Drop` bumps a counter — proves the store's held frame
+    /// is dropped synchronously on the releasing thread, non-blocking (F3).
+    struct CountedDrop(Arc<AtomicUsize>);
+    impl Drop for CountedDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Release);
         }
     }
 
@@ -837,6 +868,53 @@ mod tests {
         );
 
         drop((h1, h2));
+        reg.shutdown();
+    }
+
+    #[test]
+    fn dropping_a_handle_tears_down_the_store_without_blocking() {
+        // F3 (safety §4): SourceHandle::drop → release() (a brief O(1) registry lock
+        // + a wait-free reaper hand-off; the blocking decode join runs off-thread) →
+        // then the handle's own Arc<TileStore<T>> drops. On a store-only last-release
+        // (no actor) that final Arc drop tears down the TileStore — and the frame T
+        // it holds — ON THE CALLING THREAD. That store/frame Drop must be
+        // non-blocking (no device call, no pool round-trip, no thread join) so a
+        // handle drop is safe on any thread, including a Tokio async destructor. This
+        // pins that the teardown runs synchronously here and neither blocks nor panics.
+        let reg = SourceRegistry::<CountedDrop>::new();
+        let key = SourceKey::from_canonical("rtsp://drop-me");
+        let drops = Arc::new(AtomicUsize::new(0));
+
+        let h = reg
+            .acquire_store(key.clone(), size(2, 2), |_r| {
+                Ok::<_, Infallible>(Arc::new(TileStore::new(
+                    "drop-me",
+                    TileThresholds::default(),
+                    NoSignalPolicy::HoldForever,
+                )))
+            })
+            .unwrap();
+        // Publish a Drop-counting frame into the store; tearing the store down drops it.
+        h.store()
+            .publish(CountedDrop(drops.clone()), MediaTime::from_nanos(0));
+        assert_eq!(reg.active_len(), 1);
+
+        let start = Instant::now();
+        drop(h); // last release (no actor): entry removed + store Arc dropped here.
+        let elapsed = start.elapsed();
+
+        assert!(
+            !reg.contains(&key),
+            "the store-only entry is removed on last release"
+        );
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "handle drop (store + frame teardown) must be non-blocking (took {elapsed:?})"
+        );
+        assert!(
+            drops.load(Ordering::Acquire) >= 1,
+            "the store's held frame was dropped synchronously on the calling thread"
+        );
         reg.shutdown();
     }
 }
