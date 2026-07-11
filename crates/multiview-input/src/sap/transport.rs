@@ -481,4 +481,25 @@ mod tests {
             "the legit session is observed despite a preceding malformed flood (S3)"
         );
     }
+
+    #[tokio::test]
+    async fn listener_binds_ipv6_unspecified_as_dual_stack() {
+        // S4 (#158): binding [::] must be dual-stack (IPV6_V6ONLY=false) so it also
+        // accepts IPv4-mapped SAP, and must set SO_REUSEADDR — mirroring the webrtc
+        // media bind (ADR-0042 IPv6-first). tokio's UdpSocket::bind sets NEITHER, so
+        // dual-stack is left to the host `bindv6only` sysctl and SO_REUSEADDR is off;
+        // both are now set explicitly via socket2 for a deterministic bind.
+        let listener = SapListener::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0))
+            .await
+            .unwrap();
+        let sock = socket2::SockRef::from(listener.socket.as_ref());
+        assert!(
+            !sock.only_v6().unwrap(),
+            "the [::] SAP listener must bind dual-stack (only_v6 == false) (S4)"
+        );
+        assert!(
+            sock.reuse_address().unwrap(),
+            "the [::] SAP listener must set SO_REUSEADDR like the webrtc media bind (S4)"
+        );
+    }
 }
