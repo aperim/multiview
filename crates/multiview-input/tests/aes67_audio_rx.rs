@@ -91,11 +91,27 @@ mod producer {
 
     /// Wrap an encoded AES67 payload in a post-RTP-parse packet unit.
     fn audio_packet(timestamp: u32, sequence: u16, ssrc: u32, payload: Vec<u8>) -> St2110Packet {
+        audio_packet_pt(timestamp, sequence, ssrc, SESSION_PT, payload)
+    }
+
+    /// The session-negotiated RTP payload type the producer decodes against.
+    const SESSION_PT: u8 = 98;
+
+    /// Like [`audio_packet`] but with an explicit RTP payload type, to exercise the
+    /// session payload-type filter (RFC 3550 demuxes by payload type).
+    fn audio_packet_pt(
+        timestamp: u32,
+        sequence: u16,
+        ssrc: u32,
+        payload_type: u8,
+        payload: Vec<u8>,
+    ) -> St2110Packet {
         St2110Packet {
             marker: false,
             timestamp,
             sequence,
             ssrc,
+            payload_type,
             payload,
         }
     }
@@ -153,6 +169,42 @@ mod producer {
             .expect("a bad payload is skipped, not faulted")
             .expect("the following good unit is yielded");
         assert_eq!(frame.raw_timestamp, 20, "skipped straight to the good unit");
+    }
+
+    #[test]
+    fn producer_drops_packets_whose_payload_type_does_not_match_the_session() {
+        let format = Aes3Format::new(2, SampleDepth::L24).expect("stereo L24");
+        let packetizer = Aes67Packetizer::new(2, SampleDepth::L24).expect("stereo L24");
+        let stray = packetizer
+            .encode(&[0.9_f32, -0.9, 0.8, -0.8])
+            .expect("whole stereo groups");
+        let wanted = packetizer
+            .encode(&[0.5_f32, -0.5, 0.25, -0.25])
+            .expect("whole stereo groups");
+
+        // A stray RTP stream on the same 5-tuple carries a DIFFERENT payload type —
+        // a well-formed L24 payload that must NOT be decoded as our audio (RFC 3550
+        // demuxes by payload type; without a filter it would be treated as PCM).
+        const STRAY_PT: u8 = 96;
+        let source = ScriptedSource::new(vec![
+            audio_packet_pt(1_000, 7, 0xABCD, STRAY_PT, stray),
+            audio_packet_pt(1_048, 8, 0xABCD, SESSION_PT, wanted),
+        ]);
+        let mut producer = Aes67AudioProducer::new(Box::new(source), format, SESSION_PT);
+
+        // Only the session-PT unit is yielded; the stray-PT one was dropped.
+        let frame = producer
+            .next_audio()
+            .expect("poll never faults")
+            .expect("the session-PT unit is yielded");
+        assert_eq!(
+            frame.raw_timestamp, 1_048,
+            "the stray payload-type packet is dropped; the session-PT one decodes"
+        );
+        assert!(
+            producer.next_audio().expect("poll never faults").is_none(),
+            "no other units remain"
+        );
     }
 
     #[test]
