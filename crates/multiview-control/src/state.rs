@@ -22,7 +22,6 @@ use crate::alarm_store::{AlarmRepository, InMemoryAlarmStore};
 use crate::audio_routing::AudioRoutingStore;
 use crate::audit::{AuditRepository, InMemoryAuditLog};
 use crate::auth::ApiKeyStore;
-use crate::limits::Limiters;
 use crate::command::CommandSender;
 use crate::concurrency::IdempotencyStore;
 use crate::devices::cast::media::CastDelivery;
@@ -30,6 +29,7 @@ use crate::devices::cast::store::CastSessionStore;
 use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowser, ScanGate};
 use crate::devices::{DeviceDriverRegistry, DevicePollerRegistry, DeviceStatusRegistry};
 use crate::error::{ControlError, ControlResult};
+use crate::limits::Limiters;
 use crate::nmos::NmosRegistry;
 use crate::pending_actions::{InMemoryPendingActions, PendingActionRepository};
 use crate::repository::{InMemoryRepository, LayoutInput, Repository};
@@ -668,7 +668,7 @@ pub struct AppState {
     pub routes: Arc<RouteTable>,
     /// The API-key + RBAC store.
     pub api_keys: Arc<ApiKeyStore>,
-    /// The management-plane connection + rate limiters (SEC-14 control-plane DoS
+    /// The management-plane connection + rate limiters (SEC-14 control-plane `DoS`
     /// floor): the concurrent-request cap plus the per-IP (pre-auth) and
     /// per-API-key (post-auth) token buckets. Built from `control.limits` by the
     /// binary via [`AppState::with_limits`]; the bare constructor defaults to the
@@ -1103,7 +1103,7 @@ impl AppState {
     }
 
     /// Install the management-plane connection + rate limits (SEC-14 control-plane
-    /// DoS floor) from operator config. The binary calls this with
+    /// `DoS` floor) from operator config. The binary calls this with
     /// `control.limits` (secure defaults); the bare constructor leaves the inert
     /// disabled set, so tests and embedders stay unlimited unless they opt in. The
     /// runtime limiters are built here, so callers never name the internal type.

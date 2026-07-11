@@ -1,5 +1,5 @@
 //! Management-plane rate limiting — the keyed token-bucket that backs the SEC-14
-//! control-plane DoS floor.
+//! control-plane `DoS` floor.
 //!
 //! This module is the **pure, clock-injected** core: a [`RateLimiter`] that
 //! answers "may this key make one more request right now?" with a token-bucket
@@ -9,7 +9,7 @@
 //! `AppState`, and no wall clock, so it is exhaustively testable offline (the same
 //! seam pattern the rest of this crate uses for clock-driven logic).
 //!
-//! ## Bounded by construction — the DoS-resistance property
+//! ## Bounded by construction — the `DoS`-resistance property
 //!
 //! A rate limiter that grows a per-key map is itself a memory-exhaustion vector:
 //! an attacker rotating source addresses inflates the map without bound. This
@@ -30,7 +30,7 @@
 //! saturating).
 
 use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::{BuildHasher, Hash};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -151,9 +151,7 @@ impl<S: BuildHasher> RateLimiter<S> {
 
     /// The cell index a key maps to. Stable for the life of the limiter.
     pub(crate) fn cell_of<K: Hash + ?Sized>(&self, key: &K) -> usize {
-        let mut h = self.hasher.build_hasher();
-        key.hash(&mut h);
-        let hash = h.finish();
+        let hash = self.hasher.hash_one(key);
         // Work in u64 then narrow: `idx < n <= usize::MAX`, so the narrowing is
         // lossless. No `as` (workspace-banned) and no panic.
         let n = u64::try_from(self.cells.len()).unwrap_or(u64::MAX).max(1);
@@ -186,10 +184,7 @@ impl<S: BuildHasher> RateLimiter<S> {
         // burst ceiling), then spend or refuse one token.
         let elapsed = now_ns.saturating_sub(bucket.last_ns);
         let refill = elapsed.saturating_mul(self.refill_per_sec);
-        let available = bucket
-            .tokens
-            .saturating_add(refill)
-            .min(self.capacity_nano);
+        let available = bucket.tokens.saturating_add(refill).min(self.capacity_nano);
         bucket.last_ns = now_ns;
 
         if available >= REQUEST_COST {
@@ -211,7 +206,7 @@ impl<S: BuildHasher> RateLimiter<S> {
 
 /// The fixed number of token-bucket cells per keyed limiter. `O(1)` memory that
 /// never grows regardless of how many distinct IPs / keys are ever seen — the
-/// bounded-memory property that keeps the DoS floor from becoming its own
+/// bounded-memory property that keeps the `DoS` floor from becoming its own
 /// memory-exhaustion vector. Sized generously so a hash collision between the
 /// handful of real operators / keys is astronomically unlikely.
 const RATE_LIMIT_CELLS: usize = 4096;
@@ -594,7 +589,9 @@ mod middleware_tests {
     use multiview_config::limits::ManagementLimits;
     use tower::ServiceExt;
 
-    use super::{concurrency_cap, per_api_key_rate_limit, per_ip_rate_limit, Limiters, PerKeyLimitState};
+    use super::{
+        concurrency_cap, per_api_key_rate_limit, per_ip_rate_limit, Limiters, PerKeyLimitState,
+    };
     use crate::auth::{ApiKeyStore, Principal};
     use crate::problem::PROBLEM_JSON;
 
@@ -623,12 +620,9 @@ mod middleware_tests {
     #[tokio::test]
     async fn per_ip_limit_allows_the_burst_then_429s_the_same_ip() {
         let limiters = Arc::new(Limiters::from_config(&cfg(256, 1, 1)));
-        let app = Router::new()
-            .route("/x", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(
-                limiters,
-                per_ip_rate_limit,
-            ));
+        let app = Router::new().route("/x", get(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(limiters, per_ip_rate_limit),
+        );
 
         let first = app
             .clone()
@@ -663,25 +657,34 @@ mod middleware_tests {
     #[tokio::test]
     async fn per_ip_limit_is_independent_across_ips() {
         let limiters = Arc::new(Limiters::from_config(&cfg(256, 1, 1)));
-        let app = Router::new()
-            .route("/x", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(
-                limiters,
-                per_ip_rate_limit,
-            ));
+        let app = Router::new().route("/x", get(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(limiters, per_ip_rate_limit),
+        );
 
         // Drain IP A.
         assert_eq!(
-            app.clone().oneshot(get_ip("/x", "198.51.100.1")).await.unwrap().status(),
+            app.clone()
+                .oneshot(get_ip("/x", "198.51.100.1"))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::OK
         );
         assert_eq!(
-            app.clone().oneshot(get_ip("/x", "198.51.100.1")).await.unwrap().status(),
+            app.clone()
+                .oneshot(get_ip("/x", "198.51.100.1"))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::TOO_MANY_REQUESTS
         );
         // IP B is unaffected.
         assert_eq!(
-            app.clone().oneshot(get_ip("/x", "198.51.100.2")).await.unwrap().status(),
+            app.clone()
+                .oneshot(get_ip("/x", "198.51.100.2"))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::OK
         );
     }
@@ -692,15 +695,15 @@ mod middleware_tests {
         // passes through (the concurrency cap + per-key limit still apply). Three
         // requests past a burst of 1 all succeed.
         let limiters = Arc::new(Limiters::from_config(&cfg(256, 1, 1)));
-        let app = Router::new()
-            .route("/x", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(
-                limiters,
-                per_ip_rate_limit,
-            ));
+        let app = Router::new().route("/x", get(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(limiters, per_ip_rate_limit),
+        );
         for _ in 0..3 {
             let req = Request::builder().uri("/x").body(Body::empty()).unwrap();
-            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+            assert_eq!(
+                app.clone().oneshot(req).await.unwrap().status(),
+                StatusCode::OK
+            );
         }
     }
 
@@ -720,12 +723,9 @@ mod middleware_tests {
     #[tokio::test]
     async fn per_api_key_limit_429s_a_valid_key_after_its_burst() {
         let (state, bearer) = per_key_state(&cfg(256, 1, 1));
-        let app = Router::new()
-            .route("/x", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(
-                state,
-                per_api_key_rate_limit,
-            ));
+        let app = Router::new().route("/x", get(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(state, per_api_key_rate_limit),
+        );
         let mk = || {
             Request::builder()
                 .uri("/x")
@@ -733,7 +733,10 @@ mod middleware_tests {
                 .body(Body::empty())
                 .unwrap()
         };
-        assert_eq!(app.clone().oneshot(mk()).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            app.clone().oneshot(mk()).await.unwrap().status(),
+            StatusCode::OK
+        );
         let limited = app.clone().oneshot(mk()).await.unwrap();
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(limited.headers().contains_key(header::RETRY_AFTER));
@@ -742,16 +745,16 @@ mod middleware_tests {
     #[tokio::test]
     async fn per_api_key_limit_ignores_unauthenticated_requests() {
         let (state, _bearer) = per_key_state(&cfg(256, 1, 1));
-        let app = Router::new()
-            .route("/x", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(
-                state,
-                per_api_key_rate_limit,
-            ));
+        let app = Router::new().route("/x", get(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(state, per_api_key_rate_limit),
+        );
         // No credential ⇒ not per-key limited; three past a burst of 1 all pass.
         for _ in 0..3 {
             let req = Request::builder().uri("/x").body(Body::empty()).unwrap();
-            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+            assert_eq!(
+                app.clone().oneshot(req).await.unwrap().status(),
+                StatusCode::OK
+            );
         }
     }
 
@@ -767,18 +770,17 @@ mod middleware_tests {
             .try_acquire_owned()
             .expect("one permit is free");
 
-        let app = Router::new()
-            .route("/x", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(
-                limiters.clone(),
-                concurrency_cap,
-            ));
+        let app = Router::new().route("/x", get(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(limiters.clone(), concurrency_cap),
+        );
         let req = Request::builder().uri("/x").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(resp.headers().contains_key(header::RETRY_AFTER));
         assert_eq!(
-            resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
             Some(PROBLEM_JSON)
         );
         drop(held);
@@ -789,15 +791,15 @@ mod middleware_tests {
         // max_concurrent = 1, but sequential requests each release the permit, so
         // both succeed (proves the guard is not a one-shot).
         let limiters = Arc::new(Limiters::from_config(&cfg(1, 256, 256)));
-        let app = Router::new()
-            .route("/x", get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(
-                limiters,
-                concurrency_cap,
-            ));
+        let app = Router::new().route("/x", get(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(limiters, concurrency_cap),
+        );
         for _ in 0..2 {
             let req = Request::builder().uri("/x").body(Body::empty()).unwrap();
-            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+            assert_eq!(
+                app.clone().oneshot(req).await.unwrap().status(),
+                StatusCode::OK
+            );
         }
     }
 

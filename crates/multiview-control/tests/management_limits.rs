@@ -53,7 +53,7 @@ async fn http_get_status(addr: std::net::SocketAddr, path: &str) -> Option<Strin
     text.lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
-        .map(|code| code.to_owned())
+        .map(str::to_owned)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -63,20 +63,28 @@ async fn the_served_control_plane_rate_limits_per_source_ip() {
     let addr = listener.local_addr().unwrap();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(multiview_control::serve(listener, limited_state(), async move {
-        let _ = shutdown_rx.await;
-    }));
+    let server = tokio::spawn(multiview_control::serve(
+        listener,
+        limited_state(),
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
 
     // First request from the loopback client is within the per-IP burst of 1.
     assert_eq!(
-        http_get_status(addr, "/api/v1/openapi.json").await.as_deref(),
+        http_get_status(addr, "/api/v1/openapi.json")
+            .await
+            .as_deref(),
         Some("200"),
         "first request should be admitted"
     );
     // The second request (same source IP, immediately) exceeds the burst → 429.
     // Proves ConnectInfo reached the per-IP guard over a real socket.
     assert_eq!(
-        http_get_status(addr, "/api/v1/openapi.json").await.as_deref(),
+        http_get_status(addr, "/api/v1/openapi.json")
+            .await
+            .as_deref(),
         Some("429"),
         "second request from the same IP should be rate-limited"
     );

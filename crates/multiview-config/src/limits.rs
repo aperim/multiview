@@ -1,4 +1,4 @@
-//! Management-plane connection + rate limits (SEC-14) — the control-plane DoS
+//! Management-plane connection + rate limits (SEC-14) — the control-plane `DoS`
 //! floor, as operator configuration.
 //!
 //! [`ManagementLimits`] is the `[control.limits]` config section: the
@@ -82,7 +82,7 @@ impl RateLimitConfig {
 }
 
 /// The `[control.limits]` section: the management-plane connection + rate caps
-/// (SEC-14 control-plane DoS floor).
+/// (SEC-14 control-plane `DoS` floor).
 ///
 /// Absent ⇒ the secure defaults (limits enabled). Every field defaults
 /// individually, so a partial section overrides only the knobs it names.
@@ -125,7 +125,7 @@ impl ManagementLimits {
     /// # Errors
     /// [`ConfigError::Validation`] if the concurrency cap is zero, or either
     /// token-bucket rate has a zero `burst` or `refill_per_sec` — each would turn
-    /// the DoS floor into a self-inflicted outage. Validated regardless of
+    /// the `DoS` floor into a self-inflicted outage. Validated regardless of
     /// `enabled` so a typo is caught even while the limits are temporarily off.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.max_concurrent_requests == 0 {
@@ -156,7 +156,9 @@ mod tests {
         assert_eq!(limits.per_ip.refill_per_sec, 40);
         assert_eq!(limits.per_api_key.burst, 240);
         assert_eq!(limits.per_api_key.refill_per_sec, 80);
-        limits.validate().expect("the secure defaults must validate");
+        limits
+            .validate()
+            .expect("the secure defaults must validate");
     }
 
     #[test]

@@ -39,8 +39,9 @@ multiview-preview = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # `net` adds `tokio::net::TcpListener` for `serve` (the real-socket bind that lets
-# `multiview run` expose the API+WebUI); pure Rust, stays in the default build.
-tokio = { workspace = true, features = ["net"] }
+# `multiview run` expose the API+WebUI); `sync` adds `tokio::sync::Semaphore` for
+# the SEC-14 concurrent-request cap. Pure Rust, stays in the default build.
+tokio = { workspace = true, features = ["net", "sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

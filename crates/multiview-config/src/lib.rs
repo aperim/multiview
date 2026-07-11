@@ -191,7 +191,7 @@ pub struct ControlConfig {
     /// `scheme://host` origin by [`MultiviewConfig::validate`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_origins: Vec<String>,
-    /// Management-plane connection + rate limits (SEC-14 control-plane DoS
+    /// Management-plane connection + rate limits (SEC-14 control-plane `DoS`
     /// floor): the concurrent-request cap plus the per-IP (pre-auth) and
     /// per-API-key (post-auth) token-bucket rates the control plane enforces.
     /// Absent ⇒ the secure defaults (limits enabled); validated by
