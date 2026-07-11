@@ -552,23 +552,13 @@ fn parse_cc_field(field: &str) -> Option<multiview_ffmpeg::CcChannel> {
     }
 }
 
-/// Publish each decoded **bitmap** cue into the store using its own `[start,
-/// end)` window — the DVB-sub sibling of [`publish_cues`], but with **no
-/// `CuePacer`**: these cues are decoded inside the source's already-PTS-paced
-/// video ingest loop, so the bitmap cue is published at the same media instant
-/// its packet arrives (no separate wall-clock pacing needed). The store is the
-/// lock-free hand-off the off-hot-path baker samples per tick (#1/#10).
-pub fn publish_bitmap_cues(store: &CueStore, cues: Vec<CaptionCue>) {
-    publish_window_cues(store, cues);
-}
-
 /// Publish each decoded cue (text **or** bitmap) into the store using its own
 /// `[start, end)` window. The shared, shape-agnostic publish behind both the
-/// DVB-sub bitmap route ([`publish_bitmap_cues`]) and the embedded-CC / in-
-/// container TEXT routes: each is decoded inside the source's already-PTS-paced
-/// video ingest loop, so the cue is published at the media instant its packet/
-/// frame arrives (no separate wall-clock pacing needed). The store is the
-/// lock-free hand-off the off-hot-path baker samples per tick (#1/#10).
+/// DVB-sub bitmap route and the embedded-CC / in-container TEXT routes: each is
+/// decoded inside the source's already-PTS-paced video ingest loop, so the cue
+/// is published at the media instant its packet/frame arrives (no separate
+/// wall-clock pacing needed). The store is the lock-free hand-off the
+/// off-hot-path baker samples per tick (#1/#10).
 pub fn publish_window_cues(store: &CueStore, cues: Vec<CaptionCue>) {
     for cue in cues {
         let (start, end) = (cue.start(), cue.end());
@@ -1274,24 +1264,6 @@ mod tests {
         assert_eq!(embedded_cc_channel(&SourceKind::Bars, &field("cc1")), None);
         // A non-embedded selector is not this path.
         assert_eq!(embedded_cc_channel(&ts, &CaptionSelector::Auto), None);
-    }
-
-    #[test]
-    fn publish_bitmap_cues_inserts_each_cue_at_its_window() {
-        use multiview_ffmpeg::caption::{CaptionCue, CueRect};
-        let store = CueStore::new();
-        let rgba = vec![0_u8; 2 * 2 * 4];
-        let rect = CueRect::new(0, 0, 2, 2);
-        let cue = CaptionCue::try_bitmap(
-            MediaTime::from_nanos(1_000),
-            MediaTime::from_nanos(3_000),
-            rgba,
-            rect,
-        )
-        .expect("valid bitmap cue");
-        publish_bitmap_cues(&store, vec![cue]);
-        assert!(store.active_at(MediaTime::from_nanos(2_000)).is_some());
-        assert!(store.active_at(MediaTime::from_nanos(500)).is_none());
     }
 
     #[test]
