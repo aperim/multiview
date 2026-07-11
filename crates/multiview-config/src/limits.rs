@@ -45,6 +45,16 @@ const DEFAULT_PER_API_KEY_REFILL_PER_SEC: u32 = 80;
 /// any legitimate client (headers arrive in milliseconds) while bounding a
 /// slow-header slowloris.
 const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 20;
+/// Default cap on concurrently-accepted connections across all peers: bounds the
+/// socket + task population a connection flood can pin **before** any request parses
+/// (the slowloris / slow-TLS-handshake floor the request-level caps miss). Generous
+/// for a handful of operators plus the SPA's fan-out and its long-lived WS/SSE
+/// sessions, while bounding a flood.
+const DEFAULT_MAX_CONNECTIONS: usize = 1024;
+/// Default cap on concurrently-accepted connections from a single peer IP: bounds a
+/// single-source flood while leaving headroom for one host running the SPA (resource
+/// fan-out + WS + SSE). Must not exceed [`DEFAULT_MAX_CONNECTIONS`].
+const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 256;
 
 fn default_enabled() -> bool {
     true
@@ -56,6 +66,14 @@ fn default_max_concurrent_requests() -> usize {
 
 fn default_header_read_timeout_secs() -> u64 {
     DEFAULT_HEADER_READ_TIMEOUT_SECS
+}
+
+fn default_max_connections() -> usize {
+    DEFAULT_MAX_CONNECTIONS
+}
+
+fn default_max_connections_per_ip() -> usize {
+    DEFAULT_MAX_CONNECTIONS_PER_IP
 }
 
 fn default_per_ip() -> RateLimitConfig {
@@ -167,6 +185,23 @@ pub struct ManagementLimits {
     /// stays on even for a trusted-network deployment. Default `20`.
     #[serde(default = "default_header_read_timeout_secs")]
     pub header_read_timeout_secs: u64,
+    /// The cap on concurrently-accepted connections across all peers, enforced by the
+    /// control-plane serve loop **at accept** — before any request headers parse. This
+    /// is the population bound the request-level caps miss: `max_concurrent_requests`
+    /// and the token buckets engage only *after* a request's headers are parsed, so a
+    /// flood of half-open, slow-header (or slow-TLS-handshake) connections pins sockets
+    /// + tasks without ever taking a request permit. Over-cap connections are dropped
+    /// at accept. Enforced only while `enabled` (a shed-layer cap, like
+    /// `max_concurrent_requests`). Default `1024`.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+    /// The cap on concurrently-accepted connections from a single peer IP, enforced at
+    /// accept **before** authentication so one source cannot monopolise
+    /// `max_connections`. Must not exceed `max_connections` (a looser per-IP cap could
+    /// never bind). Over-cap connections are dropped at accept. Enforced only while
+    /// `enabled`. Default `256`.
+    #[serde(default = "default_max_connections_per_ip")]
+    pub max_connections_per_ip: usize,
 }
 
 impl Default for ManagementLimits {
@@ -177,6 +212,8 @@ impl Default for ManagementLimits {
             per_ip: default_per_ip(),
             per_api_key: default_per_api_key(),
             header_read_timeout_secs: default_header_read_timeout_secs(),
+            max_connections: default_max_connections(),
+            max_connections_per_ip: default_max_connections_per_ip(),
         }
     }
 }
@@ -233,6 +270,8 @@ mod tests {
         assert_eq!(limits.per_api_key.burst, 240);
         assert_eq!(limits.per_api_key.refill_per_sec, 80);
         assert_eq!(limits.header_read_timeout_secs, 20);
+        assert_eq!(limits.max_connections, 1024);
+        assert_eq!(limits.max_connections_per_ip, 256);
         limits
             .validate()
             .expect("the secure defaults must validate");
@@ -261,6 +300,61 @@ mod tests {
             limits.validate().is_err(),
             "a zero concurrency cap would reject every request and must fail config load"
         );
+    }
+
+    #[test]
+    fn a_zero_max_connections_is_rejected() {
+        let limits = ManagementLimits {
+            max_connections: 0,
+            ..ManagementLimits::default()
+        };
+        assert!(
+            limits.validate().is_err(),
+            "a zero connection cap would drop every connection at accept and must fail config load"
+        );
+    }
+
+    #[test]
+    fn a_zero_max_connections_per_ip_is_rejected() {
+        let limits = ManagementLimits {
+            max_connections_per_ip: 0,
+            ..ManagementLimits::default()
+        };
+        assert!(
+            limits.validate().is_err(),
+            "a zero per-IP connection cap would drop every connection at accept and must fail \
+             config load"
+        );
+    }
+
+    #[test]
+    fn a_per_ip_connection_cap_above_the_global_cap_is_rejected() {
+        // A per-IP cap looser than the global cap is a misconfiguration: the per-IP
+        // limit could never bind (the global cap engages first), so a single source
+        // could still reach the global cap. Err strict — catch the typo at load.
+        let limits = ManagementLimits {
+            max_connections: 100,
+            max_connections_per_ip: 101,
+            ..ManagementLimits::default()
+        };
+        assert!(
+            limits.validate().is_err(),
+            "a per-IP connection cap above the global cap must fail config load"
+        );
+    }
+
+    #[test]
+    fn a_per_ip_connection_cap_equal_to_the_global_cap_validates() {
+        // The boundary (per-IP == global) is honourable — a single trusted source may
+        // use the whole budget — so it must pass; only strictly-larger is rejected.
+        let limits = ManagementLimits {
+            max_connections: 100,
+            max_connections_per_ip: 100,
+            ..ManagementLimits::default()
+        };
+        limits
+            .validate()
+            .expect("a per-IP cap equal to the global cap is honourable and must validate");
     }
 
     #[test]
