@@ -23,7 +23,7 @@ use multiview_audio::AudioBlock;
 
 use crate::display::audio::AudioFifo;
 
-use super::packet::{build_rtp_header, encode_pcm, PcmDepth, RTP_FIXED_HEADER_LEN};
+use super::packet::{build_rtp_header, encode_pcm_append, PcmDepth, RTP_FIXED_HEADER_LEN};
 
 /// Default send FIFO depth in frames: 100 ms at 48 kHz. Bounds the decoupling
 /// buffer between the engine bake and the send timer; on overflow the oldest
@@ -345,6 +345,24 @@ impl Aes67Sender {
     /// returns a full packet, whatever the FIFO fill — the RTP media clock is
     /// driven by the send timer, never by the input feed.
     pub fn next_packet(&mut self) -> Vec<u8> {
+        let mut packet = Vec::new();
+        self.next_packet_into(&mut packet);
+        packet
+    }
+
+    /// Drain the next continuous RTP packet into a caller-owned, **reused** buffer
+    /// (rule 22: no per-packet allocation on the continuous send path). Identical
+    /// bytes to [`next_packet`](Self::next_packet), but written into `out` in place
+    /// so the send loop transmits from one buffer warmed once and reused forever
+    /// — [`next_packet`](Self::next_packet) is just this over a fresh `Vec`.
+    ///
+    /// Drains `frames_per_packet` frames of real audio, silence-filling any
+    /// underrun so the stream never gaps or stalls (invariant #1), encodes them to
+    /// big-endian L16/L24, prepends the 12-byte RTP header (marker=0), and advances
+    /// the sequence (`+1`) and timestamp (`+frames_per_packet`). Always writes a
+    /// full packet, whatever the FIFO fill — the RTP media clock is driven by the
+    /// send timer, never by the input feed.
+    pub fn next_packet_into(&mut self, out: &mut Vec<u8>) {
         let want_samples = self.frames_per_packet.saturating_mul(self.channels);
         // Silence baseline first, so a skipped drain (lock contention) emits
         // silence, never stale samples from the previous packet.
@@ -359,24 +377,18 @@ impl Aes67Sender {
             let _real = fifo.pop_into(&mut self.scratch);
         }
 
-        let payload = encode_pcm(&self.scratch, self.depth);
         let header = build_rtp_header(self.payload_type, self.sequence, self.timestamp, self.ssrc);
-
-        let mut packet = Vec::with_capacity(RTP_FIXED_HEADER_LEN.saturating_add(payload.len()));
-        packet.extend_from_slice(&header);
-        packet.extend_from_slice(&payload);
+        // Reuse the caller's buffer in place: clear (keeps the allocation), reserve
+        // the exact packet size once, then write header + PCM — so the steady send
+        // path never reallocates per packet (rule 22).
+        let payload_bytes = want_samples.saturating_mul(self.depth.bytes_per_sample());
+        out.clear();
+        out.reserve(RTP_FIXED_HEADER_LEN.saturating_add(payload_bytes));
+        out.extend_from_slice(&header);
+        encode_pcm_append(out, &self.scratch, self.depth);
 
         self.sequence = self.sequence.wrapping_add(1);
         self.timestamp = self.timestamp.wrapping_add(self.timestamp_increment);
-        packet
-    }
-
-    /// Drain the next continuous RTP packet into a caller-owned, **reused** buffer
-    /// (rule 22: no per-packet allocation on the continuous send path). Identical
-    /// bytes to [`next_packet`](Self::next_packet), written into `out` so the send
-    /// loop transmits from one buffer that is warmed once and reused forever.
-    pub fn next_packet_into(&mut self, out: &mut Vec<u8>) {
-        *out = self.next_packet();
     }
 
     /// Current FIFO fill in frames (per channel). `0` on the rare lock

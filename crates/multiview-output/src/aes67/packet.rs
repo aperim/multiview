@@ -92,10 +92,19 @@ pub fn build_rtp_header(
 #[must_use]
 pub fn encode_pcm(samples: &[f32], depth: PcmDepth) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(samples.len().saturating_mul(depth.bytes_per_sample()));
+    encode_pcm_append(&mut bytes, samples, depth);
+    bytes
+}
+
+/// Encode interleaved unit-range `f32` samples, **appending** the big-endian
+/// L16/L24 bytes to `out` (never clearing it) — the allocation-free core of
+/// [`encode_pcm`] that the continuous send path reuses to avoid a per-packet
+/// payload allocation (rule 22). The caller reserves/clears `out`.
+pub fn encode_pcm_append(out: &mut Vec<u8>, samples: &[f32], depth: PcmDepth) {
     match depth {
         PcmDepth::L16 => {
             for &sample in samples {
-                bytes.extend_from_slice(&encode_l16(sample).to_be_bytes());
+                out.extend_from_slice(&encode_l16(sample).to_be_bytes());
             }
         }
         PcmDepth::L24 => {
@@ -104,11 +113,10 @@ pub fn encode_pcm(samples: &[f32], depth: PcmDepth) -> Vec<u8> {
                 // sign-extended `i32` shifted left by 8, exactly matching the
                 // decoder's `i32::from_be_bytes([hi, mid, lo, 0]) >> 8`.
                 let [hi, mid, lo, _low] = (encode_l24(sample) << 8).to_be_bytes();
-                bytes.extend_from_slice(&[hi, mid, lo]);
+                out.extend_from_slice(&[hi, mid, lo]);
             }
         }
     }
-    bytes
 }
 
 /// Map a unit-range `f32` to a 16-bit PCM code (clamped, round-to-nearest). The

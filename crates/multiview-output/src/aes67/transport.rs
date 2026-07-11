@@ -110,11 +110,15 @@ impl Aes67UdpSender {
         let ptime = sender.packet_duration().max(Duration::from_micros(1));
         let mut ticker = tokio::time::interval(ptime);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // One datagram buffer, warmed on the first tick and reused for every
+        // packet — the continuous send path allocates nothing per tick (rule 22 /
+        // panel F6).
+        let mut datagram = Vec::new();
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    let packet = sender.next_packet();
-                    self.send_packet(&packet).await?;
+                    sender.next_packet_into(&mut datagram);
+                    self.send_packet(&datagram).await?;
                 }
                 () = &mut stop => return Ok(()),
             }
