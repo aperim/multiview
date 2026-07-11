@@ -1680,6 +1680,18 @@ pub struct Pipeline {
     /// like any source's audio). Built only for media players whose default asset
     /// declares a vamp window; empty when this run did not opt into program audio.
     player_audio_ingest_plans: Vec<crate::audio::PlayerAudioPlan>,
+    /// Per-source **AES67 / ST 2110-30** audio RX plans (#103, ADR-0033/T013):
+    /// how to bind + receive each AES67 multicast PCM source. The drive starts one
+    /// supervised RX thread per plan (a peer of the audio decode threads) that
+    /// depacketizes → rebases (ADR-T013) → publishes into that source's
+    /// [`Self::audio_stores`] entry, which the program bus samples like any
+    /// source's audio. An AES67 source is AUDIO-ONLY — it takes no video
+    /// [`TileStore`], no [`source_registry`](Self::source_registry) entry, and no
+    /// layout tile. Built only for `SourceKind::Aes67` sources; spawned only when
+    /// this run opted into program audio (else there is no bus to consume the
+    /// store). Only under the off-by-default `aes67` feature.
+    #[cfg(feature = "aes67")]
+    aes67_rx_plans: Vec<Aes67RxPlan>,
     /// The fixed canvas color (ADR-C001 SDR BT.709 limited).
     canvas_color: CanvasColor,
     /// The "no signal" slate composited for tiles with no usable frame.
@@ -1911,6 +1923,80 @@ struct IngestPlan {
     youtube_url_slot: Option<Arc<arc_swap::ArcSwapOption<String>>>,
 }
 
+/// Everything one AES67 / ST 2110-30 audio source needs to be received on its own
+/// supervised RX thread (#103, ADR-0033/T013): the resolved SDP session (PCM
+/// format + RTP clock + payload type), the multicast `group:port` to bind + join,
+/// and the last-good [`AudioStore`](multiview_audio::store::AudioStore) its
+/// rebased 48 kHz PCM is published into (shared with the program bus). Audio-only
+/// — there is no [`TileStore`], no cell, and no video decode.
+#[cfg(feature = "aes67")]
+struct Aes67RxPlan {
+    /// The source id (diagnostics + the run's stop-flag key).
+    id: String,
+    /// The parsed SDP session: PCM format (channels + L16/L24), RTP clock rate,
+    /// and dynamic payload type. The multicast binding is deliberately NOT read
+    /// from here (the SDP parser ignores the `c=` line — the transport binding is
+    /// a config concern); it comes from [`Self::group`].
+    session: multiview_input::st2110::sdp::AudioSdpSession,
+    /// The resolved multicast `group:port` (from the config `multicast` override)
+    /// the receiver binds the port of and joins the group of.
+    group: std::net::SocketAddr,
+    /// The last-good `AudioStore` the rebased 48 kHz PCM is published into — shared
+    /// with the [`ProgramBus`](multiview_audio::program::ProgramBus), which samples
+    /// it per tick (a best-effort writer of a lock-free store, inv #1/#10).
+    store: Arc<multiview_audio::store::AudioStore>,
+}
+
+/// Resolve an AES67 source's SDP session + multicast `group:port` binding (#103).
+///
+/// The SDP (RFC 4566/8866) carries the PCM format, RTP clock, and payload type;
+/// the multicast binding comes from the config `multicast` override (the SDP
+/// parser ignores the `c=` connection line by design — the transport binding is a
+/// config concern, `multiview-input`'s `st2110::sdp` module contract). A
+/// missing/malformed SDP or a missing/invalid override is a typed refusal at build
+/// time (never a silent skip — the fail-closed contract).
+///
+/// # Errors
+/// [`PipelineError::Ingest`] when the source is not AES67, the SDP does not parse,
+/// the `multicast` override is absent, or it is not a valid `group:port`.
+#[cfg(feature = "aes67")]
+fn resolve_aes67_source(
+    source: &Source,
+) -> Result<
+    (
+        multiview_input::st2110::sdp::AudioSdpSession,
+        std::net::SocketAddr,
+    ),
+    PipelineError,
+> {
+    let SourceKind::Aes67 { sdp, multicast, .. } = &source.kind else {
+        return Err(PipelineError::Ingest {
+            id: source.id.clone(),
+            reason: "resolve_aes67_source called on a non-aes67 source".to_owned(),
+        });
+    };
+    let session = multiview_input::st2110::sdp::AudioSdpSession::parse(sdp).map_err(|e| {
+        PipelineError::Ingest {
+            id: source.id.clone(),
+            reason: format!("aes67 sdp parse failed: {e}"),
+        }
+    })?;
+    let group_str = multicast.as_deref().ok_or_else(|| PipelineError::Ingest {
+        id: source.id.clone(),
+        reason: "aes67 source requires a `multicast` group:port override (e.g. \
+                 \"[ff3e::1]:5004\"); the SDP connection line is not used for the \
+                 transport binding"
+            .to_owned(),
+    })?;
+    let group = group_str
+        .parse::<std::net::SocketAddr>()
+        .map_err(|e| PipelineError::Ingest {
+            id: source.id.clone(),
+            reason: format!("aes67 multicast `{group_str}` is not a valid group:port: {e}"),
+        })?;
+    Ok((session, group))
+}
+
 /// The in-container subtitle decode route stashed on an [`IngestPlan`]: which
 /// muxed subtitle stream to decode (index + its time-base), the decoder kind
 /// (DVB-sub bitmap or `ass`/`subrip`/`mov_text` text), and the per-source cue
@@ -1989,6 +2075,13 @@ impl Pipeline {
         let mut audio_ingest_plans: Vec<crate::audio::AudioIngestPlan> = Vec::new();
         // AUD-5: synthetic line-up tone plans (the `bars` source's 1 kHz companion).
         let mut tone_ingest_plans: Vec<crate::audio::ToneIngestPlan> = Vec::new();
+        // #103: AES67 / ST 2110-30 audio RX plans. Each `SourceKind::Aes67` source
+        // is AUDIO-ONLY — the source loop below SKIPS the entire video path for it
+        // (no TileStore, no registry entry, no ingest plan) and queues one RX plan
+        // here, spawned in `drive_streaming`. Only under the `aes67` feature; a
+        // non-`aes67` build rejected any aes67 source up front (the gate above).
+        #[cfg(feature = "aes67")]
+        let mut aes67_rx_plans: Vec<Aes67RxPlan> = Vec::new();
 
         // Per-source native caption stores + reader plans. Built best-effort: a
         // source whose selector resolves to an HLS WebVTT rendition gets a store
@@ -2022,6 +2115,26 @@ impl Pipeline {
             Vec::with_capacity(config.sources.len());
 
         for source in &config.sources {
+            // #103: an AES67 / ST 2110-30 source is AUDIO-ONLY. It decodes no
+            // pixels, so it takes NO video TileStore, NO SourceRegistry entry, and
+            // NO layout tile — the MP-2 decode-once video seam (ADR-0030 §3) never
+            // sees it. It contributes an AudioStore (routed onto the program bus
+            // like any source's audio, so it "joins" the bus at the routing loop
+            // below) plus a supervised RX plan (bound + received on its own thread
+            // in `drive_streaming`). Skip the entire video path for it.
+            #[cfg(feature = "aes67")]
+            if matches!(source.kind, SourceKind::Aes67 { .. }) {
+                let (session, group) = resolve_aes67_source(source)?;
+                let store = crate::audio::new_store();
+                audio_stores.insert(source.id.clone(), Arc::clone(&store));
+                aes67_rx_plans.push(Aes67RxPlan {
+                    id: source.id.clone(),
+                    session,
+                    group,
+                    store,
+                });
+                continue;
+            }
             let (tile_w, tile_h) = cell_pixel_size(&layout, &source.id)
                 .unwrap_or((config.canvas.width, config.canvas.height));
             // The registry owns the shared store, sized to the per-axis supremum;
@@ -2277,6 +2390,8 @@ impl Pipeline {
             audio_ingest_plans,
             tone_ingest_plans,
             player_audio_ingest_plans,
+            #[cfg(feature = "aes67")]
+            aes67_rx_plans,
             inventories,
             #[cfg(feature = "overlay")]
             caption_stores,
@@ -3034,6 +3149,16 @@ impl Pipeline {
         } else {
             Vec::new()
         };
+        // #103: AES67 / ST 2110-30 audio RX plans (audio-only ST 2110-30 sources).
+        // Spawned ONLY when this run opted into program audio — mirroring the audio
+        // decode plans above: without a `ProgramBus` consuming the store, the
+        // received PCM would go nowhere. Left in place (untouched) when audio is off.
+        #[cfg(feature = "aes67")]
+        let aes67_plans: Vec<Aes67RxPlan> = if self.encode_cfg.audio.is_some() {
+            std::mem::take(&mut self.aes67_rx_plans)
+        } else {
+            Vec::new()
+        };
         // The supervisor registers every producer's per-thread stop flag in the
         // run's shared registry (ADR-W018) — the video decode thread under `{id}`,
         // its audio/tone/caption companions under `{id}/<role>` — so a live
@@ -3046,6 +3171,16 @@ impl Pipeline {
             caption_plans,
             &self.stop_registry,
         );
+        // #103: spawn the AES67 RX threads into the SAME supervisor (its bounded
+        // stop+join teardown), registered under `{id}` like a video source's
+        // producer. An AES67 source has no video decode thread, so `{id}` is its
+        // primary producer flag (a live `RemoveSource` stops it).
+        #[cfg(feature = "aes67")]
+        let supervisor = {
+            let mut supervisor = supervisor;
+            supervisor.spawn_aes67_receivers(aes67_plans, &self.stop_registry);
+            supervisor
+        };
 
         // Prime the first frame per tile BEFORE constructing the runtime (whose
         // `new` seeds tick 0 to "now") and therefore before the output clock's
@@ -5777,6 +5912,47 @@ impl Drop for IngestSupervisor {
         // thread blocks the caller. After `shutdown` the handle vec is already
         // drained, so this is a no-op on that path.
         self.join_all();
+    }
+}
+
+#[cfg(feature = "aes67")]
+impl IngestSupervisor {
+    /// Spawn one supervised AES67 / ST 2110-30 RX thread per plan (#103), pushing
+    /// each into the SAME `producers` vec every other ingest thread lives in — so
+    /// they share the identical bounded stop+join teardown ([`Self::join_all`]).
+    ///
+    /// Each registers its per-thread stop flag under the source id in the run's
+    /// shared registry (ADR-W018 — a live `RemoveSource` raises exactly this
+    /// flag), like [`spawn_ingest_producer`] does for a video source (an AES67
+    /// source has no video thread, so `{id}` is its primary producer). The RX
+    /// thread only ever WRITES its lock-free `AudioStore`, so it can neither pace
+    /// nor stall the output clock (inv #1/#10); a thread that cannot spawn is
+    /// logged and skipped (its source rides silence on the bus, never failing the
+    /// run — invariant #1).
+    fn spawn_aes67_receivers(
+        &mut self,
+        plans: Vec<Aes67RxPlan>,
+        registry: &crate::live_sources::StopRegistry,
+    ) {
+        for plan in plans {
+            let stop = Arc::new(AtomicBool::new(false));
+            let id = plan.id.clone();
+            let exited = crate::live_sources::register_stop(registry, &id, &stop);
+            // ExitGuard built BEFORE spawn (flips `exited` even if Builder::spawn
+            // fails — the dropped closure drops the guard) (ADR-W018 §5).
+            let exit_guard = crate::live_sources::ExitGuard::new(&exited);
+            let thread_stop = Arc::clone(&stop);
+            let builder = std::thread::Builder::new().name(format!("multiview-aes67-rx-{id}"));
+            match builder.spawn(move || {
+                let _exit = exit_guard;
+                drive_aes67_rx(&plan, &thread_stop);
+            }) {
+                Ok(handle) => self.producers.push((stop, handle)),
+                Err(e) => {
+                    tracing::error!(error = %e, source = %id, "could not spawn aes67 rx thread");
+                }
+            }
+        }
     }
 }
 
@@ -9060,6 +9236,192 @@ fn webrtc_audio_block(
     use multiview_audio::format::{AudioBlock, AudioFormat, ChannelLayout};
     let format = AudioFormat::new(samples.rate, ChannelLayout::Stereo);
     AudioBlock::from_interleaved(format, samples.interleaved.clone()).ok()
+}
+
+/// The canonical AES67 audio store / program-bus sample rate (Hz): 48 kHz — the
+/// rate [`crate::audio::new_store`] mints and the program bus mixes, so a rebased
+/// AES67 block is published at exactly this rate (the store's format contract).
+#[cfg(feature = "aes67")]
+const AES67_STORE_RATE_HZ: u32 = 48_000;
+
+/// The AES67 RX socket→packet channel-bridge depth (#103): a bounded drop-oldest
+/// buffer of depacketized RTP units between the async receive loop (writer) and
+/// the [`Aes67AudioProducer`] drain (reader). Bounded so a burst can never grow
+/// memory (inv #5); AES67 Class-A packets are 1 ms, so 512 units is ~0.5 s of
+/// slack — far more than the 2 ms drain cadence needs, and it drops-oldest under
+/// any stall rather than back-pressuring the socket.
+#[cfg(feature = "aes67")]
+const AES67_RX_BRIDGE_CAP: usize = 512;
+
+/// Receive one AES67 / ST 2110-30 multicast PCM source into its `AudioStore`
+/// (#103, ADR-0033/T013), until `stop` is raised or the socket faults.
+///
+/// Binds a UDP receiver to the multicast port, joins the group, and pumps
+/// depacketized audio units through the shared ADR-T013
+/// [`RtpAudioRebaser`](multiview_input::rtp_audio::RtpAudioRebaser) — the SAME
+/// seam the WebRTC-Opus path uses ([`publish_webrtc_audio`]), except AES67 passes
+/// the **real packet SSRC** (not the hardcoded `0`), so an SSRC change re-anchors
+/// the store's absolute-frame timeline. Each rebased block is published into the
+/// source's last-good [`AudioStore`](multiview_audio::store::AudioStore), which the
+/// program bus samples. Every hand-off is sampled, never pacing (inv #1/#10); a
+/// malformed packet is skipped by the producer (bad inputs are the product, inv
+/// #2), and a socket fault ends the session (the tile-less store then silence-fills
+/// on the bus).
+///
+/// The receiver socket + its receive loop are async, but this runs on the ingest
+/// thread (a `std::thread`, the control/IO plane), so it drives them on a small
+/// **current-thread** Tokio runtime (like [`resolve_youtube_master`]) — the output
+/// data plane is never involved. A `select!` drives the receive loop concurrently
+/// with a 2 ms drain poll on the one thread, so the socket makes progress without a
+/// dedicated runtime worker.
+#[cfg(feature = "aes67")]
+fn drive_aes67_rx(plan: &Aes67RxPlan, stop: &AtomicBool) {
+    use multiview_input::st2110::transport::{MulticastInterface, RtpReceiver};
+    use multiview_input::st2110::Aes67AudioProducer;
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!(source = %plan.id, error = %e, "aes67 rx runtime build failed; source silent");
+            return;
+        }
+    };
+
+    // Receiving multicast binds the port on the WILDCARD of the group's address
+    // family (IPv6 `[::]` / IPv4 `0.0.0.0`) and then joins the group — never the
+    // group literal (a portable multicast receive).
+    let port = plan.group.port();
+    let local: std::net::SocketAddr = if plan.group.is_ipv6() {
+        (std::net::Ipv6Addr::UNSPECIFIED, port).into()
+    } else {
+        (std::net::Ipv4Addr::UNSPECIFIED, port).into()
+    };
+
+    runtime.block_on(async {
+        let receiver = match RtpReceiver::bind(local).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(source = %plan.id, error = %e, local = %local, "aes67 rx bind failed; source silent");
+                return;
+            }
+        };
+        if let Err(e) = receiver.join_multicast(plan.group.ip(), MulticastInterface::Unspecified) {
+            tracing::warn!(source = %plan.id, error = %e, group = %plan.group, "aes67 rx multicast join failed; source silent");
+            return;
+        }
+        tracing::info!(source = %plan.id, group = %plan.group, "aes67 rx receiving");
+        let (packet_source, receive_loop) = receiver.channel_bridge(AES67_RX_BRIDGE_CAP);
+        let mut receive_loop = receive_loop;
+        let mut producer = Aes67AudioProducer::new(Box::new(packet_source), plan.session.format);
+        // The ADR-T013 rebaser maps each packet's 32-bit RTP media timestamp onto
+        // the store's absolute 48 kHz frame index. Wire rate is the SDP clock; the
+        // store is canonical 48 kHz.
+        let mut rebaser = multiview_input::rtp_audio::RtpAudioRebaser::new(
+            plan.session.clock_rate,
+            AES67_STORE_RATE_HZ,
+        );
+        loop {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            tokio::select! {
+                // The receive loop drives the socket → packet channel. It resolves
+                // only on a socket fault or when the packet source is dropped —
+                // end the session (the store then silence-fills on the bus).
+                () = &mut receive_loop => {
+                    tracing::info!(source = %plan.id, "aes67 rx socket ended; source holds silence");
+                    return;
+                }
+                // Drain every unit ready this poll and publish it. A 2 ms nap
+                // yields to the runtime so `receive_loop` makes progress (never
+                // spins); AES67 Class-A packets are 1 ms, so this keeps pace.
+                () = tokio::time::sleep(Duration::from_millis(2)) => {
+                    if !drain_aes67_producer(plan, &mut producer, &mut rebaser) {
+                        return; // producer fault: end the session.
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Drain every AES67 audio unit ready this poll, rebasing + publishing each into
+/// the source's store. Returns `false` on a producer fault (end the session),
+/// `true` to keep receiving. Never paces the engine (inv #1/#10); a rejected
+/// publish or degenerate block is logged/skipped, never fatal (inv #2).
+#[cfg(feature = "aes67")]
+fn drain_aes67_producer(
+    plan: &Aes67RxPlan,
+    producer: &mut multiview_input::st2110::Aes67AudioProducer,
+    rebaser: &mut multiview_input::rtp_audio::RtpAudioRebaser,
+) -> bool {
+    loop {
+        match producer.next_audio() {
+            Ok(Some(frame)) => {
+                // AES67 passes the REAL SSRC (not the WebRTC path's hardcoded 0),
+                // so a mid-stream SSRC change re-anchors the store timeline.
+                let anchor = rebaser.rebase(frame.raw_timestamp, frame.ssrc, frame.discontinuity);
+                let Some(block) = aes67_audio_block(&frame) else {
+                    continue; // degenerate shape: skip (bad inputs are the product).
+                };
+                if let Err(e) = plan.store.publish_at(anchor.store_frame, &block) {
+                    tracing::debug!(source = %plan.id, error = %e, "aes67 audio publish rejected");
+                }
+            }
+            Ok(None) => return true, // nothing ready this poll.
+            Err(e) => {
+                tracing::warn!(source = %plan.id, error = %e, "aes67 producer faulted");
+                return false;
+            }
+        }
+    }
+}
+
+/// Bridge a depacketized [`Aes67AudioFrame`](multiview_input::st2110::Aes67AudioFrame)
+/// (interleaved canonical f32, frame-major) into the [`AudioBlock`] the
+/// `AudioStore` consumes, at the store's canonical 48 kHz **stereo**. The per-source
+/// store + program bus are stereo, so the block must be stereo whatever the source
+/// channel count: mono is duplicated L=R, a >2-channel stream keeps its first two
+/// channels (a full downmix is a later slice). Returns `None` (panic-free) on a
+/// degenerate shape.
+#[cfg(feature = "aes67")]
+fn aes67_audio_block(
+    frame: &multiview_input::st2110::Aes67AudioFrame,
+) -> Option<multiview_audio::format::AudioBlock> {
+    use multiview_audio::format::{AudioBlock, AudioFormat, ChannelLayout};
+    let channels = usize::from(frame.format.channels).max(1);
+    let stereo = interleave_to_stereo(&frame.samples, channels);
+    let format = AudioFormat::new(AES67_STORE_RATE_HZ, ChannelLayout::Stereo);
+    AudioBlock::from_interleaved(format, stereo).ok()
+}
+
+/// Convert an interleaved, frame-major f32 buffer at `channels` into interleaved
+/// STEREO (`L,R,…`): stereo passes through, mono duplicates each sample to both
+/// channels, and >2 channels keep the first two. `channels` is clamped to ≥1 so
+/// the frame stride is never zero.
+#[cfg(feature = "aes67")]
+fn interleave_to_stereo(samples: &[f32], channels: usize) -> Vec<f32> {
+    let channels = channels.max(1);
+    if channels == 2 {
+        return samples.to_vec();
+    }
+    let frames = samples.len() / channels;
+    let mut out = Vec::with_capacity(frames.saturating_mul(2));
+    for f in 0..frames {
+        let base = f.saturating_mul(channels);
+        let left = samples.get(base).copied().unwrap_or(0.0);
+        let right = if channels == 1 {
+            left
+        } else {
+            samples.get(base.saturating_add(1)).copied().unwrap_or(left)
+        };
+        out.push(left);
+        out.push(right);
+    }
+    out
 }
 
 /// Map one decoded frame onto the timeline the store is stamped with.
