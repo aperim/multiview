@@ -154,3 +154,39 @@ async fn udp_sender_threads_the_interface_index_to_v6_multicast_egress() {
          plumbed to IPV6_MULTICAST_IF, not hardcoded 0) (P2-F8)"
     );
 }
+
+#[tokio::test]
+async fn serve_applies_the_configured_multicast_egress_interface() {
+    // S1 (#156): serve() must apply the configured IPv6 egress interface during
+    // socket setup. F8 wired configure_multicast_egress but NOTHING on the serve
+    // path called it, so a configured interface was silently ignored and the flow
+    // streamed on the OS default. Proven like F8: a BOGUS index must make serve()
+    // fail fast. A real receiver keeps every send Ok, so the ONLY thing that can
+    // end serve() is applying (and having the OS reject) the egress interface —
+    // without the fix serve() streams forever and the timeout elapses (the RED).
+    use multiview_output::aes67::transport::MulticastInterface;
+    let loopback = Ipv6Addr::LOCALHOST;
+
+    let rx = tokio::net::UdpSocket::bind(SocketAddr::new(loopback.into(), 0))
+        .await
+        .expect("bind rx");
+    let rx_addr = rx.local_addr().expect("rx addr");
+    let tx = Aes67UdpSender::bind(SocketAddr::new(loopback.into(), 0), rx_addr)
+        .await
+        .expect("bind tx")
+        .with_interface(MulticastInterface::Index(0xFFFF_FFF0));
+    let mut sender =
+        Aes67Sender::new(2, PcmDepth::L16, 97, 1, 48_000, 48, 4_800).expect("valid aes67 config");
+
+    let served = tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        tx.serve(&mut sender, std::future::pending::<()>()),
+    )
+    .await;
+    let inner = served
+        .expect("serve() must apply the configured egress and fail fast, not stream forever (S1)");
+    assert!(
+        inner.is_err(),
+        "a bogus configured egress interface must make serve() fail during setup (S1)"
+    );
+}
