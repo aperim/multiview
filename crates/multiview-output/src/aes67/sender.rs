@@ -246,6 +246,45 @@ mod tests {
         AudioBlock::from_interleaved(fmt, vec![0.1_f32; 48]).expect("mono block")
     }
 
+    /// F5: construction is fallible and fail-closed — a channel count, ptime, or
+    /// capacity outside the supported bounds, or a channel×ptime×depth combo that
+    /// would produce an oversized (IP-fragmenting) UDP packet, is rejected rather
+    /// than clamped or allowed to overflow the RTP timestamp increment.
+    #[test]
+    fn rejects_out_of_range_config() {
+        // Zero and oversized channel count.
+        assert!(matches!(
+            Aes67Sender::new(0, PcmDepth::L24, 96, 1, 48, 4_800),
+            Err(Aes67ConfigError::Channels { .. })
+        ));
+        assert!(matches!(
+            Aes67Sender::new(MAX_CHANNELS + 1, PcmDepth::L24, 96, 1, 48, 4_800),
+            Err(Aes67ConfigError::Channels { .. })
+        ));
+        // Zero and oversized frames-per-packet (oversized ptime).
+        assert!(matches!(
+            Aes67Sender::new(2, PcmDepth::L24, 96, 1, 0, 4_800),
+            Err(Aes67ConfigError::FramesPerPacket { .. })
+        ));
+        assert!(matches!(
+            Aes67Sender::new(2, PcmDepth::L24, 96, 1, MAX_FRAMES_PER_PACKET + 1, 4_800),
+            Err(Aes67ConfigError::FramesPerPacket { .. })
+        ));
+        // A channel × ptime × depth combo that would exceed one MTU (8ch × 96
+        // frames × 3 bytes = 2304 > MAX_PACKET_PAYLOAD_BYTES): oversized UDP.
+        assert!(matches!(
+            Aes67Sender::new(8, PcmDepth::L24, 96, 1, 96, 4_800),
+            Err(Aes67ConfigError::PayloadTooLarge { .. })
+        ));
+        // Oversized capacity (would pre-allocate a huge FIFO).
+        assert!(matches!(
+            Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48, MAX_CAPACITY_FRAMES + 1),
+            Err(Aes67ConfigError::Capacity { .. })
+        ));
+        // A realistic config still constructs.
+        assert!(Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48, 4_800).is_ok());
+    }
+
     /// F3: while the shared FIFO lock is held, a concurrent handle `push` (the
     /// engine bake side) must NOT block on it — it sheds the block and returns
     /// (inv #10: the engine can never be back-pressured by the send loop). A
