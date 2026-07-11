@@ -85,7 +85,8 @@ use multiview_core::time::{MediaTime, Rational};
 use multiview_core::traits::SourceState;
 use multiview_engine::{
     CompositedFrame, CompositorDrive, EnginePublisher, MonotonicTimeSource, MultiviewProgram,
-    OutputClock, Pacer, RealtimePacer, StopSignal, TimeSource,
+    OutputClock, Pacer, RealtimePacer, RequestedSize, SourceHandle, SourceKey, SourceRegistry,
+    StopSignal, TimeSource,
 };
 use multiview_events::Event;
 use multiview_ffmpeg::{
@@ -1593,7 +1594,24 @@ pub struct Pipeline {
     overlay_apply: crate::live_overlays::OverlayApplySlot,
     /// Per-source last-good-frame stores, keyed by source id. Shared (`Arc`)
     /// between the engine's drive loop (reader) and the ingest threads (writers).
+    /// Each entry is an `Arc` clone of the store the [`source_registry`](Self::source_registry)
+    /// owns (MP-2, ADR-0030 §3) — this map is a lock-free reader, not the owner.
     stores: HashMapStores,
+    /// MP-2 (ADR-0030 §3): the source registry that OWNS each source's shared
+    /// [`TileStore`] and its decode sizing (the per-axis supremum across that
+    /// source's cells). [`stores`](Self::stores) and each ingest plan hold `Arc`
+    /// clones of the registry's stores; the registry is the single owner. Keyed by
+    /// source id in this single-program build (one entry per id, exactly the old
+    /// `stores` map); the URL-canonical cross-id share is a later milestone.
+    source_registry: Arc<SourceRegistry<Nv12Image>>,
+    /// The registry references this pipeline holds — one [`SourceHandle`] per
+    /// startup source — keeping each registry entry (and its shared store) alive for
+    /// the pipeline's lifetime (the program's reference to the source). Dropping the
+    /// pipeline drops these, releasing each reference (last-release removes the entry).
+    // reason: held purely for that RAII `Drop`; it is never read, and the dead_code
+    // lint cannot observe a Drop side-effect (rule 20 justification).
+    #[allow(dead_code)]
+    source_handles: Vec<SourceHandle<Nv12Image>>,
     /// The per-source producer stop flags (ADR-W018): every startup ingest
     /// thread registers its flag here, and the live-source hub shares the same
     /// registry, so a live `RemoveSource` can tear down exactly one producer.
@@ -1984,14 +2002,39 @@ impl Pipeline {
         #[cfg(feature = "overlay")]
         let mut prefetched_captions = prefetch_caption_plans(config);
 
+        // MP-2 (ADR-0030 §3): the SourceRegistry owns each source's shared TileStore
+        // and its decode sizing. In this single-program build it keys by source id —
+        // one entry per id, exactly today's `stores` map; a later milestone folds the
+        // URL-canonical StableStreamId so two ids at one location share ONE decode.
+        // The decode threads spawn later (drive_streaming) and their stop/join stays
+        // with the run's StopRegistry, so store creation goes through `acquire_store`
+        // (no decode actor to own yet). Holding each handle keeps its entry alive for
+        // the pipeline's lifetime (the program's reference); dropping it releases.
+        let source_registry = SourceRegistry::<Nv12Image>::new();
+        let mut source_handles: Vec<SourceHandle<Nv12Image>> =
+            Vec::with_capacity(config.sources.len());
+
         for source in &config.sources {
             let (tile_w, tile_h) = cell_pixel_size(&layout, &source.id)
                 .unwrap_or((config.canvas.width, config.canvas.height));
-            let store = Arc::new(TileStore::new(
-                source.id.clone(),
-                TileThresholds::default(),
-                NoSignalPolicy::HoldForever,
-            ));
+            // The registry owns the shared store, sized to the per-axis supremum;
+            // `stores` + the ingest plan below hold Arc clones (lock-free readers).
+            let source_handle = source_registry.acquire_store(
+                SourceKey::from_canonical(source.id.as_str()),
+                RequestedSize {
+                    width: tile_w,
+                    height: tile_h,
+                },
+                |_requested| -> Result<Arc<TileStore<Nv12Image>>, PipelineError> {
+                    Ok(Arc::new(TileStore::new(
+                        source.id.clone(),
+                        TileThresholds::default(),
+                        NoSignalPolicy::HoldForever,
+                    )))
+                },
+            )?;
+            let store = Arc::clone(source_handle.store());
+            source_handles.push(source_handle);
             #[cfg_attr(not(feature = "overlay"), allow(unused_mut))]
             let mut plan = ingest_plan_for(
                 source,
@@ -2212,6 +2255,8 @@ impl Pipeline {
             cadence,
             program_spec,
             stores,
+            source_registry,
+            source_handles,
             stop_registry: crate::live_sources::stop_registry(),
             #[cfg(feature = "gpu")]
             live_island: Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -2615,6 +2660,15 @@ impl Pipeline {
     #[must_use]
     pub fn preview_stores(&self) -> HashMapStores {
         self.stores.clone()
+    }
+
+    /// The source registry that owns this pipeline's per-source shared stores +
+    /// their decode sizing (MP-2, ADR-0030 §3). The run/drive path reads it to
+    /// resolve a source's shared decode; `stores` holds `Arc` clones of the same
+    /// stores for lock-free sampling.
+    #[must_use]
+    pub fn source_registry(&self) -> &Arc<SourceRegistry<Nv12Image>> {
+        &self.source_registry
     }
 
     /// DEV-C1 (ADR-M010): the shared outbound presentation-epoch cell this
@@ -5966,13 +6020,21 @@ fn duration_from_nanos(nanos: i64) -> Duration {
     Duration::from_nanos(u64::try_from(nanos.max(0)).unwrap_or(u64::MAX))
 }
 
-/// The pixel size of the cell that binds `source_id`, if any.
+/// The decode size for `source_id`: the **per-axis supremum** of the pixel sizes
+/// of every cell that binds it, or [`None`] if no cell binds it.
+///
+/// A source can tile into several cells of different sizes (e.g. a big PGM cell
+/// plus a small PIP). Decoding once at the per-axis max satisfies the largest
+/// consumer on each axis (ADR-0030 §3); each cell then scales down at composite.
+/// Taking the FIRST binding cell would under-decode every larger tile bound to
+/// the same source.
 fn cell_pixel_size(layout: &Layout, source_id: &str) -> Option<(u32, u32)> {
-    let cell = layout
+    layout
         .cells
         .iter()
-        .find(|c| c.source.as_deref() == Some(source_id))?;
-    Some(cell_dims(cell, layout.canvas.width, layout.canvas.height))
+        .filter(|c| c.source.as_deref() == Some(source_id))
+        .map(|c| cell_dims(c, layout.canvas.width, layout.canvas.height))
+        .reduce(|(aw, ah), (bw, bh)| (aw.max(bw), ah.max(bh)))
 }
 
 /// Convert a cell's normalized `w`/`h` into even pixel dimensions (NV12 needs
@@ -13365,6 +13427,141 @@ mod media_player_handle_tests {
             Arc::strong_count(&frame) >= 2,
             "the buffer is shared by handle (strong_count = {})",
             Arc::strong_count(&frame)
+        );
+    }
+}
+
+#[cfg(test)]
+mod mp2_slice2_registry_adoption {
+    //! MP-2 SLICE 2 (ADR-0030 §3): the CLI `Pipeline` adopts the engine
+    //! `SourceRegistry` as the owner of per-source `TileStore` creation + sizing.
+    //!  * `cell_pixel_size` sizes a source's decode to the **per-axis supremum**
+    //!    across ALL cells that bind it — never just the first-found cell.
+    //!  * `Pipeline::build` mints ONE registry that OWNS the shared store (the
+    //!    `stores` map + the ingest plan just hold `Arc` clones of it), sized to
+    //!    that supremum — the single-program output path is otherwise unchanged.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    /// A 2x2 grid where source `cam1` is bound by two cells of DIFFERENT sizes:
+    /// area `a` = 400x480 and area `d` = 800x240 on a 1200x720 canvas. The
+    /// per-axis supremum is 800x480 — a size NEITHER binding cell has, so a
+    /// first-found (`.find`) result can never equal it: the test discriminates
+    /// the bug regardless of which binding cell iterates first.
+    fn two_cells_one_source_config() -> multiview_config::MultiviewConfig {
+        let doc = r##"schema_version = 1
+[canvas]
+width = 1200
+height = 720
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "2fr"]
+rows = ["2fr", "1fr"]
+areas = ["a b", "c d"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[cells]]
+id = "small"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[cells]]
+id = "wide"
+area = "d"
+[cells.source]
+input_id = "cam1"
+[[outputs]]
+kind = "hls"
+path = "/tmp/mp2-slice2-two-cells.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##;
+        multiview_config::MultiviewConfig::load_from_toml(doc).expect("test config parses")
+    }
+
+    #[test]
+    fn cell_pixel_size_is_the_per_axis_supremum_across_all_binding_cells() {
+        let config = two_cells_one_source_config();
+        let layout = config.solve_layout().expect("layout solves");
+
+        // Every cell that binds `cam1`, in layout order — the order `.find` walks.
+        let bound: Vec<(u32, u32)> = layout
+            .cells
+            .iter()
+            .filter(|c| c.source.as_deref() == Some("cam1"))
+            .map(|c| cell_dims(c, layout.canvas.width, layout.canvas.height))
+            .collect();
+        assert!(bound.len() >= 2, "config must bind cam1 from >= 2 cells");
+
+        let supremum = bound
+            .iter()
+            .copied()
+            .reduce(|(aw, ah), (bw, bh)| (aw.max(bw), ah.max(bh)))
+            .unwrap();
+        let first = *bound.first().unwrap();
+        assert_ne!(
+            first, supremum,
+            "test precondition: the first-found cell must differ from the supremum \
+             so the assertion discriminates the .find() bug"
+        );
+
+        let got = cell_pixel_size(&layout, "cam1").expect("cam1 is bound");
+        assert_eq!(
+            got, supremum,
+            "cell_pixel_size must decode at the per-axis supremum across ALL binding \
+             cells (ADR-0030 §3), not the first-found cell {first:?}"
+        );
+    }
+
+    #[test]
+    fn pipeline_build_registry_owns_the_shared_store_sized_to_the_supremum() {
+        // The single-program build mints ONE SourceRegistry that OWNS each source's
+        // shared TileStore: the `stores` map (sampled by the compositor drive) and
+        // the ingest plan hold Arc CLONES of the registry's store, and the registry
+        // records the decode target = the per-axis supremum across the source's
+        // cells. Two cells binding `cam1` therefore share ONE registry entry / ONE
+        // store, sized to the supremum — the decode-once seam at the pipeline level.
+        let config = two_cells_one_source_config();
+        let pipeline = Pipeline::build(&config).expect("pipeline builds");
+        let key = multiview_engine::SourceKey::from_canonical("cam1");
+
+        // Exactly one registry entry for the one source, regardless of how many
+        // cells bind it.
+        assert_eq!(
+            pipeline.source_registry.active_len(),
+            1,
+            "one source => one registry entry, even when two cells bind it"
+        );
+
+        // The decode target the registry records is the per-axis supremum — the
+        // same value `cell_pixel_size` derives for the ingest plan's tile geometry.
+        let expect = cell_pixel_size(&pipeline.layout, "cam1").expect("cam1 is bound");
+        assert_eq!(
+            pipeline.source_registry.requested_supremum(&key),
+            Some(multiview_engine::RequestedSize {
+                width: expect.0,
+                height: expect.1,
+            }),
+            "the registry decodes at the per-axis supremum across cam1's cells"
+        );
+
+        // The `stores` map holds the registry's OWN store Arc (not an independent
+        // TileStore) — the registry is the single owner, the map a lock-free reader.
+        let mapped = pipeline.stores.get("cam1").expect("cam1 has a store");
+        let owned = pipeline
+            .source_registry
+            .store(&key)
+            .expect("the registry owns cam1's store");
+        assert!(
+            std::sync::Arc::ptr_eq(mapped, &owned),
+            "the stores map must hold the registry's store Arc (decode-once ownership)"
         );
     }
 }

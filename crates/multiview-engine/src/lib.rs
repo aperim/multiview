@@ -103,6 +103,7 @@ pub mod probe;
 pub mod program;
 pub mod programset;
 pub mod ptp;
+pub mod registry;
 pub mod route;
 pub mod runtime;
 pub mod salvo;
@@ -150,6 +151,9 @@ pub use probe::{
 pub use program::{MultiviewProgram, ProgramId, ProgramKind};
 pub use programset::{Program, ProgramSet};
 pub use ptp::{PtpSample, PtpServo, ServoConfig};
+pub use registry::{
+    RequestedSize, SourceActor, SourceHandle, SourceInit, SourceKey, SourceRegistry,
+};
 pub use route::{resolve_selector, RouteApplier, RouteIntent, RouteResolution};
 pub use runtime::{
     CooperativePacer, EngineRuntime, Pacer, RealtimePacer, RunOutcome, RunStop, StopSignal,
