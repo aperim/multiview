@@ -232,6 +232,17 @@ where
     .with_device_pollers(device_poller_registry(delivery.as_ref(), &dial_policy))
     .with_dial_policy(Arc::clone(&dial_policy))
     .with_auth_disabled(auth_disabled)
+    // The management-plane request-concurrency + rate caps (SEC-14 control-plane DoS
+    // floor): map `control.limits` (secure defaults when the section is absent)
+    // onto the served API. Config-driven; the guards shed `429`/`503` and never
+    // touch the engine (invariant #10).
+    .with_limits(
+        &config
+            .control
+            .as_ref()
+            .map(|control| control.limits.clone())
+            .unwrap_or_default(),
+    )
     // The realtime `Origin` allow-list (SEC-13 / CSWSH, ADR-RT011): map
     // `control.allowed_origins` (empty ⇒ same-origin only) onto the WS + SSE upgrade
     // gate. Enforced even when auth is disabled — a cross-origin handshake bypasses

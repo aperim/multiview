@@ -39,8 +39,9 @@ multiview-preview = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # `net` adds `tokio::net::TcpListener` for `serve` (the real-socket bind that lets
-# `multiview run` expose the API+WebUI); pure Rust, stays in the default build.
-tokio = { workspace = true, features = ["net"] }
+# `multiview run` expose the API+WebUI); `sync` adds `tokio::sync::Semaphore` for
+# the SEC-14 concurrent-request cap. Pure Rust, stays in the default build.
+tokio = { workspace = true, features = ["net", "sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -48,6 +49,10 @@ serde_json = { workspace = true }
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["trace", "cors"] }
+# The `http_body::Body` trait, to wrap a response body so a SEC-14 concurrency
+# permit is held for the BODY's lifetime (a held-open SSE stream), not merely the
+# handler's return. Pure Rust; already in the lock via axum.
+http-body = "1.0.1"
 bytes = "1.10.1"
 async-stream = "0.3.6"
 uuid = { version = "1.23.2", features = ["v4"] }

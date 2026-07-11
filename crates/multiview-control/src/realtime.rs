@@ -1419,7 +1419,11 @@ fn current_engine_snapshot(state: &AppState) -> (EngineStateSnapshot, u64) {
 /// blocks blocks only this client's task; the engine is never awaited.
 ///
 /// [`Role::Viewer`]: crate::auth::Role::Viewer
-pub async fn ws_handler(
+// `pub(crate)`, not `pub`: this handler is registered on the router within this
+// crate (`lib.rs`) and is never referenced across a crate boundary, so it need
+// not — and must not — widen the visibility of its internal `ConcurrencyPermitClaim`
+// extractor (a `pub(crate)` permit newtype) into the public API (private-interfaces).
+pub(crate) async fn ws_handler(
     // The auth gate is the FIRST extractor, so authentication is decided before
     // axum's `WebSocketUpgrade` extractor runs — an unauthenticated request is a
     // `401`/`403` `problem+json`, never pre-empted by the upgrade extractor's
@@ -1427,6 +1431,13 @@ pub async fn ws_handler(
     RealtimeViewer(principal, live_baseline): RealtimeViewer,
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
+    // SEC-14: claim the in-flight concurrency permit (if the cap is enabled) and hold
+    // it for the SESSION's life. axum spawns the upgraded socket as a DETACHED task
+    // ([`WebSocketUpgrade::on_upgrade`]), so a permit tied to the empty `101` response
+    // body would release at the handshake and leave a live socket uncounted; moving it
+    // into the session makes each live WebSocket count against the concurrency cap
+    // until it closes. `None` (limits disabled) ⇒ no-op, as before SEC-14.
+    crate::limits::ConcurrencyPermitClaim(concurrency_permit): crate::limits::ConcurrencyPermitClaim,
 ) -> Response {
     // Carry the authenticated principal into the session so the stream is a
     // read-side projection of only its in-scope device/cast objects (BOLA
@@ -1434,7 +1445,12 @@ pub async fn ws_handler(
     // narrowed/revoked mid-session (ADR-RT010). An unscoped principal sees all.
     // `live_baseline` is the auth-time authorization generation (store keys only),
     // threaded so a change racing the upgrade is caught by the first reauthorize.
-    ws.on_upgrade(move |socket| run_ws_session(socket, state, principal, live_baseline))
+    ws.on_upgrade(move |socket| async move {
+        // Hold the concurrency permit for the whole session; it drops when this
+        // detached task ends (the socket closes), freeing the slot.
+        let _concurrency_permit = concurrency_permit;
+        run_ws_session(socket, state, principal, live_baseline).await;
+    })
 }
 
 /// A pre-upgrade auth + origin gate for the realtime transports.

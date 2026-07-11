@@ -29,6 +29,7 @@ use crate::devices::cast::store::CastSessionStore;
 use crate::devices::discovery::{DiscoveryBrowser, DiscoveryInventory, NullBrowser, ScanGate};
 use crate::devices::{DeviceDriverRegistry, DevicePollerRegistry, DeviceStatusRegistry};
 use crate::error::{ControlError, ControlResult};
+use crate::limits::Limiters;
 use crate::nmos::NmosRegistry;
 use crate::pending_actions::{InMemoryPendingActions, PendingActionRepository};
 use crate::repository::{InMemoryRepository, LayoutInput, Repository};
@@ -667,6 +668,14 @@ pub struct AppState {
     pub routes: Arc<RouteTable>,
     /// The API-key + RBAC store.
     pub api_keys: Arc<ApiKeyStore>,
+    /// The management-plane request-concurrency + rate limiters (SEC-14 control-plane
+    /// `DoS` floor): the concurrent-request cap plus the per-IP (pre-auth) and
+    /// per-API-key (post-auth) token buckets. Built from `control.limits` by the
+    /// binary via [`AppState::with_limits`]; the bare constructor defaults to the
+    /// inert (disabled) set, so tests and embedders are unlimited unless they opt
+    /// in. Control-plane only — the guards shed (`429`/`503`), never back-pressure
+    /// the engine (invariant #10).
+    pub(crate) limiters: Arc<Limiters>,
     /// The optional `OAuth2`/JWT validator. When configured, a `Bearer` token that
     /// is not a native API key is validated as an IS-10-aligned JWT (signature +
     /// issuer/audience/expiry, `alg=none` refused) and its claims mapped to a
@@ -949,6 +958,10 @@ impl AppState {
             nmos: Arc::new(NmosRegistry::new()),
             routes: Arc::new(RouteTable::new()),
             api_keys,
+            // Inert by default (no DoS floor): the binary installs the configured
+            // limiters via `with_limits` (`control.limits`, secure defaults). Tests
+            // and embedders stay unlimited unless they opt in (SEC-14).
+            limiters: Arc::new(Limiters::disabled()),
             jwt: None,
             jwt_api_name: "multiview".to_owned(),
             audit: Arc::new(InMemoryAuditLog::new()),
@@ -1086,6 +1099,36 @@ impl AppState {
     #[must_use]
     pub fn with_boot_model(mut self, boot_model: Arc<crate::boot_model::BootModel>) -> Self {
         self.boot_model = Some(boot_model);
+        self
+    }
+
+    /// Install the management-plane request-concurrency + rate limits (SEC-14
+    /// control-plane `DoS` floor) from operator config. The binary calls this with
+    /// `control.limits` (secure defaults); the bare constructor leaves the inert
+    /// disabled set, so tests and embedders stay unlimited unless they opt in. The
+    /// runtime limiters are built here, so callers never name the internal type.
+    ///
+    /// This is the PUBLIC runtime API, so — unlike the CLI config path, which
+    /// validates at load — an embedder can hand us an unvalidated
+    /// [`ManagementLimits`](multiview_config::limits::ManagementLimits). An invalid
+    /// one is dangerous: a zero concurrency cap installs a permanently-closed
+    /// semaphore (every request `503`) and an oversized cap would be silently clamped
+    /// to a different effective value. So validate here and, on failure, fall back to
+    /// the secure defaults (limits ON) with a warning — fail **SAFE**, never panic
+    /// (rule 17) — rather than honour a broken cap.
+    #[must_use]
+    pub fn with_limits(mut self, limits: &multiview_config::limits::ManagementLimits) -> Self {
+        let installed = match limits.validate() {
+            Ok(()) => limits.clone(),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "control.limits failed validation; installing the secure defaults instead"
+                );
+                multiview_config::limits::ManagementLimits::default()
+            }
+        };
+        self.limiters = Arc::new(Limiters::from_config(&installed));
         self
     }
 

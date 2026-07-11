@@ -54,6 +54,9 @@ pub mod devices;
 pub mod error;
 pub mod is07;
 pub mod jwt;
+/// Management-plane rate limiting (SEC-14): the keyed token-bucket + the
+/// request-concurrency + rate middleware backing the control-plane `DoS` floor.
+pub(crate) mod limits;
 pub mod live_apply;
 pub mod nmos;
 pub mod notify;
@@ -218,6 +221,11 @@ pub use whip::{no_whip, NoWhip, SharedWhip, WhipAnswer, WhipAuth, WhipProvider, 
 ///
 /// The returned router carries `AppState`, so it is ready to serve.
 pub fn router(state: AppState) -> Router {
+    // SEC-14: install the management-plane request-concurrency + rate caps only when
+    // the operator has limits enabled (the default). Disabled ⇒ the router is exactly
+    // what it was before — no middleware, no overhead.
+    let limits_enabled = state.limiters.is_enabled();
+
     let api = routes::api_router()
         // The WebRTC media-signalling routes, wrapped with their own CORS layer
         // (ADR-0048 §9): `webrtc.cors_allow_origins` applies **only** here — to
@@ -248,6 +256,22 @@ pub fn router(state: AppState) -> Router {
             config_lock::config_lock_guard,
         ));
 
+    // SEC-14 post-auth per-API-key rate limit on the authenticated `/api/v1`
+    // surface: resolves the presented `Bearer` credential and limits a *validated*
+    // key by its `key_id` (unauthenticated requests pass through — they are covered
+    // by the outer per-IP + concurrency caps). Applied inside those outer caps.
+    let api = if limits_enabled {
+        api.layer(axum::middleware::from_fn_with_state(
+            limits::PerKeyLimitState {
+                limiters: state.limiters.clone(),
+                api_keys: state.api_keys.clone(),
+            },
+            limits::per_api_key_rate_limit,
+        ))
+    } else {
+        api
+    };
+
     let app = Router::new()
         .nest("/api/v1", api)
         // The NMOS Node API lives under its own standardised `/x-nmos` base, not
@@ -262,7 +286,27 @@ pub fn router(state: AppState) -> Router {
     #[cfg(feature = "embed-web")]
     let app = app.fallback(spa::spa_fallback);
 
-    app.with_state(state)
+    // Capture the shared limiters before `state` is consumed by `with_state`.
+    let limiters = state.limiters.clone();
+    let app = app.with_state(state);
+
+    // SEC-14 outer caps over the WHOLE surface (`/api/v1`, `/x-nmos`, docs, SPA):
+    // the per-IP pre-auth rate limit is OUTERMOST — an abusive source IP is shed
+    // with `429` before it can consume a concurrency permit — then the global
+    // concurrent-request cap sheds `503`. Both carry their own state and shed
+    // rather than queue, so they never back-pressure the engine (invariant #10).
+    if limits_enabled {
+        app.layer(axum::middleware::from_fn_with_state(
+            limiters.clone(),
+            limits::concurrency_cap,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            limiters,
+            limits::per_ip_rate_limit,
+        ))
+    } else {
+        app
+    }
 }
 
 /// Serve the control-plane [`router`] on an already-bound
@@ -301,6 +345,13 @@ where
 /// contract as [`serve`] applies: anything mounted must be best-effort and
 /// physically incapable of back-pressuring the engine (invariant #10).
 ///
+/// This helper installs each connection's peer `SocketAddr` as a `ConnectInfo`
+/// request extension (`into_make_service_with_connect_info`), which the SEC-14
+/// pre-auth per-IP rate limit ([`crate::limits`]) REQUIRES to key on the source IP.
+/// Serving [`router`] through a different make-service loses that extension and
+/// silently disables the per-IP guard (it fails open); route control-plane traffic
+/// through this helper (or [`serve`]) to keep it active.
+///
 /// # Errors
 /// Propagates any I/O error from the underlying [`axum::serve`] accept loop.
 pub async fn serve_router<F>(
@@ -311,7 +362,14 @@ pub async fn serve_router<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown)
-        .await
+    // `into_make_service_with_connect_info` records each connection's peer
+    // `SocketAddr` in request extensions so the SEC-14 per-IP rate limit can key
+    // on the source IP (the pre-auth brute-force guard). Handlers that ignore it
+    // are unaffected.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
 }
