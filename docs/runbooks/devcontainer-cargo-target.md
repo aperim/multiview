@@ -65,22 +65,23 @@ already started. To make the fix live, **Dev Containers: Rebuild Container** (or
 
 ### Interim workaround (running container, before a rebuild)
 
-Until the container is rebuilt, prefix each build with an explicit, worktree-local
-target so that lane gets an **isolated** `target/` (rule 10/11 compliant — it points
-at the worktree, never `/tmp`):
+Until the container is rebuilt, **unset** the inherited override so cargo falls back
+to its default per-directory `target/` under the worktree — rule-10 compliant (no
+override at all), and more robust than re-pointing the variable (it can't
+accidentally target the wrong path when run from a subdirectory):
 
 ```bash
 # run from inside the worktree lane
-CARGO_TARGET_DIR="$PWD/target" cargo build   # (…test / clippy / check)
+env -u CARGO_TARGET_DIR cargo build   # (…test / clippy / check)
 ```
 
-In an agent bash context whose working directory resets between calls, use an
-**absolute** path and `cd` into the lane first, so the override does not silently
-target the root checkout:
+In an agent bash context whose working directory resets between calls, `cd` into the
+lane first so cargo's default resolution lands the `target/` under the lane, not the
+root checkout:
 
 ```bash
 cd /workspaces/multiview/.claude/worktrees/<lane> \
-  && CARGO_TARGET_DIR="/workspaces/multiview/.claude/worktrees/<lane>/target" cargo build
+  && env -u CARGO_TARGET_DIR cargo build
 ```
 
 Do **not** `cargo clean` the shared root `target/` to "isolate" a build — that nukes
