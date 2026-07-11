@@ -82,6 +82,26 @@ fn packet_duration_derives_the_send_cadence_from_the_media_clock() {
 }
 
 #[test]
+fn rejects_a_payload_type_outside_the_7bit_rtp_range() {
+    // P2-F7: the RTP payload type is a 7-bit field (0..=127). A value >127 was
+    // silently truncated with `& 0x7f`, so the transmitted PT diverged from the
+    // advertised SDP (e.g. 200 -> 72). Reject it fail-closed at construction
+    // rather than send a PT that does not match the announced one.
+    assert!(matches!(
+        Aes67Sender::new(2, PcmDepth::L24, 128, 1, 48_000, 48, 4_800),
+        Err(Aes67ConfigError::PayloadType { .. })
+    ));
+    assert!(matches!(
+        Aes67Sender::new(2, PcmDepth::L24, 200, 1, 48_000, 48, 4_800),
+        Err(Aes67ConfigError::PayloadType { .. })
+    ));
+    // In-range dynamic payload types (96..=127 is the usual AES67 band) still
+    // construct, including the 127 boundary.
+    assert!(Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48_000, 48, 4_800).is_ok());
+    assert!(Aes67Sender::new(2, PcmDepth::L24, 127, 1, 48_000, 48, 4_800).is_ok());
+}
+
+#[test]
 fn sender_payload_roundtrips_through_the_v30_decoder() {
     let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FS, FRAMES_PER_PACKET, 4_800)
         .expect("valid aes67 config");
