@@ -419,3 +419,72 @@ fn a_wedged_source_teardown_never_stalls_a_sibling_consumer() {
         "A's shutdown must complete on the reaper once the wedge clears"
     );
 }
+
+#[test]
+fn acquire_store_shares_one_store_and_grows_supremum() {
+    // SLICE 2 adoption (pipeline.rs): the registry owns the shared `TileStore` +
+    // its sizing while the decode teardown is still owned externally (the run's
+    // `StopRegistry`, until the decode-ownership hoist). `acquire_store` is the
+    // store-only sibling of `acquire`: it registers an entry with NO actor (the
+    // factory yields only the store). It MUST still decode-once — share ONE store
+    // across every reference of one canonical key and grow the per-axis supremum,
+    // exactly like `acquire` — and last-release MUST tear the entry down (there is
+    // no actor to reap). The `store` accessor returns that same shared `Arc`.
+    let reg = SourceRegistry::<u64>::new();
+    let key = SourceKey::from_canonical("rtsp://cam-share");
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let counting = |calls: Arc<AtomicUsize>| {
+        move |_req: RequestedSize| {
+            calls.fetch_add(1, Ordering::Release);
+            Ok::<_, Infallible>(store("cam-share"))
+        }
+    };
+
+    let h1 = reg
+        .acquire_store(key.clone(), size(640, 360), counting(calls.clone()))
+        .unwrap();
+    // A second reference to the SAME key must NOT run the factory and must share
+    // the one store (decode-once, use-many).
+    let h2 = reg
+        .acquire_store(
+            key.clone(),
+            size(1920, 720),
+            |_r| -> Result<Arc<TileStore<u64>>, Infallible> {
+                panic!("second reference to an existing key must NOT run the factory");
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        calls.load(Ordering::Acquire),
+        1,
+        "one canonical key must create exactly ONE store (decode-once)"
+    );
+    assert_eq!(reg.active_len(), 1);
+    assert!(
+        Arc::ptr_eq(h1.store(), h2.store()),
+        "both references must share ONE store"
+    );
+    assert_eq!(
+        reg.requested_supremum(&key),
+        Some(size(1920, 720)),
+        "supremum must grow to the per-axis max across references"
+    );
+    // The `store` accessor (lifecycle/test) returns the SAME shared Arc — never a
+    // clone of the pixels, and it is not the sample path.
+    assert!(
+        Arc::ptr_eq(&reg.store(&key).unwrap(), h1.store()),
+        "the store accessor returns the shared store Arc"
+    );
+
+    // Last-release tears the entry down — no actor to reap, just removed.
+    drop((h1, h2));
+    assert_eq!(
+        reg.active_len(),
+        0,
+        "last release removes the store-only entry"
+    );
+    assert!(!reg.contains(&key));
+    reg.shutdown();
+}
