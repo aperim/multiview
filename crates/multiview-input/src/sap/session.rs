@@ -23,6 +23,7 @@
 
 use std::net::IpAddr;
 use std::num::NonZeroU16;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -119,6 +120,11 @@ pub struct SapSessionTable {
     write: Mutex<()>,
     capacity: usize,
     per_origin_cap: usize,
+    /// How many [`purge`](Self::purge) reap scans have run since construction
+    /// (observability). A well-behaved reaper runs on its steady cadence; a burst
+    /// of scans back-to-back means the purge timer amplified missed ticks (I1) —
+    /// the [`purge_count`](Self::purge_count) a test asserts against.
+    purges: AtomicU64,
 }
 
 impl SapSessionTable {
@@ -137,6 +143,7 @@ impl SapSessionTable {
             write: Mutex::new(()),
             capacity: capacity.max(1),
             per_origin_cap: per_origin_cap.max(1),
+            purges: AtomicU64::new(0),
         }
     }
 
@@ -211,6 +218,10 @@ impl SapSessionTable {
     /// [`PURGE_FLOOR`] applies when the period is short or unknown). A no-op with
     /// no allocation when nothing has expired.
     pub fn purge(&self, now: Duration) {
+        // Count every reap scan (observability): a steady cadence increments this
+        // once per purge period; a back-to-back burst means the purge timer
+        // amplified missed ticks (I1).
+        self.purges.fetch_add(1, Ordering::Relaxed);
         // Serialize against `observe` on the same write lock (P2-F2) so a purge
         // and an insert cannot each clone the same snapshot and clobber the other.
         let _write = self.write.lock().unwrap_or_else(PoisonError::into_inner);
@@ -243,6 +254,17 @@ impl SapSessionTable {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.sessions.load().is_empty()
+    }
+
+    /// How many [`purge`](Self::purge) reap scans have run since construction.
+    ///
+    /// Observability for the reaper cadence: on a steady cadence this advances one
+    /// per purge period, so a jump of several periods must advance it by **one**
+    /// (a `MissedTickBehavior::Skip` reaper) rather than once per missed tick (a
+    /// burst — I1).
+    #[must_use]
+    pub fn purge_count(&self) -> u64 {
+        self.purges.load(Ordering::Relaxed)
     }
 }
 

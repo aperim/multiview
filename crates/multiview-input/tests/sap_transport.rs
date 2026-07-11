@@ -248,6 +248,47 @@ async fn purge_runs_on_its_own_timer_even_when_no_datagrams_arrive() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn missed_purge_ticks_collapse_to_one_reap_not_a_burst() {
+    use multiview_input::sap::transport::PURGE_INTERVAL;
+    use multiview_input::sap::SapSessionTable;
+    use std::sync::Arc;
+
+    // I1 (#154): when the receive branch keeps the loop busy across several purge
+    // periods, the purge interval must fire ONCE on return, not burst
+    // one redundant O(n) reap scan per missed tick (amplifying the very work F4
+    // gated). Run the listener with no datagrams, jump the paused clock past N
+    // purge intervals in ONE step, and count actual reap scans via the table.
+    let table = Arc::new(SapSessionTable::with_limits(16, 16));
+    let listener = SapListener::bind(loopback6(0))
+        .await
+        .unwrap()
+        .with_table(Arc::clone(&table));
+    tokio::spawn(listener.run());
+
+    // Let run() reach its select! and consume the immediate first purge tick at
+    // t=0, BEFORE the clock jumps.
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(table.purge_count(), 0, "no reap scan before the clock advances");
+
+    // Jump past 5 purge intervals in a SINGLE step — a stall that missed 5 ticks.
+    tokio::time::advance(PURGE_INTERVAL * 5 + Duration::from_millis(1)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    // Skip: the 5 missed ticks collapse to ONE reap. Burst (the default, the bug)
+    // runs 5 redundant O(n) scans back-to-back.
+    assert_eq!(
+        table.purge_count(),
+        1,
+        "missed purge ticks must Skip to a single reap, not Burst N redundant O(n) \
+         scans (I1)"
+    );
+}
+
 #[tokio::test]
 async fn announcer_threads_the_interface_index_to_v6_multicast_egress() {
     // P2-F9: IPv6 multicast egress is interface-scoped (RFC 4291): a scoped /
