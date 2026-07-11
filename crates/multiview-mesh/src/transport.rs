@@ -358,4 +358,32 @@ mod tests {
             "publish/receive chunking must round-trip at the cap"
         );
     }
+
+    /// `chunk_txt`'s contract is TOTAL: it returns either `Ok` with exactly one
+    /// `p{i}` property per chunk, or a typed error — never `Ok` having silently
+    /// dropped a chunk. A chunk that is not valid UTF-8 (so it cannot ride an
+    /// mDNS TXT string value) is refused with `MeshError::AnnounceNotText`, not
+    /// skipped: skipping it would emit `c` = N with only N-1 `p` properties, and
+    /// every peer's `reassemble_txt` would then miss `p{index}` (its `?` yields
+    /// `None`) and silently drop the whole announce — the exact silent-drop this
+    /// guard exists to prevent, hiding inside the guard itself.
+    ///
+    /// Today's announce is pure-ASCII JSON so this never trips in practice (see
+    /// `max_legitimate_announce_reassembles_within_chunk_cap`); the guard keeps
+    /// the contract total against future payload growth or a non-ASCII field.
+    #[test]
+    fn chunk_txt_refuses_a_chunk_that_is_not_valid_utf8() {
+        // A full ASCII first chunk, then a second chunk whose leading byte
+        // (`0xFF`, never a valid UTF-8 start) is not text. The bad chunk is at
+        // index 1, so the reported `chunk_index` must be the real index — a
+        // hard-coded `0` would be wrong.
+        let mut wire = vec![b'x'; CHUNK_BYTES];
+        wire.push(0xFF);
+        assert_eq!(
+            chunk_txt(&wire),
+            Err(MeshError::AnnounceNotText { chunk_index: 1 }),
+            "a non-UTF-8 chunk must be refused with its index, never silently \
+             dropped (which would emit c=N with N-1 p-properties, dropped by every peer)"
+        );
+    }
 }
