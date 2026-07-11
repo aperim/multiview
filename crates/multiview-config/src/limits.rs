@@ -11,9 +11,14 @@
 //! bound in-flight requests (and the long-lived WS/SSE sessions that hold a
 //! concurrency permit for their lifetime) — **not** idle keep-alive connections,
 //! which hold no permit. A half-open, slow-header connection (slowloris) is bounded
-//! separately by [`ManagementLimits::header_read_timeout_secs`], which the
-//! `multiview-control` serve loop applies to the header read (SEC-14 / #126; see
-//! [ADR-W028](../../../docs/decisions/ADR-W028.md)).
+//! two ways: [`ManagementLimits::header_read_timeout_secs`] bounds its *lifetime* (the
+//! serve loop drops it if the header block does not arrive in time), and
+//! [`ManagementLimits::max_connections`] / [`ManagementLimits::max_connections_per_ip`]
+//! bound the *population* the serve loop will accept at all — the floor the
+//! request-level caps miss, since a connection stalled before its headers parse never
+//! takes a request permit (SEC-14 / #126; see
+//! [ADR-W028](../../../docs/decisions/ADR-W028.md),
+//! [ADR-W031](../../../docs/decisions/ADR-W031.md)).
 
 use serde::{Deserialize, Serialize};
 
@@ -222,9 +227,12 @@ impl ManagementLimits {
     /// Validate the limits.
     ///
     /// # Errors
-    /// [`ConfigError::Validation`] if the concurrency cap is zero, or either
-    /// token-bucket rate has a zero `burst` or `refill_per_sec` — each would turn
-    /// the `DoS` floor into a self-inflicted outage. Validated regardless of
+    /// [`ConfigError::Validation`] if the concurrency cap is zero or above the runtime
+    /// ceiling, the header-read timeout is zero, either connection cap
+    /// (`max_connections` / `max_connections_per_ip`) is zero, the per-IP connection
+    /// cap exceeds the global one, or either token-bucket rate has a zero `burst` or
+    /// `refill_per_sec` — each would turn the `DoS` floor into a self-inflicted outage
+    /// (or, for a looser per-IP cap, a floor that never binds). Validated regardless of
     /// `enabled` so a typo is caught even while the limits are temporarily off.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.max_concurrent_requests == 0 {
@@ -247,6 +255,27 @@ impl ManagementLimits {
                  connection before it can send its headers)"
                     .to_owned(),
             ));
+        }
+        if self.max_connections == 0 {
+            return Err(ConfigError::Validation(
+                "control.limits.max_connections must be >= 1 (0 would drop every connection at \
+                 accept)"
+                    .to_owned(),
+            ));
+        }
+        if self.max_connections_per_ip == 0 {
+            return Err(ConfigError::Validation(
+                "control.limits.max_connections_per_ip must be >= 1 (0 would drop every \
+                 connection at accept)"
+                    .to_owned(),
+            ));
+        }
+        if self.max_connections_per_ip > self.max_connections {
+            return Err(ConfigError::Validation(format!(
+                "control.limits.max_connections_per_ip ({}) must be <= max_connections ({}); a \
+                 per-IP cap above the global cap can never bind",
+                self.max_connections_per_ip, self.max_connections
+            )));
         }
         self.per_ip.validate("per_ip")?;
         self.per_api_key.validate("per_api_key")?;
