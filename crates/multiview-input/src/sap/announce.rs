@@ -17,7 +17,6 @@
 //! This is off the output clock and cannot pace it (inv #1): the announce timer
 //! is independent of the per-tick output loop.
 
-use std::hash::{Hash as _, Hasher as _};
 use std::net::IpAddr;
 use std::num::NonZeroU16;
 use std::time::Duration;
@@ -111,17 +110,31 @@ pub fn deletion(hash: NonZeroU16, origin: IpAddr, sdp: Vec<u8>) -> SapPacket {
     }
 }
 
+/// FNV-1a/64 offset basis (the defined algorithm's fixed seed).
+const FNV1A_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+/// FNV-1a/64 prime.
+const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
+
 /// A stable, **non-zero** 16-bit message-id hash of an SDP body (RFC 2974 §8): the
 /// same SDP always yields the same hash (so a receiver de-duplicates), and a
 /// changed SDP yields a different one (so a modification is detectable). Zero (the
 /// reserved value) is never produced — the [`NonZeroU16`] return type enforces it.
+///
+/// Uses **FNV-1a**, a small, fully-defined algorithm, so the mapping is stable
+/// across toolchain versions, targets, and restarts (P2-F4). `DefaultHasher` is
+/// explicitly *not* a stable cross-version contract — a toolchain bump could
+/// change the hash for identical SDP, and a receiver would then see a restarted
+/// announcer's unchanged sessions as new ones (duplicate sessions until timeout),
+/// so it must never back this identifier.
 #[must_use]
 pub fn stable_hash(sdp: &[u8]) -> NonZeroU16 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    sdp.hash(&mut hasher);
-    let full = hasher.finish();
+    let mut hash = FNV1A_OFFSET_BASIS;
+    for &byte in sdp {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV1A_PRIME);
+    }
     // Fold the 64-bit digest into 16 bits, then force non-zero (0 is reserved).
-    let folded = full ^ (full >> 16) ^ (full >> 32) ^ (full >> 48);
+    let folded = hash ^ (hash >> 16) ^ (hash >> 32) ^ (hash >> 48);
     let low = u16::try_from(folded & 0xFFFF).unwrap_or(1);
     NonZeroU16::new(low).unwrap_or(NonZeroU16::MIN)
 }
