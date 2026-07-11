@@ -429,11 +429,13 @@ impl Aes67Sender {
         self.sample_rate
     }
 
-    /// The packet-time (`ptime`) this sender must be driven at: exactly
-    /// `frames_per_packet / sample_rate`, the interval that keeps the wire cadence
-    /// locked to the RTP media clock (panel F1). The send loop
-    /// ([`Aes67UdpSender::serve`](super::transport::Aes67UdpSender::serve)) derives
-    /// its timer from this rather than an arbitrary caller-supplied duration.
+    /// The nominal packet-time (`ptime`): exactly `frames_per_packet /
+    /// sample_rate`, the per-packet interval the RTP media clock advances by (panel
+    /// F1). This is the *single-packet* duration, **floored** to whole nanoseconds;
+    /// the send loop does **not** repeat it (that would accumulate the truncation
+    /// into drift — see [`packet_deadline_offset`](Self::packet_deadline_offset)),
+    /// it drives from the cumulative absolute deadline instead. Retained as the
+    /// human-facing ptime and the source of the floored per-packet value.
     ///
     /// Computed in exact integer nanoseconds (never float fps — invariant #3);
     /// `sample_rate` is a validated non-zero rate, so there is no division by zero
@@ -444,6 +446,37 @@ impl Aes67Sender {
         let frames = u64::try_from(self.frames_per_packet).unwrap_or(u64::MAX);
         let nanos = frames.saturating_mul(1_000_000_000) / u64::from(self.sample_rate);
         std::time::Duration::from_nanos(nanos)
+    }
+
+    /// The absolute offset from the send-loop start at which packet `index`
+    /// (0-based) is due — the deadline
+    /// [`Aes67UdpSender::serve`](super::transport::Aes67UdpSender::serve)
+    /// `sleep_until`s (panel T1).
+    ///
+    /// Packet `index` carries the `index × frames_per_packet`-th media frame, so it
+    /// is due `index × frames_per_packet / sample_rate` seconds after the loop
+    /// started. Deriving the deadline from the **cumulative** index (rather than
+    /// repeating one floored [`packet_duration`](Self::packet_duration)) keeps each
+    /// deadline within one nanosecond of the ideal **forever**: the single division
+    /// is floored once, so the rounding never accumulates. Repeating a truncated
+    /// per-packet duration instead loses the sub-nanosecond remainder every packet
+    /// and drifts without bound at any rate `frames_per_packet` does not evenly
+    /// divide (e.g. 48 @ 44.1 kHz) — the T1 defect (inv #1/#3, never float).
+    ///
+    /// Exact integer math: the `index × frames × 1e9` product is taken in `u128`
+    /// (it can exceed `u64` after a few days of ticks) and the divided result — ns
+    /// since start — fits `u64` for millennia; `sample_rate` is a validated
+    /// non-zero rate, so there is no division by zero.
+    #[must_use]
+    pub fn packet_deadline_offset(&self, index: u64) -> std::time::Duration {
+        // `timestamp_increment == frames_per_packet` (validated ≤ MAX_FRAMES_PER_PACKET,
+        // well inside u32), so `u128::from` is exact and cast-free.
+        let frames = u128::from(self.timestamp_increment);
+        let nanos = u128::from(index)
+            .saturating_mul(frames)
+            .saturating_mul(1_000_000_000)
+            / u128::from(self.sample_rate);
+        std::time::Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
     }
 }
 

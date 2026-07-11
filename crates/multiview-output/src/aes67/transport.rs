@@ -21,7 +21,6 @@
 //! membership); this transport carries the datagrams.
 
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use tokio::net::UdpSocket;
 
@@ -170,11 +169,15 @@ impl Aes67UdpSender {
     /// Drive `sender` on its **media-clock cadence**, sending one continuous
     /// marker=0 packet per tick until `stop` resolves or the socket faults.
     ///
-    /// The send interval is [`sender.packet_duration()`](Aes67Sender::packet_duration)
-    /// — `frames_per_packet / sample_rate` — **not** a caller-supplied duration, so
-    /// the wire cadence always matches the RTP media clock (which advances
-    /// `+frames_per_packet` per packet); an unrelated timer would drift the
-    /// receiver buffer (panel F1).
+    /// Each packet is sent at its **absolute** deadline
+    /// [`sender.packet_deadline_offset(n)`](Aes67Sender::packet_deadline_offset)
+    /// from the loop start — `n × frames_per_packet / sample_rate` — via
+    /// `sleep_until`, **not** a repeated interval. Deriving every deadline from the
+    /// cumulative packet index keeps the wire cadence locked to the RTP media clock
+    /// (which advances `+frames_per_packet` per packet) with sub-nanosecond error
+    /// forever; repeating one floored `packet_duration` would accumulate the
+    /// truncation into unbounded drift at any non-dividing rate and walk the
+    /// receiver buffer (panel T1, inv #1/#3).
     ///
     /// This is the off-hot-path send loop: it samples the sender's bounded
     /// drop-oldest FIFO and never paces the engine (invariants #1 / #10). The
@@ -190,21 +193,23 @@ impl Aes67UdpSender {
         S: std::future::Future<Output = ()>,
     {
         tokio::pin!(stop);
-        // The cadence IS the media clock (panel F1): derive it from the sender's
-        // validated (sample_rate, frames_per_packet), clamped to a sane floor so a
-        // degenerate config can never spin a zero-duration timer.
-        let ptime = sender.packet_duration().max(Duration::from_micros(1));
-        let mut ticker = tokio::time::interval(ptime);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Absolute per-packet deadlines from one fixed start (panel T1): packet n
+        // is due at start + n×frames_per_packet/sample_rate, floored ONCE from the
+        // cumulative index so the rounding never accumulates into drift the way a
+        // repeated truncated interval would. `sleep_until` each deadline.
+        let start = tokio::time::Instant::now();
         // One datagram buffer, warmed on the first tick and reused for every
         // packet — the continuous send path allocates nothing per tick (rule 22 /
         // panel F6).
         let mut datagram = Vec::new();
+        let mut packet_index: u64 = 0;
         loop {
+            let deadline = start + sender.packet_deadline_offset(packet_index);
             tokio::select! {
-                _ = ticker.tick() => {
+                () = tokio::time::sleep_until(deadline) => {
                     sender.next_packet_into(&mut datagram);
                     self.send_packet(&datagram).await?;
+                    packet_index = packet_index.saturating_add(1);
                 }
                 () = &mut stop => return Ok(()),
             }
