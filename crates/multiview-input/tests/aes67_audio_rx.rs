@@ -173,6 +173,10 @@ mod producer {
 
     #[test]
     fn producer_drops_packets_whose_payload_type_does_not_match_the_session() {
+        // A stray RTP stream on the same 5-tuple carries a DIFFERENT payload type —
+        // a well-formed L24 payload that must NOT be decoded as our audio (RFC 3550
+        // demuxes by payload type; without a filter it would be treated as PCM).
+        const STRAY_PT: u8 = 96;
         let format = Aes3Format::new(2, SampleDepth::L24).expect("stereo L24");
         let packetizer = Aes67Packetizer::new(2, SampleDepth::L24).expect("stereo L24");
         let stray = packetizer
@@ -182,10 +186,6 @@ mod producer {
             .encode(&[0.5_f32, -0.5, 0.25, -0.25])
             .expect("whole stereo groups");
 
-        // A stray RTP stream on the same 5-tuple carries a DIFFERENT payload type —
-        // a well-formed L24 payload that must NOT be decoded as our audio (RFC 3550
-        // demuxes by payload type; without a filter it would be treated as PCM).
-        const STRAY_PT: u8 = 96;
         let source = ScriptedSource::new(vec![
             audio_packet_pt(1_000, 7, 0xABCD, STRAY_PT, stray),
             audio_packet_pt(1_048, 8, 0xABCD, SESSION_PT, wanted),
