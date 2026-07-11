@@ -1265,3 +1265,158 @@ mod middleware_tests {
         assert!(!limiters.is_enabled());
     }
 }
+
+#[cfg(test)]
+mod connection_admission_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::net::{IpAddr, Ipv6Addr};
+
+    use super::ConnectionAdmission;
+
+    /// A distinct ULA test address per `n`.
+    fn ip(n: u16) -> IpAddr {
+        IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, n))
+    }
+
+    #[test]
+    fn global_cap_admits_up_to_the_limit_then_rejects() {
+        // Global cap 2, per-IP effectively unbounded: the third concurrent connection
+        // (even from a fresh IP) is refused at accept once the global cap is reached.
+        let admission = ConnectionAdmission::new(2, 100);
+        let g1 = admission.try_admit(ip(1)).expect("first admits");
+        let g2 = admission.try_admit(ip(2)).expect("second admits");
+        assert!(
+            admission.try_admit(ip(3)).is_none(),
+            "the global cap of 2 must refuse the third concurrent connection"
+        );
+        // Freeing one slot lets the next connection in.
+        drop(g1);
+        let _g3 = admission
+            .try_admit(ip(3))
+            .expect("a freed global slot admits the next connection");
+        drop(g2);
+    }
+
+    #[test]
+    fn per_ip_cap_admits_up_to_the_limit_then_rejects_that_ip() {
+        // Global cap generous, per-IP cap 2: a single IP is bounded at 2 while a
+        // different IP keeps its own independent allowance.
+        let admission = ConnectionAdmission::new(100, 2);
+        let _a1 = admission.try_admit(ip(1)).expect("ip1 #1 admits");
+        let _a2 = admission.try_admit(ip(1)).expect("ip1 #2 admits");
+        assert!(
+            admission.try_admit(ip(1)).is_none(),
+            "the per-IP cap of 2 must refuse a third connection from the same IP"
+        );
+        // A different source IP is unaffected by ip1 being at its per-IP cap.
+        let _b1 = admission
+            .try_admit(ip(2))
+            .expect("a different IP keeps its own per-IP allowance");
+    }
+
+    #[test]
+    fn dropping_a_guard_frees_the_global_slot() {
+        let admission = ConnectionAdmission::new(1, 100);
+        let g1 = admission.try_admit(ip(1)).expect("first admits");
+        assert!(
+            admission.try_admit(ip(2)).is_none(),
+            "global cap 1 is full while g1 is held"
+        );
+        drop(g1);
+        let _g2 = admission
+            .try_admit(ip(2))
+            .expect("dropping the guard frees the global slot");
+    }
+
+    #[test]
+    fn dropping_a_guard_frees_the_per_ip_slot() {
+        let admission = ConnectionAdmission::new(100, 1);
+        let g1 = admission.try_admit(ip(1)).expect("ip1 #1 admits");
+        assert!(
+            admission.try_admit(ip(1)).is_none(),
+            "per-IP cap 1 is full for ip1 while g1 is held"
+        );
+        drop(g1);
+        let _g2 = admission
+            .try_admit(ip(1))
+            .expect("dropping the guard frees the per-IP slot for that IP");
+    }
+
+    #[test]
+    fn a_rejected_per_ip_admission_leaves_no_stray_entry() {
+        // A per-IP rejection must not insert or bump a map entry — otherwise a flood
+        // of rejected attempts would grow the map. One live guard ⇒ exactly one tracked
+        // IP, and the count is not inflated by the rejected attempt (proved by the
+        // eviction test: the single live guard's Drop returns the map to empty).
+        let admission = ConnectionAdmission::new(100, 1);
+        let g1 = admission.try_admit(ip(1)).expect("ip1 #1 admits");
+        assert_eq!(admission.tracked_ips(), 1, "one live connection ⇒ one tracked IP");
+        assert!(
+            admission.try_admit(ip(1)).is_none(),
+            "ip1 is at its per-IP cap"
+        );
+        assert_eq!(
+            admission.tracked_ips(),
+            1,
+            "a rejected admission must not add a stray map entry"
+        );
+        drop(g1);
+        assert_eq!(
+            admission.tracked_ips(),
+            0,
+            "the only live guard's Drop must evict the entry (no leftover count from the reject)"
+        );
+    }
+
+    #[test]
+    fn the_per_ip_entry_is_evicted_when_its_last_connection_closes() {
+        // The bounded-memory property (nit 1): the per-IP map is bounded by the number
+        // of *concurrent distinct* IPs, not all-IPs-ever — so an entry is removed the
+        // instant its count reaches zero, not merely decremented.
+        let admission = ConnectionAdmission::new(100, 5);
+        let g1 = admission.try_admit(ip(1)).expect("ip1 #1 admits");
+        let g2 = admission.try_admit(ip(1)).expect("ip1 #2 admits");
+        assert_eq!(admission.tracked_ips(), 1, "one distinct IP is tracked");
+        drop(g1);
+        assert_eq!(
+            admission.tracked_ips(),
+            1,
+            "one connection from ip1 is still live ⇒ the entry remains"
+        );
+        drop(g2);
+        assert_eq!(
+            admission.tracked_ips(),
+            0,
+            "the last connection from ip1 closing must EVICT its map entry (count==0), not leave a \
+             zero-valued key that grows the map unbounded"
+        );
+    }
+
+    #[test]
+    fn held_guards_never_exceed_either_cap() {
+        // Global cap 4, per-IP cap 2, two source IPs. Exactly 4 admissions succeed
+        // (2 per IP), and every further attempt — from either IP — is refused. Proves
+        // the two caps compose: neither the global nor a per-IP bound can be exceeded.
+        let admission = ConnectionAdmission::new(4, 2);
+        let mut held = Vec::new();
+        held.push(admission.try_admit(ip(1)).expect("ip1 #1"));
+        held.push(admission.try_admit(ip(1)).expect("ip1 #2"));
+        assert!(
+            admission.try_admit(ip(1)).is_none(),
+            "ip1 is at its per-IP cap of 2"
+        );
+        held.push(admission.try_admit(ip(2)).expect("ip2 #1"));
+        held.push(admission.try_admit(ip(2)).expect("ip2 #2"));
+        assert_eq!(held.len(), 4, "exactly the global cap of 4 connections are live");
+        assert!(
+            admission.try_admit(ip(2)).is_none(),
+            "ip2 is at its per-IP cap of 2 (and the global cap of 4 is full)"
+        );
+        assert!(
+            admission.try_admit(ip(3)).is_none(),
+            "a fresh IP is refused because the global cap of 4 is full"
+        );
+        assert_eq!(admission.tracked_ips(), 2, "exactly two distinct IPs are tracked");
+    }
+}
