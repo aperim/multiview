@@ -68,6 +68,19 @@ pub struct WatchOptions {
     /// `Arc<Mutex<Option<…>>>` only so `WatchOptions` stays `Clone` — the
     /// production path never constructs it and never pays for it.
     manual_poll: Option<Arc<std::sync::Mutex<Option<PollGate>>>>,
+    /// A one-shot slot ([`WatchOptions::with_post_probe_interpose`]) holding
+    /// content the loop writes to the watched path exactly once, right after a
+    /// successful [`probe`] and BEFORE the settled read/apply. It exists only so
+    /// a test can interpose a concurrent external writer precisely in the
+    /// probe→apply window (the TOCTOU the content fingerprint must be immune
+    /// to). Because arming it makes the watcher WRITE the config file, the whole
+    /// seam is gated behind the test-only `_test-seams` feature: compiled out of
+    /// the default build and the `multiview-cli` release presets, and — even if
+    /// the feature is enabled — inert until a caller explicitly arms it via
+    /// [`with_post_probe_interpose`](WatchOptions::with_post_probe_interpose),
+    /// which no production code does. No shipped configuration writes the file.
+    #[cfg(feature = "_test-seams")]
+    interpose: Option<Arc<std::sync::Mutex<Option<Vec<u8>>>>>,
 }
 
 impl Default for WatchOptions {
@@ -77,6 +90,8 @@ impl Default for WatchOptions {
             initial_observed: None,
             handle: None,
             manual_poll: None,
+            #[cfg(feature = "_test-seams")]
+            interpose: None,
         }
     }
 }
@@ -133,6 +148,62 @@ impl WatchOptions {
         let (manual, gate) = manual_poll_pair();
         self.manual_poll = Some(Arc::new(std::sync::Mutex::new(Some(gate))));
         (self, manual)
+    }
+
+    /// Install the **post-probe interpose** test seam and return its handle.
+    /// Between two [`ManualPoll::poll_once`]s, call
+    /// [`PostProbeInterpose::interpose_next`] to schedule a single write the
+    /// loop performs on its NEXT poll, right after [`probe`] and BEFORE the
+    /// settled read/apply — modelling an external writer that races the poll
+    /// exactly in the probe→apply window. It exists to prove the applied
+    /// fingerprint always matches the content actually applied: a probe-then-
+    /// reread would apply the racer's bytes yet record the probe's fingerprint.
+    ///
+    /// Test-only (`_test-seams`): the seam WRITES the watched file, so it is
+    /// compiled out of the default build and the `multiview-cli` release presets
+    /// (and, even when the feature is on, does nothing until armed here). Composes
+    /// with [`with_manual_poll`](Self::with_manual_poll): the interposed write
+    /// lands mid-poll, so a plain `poll_once` still drives it.
+    #[cfg(feature = "_test-seams")]
+    #[must_use]
+    pub fn with_post_probe_interpose(mut self) -> (Self, PostProbeInterpose) {
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        self.interpose = Some(Arc::clone(&slot));
+        (self, PostProbeInterpose { slot })
+    }
+}
+
+/// The test-side handle of the post-probe interpose seam
+/// ([`WatchOptions::with_post_probe_interpose`]). Held by the test; a cheap
+/// `Arc` clone shares the one-shot slot with the loop. Test-only
+/// (`_test-seams`) — compiled out of the default build and the release presets.
+#[cfg(feature = "_test-seams")]
+#[derive(Debug, Clone)]
+pub struct PostProbeInterpose {
+    /// The shared one-shot slot the loop drains post-probe (see
+    /// [`WatchOptions::interpose`]).
+    slot: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+}
+
+#[cfg(feature = "_test-seams")]
+impl PostProbeInterpose {
+    /// Schedule `content` to be written to the watched path once, on the loop's
+    /// next poll, in the probe→apply window. One-shot: the loop takes and
+    /// clears it, so it fires on exactly the next poll and no later one.
+    pub fn interpose_next(&self, content: &str) {
+        *lock_interpose(&self.slot) = Some(content.as_bytes().to_vec());
+    }
+}
+
+/// Lock the interpose one-shot slot, recovering from a poisoned lock (a
+/// panicked test thread must not wedge the watcher). Test-only (`_test-seams`).
+#[cfg(feature = "_test-seams")]
+fn lock_interpose(
+    slot: &std::sync::Mutex<Option<Vec<u8>>>,
+) -> std::sync::MutexGuard<'_, Option<Vec<u8>>> {
+    match slot.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -447,6 +518,35 @@ fn content_hash(text: &str) -> u64 {
     hasher.finish()
 }
 
+/// A stable in-process hash of the watched file's raw bytes, folded into the
+/// [`Fingerprint`] so change detection does not depend on filesystem `stat`
+/// granularity. Not an adversarial boundary (whoever writes the config file
+/// already controls it), so `DefaultHasher` is ample; hashing BYTES (not a
+/// `&str`) keeps a non-UTF-8 file detectable as a change — the settled UTF-8
+/// decode in [`watch_loop`] does the UTF-8 gate.
+fn fingerprint_content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The content axis of a [`Fingerprint`]: a hash of the file's bytes when they
+/// could be read this poll, or `Unreadable` when the path exists (its `stat`
+/// succeeded) but its bytes could not be read — a permissions problem, or a
+/// swap racing the stat. A distinct, typed state rather than an in-band hash
+/// value: two `Unreadable` polls compare equal (so they settle to the "cannot
+/// be read" reject in [`watch_loop`]), and a real file's `Readable` hash can
+/// never alias "unreadable" — there is no sentinel value to collide with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentFingerprint {
+    /// A stable hash of the file's bytes ([`fingerprint_content_hash`]).
+    Readable(u64),
+    /// The path exists (its `stat` succeeded) but its bytes could not be read
+    /// this poll.
+    Unreadable,
+}
+
 /// Spawn the config-file watcher over `path` on the control-plane tokio
 /// runtime. `baseline` is the document the run booted with (the currently
 /// RUNNING state); `state` is the router's `AppState` (the one set of stores,
@@ -495,33 +595,173 @@ impl Drop for ActiveGuard {
     }
 }
 
-/// A cheap content-change fingerprint of the watched path: length + mtime +
-/// inode. Re-`stat`ing the PATH (never a held fd) makes a write-temp +
-/// `rename(2)` land as a normal change (new inode).
+/// A content-change fingerprint of the watched path: length + mtime + inode +
+/// a hash of the file's bytes ([`ContentFingerprint`]). All four axes come from
+/// a SINGLE fd opened once per poll (see [`probe`]): `len` + `content` (and the
+/// bytes carried to the apply) are ONE read of that fd, and mtime/inode are an
+/// `fstat` of the SAME fd. The fd pins one inode, so a rename can never pair one
+/// file's metadata with another file's bytes. It is NOT a point-in-time snapshot
+/// of every axis, though: the `fstat` runs after the read, so a same-inode
+/// in-place rewrite landing between them can move mtime past the bytes just read.
+/// That is benign — `content` (coherent with the applied bytes) is the
+/// authoritative discriminator, not mtime. The byte hash makes detection
+/// filesystem-independent — a same-length in-place rewrite (identical
+/// len/mtime/inode, e.g. a shell `>` redirect or a non-atomic editor landing
+/// within the filesystem's mtime granularity) still produces a distinct
+/// fingerprint, so the already-applied short-circuit in [`watch_loop`] cannot
+/// silently drop it. Re-opening the PATH each poll lands a write-temp +
+/// `rename(2)` as a change (new inode); a rename that does not alter the bytes
+/// then adopts without re-applying (the `last_observed == text` arm).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     len: u64,
     modified: Option<std::time::SystemTime>,
     inode: u64,
+    content: ContentFingerprint,
 }
 
-/// Probe the path's fingerprint; [`None`] when the file is (transiently)
-/// missing. `tokio::fs` so the `stat(2)` rides the blocking pool, never the
-/// control-plane reactor (review m6).
-async fn probe(path: &Path) -> Option<Fingerprint> {
-    let meta = tokio::fs::metadata(path).await.ok()?;
+/// The watched path as this poll read it: its change [`Fingerprint`] plus the
+/// exact bytes the `len`/`content` axes were computed from. The content axis and
+/// these carried bytes are ONE coherent fd read — the settled apply in
+/// [`watch_loop`] uses THESE bytes, never a second read that could observe
+/// different content — so the fingerprint recorded as `applied` always matches
+/// the content actually applied (the probe→apply TOCTOU is closed by
+/// construction). (mtime/inode are an `fstat` of the same fd, not a point-in-time
+/// snapshot of the bytes; see [`Fingerprint`].)
+struct Probed {
+    /// The change fingerprint (`len` + `content` derived from `bytes`).
+    fingerprint: Fingerprint,
+    /// The bytes read this poll, or the read error's message when the path was
+    /// present but its bytes could not be read (`Err(_)` iff
+    /// `fingerprint.content == ContentFingerprint::Unreadable`). The error is
+    /// carried, not the fingerprint's `Unreadable`, so the settled reject keeps
+    /// the errno detail the old settled read surfaced — the message never enters
+    /// the fingerprint, so a varying error string can't unsettle the debounce.
+    bytes: Result<Vec<u8>, String>,
+}
+
+/// The file's inode — the identity axis that makes a write-temp + `rename(2)`
+/// read as a change — on Unix; `0` on non-Unix, where the content hash carries
+/// change detection alone. Taken from an `fstat` of the open fd, or the fallback
+/// path `stat` when the file could not be opened.
+fn inode_of(meta: &std::fs::Metadata) -> u64 {
     #[cfg(unix)]
-    let inode = {
+    {
         use std::os::unix::fs::MetadataExt as _;
         meta.ino()
-    };
+    }
     #[cfg(not(unix))]
-    let inode = 0_u64;
-    Some(Fingerprint {
-        len: meta.len(),
-        modified: meta.modified().ok(),
-        inode,
-    })
+    {
+        let _ = meta;
+        0_u64
+    }
+}
+
+/// Probe the path this poll by opening it ONCE: read that fd (deriving the
+/// change [`Fingerprint`]'s `len` + `content`) and `fstat` the SAME fd for
+/// mtime/inode. `len` + `content` and the carried apply-bytes are one coherent
+/// read; the fd pins one inode, so mtime/inode belong to the same file as those
+/// bytes (a rename cannot pair another file's metadata with them). It is not a
+/// point-in-time snapshot of every axis — the `fstat` follows the read (see
+/// [`Fingerprint`]) — but that is benign: `content` drives detection and is
+/// coherent with the applied bytes. Returns [`None`] only when the path is
+/// (transiently) missing (open AND `stat` both fail); a present-but-unreadable
+/// path (open denied, or opened but unreadable — e.g. a directory, `EISDIR`)
+/// yields a fingerprint with [`ContentFingerprint::Unreadable`] and the read/open
+/// error in place of bytes. `tokio::fs` so the open/read/`fstat` ride the
+/// blocking pool, never the control-plane reactor (review m6).
+///
+/// Opening once — rather than a path `stat`, then a separate path read to hash,
+/// then a third read to apply — makes `len`/`content` and the carried `bytes` one
+/// coherent read: a same-length in-place rewrite is still a distinct fingerprint,
+/// AND the settled apply uses the very bytes the fingerprint identifies, so no
+/// concurrent write can make the applied content diverge from the recorded
+/// fingerprint. The config file is small and this runs once per ~1–2 s poll, so
+/// the read is negligible; it reads the RAW bytes — a non-UTF-8 file still
+/// fingerprints and settles to the UTF-8-decode reject in [`watch_loop`].
+async fn probe(path: &Path) -> Option<Probed> {
+    use tokio::io::AsyncReadExt as _;
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(open_error) => {
+            // Not openable. If its `stat` also fails the path is genuinely
+            // (transiently) missing → `None`; otherwise it is present but
+            // unreadable this poll (e.g. a permissions change), which settles to
+            // the "cannot be read" reject rather than the already-applied
+            // short-circuit — the open error is carried for that message.
+            let meta = tokio::fs::metadata(path).await.ok()?;
+            return Some(Probed {
+                fingerprint: Fingerprint {
+                    len: meta.len(),
+                    modified: meta.modified().ok(),
+                    inode: inode_of(&meta),
+                    content: ContentFingerprint::Unreadable,
+                },
+                bytes: Err(open_error.to_string()),
+            });
+        }
+    };
+    // Read the fd to end (`len` + `content` + the bytes carried to the apply),
+    // then `fstat` the SAME fd for mtime/inode. A read that fails on an opened fd
+    // (e.g. the path is a directory, `EISDIR`) yields the typed `Unreadable`
+    // content and carries the read error. A fresh valid fd's `fstat` does not
+    // fail in practice; if it did, the content hash still drives detection, so
+    // the stat axes fall back to empty rather than mis-reporting the file gone.
+    let mut bytes = Vec::new();
+    let read = file.read_to_end(&mut bytes).await;
+    let meta = file.metadata().await.ok();
+    let modified = meta.as_ref().and_then(|m| m.modified().ok());
+    let inode = meta.as_ref().map_or(0_u64, inode_of);
+    match read {
+        Ok(_) => {
+            // `usize` → `u64` never truncates on a 64-/32-bit target; the
+            // fallback is unreachable and only avoids an `as` cast.
+            let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            let content = ContentFingerprint::Readable(fingerprint_content_hash(&bytes));
+            Some(Probed {
+                fingerprint: Fingerprint {
+                    len,
+                    modified,
+                    inode,
+                    content,
+                },
+                bytes: Ok(bytes),
+            })
+        }
+        Err(read_error) => Some(Probed {
+            fingerprint: Fingerprint {
+                len: meta.as_ref().map_or(0_u64, std::fs::Metadata::len),
+                modified,
+                inode,
+                content: ContentFingerprint::Unreadable,
+            },
+            bytes: Err(read_error.to_string()),
+        }),
+    }
+}
+
+/// Fire the post-probe interpose test seam, if one is installed: write the
+/// scheduled bytes to the watched path once (draining the one-shot slot). This
+/// models a concurrent external writer landing between a poll's fingerprint
+/// probe and its settled read/apply. Test-only (`_test-seams`): the whole seam,
+/// this function included, is compiled out of the default build and the release
+/// presets, so no shipped configuration of the watcher has a code path that
+/// writes the config file.
+#[cfg(feature = "_test-seams")]
+async fn maybe_interpose(options: &WatchOptions, path: &Path) {
+    let Some(slot) = options.interpose.as_ref() else {
+        return;
+    };
+    let Some(bytes) = lock_interpose(slot).take() else {
+        return;
+    };
+    if let Err(error) = tokio::fs::write(path, bytes).await {
+        tracing::error!(
+            path = %path.display(),
+            %error,
+            "post-probe interpose write failed (test seam)"
+        );
+    }
 }
 
 /// The poll loop: debounce (a new fingerprint must be observed on two
@@ -586,7 +826,11 @@ async fn watch_loop(
             tracing::debug!(path = %path.display(), "config-file watcher stopped");
             return;
         }
-        let Some(now) = probe(&path).await else {
+        let Some(Probed {
+            fingerprint: now,
+            bytes: now_bytes,
+        }) = probe(&path).await
+        else {
             // Mid-rename ENOENT is normal; a file that STAYS missing is
             // reported once (the running configuration is unchanged).
             candidate = None;
@@ -604,6 +848,13 @@ async fn watch_loop(
         };
         missing_polls = 0;
         missing_reported = false;
+        // TEST-ONLY seam (the `_test-seams` feature, compiled out of the default
+        // build and the release presets): interpose a concurrent external writer
+        // here — after this poll's
+        // fingerprint probe, before its settled read/apply — to exercise the
+        // probe→apply TOCTOU. Absent from the production binary entirely.
+        #[cfg(feature = "_test-seams")]
+        maybe_interpose(&options, &path).await;
         if applied.as_ref() == Some(&now) {
             candidate = None;
             // The file is present at the already-applied content, so any
@@ -647,18 +898,39 @@ async fn watch_loop(
             candidate = Some(now);
             continue;
         }
-        // Stable across two polls: act on it. Read the content once — the
-        // expected-write check is content-paired (review m3). `tokio::fs` so
-        // the read rides the blocking pool (review m6).
+        // Stable across two polls: act on the SAME bytes the fingerprint was
+        // built from — carried out of `probe`, never a second read — so the
+        // content applied is exactly the content the recorded fingerprint
+        // identifies (no probe→apply TOCTOU). The expected-write check is
+        // content-paired (review m3).
         candidate = None;
-        let text = match tokio::fs::read_to_string(&path).await {
-            Ok(text) => text,
+        // `probe` found the path present but its bytes unreadable
+        // (`ContentFingerprint::Unreadable`): reject, exactly as a failed settled
+        // read did.
+        let bytes = match now_bytes {
+            Ok(bytes) => bytes,
             Err(error) => {
                 rejected = Some(now);
                 reject(
                     &state,
                     &path,
                     &format!("the file cannot be read: {error}"),
+                    &mut invalid_active,
+                );
+                continue;
+            }
+        };
+        // `probe` read these bytes and folded their hash into `now.content`;
+        // decode them here (the UTF-8 gate). A non-UTF-8 file is rejected,
+        // exactly as the old settled `read_to_string` did.
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(error) => {
+                rejected = Some(now);
+                reject(
+                    &state,
+                    &path,
+                    &format!("the file is not valid UTF-8: {error}"),
                     &mut invalid_active,
                 );
                 continue;

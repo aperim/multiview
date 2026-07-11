@@ -3136,6 +3136,7 @@ dependencies = [
  "mdns-sd",
  "mime_guess",
  "multiview-config",
+ "multiview-control",
  "multiview-core",
  "multiview-engine",
  "multiview-events",

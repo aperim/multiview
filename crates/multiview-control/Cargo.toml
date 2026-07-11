@@ -181,6 +181,16 @@ tempfile = "3"
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
+# Self dev-dependency: the canonical way to enable a TEST-ONLY feature for this
+# crate's OWN tests without pulling it into the default build or a downstream
+# consumer's normal build. Dev-dependencies are inactive for a normal
+# `cargo build`/`check` and for `multiview-cli`'s build of this crate (resolver
+# v2 keeps dev-dep features out of the non-test graph), so `_test-seams` — which
+# exposes the config-watch post-probe interpose hook that WRITES the watched
+# file — is turned on by THIS line only when building this crate's own tests. It
+# is still an ordinary feature, so an explicit `--features _test-seams` or a
+# workspace `--all-features` build can enable it; the release presets do not.
+multiview-control = { path = ".", features = ["_test-seams"] }
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",
@@ -268,6 +278,16 @@ ciborium = "0.2.2"
 # flag): the `zowietek` HTTP transport, the `cast` CASTV2 wire layer, and the
 # `discovery` mDNS browse.
 "devices-net" = ["zowietek", "cast", "discovery"]
+# TEST-ONLY seam — do NOT enable in a shipped build. Exposes the config-watch
+# post-probe interpose hook (`WatchOptions::with_post_probe_interpose`) the
+# probe→apply TOCTOU regression test uses to WRITE the watched file mid-poll.
+# Because the hook makes the watcher write the config file, it is off by default
+# and excluded from the `multiview-cli` release presets (nvidia/apple/linux-vaapi/
+# full — verified: none pull `multiview-control/_test-seams`); it is compiled in
+# for this crate's own tests via the self dev-dependency above. It is an ordinary
+# feature (an explicit `--features _test-seams` can still turn it on), so keep it
+# out of shipped builds. Underscore-prefixed to mark it internal.
+"_test-seams" = []
 
 [lints]
 workspace = true

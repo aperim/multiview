@@ -1,6 +1,7 @@
 # ADR-W020: Config-file watch — hot-reload the impacted parts through the one apply machinery
 
-- **Status:** Accepted
+- **Status:** Accepted — §1's stat-only fingerprint superseded by [ADR-W027](ADR-W027.md)
+  (2026-07-11; the watch fingerprint now folds a content hash). The rest of this ADR stands.
 - **Area:** Web/API stack · config-as-code ↔ engine (invariant #11 live-apply classification)
 - **Date:** 2026-06-10
 - **Source:** [management-capability-matrix](../research/management-capability-matrix.md);
@@ -55,14 +56,20 @@ and diffs it against the boot baseline, so an edit landing in the window between
 config load and the watcher spawn is **applied**, never silently adopted (an unchanged file
 settles to an empty diff and is adopted with no commands and no warnings).
 
-**Known limit (accepted):** the fingerprint is `(len, mtime, inode)`, not a content hash. A
-rewrite that preserves all three — a same-length in-place write combined with an mtime restore
-(e.g. tooling that resets timestamps), or a same-length write landing within the filesystem's
-mtime granularity on a coarse-grained filesystem — is invisible to the poll. Editors and
-deployment tools do not do this in practice (write-temp + `rename(2)` changes the inode; a
-normal write advances mtime); when in doubt, `touch` the file or write via rename to force
-detection. Hashing the content every poll was rejected as a per-second read of the whole file
-for a corner no real writer hits.
+**Known limit — RESOLVED by [ADR-W027](ADR-W027.md) (2026-07-11):** the fingerprint now folds a
+hash of the file's bytes, so a same-length in-place rewrite is detected and applied. The
+`(len, mtime, inode)`-only rationale below is retained as the original, now-reversed decision: the
+"corner no real writer hits" turned out to be hit by legitimate writers (a shell `>` redirect, a
+non-atomic in-place editor, config-management rewrites), a cross-vendor review judged silently
+dropping such an edit a correctness defect, and the per-poll read of a small config on the
+blocking pool was re-evaluated as negligible. **Original decision (superseded):** the fingerprint
+is `(len, mtime, inode)`, not a content hash. A rewrite that preserves all three — a same-length
+in-place write combined with an mtime restore (e.g. tooling that resets timestamps), or a
+same-length write landing within the filesystem's mtime granularity on a coarse-grained
+filesystem — is invisible to the poll. Editors and deployment tools do not do this in practice
+(write-temp + `rename(2)` changes the inode; a normal write advances mtime); when in doubt,
+`touch` the file or write via rename to force detection. Hashing the content every poll was
+rejected as a per-second read of the whole file for a corner no real writer hits.
 
 ### 2. Invalid file ⇒ warn loudly, change nothing
 

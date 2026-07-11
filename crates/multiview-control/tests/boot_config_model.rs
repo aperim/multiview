@@ -21,7 +21,7 @@
 
 mod support;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -435,7 +435,7 @@ async fn revert_after_a_file_watch_apply_returns_to_loaded() {
     // External boot-file edit: in_a goes near-white; the watcher applies it.
     // Driven by manual ticks (no wall-clock race): one poll registers the
     // candidate, the second crosses the debounce and applies.
-    std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#f0f0f0")).expect("edit boot file");
+    external_edit(&r.boot_path, &BOOT_DOC.replace("#101418", "#f0f0f0"));
     drive_polls(&mut poll, 2).await;
     assert_eq!(
         r.state.config_watch.snapshot().applied_count,
@@ -642,7 +642,7 @@ async fn promote_does_not_retrigger_a_file_watch_apply() {
     // Watching resumes against the ADOPTED baseline: a real external edit
     // still applies (candidate on the first poll, applied on the second).
     let text = std::fs::read_to_string(&r.boot_path).expect("read promoted file");
-    std::fs::write(&r.boot_path, text.replace("#c0c0c0", "#101418")).expect("external edit");
+    external_edit(&r.boot_path, &text.replace("#c0c0c0", "#101418"));
     drive_polls(&mut poll, 2).await;
     assert_eq!(
         r.state.config_watch.snapshot().applied_count,
@@ -791,7 +791,7 @@ async fn a_resumed_run_does_not_reapply_the_unchanged_boot_file() {
 
     // A REAL edit still hot-applies, diffed against the RESUMED baseline
     // (candidate on the first poll, applied on the second).
-    std::fs::write(&boot_path, BOOT_DOC.replace("#101418", "#123456")).expect("edit boot file");
+    external_edit(&boot_path, &BOOT_DOC.replace("#101418", "#123456"));
     drive_polls(&mut poll, 2).await;
     assert_eq!(
         state.config_watch.snapshot().applied_count,
@@ -2904,6 +2904,42 @@ async fn settle_initial(poll: &mut ManualPoll, state: &AppState) {
     );
 }
 
+/// Force `path`'s modification time to `mtime`, leaving its inode and length
+/// untouched (opens the existing file without truncating, then `set_modified`).
+/// Lets a test REMOVE the filesystem's mtime granularity as a variable and pin
+/// exactly which fingerprint axis distinguishes an edit from the already-applied
+/// content — `config_watch.rs` fingerprints len+mtime+inode PLUS a hash of the
+/// file's bytes, so with mtime (and inode) pinned only the bytes differ.
+fn force_mtime(path: &Path, mtime: std::time::SystemTime) {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open the boot file to set its mtime");
+    file.set_modified(mtime).expect("set the boot file mtime");
+}
+
+/// Simulate a real external boot-file edit: an ATOMIC temp-file save (write a
+/// freshly-named sibling temp, then `rename(2)` it over the path), exactly how
+/// an editor saves and precisely what the watcher's fingerprint is built to
+/// detect (`config_watch.rs` module docs: "a write-temp + `rename(2)` lands as
+/// a normal change (new inode)").
+///
+/// The rename gives the path a BRAND-NEW inode — the temp is created while the
+/// old file is still linked, so its inode can never be the still-linked one —
+/// so the fingerprint always differs from the previously-applied one regardless
+/// of mtime granularity. This is the realistic editor-save model, so the
+/// external-edit tests use it. A same-length in-place rewrite (same inode) is
+/// NOW detected too — the watcher fingerprints the file's bytes, not just its
+/// stat — and that path has its own coverage in
+/// [`an_in_place_same_length_edit_after_promote_still_applies`].
+fn external_edit(path: &Path, content: &str) {
+    let dir = path.parent().expect("the boot path has a parent directory");
+    let tmp = tempfile::NamedTempFile::new_in(dir).expect("create a temp for the atomic edit");
+    std::fs::write(tmp.path(), content).expect("write the external-edit content to the temp");
+    tmp.persist(path)
+        .expect("atomically rename the external edit into place");
+}
+
 /// DETERMINISTIC equivalent of `revert_after_a_file_watch_apply_returns_to_loaded`'s
 /// apply gate: an external boot-file edit hot-applies through the watcher, driven
 /// by manual ticks with ZERO wall-clock waits. Proves the manual-poll seam
@@ -2933,7 +2969,7 @@ async fn manual_poll_drives_an_external_edit_apply_deterministically() {
 
     // External edit: in_a goes near-white. One tick registers the new
     // fingerprint as a candidate; the second crosses the debounce and applies.
-    std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#f0f0f0")).expect("edit boot file");
+    external_edit(&r.boot_path, &BOOT_DOC.replace("#101418", "#f0f0f0"));
     assert!(poll.poll_once().await, "first poll: candidate registered");
     assert_eq!(
         r.state.config_watch.snapshot().applied_count,
@@ -2964,6 +3000,328 @@ async fn manual_poll_drives_an_external_edit_apply_deterministically() {
         "the edit rides the live machinery (UpsertSource), got {drained:?}"
     );
 
+    watch.stop();
+}
+
+/// Regression (task #7): the post-promote external-edit apply must NOT depend
+/// on the filesystem's mtime granularity. The watcher fingerprints the boot
+/// file and short-circuits without re-applying when the fingerprint matches the
+/// already-applied one (`config_watch.rs`).
+///
+/// This test REMOVES mtime as a variable — it forces the edit's mtime equal to
+/// the adopted file's — and drives an ATOMIC temp+rename edit (via
+/// [`external_edit`]), which lands on a FRESH inode distinct from the
+/// still-linked adopted one by construction, so the fingerprint always differs
+/// and the edit hot-applies. The harder same-length IN-PLACE case (every stat
+/// axis aliases; only the bytes differ) is covered by
+/// [`an_in_place_same_length_edit_after_promote_still_applies`], which the
+/// watcher now catches because the fingerprint folds a hash of the bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_edit_after_promote_applies_regardless_of_mtime_granularity() {
+    let mut r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        options,
+    );
+    settle_initial(&mut poll, &r.state).await;
+
+    // Promote: the watcher adopts (not applies) its own write.
+    recolor_in_a(&r, "#c0c0c0").await;
+    let _ = r.commands.try_drain();
+    let resp = send(
+        &r.router,
+        post_idem("/api/v1/config/promote", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    drive_polls(&mut poll, 4).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        0,
+        "the promote itself must not count as a file-watch apply"
+    );
+
+    // The fingerprint the watcher now holds as `applied` (the promote-adopted
+    // boot file).
+    let adopted_mtime = std::fs::metadata(&r.boot_path)
+        .expect("stat the adopted boot file")
+        .modified()
+        .expect("adopted boot file mtime");
+
+    // A genuine external edit: a same-width colour swap, in place (same inode,
+    // same length) — the original flaky write path.
+    let promoted = std::fs::read_to_string(&r.boot_path).expect("read the promoted file");
+    let edited = promoted.replace("#c0c0c0", "#101418");
+    external_edit(&r.boot_path, &edited);
+    // Remove mtime as a discriminator — force the worst case the coarse fs
+    // granularity produces by accident, so ONLY the inode can tell the edit
+    // apart from the adopted content.
+    force_mtime(&r.boot_path, adopted_mtime);
+
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
+        "a real external edit after a promote must hot-apply even when its \
+         fingerprint mtime matches the adopted write (task #7)"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#101418"),
+        "the store mirrors the applied external edit"
+    );
+    watch.stop();
+}
+
+/// Regression (task #7, the real production fix): the config watcher must detect
+/// a legitimate same-length IN-PLACE rewrite — a shell `>` redirect, a
+/// non-atomic editor, or a config-management tool rewriting the file in place —
+/// even when it lands within the filesystem's mtime granularity so its `len`,
+/// `mtime`, and `inode` ALL alias the already-applied write. This is the defect
+/// behind the original flake: the watcher's fingerprint was stat-only
+/// (len+mtime+inode) and the "already applied" short-circuit dropped such an
+/// edit WITHOUT ever reading its content. The fix folds a hash of the file's
+/// bytes into the fingerprint, so a same-length in-place content change is still
+/// a distinct fingerprint and hot-applies.
+///
+/// The stimulus is the aliased worst case, forced deterministically (not left to
+/// the tmpfs odds): an in-place `std::fs::write` (same inode by construction), a
+/// same-WIDTH colour swap (same length), and `force_mtime` pinning the edit's
+/// mtime equal to the adopted write's. Only the file's BYTES differ — every stat
+/// axis aliases. Fails (`applied_count` stays 0) against a stat-only fingerprint;
+/// passes once the content hash lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_in_place_same_length_edit_after_promote_still_applies() {
+    let mut r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        options,
+    );
+    settle_initial(&mut poll, &r.state).await;
+
+    // Promote: the watcher adopts (not applies) its own write.
+    recolor_in_a(&r, "#c0c0c0").await;
+    let _ = r.commands.try_drain();
+    let resp = send(
+        &r.router,
+        post_idem("/api/v1/config/promote", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    drive_polls(&mut poll, 4).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        0,
+        "the promote itself must not count as a file-watch apply"
+    );
+
+    // The adopted write's mtime + inode — the aliasing target.
+    let adopted_meta = std::fs::metadata(&r.boot_path).expect("stat the adopted boot file");
+    let adopted_mtime = adopted_meta.modified().expect("adopted boot file mtime");
+    #[cfg(unix)]
+    let adopted_inode = {
+        use std::os::unix::fs::MetadataExt as _;
+        adopted_meta.ino()
+    };
+
+    // A genuine external edit written IN PLACE (same inode), a same-width colour
+    // swap (same length) — the path an atomic-rename editor would NOT take but a
+    // shell redirect or config-management rewrite does.
+    let promoted = std::fs::read_to_string(&r.boot_path).expect("read the promoted file");
+    let edited = promoted.replace("#c0c0c0", "#101418");
+    assert_eq!(
+        edited.len(),
+        promoted.len(),
+        "the colour swap must be the same length to exercise the aliasing case"
+    );
+    std::fs::write(&r.boot_path, &edited).expect("rewrite the boot file in place");
+    // Force the worst case the coarse fs granularity produces by accident: pin
+    // the edit's mtime to the adopted write's, so len + mtime + inode ALL alias
+    // and only the bytes differ.
+    force_mtime(&r.boot_path, adopted_mtime);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let edited_inode = std::fs::metadata(&r.boot_path)
+            .expect("stat the in-place edit")
+            .ino();
+        assert_eq!(
+            edited_inode, adopted_inode,
+            "an in-place rewrite must reuse the inode — the aliasing precondition"
+        );
+    }
+
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
+        "a same-length in-place edit whose len+mtime+inode alias the adopted \
+         write must still hot-apply — the watcher fingerprints content, not just \
+         stat (task #7)"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#101418"),
+        "the store mirrors the applied in-place edit"
+    );
+    watch.stop();
+}
+
+/// RED→GREEN (task #7, cross-vendor finding 1 — the probe-vs-settled TOCTOU):
+/// the fingerprint the watcher records as `applied` MUST be the fingerprint of
+/// the content it actually applied. The poll probes the file (folding a content
+/// hash into the fingerprint), debounces, and — on the settling poll — applies.
+/// If a concurrent writer lands BETWEEN this poll's probe and its settled read,
+/// a probe-then-reread applies the racer's bytes (B) yet records the PROBE's
+/// fingerprint (A) — an incoherent `applied` that would then silently drop a
+/// later edit restoring A (its fingerprint aliases the mis-recorded `applied`).
+///
+/// The [`WatchOptions::with_post_probe_interpose`] seam interposes exactly that
+/// concurrent write in the probe→apply window, deterministically. The applied
+/// content must be the PROBED snapshot A (whose fingerprint is what gets
+/// recorded); the racer B is not lost — it is a fresh fingerprint picked up on a
+/// later poll. Since `applied` is recorded as A's fingerprint in BOTH the buggy
+/// and fixed builds, asserting the store holds A is exactly asserting
+/// `applied == fingerprint-of-applied-content`: the reread build stores B and
+/// FAILS; the single-read build stores A and passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_racing_the_probe_never_desyncs_the_applied_fingerprint() {
+    let mut r = rig(BOOT_DOC);
+    let (options, interpose) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_post_probe_interpose();
+    let (options, mut poll) = options.with_manual_poll();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        options,
+    );
+    settle_initial(&mut poll, &r.state).await;
+
+    // The edit we expect applied (A): a same-width colour swap.
+    let doc_a = BOOT_DOC.replace("#101418", "#aabbcc");
+    external_edit(&r.boot_path, &doc_a);
+    // Poll 1 registers A's fingerprint as the debounce candidate (no apply yet).
+    assert!(poll.poll_once().await, "poll 1: candidate A registered");
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        0,
+        "one poll only registers the candidate; the debounce has not settled"
+    );
+
+    // Arm a concurrent writer (B, same width) to land in the probe→apply window
+    // of the NEXT poll: the loop reads A for its fingerprint, THEN B appears on
+    // disk, THEN the settled read/apply runs. Poll 2 crosses the debounce.
+    let doc_b = BOOT_DOC.replace("#101418", "#ddeeff");
+    interpose.interpose_next(&doc_b);
+    assert!(
+        poll.poll_once().await,
+        "poll 2: A settles while B races the reread"
+    );
+
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
+        "the settled edit applies exactly once"
+    );
+    // The applied content must be the probed snapshot A — the fingerprint the
+    // loop records as `applied` is A's, so applying B would desync it. A reread
+    // records A's fingerprint but stores B (the defect); the single-read build
+    // stores A.
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#aabbcc"),
+        "the applied content matches the recorded fingerprint (A), not the racer B"
+    );
+    let drained = r.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| matches!(
+            c,
+            Command::UpsertSource { source, .. } if source.id == "in_a"
+        )),
+        "the settled edit rides the live machinery, got {drained:?}"
+    );
+
+    watch.stop();
+}
+
+/// Characterisation (task #7, cross-vendor finding 2 — the typed unreadable
+/// sentinel + recovery): a watched path that exists but whose BYTES cannot be
+/// read this poll must NOT alias the already-applied content and must NOT apply.
+/// Two such polls settle to the "cannot be read" reject; when the path becomes a
+/// readable file again the watcher resumes and applies the new content. Models
+/// the present-but-unreadable branch (`ContentFingerprint::Unreadable`)
+/// deterministically and root-independently by swapping the file for a directory
+/// at the same path — `stat` succeeds, but `read` returns `EISDIR` regardless of
+/// privilege (a chmod-000 test would be a no-op under a root CI runner).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_path_rejects_then_recovers_on_next_readable_content() {
+    let r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        options,
+    );
+    settle_initial(&mut poll, &r.state).await;
+
+    // Present-but-unreadable: replace the file with a directory at the SAME
+    // path. No poll runs during the swap (manual tick), so the loop never sees a
+    // transient ENOENT — it sees a path whose stat succeeds but whose byte read
+    // fails (EISDIR). Two polls debounce it to the reject.
+    std::fs::remove_file(&r.boot_path).expect("remove the boot file");
+    std::fs::create_dir(&r.boot_path).expect("put a directory in its place");
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        0,
+        "an unreadable path must never alias the applied content or apply"
+    );
+    // The reject publishes an event the warning-ingest task folds into the store
+    // on a separate task, so await it (the debounce itself is deterministic).
+    assert!(
+        wait_until(SETTLE, || has_active_warning(
+            &r.warnings,
+            "config-file-invalid"
+        ))
+        .await,
+        "two unreadable polls must settle to the cannot-be-read reject"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#101418"),
+        "the running store is unchanged while the path is unreadable"
+    );
+
+    // Recovery: the path becomes a readable file again, carrying a new edit.
+    std::fs::remove_dir(&r.boot_path).expect("remove the placeholder directory");
+    let recovered = BOOT_DOC.replace("#101418", "#123456");
+    std::fs::write(&r.boot_path, &recovered).expect("write the recovered content");
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
+        "once readable again the watcher resumes and applies the new content"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#123456"),
+        "the recovered edit hot-applies"
+    );
     watch.stop();
 }
 
