@@ -14792,7 +14792,11 @@ a=mediaclk:direct=0\r\n";
         let g1_alt_port: std::net::SocketAddr = "[ff3e::1]:5006".parse().unwrap();
         let g2: std::net::SocketAddr = "[ff3e::2]:5004".parse().unwrap();
         // Never the ambiguous 0.
-        assert_ne!(aes67_ssrc_for("out-a", g1), 0, "ssrc is never the ambiguous 0");
+        assert_ne!(
+            aes67_ssrc_for("out-a", g1),
+            0,
+            "ssrc is never the ambiguous 0"
+        );
         // Deterministic for the same (id, group:port).
         assert_eq!(
             aes67_ssrc_for("out-a", g1),

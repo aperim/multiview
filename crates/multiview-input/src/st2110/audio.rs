@@ -157,11 +157,7 @@ impl Aes67AudioProducer {
     /// multiplexed stream on the same 5-tuple and is dropped (not decoded as PCM),
     /// exactly like a malformed payload — see [`next_audio`](Self::next_audio).
     #[must_use]
-    pub fn new(
-        source: Box<dyn PacketSource + Send>,
-        format: Aes3Format,
-        payload_type: u8,
-    ) -> Self {
+    pub fn new(source: Box<dyn PacketSource + Send>, format: Aes3Format, payload_type: u8) -> Self {
         Self {
             source,
             format,
