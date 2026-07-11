@@ -127,6 +127,17 @@ impl core::fmt::Debug for Aes67AudioProducer {
 
 #[cfg(feature = "st2110")]
 impl Aes67AudioProducer {
+    /// The maximum number of source packets a single [`next_audio`](Self::next_audio)
+    /// call pulls before yielding `Ok(None)`.
+    ///
+    /// A sample must be **bounded work**: a malformed-packet flood must never
+    /// make one poll loop until the source drains, which would delay the output
+    /// clock (invariant #1). After this many skipped units the call returns
+    /// `Ok(None)` and the caller re-polls next tick, so a flood is drained at up
+    /// to this rate per tick rather than all at once. Sized well above any real
+    /// per-tick packet count (a 1 ms AES67 stream delivers one unit per tick).
+    pub const MAX_PACKETS_PER_POLL: usize = 64;
+
     /// Build a producer over an application-supplied packet source, decoding
     /// against the SDP-negotiated [`Aes3Format`].
     #[must_use]
@@ -154,13 +165,20 @@ impl Aes67AudioProducer {
     /// stream (invariants #1 / #2). A gap against the last accepted RTP sequence
     /// sets [`Aes67AudioFrame::discontinuity`].
     ///
+    /// **Bounded work (inv #1):** the skip loop pulls at most
+    /// [`MAX_PACKETS_PER_POLL`] units per call. A malformed-packet flood is drained
+    /// at that rate per tick rather than all at once, so one call — whether it
+    /// runs on the output-sample side or a shared ingest thread — can never do
+    /// unbounded work and delay the output clock (panel F1). Budget exhausted
+    /// with nothing valid yields `Ok(None)`; the caller re-polls next tick.
+    ///
     /// # Errors
     ///
     /// Propagates a source fault (a socket error surfaced by the underlying
     /// [`PacketSource`](super::transport::PacketSource)); the supervisor applies
     /// reconnect backoff rather than crashing the engine.
     pub fn next_audio(&mut self) -> Result<Option<Aes67AudioFrame>> {
-        loop {
+        for _ in 0..Self::MAX_PACKETS_PER_POLL {
             let Some(packet) = self.source.poll_packet()? else {
                 return Ok(None);
             };
@@ -178,6 +196,9 @@ impl Aes67AudioProducer {
                 samples,
             }));
         }
+        // Budget exhausted on skipped units this tick: yield and re-poll next
+        // tick so a flood can never make one sample unbounded work (inv #1).
+        Ok(None)
     }
 
     /// Update the sequence watermark and report whether a forward gap (a lost
