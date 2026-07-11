@@ -142,7 +142,9 @@ impl<S: BuildHasher> RateLimiter<S> {
     }
 
     /// The number of buckets in the fixed table (never changes after
-    /// construction — the bounded-memory guarantee).
+    /// construction — the bounded-memory guarantee). Test-only: the accessor
+    /// exists to pin that the table does not grow.
+    #[cfg(test)]
     pub(crate) fn cell_count(&self) -> usize {
         self.cells.len()
     }
