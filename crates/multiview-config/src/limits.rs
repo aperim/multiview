@@ -229,11 +229,12 @@ impl ManagementLimits {
     /// # Errors
     /// [`ConfigError::Validation`] if the concurrency cap is zero or above the runtime
     /// ceiling, the header-read timeout is zero, either connection cap
-    /// (`max_connections` / `max_connections_per_ip`) is zero, the per-IP connection
-    /// cap exceeds the global one, or either token-bucket rate has a zero `burst` or
-    /// `refill_per_sec` — each would turn the `DoS` floor into a self-inflicted outage
-    /// (or, for a looser per-IP cap, a floor that never binds). Validated regardless of
-    /// `enabled` so a typo is caught even while the limits are temporarily off.
+    /// (`max_connections` / `max_connections_per_ip`) is zero, the global connection
+    /// cap is above the runtime ceiling, the per-IP connection cap exceeds the global
+    /// one, or either token-bucket rate has a zero `burst` or `refill_per_sec` — each
+    /// would turn the `DoS` floor into a self-inflicted outage (or, for a looser per-IP
+    /// cap, a floor that never binds). Validated regardless of `enabled` so a typo is
+    /// caught even while the limits are temporarily off.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.max_concurrent_requests == 0 {
             return Err(ConfigError::Validation(
@@ -262,6 +263,13 @@ impl ManagementLimits {
                  accept)"
                     .to_owned(),
             ));
+        }
+        if self.max_connections > MAX_CONCURRENT_REQUESTS_CEILING {
+            return Err(ConfigError::Validation(format!(
+                "control.limits.max_connections must be <= {MAX_CONCURRENT_REQUESTS_CEILING} (the \
+                 runtime Semaphore ceiling the accept-level connection cap installs into); a larger \
+                 value cannot be installed and must not be silently clamped to a different cap"
+            )));
         }
         if self.max_connections_per_ip == 0 {
             return Err(ConfigError::Validation(
