@@ -567,3 +567,90 @@ fn publish_window_reuses_a_bounded_pool_of_backing_buffers() {
         ptrs.len()
     );
 }
+
+/// **Invariant #1 (output-clock), the RTP-audio seam.** The number and shape of
+/// frames an output loop pulls from the store is a pure function of the OUTPUT
+/// clock — it is byte-for-byte IDENTICAL whether the RTP-audio producer (AES67 /
+/// ST 2110-30, ADR-0033 §3, via [`AudioStore::publish_at`]) delivers samples
+/// mapped wild-ahead of the read cursor, far-below-head (reordered), at a
+/// negative index, or **nothing at all**. The store is *sampled*; the RTP media
+/// clock can never pace, stall, or short the output. This is the store-side half
+/// of the AES67 RX inv #1 gate (the rebaser-side half — bounded, forward-only
+/// frame indices under wild/wrapped/absent timestamps — is pinned in
+/// `multiview-input`'s `rtp_audio_rebase.rs`).
+#[test]
+fn output_pull_tick_count_is_independent_of_the_rtp_feed() {
+    const TICKS: usize = 200;
+    /// 20 ms per output tick at 48 kHz — one bake block.
+    const FRAMES_PER_TICK: usize = 960;
+
+    // The identical output loop, run under one RTP feed. Returns
+    // (tick_count, total_frames_pulled). Each tick the producer publishes (or
+    // not) *before* the output reads — the sampled, off-clock hand-off.
+    let run = |feed: &dyn Fn(&AudioStore, usize)| -> (usize, usize) {
+        let store = AudioStore::new(stereo(), 96_000);
+        let mut ticks = 0usize;
+        let mut frames = 0usize;
+        for tick in 0..TICKS {
+            feed(&store, tick);
+            let block = store.read(FRAMES_PER_TICK);
+            // The output clock always gets a full, gap-free block — silence-fill,
+            // never a short read or a stall waiting on the producer.
+            assert_eq!(
+                block.frame_count(),
+                FRAMES_PER_TICK,
+                "the output read is never short — silence-fill, never a pace/stall"
+            );
+            assert_eq!(block.format(), stereo());
+            ticks += 1;
+            frames += block.frame_count();
+        }
+        (ticks, frames)
+    };
+
+    // No producer at all: the pure output-clock baseline.
+    let absent = run(&|_store, _tick| {});
+    // A media-clock timestamp mapping far AHEAD of the read cursor each tick.
+    let wild_ahead = run(&|store, tick| {
+        store
+            .publish_at(1_000_000 + (tick as i64) * 10_000, &ramp(0, 480))
+            .expect("publish_at never faults on a valid-format block");
+    });
+    // A reordered packet mapping far BELOW the head (bounded drop-oldest).
+    let far_below = run(&|store, tick| {
+        store
+            .publish_at((tick as i64) - 500_000, &ramp(0, 480))
+            .expect("publish_at never faults on a valid-format block");
+    });
+    // A negative index (clamped to frame 0), and an early burst.
+    let negative_and_early = run(&|store, tick| {
+        store
+            .publish_at(-12_345, &ramp(0, 480))
+            .expect("publish_at never faults on a valid-format block");
+        if tick == 0 {
+            store
+                .publish_at(0, &ramp(0, 4800))
+                .expect("publish_at never faults on a valid-format block");
+        }
+    });
+
+    // The output tick count AND the total frames pulled are identical across
+    // every feed — the RTP/media clock never paces the output (invariant #1).
+    assert_eq!(
+        absent,
+        (TICKS, TICKS * FRAMES_PER_TICK),
+        "the pure output clock pulls exactly TICKS full blocks"
+    );
+    assert_eq!(
+        wild_ahead, absent,
+        "a wild-ahead RTP feed does not change the output tick count"
+    );
+    assert_eq!(
+        far_below, absent,
+        "a far-below-head reordered RTP feed does not change the output tick count"
+    );
+    assert_eq!(
+        negative_and_early, absent,
+        "a negative-index / early-burst RTP feed does not change the output tick count"
+    );
+}
