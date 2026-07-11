@@ -22,9 +22,13 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU16;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::net::UdpSocket;
+// A tokio time source so the purge cadence and the session-age `now` share one
+// clock and are testable under `tokio::time` pause; in production this is real
+// monotonic time, identical in behaviour to `std::time::Instant`.
+use tokio::time::Instant;
 
 use crate::error::{Error, Result};
 
@@ -198,26 +202,37 @@ impl SapListener {
     pub async fn run(self) -> Result<()> {
         let mut buf = vec![0u8; MAX_SAP_DATAGRAM];
         let mut limiter = SapRateLimiter::new(self.accept_burst, self.accept_window);
-        let mut last_purge = self.started.elapsed();
+        // An INDEPENDENT purge timer, selected against the receive: expired
+        // sessions are reaped on their own cadence even when announcements have
+        // stopped and `recv_from` would otherwise park the loop forever (panel
+        // F3). Consume the immediate first tick so the cadence is steady. Purge
+        // stays off the per-datagram path, so a flood still cannot amplify the
+        // O(n) scan into per-datagram work (panel F4).
+        let mut purge_tick = tokio::time::interval(PURGE_INTERVAL);
+        purge_tick.tick().await;
         loop {
-            let n = match self.socket.recv_from(&mut buf).await {
-                Ok((n, _peer)) => n,
-                Err(e) => {
-                    tracing::debug!(error = %e, "sap listener socket ended; supervisor restarts");
-                    return Ok(());
+            tokio::select! {
+                received = self.socket.recv_from(&mut buf) => {
+                    let n = match received {
+                        Ok((n, _peer)) => n,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "sap listener socket ended; supervisor restarts");
+                            return Ok(());
+                        }
+                    };
+                    let now = self.started.elapsed();
+                    if let Some(bytes) = buf.get(..n) {
+                        // Rate-gated: a flood is dropped after the cheap recv,
+                        // before the expensive fold (panel F4).
+                        self.fold_datagram(bytes, now, &mut limiter);
+                    }
                 }
-            };
-            let now = self.started.elapsed();
-            if let Some(bytes) = buf.get(..n) {
-                // Rate-gated: a flood is dropped after the cheap recv, before the
-                // expensive fold (panel F4).
-                self.fold_datagram(bytes, now, &mut limiter);
-            }
-            // Purge on a cadence, not per-datagram — sessions age on the scale of
-            // seconds+, so a flood cannot amplify the O(n) purge scan (panel F4).
-            if now.saturating_sub(last_purge) >= PURGE_INTERVAL {
-                self.table.purge(now);
-                last_purge = now;
+                _ = purge_tick.tick() => {
+                    // Reap expired sessions regardless of datagram arrival (panel
+                    // F3). Off the output data plane — never paces the engine
+                    // (inv #1/#10).
+                    self.table.purge(self.started.elapsed());
+                }
             }
         }
     }
