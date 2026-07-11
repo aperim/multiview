@@ -571,6 +571,35 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_clock_wobble_does_not_double_refill() {
+        // A non-monotonic injected clock (100 s → 50 s → 100 s) must NOT credit the
+        // 50→100 span twice: the limiter accounts against the *latest* arrival time,
+        // so only genuine forward progress past the high-water mark replenishes.
+        // Capacity 1, refill 1 (one token per second).
+        let l = limiter(64, 1, 1);
+        let key = "203.0.113.9";
+        let t100 = 100 * SEC_NS;
+        let t50 = 50 * SEC_NS;
+
+        // Spend the one token at t = 100 s; the next at the same instant is limited.
+        assert_eq!(l.check(&key, t100), Decision::Allowed);
+        assert!(matches!(l.check(&key, t100), Decision::Limited { .. }));
+
+        // Clock jumps BACK to 50 s: still empty (no negative elapsed refill).
+        assert!(matches!(l.check(&key, t50), Decision::Limited { .. }));
+
+        // Clock returns to 100 s: this is NOT new time — the 50→100 span was already
+        // accounted the first time we reached 100 s. Re-crediting it here is the bug.
+        assert!(
+            matches!(l.check(&key, t100), Decision::Limited { .. }),
+            "a 100→50→100 clock wobble must not replenish a token twice"
+        );
+
+        // Only real forward progress past the high-water mark (101 s) accrues one.
+        assert_eq!(l.check(&key, t100 + SEC_NS), Decision::Allowed);
+    }
 }
 
 #[cfg(test)]
@@ -801,6 +830,77 @@ mod middleware_tests {
                 StatusCode::OK
             );
         }
+    }
+
+    /// A response body that never yields a frame and never ends — a stand-in for an
+    /// SSE / long-poll stream that stays open. It lets a test prove the concurrency
+    /// permit is tied to the BODY's lifetime (F1), not just the handler's return.
+    struct PendingBody;
+
+    impl http_body::Body for PendingBody {
+        type Data = axum::body::Bytes;
+        type Error = std::convert::Infallible;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Pending
+        }
+
+        fn is_end_stream(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn a_held_open_response_body_holds_its_permit_until_the_body_ends() {
+        // cap = 1. The handler returns IMMEDIATELY with a body that never completes
+        // (an SSE-like long-lived stream). The permit must ride the BODY, not just
+        // the handler: while the first response is held open (body undrained) a
+        // second request is shed `503`; dropping the first frees the permit.
+        let limiters = Arc::new(Limiters::from_config(&cfg(1, 256, 256)));
+        let app = Router::new()
+            .route(
+                "/stream",
+                get(|| async { axum::response::Response::new(Body::new(PendingBody)) }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                limiters,
+                concurrency_cap,
+            ));
+
+        // First request: hold the response object (never drain its still-open body).
+        let first = app
+            .clone()
+            .oneshot(Request::builder().uri("/stream").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // A second request while the first body is still open: no permit → `503`.
+        let second = app
+            .clone()
+            .oneshot(Request::builder().uri("/stream").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            second.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a held-open streaming body must keep its concurrency permit"
+        );
+
+        // End the first stream (drop the response ⇒ drop its body ⇒ release permit).
+        drop(first);
+        drop(second);
+
+        // A fresh request now finds the freed permit.
+        let third = app
+            .clone()
+            .oneshot(Request::builder().uri("/stream").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(third.status(), StatusCode::OK);
     }
 
     #[test]

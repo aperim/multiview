@@ -3131,6 +3131,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hmac 0.13.0",
+ "http-body 1.0.1",
  "http-body-util",
  "lettre",
  "mdns-sd",

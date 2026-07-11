@@ -204,6 +204,38 @@ mod tests {
     }
 
     #[test]
+    fn a_concurrency_cap_above_the_runtime_ceiling_is_rejected() {
+        // The runtime installs the cap into a `tokio::sync::Semaphore`, whose
+        // `MAX_PERMITS` ceiling is `usize::MAX >> 3`. A config value above it cannot
+        // be honoured — the old code silently clamped, so a valid-looking config
+        // produced a DIFFERENT cap than written. Fail closed at load instead (F4).
+        let runtime_ceiling = usize::MAX >> 3;
+        let limits = ManagementLimits {
+            max_concurrent_requests: runtime_ceiling + 1,
+            ..ManagementLimits::default()
+        };
+        assert!(
+            limits.validate().is_err(),
+            "a concurrency cap above the runtime Semaphore ceiling must fail config load, \
+             not be silently clamped to a different value"
+        );
+    }
+
+    #[test]
+    fn the_runtime_ceiling_itself_validates() {
+        // The boundary value (exactly the runtime ceiling) is honourable, so it must
+        // pass — only strictly-larger values are rejected.
+        let runtime_ceiling = usize::MAX >> 3;
+        let limits = ManagementLimits {
+            max_concurrent_requests: runtime_ceiling,
+            ..ManagementLimits::default()
+        };
+        limits
+            .validate()
+            .expect("a cap equal to the runtime ceiling is honourable and must validate");
+    }
+
+    #[test]
     fn an_absent_section_deserialises_to_the_secure_defaults() {
         // A `[control.limits]` written with no fields (or omitted entirely) fills
         // every knob from its default — the secure default posture.

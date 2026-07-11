@@ -205,6 +205,10 @@ tokio = { workspace = true, features = [
 ] }
 tower = { version = "0.5.3", features = ["util"] }
 http-body-util = "0.1.3"
+# Hand-roll a never-ending response body in the SEC-14 concurrency-cap tests, to
+# prove the permit is tied to the BODY's lifetime (a held-open SSE/stream), not
+# just the handler's return (already in the lock via axum).
+http-body = "1.0.1"
 # Property tests for the pure value-machines in this crate (the IS-07 tally/GPI
 # codec and the tally mirror/override registry).
 proptest = "1.11.0"
