@@ -26,9 +26,10 @@ hardware encoders) publish low-latency WebRTC streams via **WHIP — the WebRTC-
 Ingestion Protocol, RFC 9725**: one HTTP `POST` of an SDP offer, one `201` answer,
 then ICE/DTLS/SRTP media to the server. Multiview has the *pure* half of a WebRTC
 receive path already built and tested in
-`crates/multiview-input/src/webrtc/`: SDP offer/answer negotiation
-(`sdp.rs::SessionDescription::negotiate_answer`, H.264 + Opus codec selection), the
-session lifecycle state machine, the application-layer **`MediaEngine`** seam
+`crates/multiview-input/src/webrtc/`: the negotiated-media model (`sdp.rs` —
+H.264/Opus codecs, payload types, directions) and payload-type router (`route.rs`);
+SDP offer/answer negotiation itself is str0m's (see §10), not hand-rolled here. Plus
+the application-layer **`MediaEngine`** seam
 (`transport.rs` — the engine pulls decrypted RTP; the crate never links a
 socket/crypto stack), and the bounded, keyframe-gated **`H264Depacketizer`**
 (RFC 6184 single-NAL/STAP-A/FU-A, `MAX_REORDER_PACKETS = 128`,
