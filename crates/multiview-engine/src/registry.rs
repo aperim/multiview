@@ -277,7 +277,9 @@ impl<T> SourceRegistry<T> {
     where
         F: FnOnce(RequestedSize) -> Result<Arc<TileStore<T>>, E>,
     {
-        self.acquire_inner(key, requested, |req| factory(req).map(|store| (store, None)))
+        self.acquire_inner(key, requested, |req| {
+            factory(req).map(|store| (store, None))
+        })
     }
 
     /// Shared insert-or-bump for [`acquire`] and [`acquire_store`]. On the **first**
