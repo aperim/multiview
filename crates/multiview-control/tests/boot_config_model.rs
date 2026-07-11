@@ -3081,6 +3081,105 @@ async fn external_edit_after_promote_applies_regardless_of_mtime_granularity() {
     watch.stop();
 }
 
+/// Regression (task #7, the real production fix): the config watcher must detect
+/// a legitimate same-length IN-PLACE rewrite — a shell `>` redirect, a
+/// non-atomic editor, or a config-management tool rewriting the file in place —
+/// even when it lands within the filesystem's mtime granularity so its `len`,
+/// `mtime`, and `inode` ALL alias the already-applied write. This is the defect
+/// behind the original flake: the watcher's fingerprint was stat-only
+/// (len+mtime+inode) and the "already applied" short-circuit dropped such an
+/// edit WITHOUT ever reading its content. The fix folds a hash of the file's
+/// bytes into the fingerprint, so a same-length in-place content change is still
+/// a distinct fingerprint and hot-applies.
+///
+/// The stimulus is the aliased worst case, forced deterministically (not left to
+/// the tmpfs odds): an in-place `std::fs::write` (same inode by construction), a
+/// same-WIDTH colour swap (same length), and `force_mtime` pinning the edit's
+/// mtime equal to the adopted write's. Only the file's BYTES differ — every stat
+/// axis aliases. Fails (`applied_count` stays 0) against a stat-only fingerprint;
+/// passes once the content hash lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_in_place_same_length_edit_after_promote_still_applies() {
+    let mut r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        options,
+    );
+    settle_initial(&mut poll, &r.state).await;
+
+    // Promote: the watcher adopts (not applies) its own write.
+    recolor_in_a(&r, "#c0c0c0").await;
+    let _ = r.commands.try_drain();
+    let resp = send(
+        &r.router,
+        post_idem("/api/v1/config/promote", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    drive_polls(&mut poll, 4).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        0,
+        "the promote itself must not count as a file-watch apply"
+    );
+
+    // The adopted write's mtime + inode — the aliasing target.
+    let adopted_meta = std::fs::metadata(&r.boot_path).expect("stat the adopted boot file");
+    let adopted_mtime = adopted_meta.modified().expect("adopted boot file mtime");
+    #[cfg(unix)]
+    let adopted_inode = {
+        use std::os::unix::fs::MetadataExt as _;
+        adopted_meta.ino()
+    };
+
+    // A genuine external edit written IN PLACE (same inode), a same-width colour
+    // swap (same length) — the path an atomic-rename editor would NOT take but a
+    // shell redirect or config-management rewrite does.
+    let promoted = std::fs::read_to_string(&r.boot_path).expect("read the promoted file");
+    let edited = promoted.replace("#c0c0c0", "#101418");
+    assert_eq!(
+        edited.len(),
+        promoted.len(),
+        "the colour swap must be the same length to exercise the aliasing case"
+    );
+    std::fs::write(&r.boot_path, &edited).expect("rewrite the boot file in place");
+    // Force the worst case the coarse fs granularity produces by accident: pin
+    // the edit's mtime to the adopted write's, so len + mtime + inode ALL alias
+    // and only the bytes differ.
+    force_mtime(&r.boot_path, adopted_mtime);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let edited_inode = std::fs::metadata(&r.boot_path)
+            .expect("stat the in-place edit")
+            .ino();
+        assert_eq!(
+            edited_inode, adopted_inode,
+            "an in-place rewrite must reuse the inode — the aliasing precondition"
+        );
+    }
+
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
+        "a same-length in-place edit whose len+mtime+inode alias the adopted \
+         write must still hot-apply — the watcher fingerprints content, not just \
+         stat (task #7)"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#101418"),
+        "the store mirrors the applied in-place edit"
+    );
+    watch.stop();
+}
+
 /// A boot document carrying two equal-`z` overlays (the reorder fixture).
 const BOOT_DOC_TWO_OVERLAYS: &str = r##"schema_version = 1
 [canvas]
