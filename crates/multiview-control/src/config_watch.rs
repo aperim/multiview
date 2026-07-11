@@ -68,6 +68,14 @@ pub struct WatchOptions {
     /// `Arc<Mutex<Option<…>>>` only so `WatchOptions` stays `Clone` — the
     /// production path never constructs it and never pays for it.
     manual_poll: Option<Arc<std::sync::Mutex<Option<PollGate>>>>,
+    /// A one-shot slot ([`WatchOptions::with_post_probe_interpose`]) holding
+    /// content the loop writes to the watched path exactly once, right after a
+    /// successful [`probe`] and BEFORE the settled read/apply. It exists only so
+    /// a test can interpose a concurrent external writer precisely in the
+    /// probe→apply window (the TOCTOU the content fingerprint must be immune
+    /// to). `None` in production — the watcher writes the config file on NO
+    /// path; the slot stays untaken and the loop never touches the file.
+    interpose: Option<Arc<std::sync::Mutex<Option<Vec<u8>>>>>,
 }
 
 impl Default for WatchOptions {
@@ -77,6 +85,7 @@ impl Default for WatchOptions {
             initial_observed: None,
             handle: None,
             manual_poll: None,
+            interpose: None,
         }
     }
 }
@@ -133,6 +142,55 @@ impl WatchOptions {
         let (manual, gate) = manual_poll_pair();
         self.manual_poll = Some(Arc::new(std::sync::Mutex::new(Some(gate))));
         (self, manual)
+    }
+
+    /// Install the **post-probe interpose** test seam and return its handle.
+    /// Between two [`ManualPoll::poll_once`]s, call
+    /// [`PostProbeInterpose::interpose_next`] to schedule a single write the
+    /// loop performs on its NEXT poll, right after [`probe`] and BEFORE the
+    /// settled read/apply — modelling an external writer that races the poll
+    /// exactly in the probe→apply window. It exists to prove the applied
+    /// fingerprint always matches the content actually applied: a probe-then-
+    /// reread would apply the racer's bytes yet record the probe's fingerprint.
+    ///
+    /// Production never installs one; the watcher writes the config file on no
+    /// path. Composes with [`with_manual_poll`](Self::with_manual_poll): the
+    /// interposed write lands mid-poll, so a plain `poll_once` still drives it.
+    #[must_use]
+    pub fn with_post_probe_interpose(mut self) -> (Self, PostProbeInterpose) {
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        self.interpose = Some(Arc::clone(&slot));
+        (self, PostProbeInterpose { slot })
+    }
+}
+
+/// The test-side handle of the post-probe interpose seam
+/// ([`WatchOptions::with_post_probe_interpose`]). Held by the test; a cheap
+/// `Arc` clone shares the one-shot slot with the loop.
+#[derive(Debug, Clone)]
+pub struct PostProbeInterpose {
+    /// The shared one-shot slot the loop drains post-probe (see
+    /// [`WatchOptions::interpose`]).
+    slot: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+}
+
+impl PostProbeInterpose {
+    /// Schedule `content` to be written to the watched path once, on the loop's
+    /// next poll, in the probe→apply window. One-shot: the loop takes and
+    /// clears it, so it fires on exactly the next poll and no later one.
+    pub fn interpose_next(&self, content: &str) {
+        *lock_interpose(&self.slot) = Some(content.as_bytes().to_vec());
+    }
+}
+
+/// Lock the interpose one-shot slot, recovering from a poisoned lock (a
+/// panicked test thread must not wedge the watcher).
+fn lock_interpose(
+    slot: &std::sync::Mutex<Option<Vec<u8>>>,
+) -> std::sync::MutexGuard<'_, Option<Vec<u8>>> {
+    match slot.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -569,6 +627,28 @@ async fn probe(path: &Path) -> Option<Fingerprint> {
     })
 }
 
+/// Fire the post-probe interpose test seam, if one is installed: write the
+/// scheduled bytes to the watched path once (draining the one-shot slot). This
+/// models a concurrent external writer landing between a poll's fingerprint
+/// probe and its settled read/apply. Production installs no slot, so this is a
+/// single un-taken lock and an immediate return — the watcher writes the config
+/// file on no other path.
+async fn maybe_interpose(options: &WatchOptions, path: &Path) {
+    let Some(slot) = options.interpose.as_ref() else {
+        return;
+    };
+    let Some(bytes) = lock_interpose(slot).take() else {
+        return;
+    };
+    if let Err(error) = tokio::fs::write(path, bytes).await {
+        tracing::error!(
+            path = %path.display(),
+            %error,
+            "post-probe interpose write failed (test seam)"
+        );
+    }
+}
+
 /// The poll loop: debounce (a new fingerprint must be observed on two
 /// consecutive polls), suppress expected writes, and hand a settled change to
 /// [`apply_change`].
@@ -649,6 +729,11 @@ async fn watch_loop(
         };
         missing_polls = 0;
         missing_reported = false;
+        // TEST SEAM (never armed in production): interpose a concurrent external
+        // writer here — after this poll's fingerprint probe, before its settled
+        // read/apply — to exercise the probe→apply TOCTOU. A no-op when the slot
+        // is empty, which it always is outside tests.
+        maybe_interpose(&options, &path).await;
         if applied.as_ref() == Some(&now) {
             candidate = None;
             // The file is present at the already-applied content, so any

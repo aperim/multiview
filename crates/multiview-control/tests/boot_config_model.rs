@@ -3177,6 +3177,85 @@ async fn an_in_place_same_length_edit_after_promote_still_applies() {
     watch.stop();
 }
 
+/// RED→GREEN (task #7, cross-vendor finding 1 — the probe-vs-settled TOCTOU):
+/// the fingerprint the watcher records as `applied` MUST be the fingerprint of
+/// the content it actually applied. The poll probes the file (folding a content
+/// hash into the fingerprint), debounces, and — on the settling poll — applies.
+/// If a concurrent writer lands BETWEEN this poll's probe and its settled read,
+/// a probe-then-reread applies the racer's bytes (B) yet records the PROBE's
+/// fingerprint (A) — an incoherent `applied` that would then silently drop a
+/// later edit restoring A (its fingerprint aliases the mis-recorded `applied`).
+///
+/// The [`WatchOptions::with_post_probe_interpose`] seam interposes exactly that
+/// concurrent write in the probe→apply window, deterministically. The applied
+/// content must be the PROBED snapshot A (whose fingerprint is what gets
+/// recorded); the racer B is not lost — it is a fresh fingerprint picked up on a
+/// later poll. Since `applied` is recorded as A's fingerprint in BOTH the buggy
+/// and fixed builds, asserting the store holds A is exactly asserting
+/// `applied == fingerprint-of-applied-content`: the reread build stores B and
+/// FAILS; the single-read build stores A and passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_racing_the_probe_never_desyncs_the_applied_fingerprint() {
+    let mut r = rig(BOOT_DOC);
+    let (options, interpose) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_post_probe_interpose();
+    let (options, mut poll) = options.with_manual_poll();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        options,
+    );
+    settle_initial(&mut poll, &r.state).await;
+
+    // The edit we expect applied (A): a same-width colour swap.
+    let doc_a = BOOT_DOC.replace("#101418", "#aabbcc");
+    external_edit(&r.boot_path, &doc_a);
+    // Poll 1 registers A's fingerprint as the debounce candidate (no apply yet).
+    assert!(poll.poll_once().await, "poll 1: candidate A registered");
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        0,
+        "one poll only registers the candidate; the debounce has not settled"
+    );
+
+    // Arm a concurrent writer (B, same width) to land in the probe→apply window
+    // of the NEXT poll: the loop reads A for its fingerprint, THEN B appears on
+    // disk, THEN the settled read/apply runs. Poll 2 crosses the debounce.
+    let doc_b = BOOT_DOC.replace("#101418", "#ddeeff");
+    interpose.interpose_next(&doc_b);
+    assert!(
+        poll.poll_once().await,
+        "poll 2: A settles while B races the reread"
+    );
+
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
+        "the settled edit applies exactly once"
+    );
+    // The applied content must be the probed snapshot A — the fingerprint the
+    // loop records as `applied` is A's, so applying B would desync it. A reread
+    // records A's fingerprint but stores B (the defect); the single-read build
+    // stores A.
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#aabbcc"),
+        "the applied content matches the recorded fingerprint (A), not the racer B"
+    );
+    let drained = r.commands.try_drain();
+    assert!(
+        drained.iter().any(|c| matches!(
+            c,
+            Command::UpsertSource { source, .. } if source.id == "in_a"
+        )),
+        "the settled edit rides the live machinery, got {drained:?}"
+    );
+
+    watch.stop();
+}
+
 /// A boot document carrying two equal-`z` overlays (the reorder fixture).
 const BOOT_DOC_TWO_OVERLAYS: &str = r##"schema_version = 1
 [canvas]
