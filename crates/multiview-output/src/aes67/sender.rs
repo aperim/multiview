@@ -17,6 +17,8 @@
 //! hardware follow-on; this software sender uses a free-running counter, which
 //! preserves the continuous cadence and never paces the engine.)
 
+use std::sync::{Arc, Mutex};
+
 use multiview_audio::AudioBlock;
 
 use crate::display::audio::AudioFifo;
@@ -28,14 +30,76 @@ use super::packet::{build_rtp_header, encode_pcm, PcmDepth, RTP_FIXED_HEADER_LEN
 /// frames are dropped so a slow send timer never grows memory (invariant #10).
 pub const DEFAULT_SEND_CAPACITY_FRAMES: usize = 4_800;
 
-/// A bounded drop-oldest AES67 / ST 2110-30 program-audio sender.
+/// The bounded drop-oldest send FIFO shared by an [`Aes67Sender`] (the serve
+/// side) and its [`Aes67SenderHandle`] (the producer side).
 ///
-/// Construct with [`Aes67Sender::new`], feed baked program blocks with
-/// [`push`](Aes67Sender::push), and drain one continuous RTP packet per
-/// packet-time tick with [`next_packet`](Aes67Sender::next_packet).
+/// Both halves reach it via [`try_lock`](Mutex::try_lock), never a blocking
+/// `lock`: the lock is held only for the O(samples) in-memory push/drain (never
+/// across a socket call), so genuine contention is nanosecond-scale, and on
+/// contention the bake push sheds while the serve drain silence-fills — neither
+/// half can ever block the other (panel F3, inv #1 / #10).
+type SharedFifo = Arc<Mutex<AudioFifo>>;
+
+/// The **producer half** of an [`Aes67Sender`]: a cheap, cloneable handle the
+/// engine bake consumer holds to feed baked program blocks into the shared send
+/// FIFO with [`push`](Self::push).
+///
+/// It shares the FIFO with the serve-side [`Aes67Sender`] through an `Arc`, so
+/// the bake push (`&self`) and the send/serve loop (`&mut Aes67Sender`) run
+/// concurrently on their independent clocks with **no `&mut` contention** — the
+/// handoff primitive the pipeline wires bake→sender with (panel F3). `push`
+/// never blocks the engine (inv #10).
+#[derive(Debug, Clone)]
+pub struct Aes67SenderHandle {
+    fifo: SharedFifo,
+    channels: usize,
+}
+
+impl Aes67SenderHandle {
+    /// Push one baked program block into the shared send FIFO — a bounded,
+    /// drop-oldest copy that never blocks the engine bake (inv #10).
+    ///
+    /// A block whose channel count does not match the sender's is dropped rather
+    /// than mis-interleaved (the pipeline constructs the sender with the program
+    /// bus's channel count, so this is a defensive guard, not the steady path).
+    /// On the rare lock contention the block is shed rather than waited on, so
+    /// the bake side is never back-pressured by the send loop.
+    pub fn push(&self, block: &AudioBlock) {
+        if block.format().channel_count() != self.channels {
+            return;
+        }
+        if let Ok(mut fifo) = self.fifo.try_lock() {
+            fifo.push(block.interleaved());
+        }
+    }
+
+    /// Current FIFO fill in frames (per channel). `0` on the rare lock
+    /// contention (the caller re-reads); telemetry, never blocks.
+    #[must_use]
+    pub fn fill_frames(&self) -> usize {
+        self.fifo.try_lock().map_or(0, |fifo| fifo.fill_frames())
+    }
+
+    /// Total frames dropped to drop-oldest overflow since construction. `0` on
+    /// the rare lock contention; telemetry, never blocks.
+    #[must_use]
+    pub fn dropped_frames(&self) -> u64 {
+        self.fifo.try_lock().map_or(0, |fifo| fifo.dropped_frames())
+    }
+}
+
+/// A bounded drop-oldest AES67 / ST 2110-30 program-audio sender (the **serve
+/// half**).
+///
+/// Construct with [`Aes67Sender::new`], take a producer [`handle`](Aes67Sender::handle)
+/// for the engine bake side to feed baked program blocks through, and drain one
+/// continuous RTP packet per packet-time tick with
+/// [`next_packet`](Aes67Sender::next_packet). The handle and this serve half
+/// share the send FIFO via an `Arc`, so the bake push and the send loop run
+/// concurrently without `&mut` contention (panel F3).
 #[derive(Debug)]
 pub struct Aes67Sender {
-    fifo: AudioFifo,
+    fifo: SharedFifo,
     channels: usize,
     depth: PcmDepth,
     payload_type: u8,
@@ -69,7 +133,7 @@ impl Aes67Sender {
         let frames_per_packet = frames_per_packet.max(1);
         let capacity_frames = capacity_frames.max(frames_per_packet);
         Self {
-            fifo: AudioFifo::new(capacity_frames, channels),
+            fifo: Arc::new(Mutex::new(AudioFifo::new(capacity_frames, channels))),
             channels,
             depth,
             payload_type,
@@ -82,14 +146,21 @@ impl Aes67Sender {
         }
     }
 
-    /// Push one baked program block into the send FIFO — a bounded, drop-oldest
-    /// copy that never blocks (invariant #10). A block whose channel count does
-    /// not match the sender's is dropped rather than mis-interleaved (the
-    /// pipeline constructs the sender with the program bus's channel count, so
-    /// this is a defensive guard, not the steady path).
-    pub fn push(&mut self, block: &AudioBlock) {
-        if block.format().channel_count() == self.channels {
-            self.fifo.push(block.interleaved());
+    /// A cheap, cloneable producer [`handle`](Aes67SenderHandle) sharing this
+    /// sender's send FIFO.
+    ///
+    /// The engine bake consumer holds the handle and calls
+    /// [`push`](Aes67SenderHandle::push) (`&self`); the send task holds this
+    /// `Aes67Sender` and drains via [`next_packet`](Self::next_packet)
+    /// (`&mut self`). The two run concurrently on their independent clocks with
+    /// no `&mut` contention — this is the handoff primitive the pipeline wires
+    /// bake→sender with (panel F3, inv #10). Multiple handles may be taken; each
+    /// clones the shared-FIFO `Arc`.
+    #[must_use]
+    pub fn handle(&self) -> Aes67SenderHandle {
+        Aes67SenderHandle {
+            fifo: Arc::clone(&self.fifo),
+            channels: self.channels,
         }
     }
 
@@ -103,10 +174,18 @@ impl Aes67Sender {
     /// driven by the send timer, never by the input feed.
     pub fn next_packet(&mut self) -> Vec<u8> {
         let want_samples = self.frames_per_packet.saturating_mul(self.channels);
+        // Silence baseline first, so a skipped drain (lock contention) emits
+        // silence, never stale samples from the previous packet.
+        self.scratch.clear();
         self.scratch.resize(want_samples, 0.0);
-        // `pop_into` writes exactly `want_samples` values: real samples where the
-        // FIFO has them, silence (0.0) for any underrun tail.
-        let _real = self.fifo.pop_into(&mut self.scratch);
+        // Drain via `try_lock`, never a blocking `lock`: the send loop must never
+        // wait on the engine bake side holding the shared FIFO (inv #10). On
+        // contention the drain is skipped and this tick emits silence — still one
+        // full, continuous marker=0 packet (inv #1). `pop_into` overwrites every
+        // slot it can with real samples, leaving the rest silence.
+        if let Ok(mut fifo) = self.fifo.try_lock() {
+            let _real = fifo.pop_into(&mut self.scratch);
+        }
 
         let payload = encode_pcm(&self.scratch, self.depth);
         let header = build_rtp_header(self.payload_type, self.sequence, self.timestamp, self.ssrc);
@@ -120,17 +199,18 @@ impl Aes67Sender {
         packet
     }
 
-    /// Current FIFO fill in frames (per channel).
+    /// Current FIFO fill in frames (per channel). `0` on the rare lock
+    /// contention; telemetry, never blocks the serve loop.
     #[must_use]
     pub fn fill_frames(&self) -> usize {
-        self.fifo.fill_frames()
+        self.fifo.try_lock().map_or(0, |fifo| fifo.fill_frames())
     }
 
     /// Total frames dropped to drop-oldest overflow since construction
-    /// (telemetry / test observability).
+    /// (telemetry / test observability). `0` on the rare lock contention.
     #[must_use]
     pub fn dropped_frames(&self) -> u64 {
-        self.fifo.dropped_frames()
+        self.fifo.try_lock().map_or(0, |fifo| fifo.dropped_frames())
     }
 
     /// The next RTP sequence number to be emitted.

@@ -35,4 +35,4 @@ pub mod sender;
 pub mod transport;
 
 pub use packet::{build_rtp_header, encode_pcm, PcmDepth, RTP_FIXED_HEADER_LEN, RTP_VERSION};
-pub use sender::{Aes67Sender, DEFAULT_SEND_CAPACITY_FRAMES};
+pub use sender::{Aes67Sender, Aes67SenderHandle, DEFAULT_SEND_CAPACITY_FRAMES};

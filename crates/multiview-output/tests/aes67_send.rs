@@ -43,7 +43,7 @@ fn ramp_block() -> (Vec<f32>, AudioBlock) {
 fn sender_payload_roundtrips_through_the_v30_decoder() {
     let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FRAMES_PER_PACKET, 4_800);
     let (samples, block) = ramp_block();
-    sender.push(&block);
+    sender.handle().push(&block);
 
     let packet = sender.next_packet();
     let rtp = RtpPacket::parse(&packet).expect("a valid RTP packet");
@@ -155,12 +155,13 @@ fn push_is_bounded_drop_oldest_and_never_back_pressures() {
     // oldest and accounted (invariants #10 / #5). This is the "sender can never
     // back-pressure the program bus" property.
     let capacity = 96; // frames
-    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 96, 7, FRAMES_PER_PACKET, capacity);
+    let sender = Aes67Sender::new(2, PcmDepth::L24, 96, 7, FRAMES_PER_PACKET, capacity);
+    let handle = sender.handle();
     let (_samples, block) = ramp_block(); // 48 frames per push
 
     for _ in 0..10_000 {
         // If push blocked or grew unbounded this loop would hang / OOM.
-        sender.push(&block);
+        handle.push(&block);
         assert!(
             sender.fill_frames() <= capacity,
             "the send FIFO never grows past capacity (never back-pressures)"
@@ -178,12 +179,13 @@ fn sender_cadence_is_independent_of_the_program_feed() {
     // the emitted packet count + sequence progression is identical — the RTP
     // media clock is driven by the send timer, never paced by the input feed
     // (invariant #1).
-    let drain = |feed: &dyn Fn(&mut Aes67Sender, usize)| -> (usize, u16) {
+    let drain = |feed: &dyn Fn(&Aes67SenderHandle, usize)| -> (usize, u16) {
         let mut sender = Aes67Sender::new(2, PcmDepth::L24, 96, 9, FRAMES_PER_PACKET, 4_800);
+        let handle = sender.handle();
         let mut count = 0usize;
         let mut last_seq = 0u16;
         for tick in 0..64 {
-            feed(&mut sender, tick);
+            feed(&handle, tick);
             let packet = sender.next_packet();
             let rtp = RtpPacket::parse(&packet).expect("valid RTP");
             assert!(!rtp.header.marker);
@@ -194,11 +196,11 @@ fn sender_cadence_is_independent_of_the_program_feed() {
     };
 
     let (_samples, block) = ramp_block();
-    let absent = drain(&|_s, _t| {});
-    let flooded = drain(&|s, _t| {
+    let absent = drain(&|_h, _t| {});
+    let flooded = drain(&|h, _t| {
         // A wild over-feed each tick.
         for _ in 0..50 {
-            s.push(&block);
+            h.push(&block);
         }
     });
 

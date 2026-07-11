@@ -65,8 +65,9 @@ async fn aes67_send_loopback_roundtrips_over_a_real_udp_socket() {
     )
     .unwrap();
     let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x0BAD_F00D, FRAMES_PER_PACKET, 4_800);
+    let handle = sender.handle();
     for _ in 0..PACKETS {
-        sender.push(&block);
+        handle.push(&block);
     }
 
     // Drive the real send loop; `pending()` keeps it running until we abort it
