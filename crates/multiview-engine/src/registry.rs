@@ -620,19 +620,37 @@ const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
 /// Poll cadence while grace-joining the teardown workers on shutdown.
 const TEARDOWN_POLL: Duration = Duration::from_millis(1);
 
-/// A single reserved source teardown: the owned decode actor plus an RAII guard on the
+/// RAII guard for exactly **one** reserved [`SourceRegistry::pending_teardowns`] slot: its
+/// `Drop` decrements the observable once. Created only by a **successful** [`reserve_slot`]
+/// (via [`Teardown::reserve`]), so the increment/decrement pair is balanced **by
+/// construction** and the decrement is drop glue that runs unconditionally — whether the
+/// teardown completes on a worker, is shed, or unwinds through [`Teardown::drop`] (RP1).
+struct SlotGuard {
+    pending: Arc<AtomicUsize>,
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.pending.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// A single reserved source teardown: the owned decode actor plus an RAII [`SlotGuard`] on the
 /// [`SourceRegistry::pending_teardowns`] observable.
 ///
 /// Constructed via a **bounded reservation** ([`Teardown::reserve`]) that increments the
-/// observable only within the `TEARDOWN_CAPACITY` bound; its `Drop` decrements it exactly
-/// once — so the count is correct whether the teardown completes on a worker, is shed on a
-/// full queue, or **unwinds because `shutdown()` panicked** (panic-safe). If the actor is
+/// observable only within the `TEARDOWN_CAPACITY` bound; the [`SlotGuard`] decrements it
+/// exactly once — so the count is correct whether the teardown completes on a worker, is shed
+/// on a full queue, or **unwinds because `shutdown()` panicked** (panic-safe). If the actor is
 /// still present when the guard drops (the shed / buffer-drop path — [`run`](Teardown::run)
 /// was never called) it is **signalled to terminate** structurally
-/// ([`request_stop`](SourceActor::request_stop)) then detached, non-blockingly.
+/// ([`request_stop`](SourceActor::request_stop)) then detached, non-blockingly and **contained**
+/// (a panicking actor cannot unwind into the releasing engine thread — RP1).
 struct Teardown {
     actor: Option<Box<dyn SourceActor>>,
-    pending: Arc<AtomicUsize>,
+    /// The reserved-slot guard. Declared **last** so it drops **after** the signal-and-detach
+    /// in [`Teardown::drop`] — the decrement is the final, unconditional act (RP1).
+    _slot: SlotGuard,
 }
 
 impl Teardown {
@@ -648,7 +666,9 @@ impl Teardown {
         if reserve_slot(pending) {
             Ok(Self {
                 actor: Some(actor),
-                pending: Arc::clone(pending),
+                _slot: SlotGuard {
+                    pending: Arc::clone(pending),
+                },
             })
         } else {
             Err(actor)
@@ -671,14 +691,15 @@ impl Teardown {
 
 impl Drop for Teardown {
     fn drop(&mut self) {
-        // Shed / buffer-drop path: if `run` never took the actor it is still here. Signal
-        // its decode to terminate structurally then detach — NON-BLOCKING (never a join).
-        // Then decrement the observable exactly once — panic-safe: this runs even if `run`'s
-        // `shutdown()` unwound.
+        // Shed / buffer-drop path: if `run` never took the actor it is still here. Signal its
+        // decode to terminate structurally then detach — NON-BLOCKING (never a join) and
+        // CONTAINED: `signal_and_detach` catches a panicking actor so it cannot unwind into the
+        // releasing engine thread (RP1). The `_slot` guard then decrements the observable
+        // exactly once as it drops (after this body) — panic-safe even if `run`'s `shutdown()`
+        // unwound through here.
         if let Some(actor) = self.actor.take() {
             signal_and_detach(actor);
         }
-        self.pending.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -755,9 +776,20 @@ fn reserve_slot(pending: &AtomicUsize) -> bool {
 /// ([`request_stop`](SourceActor::request_stop)) then detach by dropping it. Non-blocking on
 /// any thread — never a join. Promptness of the decode thread's actual exit is the
 /// implementor's bounded-I/O contract (a real actor must make its I/O interruptible).
+///
+/// A shed runs on the **releasing thread** (`SourceHandle::drop` / a buffer-drop on
+/// `SourceRegistry::shutdown`), which is **not** the worker's [`catch_unwind`](std::panic::catch_unwind).
+/// So the signal-and-detach is contained HERE: a panicking `request_stop` or actor `Drop`
+/// (which the trait contract forbids, but which must never corrupt the engine) is caught so it
+/// cannot unwind into the releasing engine thread (inv #10) — RP1. `AssertUnwindSafe` is sound
+/// because the actor is consumed either way: nothing broken is observed across the catch. (A
+/// *double* panic — the actor's `Drop` panicking while `request_stop` already unwinds — still
+/// aborts; a Rust fundamental the trait contract forbids.)
 fn signal_and_detach(actor: Box<dyn SourceActor>) {
-    actor.request_stop();
-    drop(actor);
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(move || {
+        actor.request_stop();
+        drop(actor);
+    }));
 }
 
 /// Lock a mutex, recovering the guard if a previous holder panicked. The registry
