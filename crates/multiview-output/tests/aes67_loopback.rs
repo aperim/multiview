@@ -64,7 +64,8 @@ async fn aes67_send_loopback_roundtrips_over_a_real_udp_socket() {
         samples.clone(),
     )
     .unwrap();
-    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x0BAD_F00D, FRAMES_PER_PACKET, 4_800);
+    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x0BAD_F00D, FRAMES_PER_PACKET, 4_800)
+        .expect("valid aes67 config");
     let handle = sender.handle();
     for _ in 0..PACKETS {
         handle.push(&block);

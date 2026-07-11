@@ -30,6 +30,78 @@ use super::packet::{build_rtp_header, encode_pcm, PcmDepth, RTP_FIXED_HEADER_LEN
 /// frames are dropped so a slow send timer never grows memory (invariant #10).
 pub const DEFAULT_SEND_CAPACITY_FRAMES: usize = 4_800;
 
+/// The maximum channel count an [`Aes67Sender`] accepts. Generous for AES67 /
+/// ST 2110-30 (real streams carry 1–8 channels; this covers high-channel
+/// professional layouts) while rejecting an absurd count that would balloon the
+/// per-packet payload and FIFO allocation.
+pub const MAX_CHANNELS: usize = 64;
+
+/// The maximum `frames_per_packet` (ptime in sample groups) an [`Aes67Sender`]
+/// accepts — 100 ms at 48 kHz, far above any real AES67 ptime (125 µs … 4 ms).
+/// It bounds the RTP timestamp increment well inside `u32` and, with
+/// [`MAX_PACKET_PAYLOAD_BYTES`], keeps the per-packet payload sane; the payload
+/// cap is the binding guard for realistic channel counts.
+pub const MAX_FRAMES_PER_PACKET: usize = 4_800;
+
+/// The maximum send-FIFO capacity in frames an [`Aes67Sender`] accepts — 1 s at
+/// 48 kHz. Bounds the up-front FIFO allocation (`capacity × channels` floats) so
+/// an extreme config cannot request a multi-gigabyte buffer.
+pub const MAX_CAPACITY_FRAMES: usize = 48_000;
+
+/// The maximum RTP payload (PCM bytes, excluding the 12-byte header) an
+/// [`Aes67Sender`] will emit per packet: one standard 1500-byte MTU minus the
+/// IPv6 + UDP + RTP headers (40 + 8 + 12). AES67 audio packets ride a single
+/// datagram and must **not** IP-fragment for real-time delivery, so a
+/// `frames_per_packet × channels × depth` product above this is rejected at
+/// construction (fail-closed) rather than sent oversized.
+pub const MAX_PACKET_PAYLOAD_BYTES: usize = 1_440;
+
+/// Why an [`Aes67Sender`] could not be constructed from the requested
+/// configuration (panel F5): a bound was exceeded, so construction fails closed
+/// rather than clamping, over-allocating, or emitting an oversized packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Aes67ConfigError {
+    /// The channel count was `0` or above [`MAX_CHANNELS`].
+    #[error("aes67 sender channel count {got} is outside 1..={max}")]
+    Channels {
+        /// The requested channel count.
+        got: usize,
+        /// The enforced maximum ([`MAX_CHANNELS`]).
+        max: usize,
+    },
+    /// `frames_per_packet` (the ptime in sample groups) was `0` or above
+    /// [`MAX_FRAMES_PER_PACKET`].
+    #[error("aes67 sender frames-per-packet {got} is outside 1..={max}")]
+    FramesPerPacket {
+        /// The requested frames-per-packet.
+        got: usize,
+        /// The enforced maximum ([`MAX_FRAMES_PER_PACKET`]).
+        max: usize,
+    },
+    /// The requested send-FIFO capacity exceeded [`MAX_CAPACITY_FRAMES`].
+    #[error("aes67 sender capacity {got} frames exceeds the {max}-frame cap")]
+    Capacity {
+        /// The requested capacity in frames.
+        got: usize,
+        /// The enforced maximum ([`MAX_CAPACITY_FRAMES`]).
+        max: usize,
+    },
+    /// The `frames_per_packet × channels × depth` product would exceed
+    /// [`MAX_PACKET_PAYLOAD_BYTES`] — an oversized UDP datagram that would
+    /// IP-fragment.
+    #[error(
+        "aes67 sender packet payload {got} bytes exceeds the {max}-byte cap \
+         (oversized UDP datagram; would IP-fragment)"
+    )]
+    PayloadTooLarge {
+        /// The per-packet payload the configuration would produce.
+        got: usize,
+        /// The enforced maximum ([`MAX_PACKET_PAYLOAD_BYTES`]).
+        max: usize,
+    },
+}
+
 /// The bounded drop-oldest send FIFO shared by an [`Aes67Sender`] (the serve
 /// side) and its [`Aes67SenderHandle`] (the producer side).
 ///
@@ -118,9 +190,20 @@ pub struct Aes67Sender {
 impl Aes67Sender {
     /// Build a sender for `channels`-channel interleaved audio at `depth`,
     /// emitting `frames_per_packet` frames per packet on RTP payload type
-    /// `payload_type` with the constant `ssrc`, buffering up to
-    /// `capacity_frames` frames (clamped to at least one packet).
-    #[must_use]
+    /// `payload_type` with the constant `ssrc`, buffering up to `capacity_frames`
+    /// frames (raised to at least one packet).
+    ///
+    /// **Fallible / fail-closed (panel F5):** the configuration is validated
+    /// against [`MAX_CHANNELS`], `1..=`[`MAX_FRAMES_PER_PACKET`],
+    /// [`MAX_CAPACITY_FRAMES`], and the [`MAX_PACKET_PAYLOAD_BYTES`] single-MTU
+    /// bound. An out-of-range value is **rejected**, never clamped or allowed to
+    /// over-allocate / emit an oversized UDP packet / overflow the RTP timestamp
+    /// increment.
+    ///
+    /// # Errors
+    ///
+    /// [`Aes67ConfigError`] when the channel count, ptime, capacity, or resulting
+    /// per-packet payload size is outside the supported bounds.
     pub fn new(
         channels: usize,
         depth: PcmDepth,
@@ -128,22 +211,49 @@ impl Aes67Sender {
         ssrc: u32,
         frames_per_packet: usize,
         capacity_frames: usize,
-    ) -> Self {
-        let channels = channels.max(1);
-        let frames_per_packet = frames_per_packet.max(1);
+    ) -> Result<Self, Aes67ConfigError> {
+        if !(1..=MAX_CHANNELS).contains(&channels) {
+            return Err(Aes67ConfigError::Channels {
+                got: channels,
+                max: MAX_CHANNELS,
+            });
+        }
+        if !(1..=MAX_FRAMES_PER_PACKET).contains(&frames_per_packet) {
+            return Err(Aes67ConfigError::FramesPerPacket {
+                got: frames_per_packet,
+                max: MAX_FRAMES_PER_PACKET,
+            });
+        }
+        if capacity_frames > MAX_CAPACITY_FRAMES {
+            return Err(Aes67ConfigError::Capacity {
+                got: capacity_frames,
+                max: MAX_CAPACITY_FRAMES,
+            });
+        }
+        let payload_bytes = frames_per_packet
+            .saturating_mul(channels)
+            .saturating_mul(depth.bytes_per_sample());
+        if payload_bytes > MAX_PACKET_PAYLOAD_BYTES {
+            return Err(Aes67ConfigError::PayloadTooLarge {
+                got: payload_bytes,
+                max: MAX_PACKET_PAYLOAD_BYTES,
+            });
+        }
         let capacity_frames = capacity_frames.max(frames_per_packet);
-        Self {
+        Ok(Self {
             fifo: Arc::new(Mutex::new(AudioFifo::new(capacity_frames, channels))),
             channels,
             depth,
             payload_type,
             ssrc,
             frames_per_packet,
+            // `frames_per_packet <= MAX_FRAMES_PER_PACKET` (well inside `u32`),
+            // so this widening never saturates — the defensive fallback is dead.
             timestamp_increment: u32::try_from(frames_per_packet).unwrap_or(u32::MAX),
             sequence: 0,
             timestamp: 0,
             scratch: Vec::new(),
-        }
+        })
     }
 
     /// A cheap, cloneable producer [`handle`](Aes67SenderHandle) sharing this
@@ -292,7 +402,7 @@ mod tests {
     /// deadline.
     #[test]
     fn handle_push_never_blocks_on_a_held_fifo() {
-        let sender = Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480);
+        let sender = Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480).expect("valid aes67 config");
         let handle = sender.handle();
         // Hold the shared FIFO lock on this thread (same module → private field).
         let fifo = Arc::clone(&sender.fifo);
@@ -314,7 +424,7 @@ mod tests {
     /// blocking lock would wait for the guard.
     #[test]
     fn next_packet_never_blocks_on_a_held_fifo() {
-        let mut sender = Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480);
+        let mut sender = Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480).expect("valid aes67 config");
         let fifo = Arc::clone(&sender.fifo);
         let guard = fifo.lock().expect("uncontended lock");
         let (tx, rx) = mpsc::channel();
