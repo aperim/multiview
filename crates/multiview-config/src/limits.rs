@@ -66,9 +66,17 @@ impl RateLimitConfig {
     /// burst would reject every request forever, and a zero refill would never
     /// replenish the bucket. `which` names the section for the message.
     fn validate(&self, which: &str) -> Result<(), ConfigError> {
-        // STUB (RED): the GREEN commit implements the zero-value rejection so the
-        // zero-* tests below fail here first.
-        let _ = which;
+        if self.burst == 0 {
+            return Err(ConfigError::Validation(format!(
+                "control.limits.{which}.burst must be >= 1 (0 would reject every request)"
+            )));
+        }
+        if self.refill_per_sec == 0 {
+            return Err(ConfigError::Validation(format!(
+                "control.limits.{which}.refill_per_sec must be >= 1 (0 would never replenish \
+                 the bucket)"
+            )));
+        }
         Ok(())
     }
 }
@@ -120,8 +128,15 @@ impl ManagementLimits {
     /// the DoS floor into a self-inflicted outage. Validated regardless of
     /// `enabled` so a typo is caught even while the limits are temporarily off.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        // STUB (RED): the GREEN commit implements the checks; returning `Ok`
-        // here makes the zero-value rejection tests fail first.
+        if self.max_concurrent_requests == 0 {
+            return Err(ConfigError::Validation(
+                "control.limits.max_concurrent_requests must be >= 1 (0 would reject every \
+                 request)"
+                    .to_owned(),
+            ));
+        }
+        self.per_ip.validate("per_ip")?;
+        self.per_api_key.validate("per_api_key")?;
         Ok(())
     }
 }
