@@ -34,25 +34,35 @@ use std::process::Command;
 
 use thiserror::Error;
 
-/// The feature specs every shipped/release artifact is built with. Keep in sync
-/// with the four umbrella presets in `crates/multiview-cli/Cargo.toml` and the
-/// exact `--features` strings the release/Docker builds pass:
+/// The feature specs the guard resolves: the four umbrella presets
+/// (`crates/multiview-cli/Cargo.toml`) plus the EXACT `--features` strings every
+/// shipping source builds. The `release_features_drift` test derives the
+/// concrete strings from [`SHIPPING_SOURCES`] and asserts this list covers every
+/// one (order-insensitive), so it cannot silently fall behind what ships.
 ///
-/// * `.github/workflows/release.yml` binaries → `ffmpeg,linux-vaapi` /
-///   `ffmpeg,apple` (each ≡ the bare umbrella, since every preset already
-///   implies `ffmpeg`, so they are covered by `linux-vaapi` / `apple` below).
-/// * `deploy/Dockerfile` `CARGO_FEATURES` → `ffmpeg,linux-vaapi,web,ntp`
-///   (default LGPL image) and `+gpl-codecs` (opt-in GPL image) — listed below
-///   as the extra-feature combos layered on top of the umbrella.
+/// * `.github/workflows/release.yml` binaries → `ffmpeg,linux-vaapi`, `ffmpeg,apple`
+/// * `.github/workflows/docker.yml` GHCR images → `ffmpeg,linux-vaapi,web`,
+///   `ffmpeg,nvidia,web`
+/// * `deploy/Dockerfile{,.nvidia}` `CARGO_FEATURES` defaults →
+///   `ffmpeg,linux-vaapi,web,ntp`, `ffmpeg,nvidia,web`; the documented GPL image
+///   adds `gpl-codecs`.
 pub const RELEASE_FEATURE_SPECS: &[&str] = &[
     // Umbrella presets (crates/multiview-cli/Cargo.toml `[features]`).
     "nvidia",
     "apple",
     "linux-vaapi",
     "full",
-    // Exact extra-feature strings the shipped Docker images build with.
-    "linux-vaapi,web,ntp",
-    "linux-vaapi,web,ntp,gpl-codecs",
+    // Exact strings the shipped release binaries build with (release.yml).
+    "ffmpeg,linux-vaapi",
+    "ffmpeg,apple",
+    // Exact strings the shipped GHCR images build with (docker.yml → the
+    // CARGO_FEATURES build-arg); `ffmpeg,nvidia,web` also = Dockerfile.nvidia's
+    // ARG default.
+    "ffmpeg,linux-vaapi,web",
+    "ffmpeg,nvidia,web",
+    // deploy/Dockerfile CARGO_FEATURES default + the documented GPL image variant.
+    "ffmpeg,linux-vaapi,web,ntp",
+    "ffmpeg,linux-vaapi,web,ntp,gpl-codecs",
 ];
 
 /// How a [`ShippingSource`] file names its shipped `--features` strings.
@@ -158,7 +168,7 @@ fn feature_set(spec: &str) -> BTreeSet<String> {
     spec.split(',')
         .map(str::trim)
         .filter(|f| !f.is_empty())
-        .map(|f| f.to_owned())
+        .map(str::to_owned)
         .collect()
 }
 
@@ -664,7 +674,10 @@ beta v0.1.0 (/w/beta)|_test-seams,default (*)";
             vec!["ffmpeg,apple".to_owned()]
         );
         assert_eq!(
-            extract_shipped_specs(ShippingSourceKind::Dockerfile, "ARG CARGO_FEATURES=ffmpeg,nvidia,web"),
+            extract_shipped_specs(
+                ShippingSourceKind::Dockerfile,
+                "ARG CARGO_FEATURES=ffmpeg,nvidia,web"
+            ),
             vec!["ffmpeg,nvidia,web".to_owned()]
         );
     }

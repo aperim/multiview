@@ -43,17 +43,33 @@ cargo tree --locked -p multiview-cli --features <spec> -e no-dev \
   release graph, and a transitive dependency's own dev-dependencies never enter.
 - The specs checked (`RELEASE_FEATURE_SPECS`) are the four umbrella presets in
   [`crates/multiview-cli/Cargo.toml`](../../crates/multiview-cli/Cargo.toml) —
-  `nvidia`, `apple`, `linux-vaapi`, `full` — plus the exact extra-feature strings
-  the shipped Docker images build with:
-  `linux-vaapi,web,ntp` and `linux-vaapi,web,ntp,gpl-codecs`
-  ([`deploy/Dockerfile`](../../deploy/Dockerfile) `CARGO_FEATURES`). The
-  `release.yml` binary strings `ffmpeg,linux-vaapi` / `ffmpeg,apple` are covered
-  by the `linux-vaapi` / `apple` umbrellas (each preset already implies
-  `ffmpeg`).
+  `nvidia`, `apple`, `linux-vaapi`, `full` — plus the **exact** `--features`
+  strings every shipping source builds:
+  - [`.github/workflows/release.yml`](../../.github/workflows/release.yml)
+    binaries → `ffmpeg,linux-vaapi`, `ffmpeg,apple`;
+  - [`.github/workflows/docker.yml`](../../.github/workflows/docker.yml) GHCR
+    images (its matrix `features:` → the `CARGO_FEATURES` build-arg) →
+    `ffmpeg,linux-vaapi,web`, `ffmpeg,nvidia,web`;
+  - [`deploy/Dockerfile`](../../deploy/Dockerfile) /
+    [`deploy/Dockerfile.nvidia`](../../deploy/Dockerfile.nvidia)
+    `ARG CARGO_FEATURES` defaults → `ffmpeg,linux-vaapi,web,ntp`,
+    `ffmpeg,nvidia,web`; the documented GPL image adds `gpl-codecs`.
 
-> **Keep in sync:** if `deploy/Dockerfile` `CARGO_FEATURES`,
-> `.github/workflows/release.yml`'s matrix, or the umbrella presets change, update
-> `RELEASE_FEATURE_SPECS` in `xtask/src/release_features.rs` to match.
+- **Anti-drift (no silent rot).** `RELEASE_FEATURE_SPECS` is not trusted to be
+  hand-maintained. The `release_feature_specs_cover_every_shipped_combo` test
+  ([`xtask/tests/release_features_drift.rs`](../../xtask/tests/release_features_drift.rs))
+  **derives** the shipped combos straight from `SHIPPING_SOURCES` (the four files
+  above) and asserts `RELEASE_FEATURE_SPECS` covers every one (order-insensitive
+  set match). Adding a shipped preset/combo to any of those files without listing
+  it in `RELEASE_FEATURE_SPECS` fails `cargo test` (and CI) — it cannot silently
+  pass. A change to any shipping source keeps `changes.code == true`, so both the
+  `test` leg (the drift test) and the `release-feature-guard` leg re-run.
+
+> **When the drift test fails:** it prints each uncovered `--features` string. Add
+> each to `RELEASE_FEATURE_SPECS` in
+> [`xtask/src/release_features.rs`](../../xtask/src/release_features.rs) (or, if a
+> shipping source moved, update `SHIPPING_SOURCES`), then re-run
+> `cargo test -p xtask --test release_features_drift`.
 
 The predicate matches the `_test-seams` **family** (name contains `test-seam`),
 not every leading-underscore feature: third-party crates legitimately resolve
