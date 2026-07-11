@@ -306,7 +306,6 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::openapi_schemas::CaptionSelectorDoc,
         crate::openapi_schemas::DevicePinDoc,
         crate::openapi_schemas::PinVendorDoc,
-        crate::openapi_schemas::RtspOptionsDoc,
         crate::openapi_schemas::RistOptionsDoc,
         crate::openapi_schemas::RistEncryptionDoc,
         crate::openapi_schemas::RistProfileDoc,

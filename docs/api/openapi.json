@@ -11596,13 +11596,6 @@
                   "rtsp_server"
                 ]
               },
-              "latency_profile": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "Latency profile hint."
-              },
               "metadata": {
                 "oneOf": [
                   {
@@ -11655,15 +11648,6 @@
                 "type": "string",
                 "description": "Video codec."
               },
-              "gop_ms": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "int32",
-                "description": "GOP duration (ms).",
-                "minimum": 0
-              },
               "gpu_pin": {
                 "oneOf": [
                   {
@@ -11709,15 +11693,6 @@
                     "description": "Per-output presentation orientation (ADR-0089)."
                   }
                 ]
-              },
-              "part_target_ms": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "int32",
-                "description": "Target part duration (ms).",
-                "minimum": 0
               },
               "path": {
                 "type": "string",
@@ -13394,19 +13369,6 @@
         ],
         "description": "`OpenAPI` mirror of [`multiview_control::routing::RouteTarget`] (RT-11).\n\nThe destination a crosspoint take re-points — internally tagged on `kind`,\n`snake_case`, never `untagged`."
       },
-      "RtspOptionsDoc": {
-        "type": "object",
-        "description": "`OpenAPI` mirror of `multiview_config::RtspOptions`.",
-        "required": [
-          "transport"
-        ],
-        "properties": {
-          "transport": {
-            "type": "string",
-            "description": "Lower-transport selection (`tcp` / `udp`)."
-          }
-        }
-      },
       "SalvoDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of [`multiview_config::Salvo`].\n\nSerde-equivalent field-for-field; the optional fields skip when empty/absent\nexactly as the config type does.",
@@ -13939,17 +13901,6 @@
                 "type": "string",
                 "enum": [
                   "rtsp"
-                ]
-              },
-              "rtsp": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/RtspOptionsDoc",
-                    "description": "RTSP transport options."
-                  }
                 ]
               },
               "url": {

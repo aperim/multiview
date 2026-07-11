@@ -700,14 +700,6 @@ pub struct DevicePinDoc {
     pub stable_id: String,
 }
 
-/// `OpenAPI` mirror of `multiview_config::RtspOptions`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[non_exhaustive]
-pub struct RtspOptionsDoc {
-    /// Lower-transport selection (`tcp` / `udp`).
-    pub transport: String,
-}
-
 /// `OpenAPI` mirror of `multiview_config::RistProfile` (VSF `TR-06`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -946,9 +938,6 @@ pub enum SourceKindDoc {
     Rtsp {
         /// Source URL.
         url: String,
-        /// RTSP transport options.
-        #[serde(default)]
-        rtsp: Option<RtspOptionsDoc>,
     },
     /// HLS / M3U pull.
     Hls {
@@ -1286,9 +1275,6 @@ pub enum OutputBodyDoc {
         mount: String,
         /// Video codec (`h264`, `hevc`, …).
         codec: String,
-        /// Latency profile hint.
-        #[serde(default)]
-        latency_profile: Option<String>,
         /// Encode-stage GPU pin.
         #[serde(default)]
         gpu_pin: Option<DevicePinDoc>,
@@ -1311,15 +1297,9 @@ pub enum OutputBodyDoc {
         path: String,
         /// Video codec.
         codec: String,
-        /// Target part duration (ms).
-        #[serde(default)]
-        part_target_ms: Option<u32>,
         /// Segment duration (ms).
         #[serde(default)]
         segment_ms: Option<u32>,
-        /// GOP duration (ms).
-        #[serde(default)]
-        gop_ms: Option<u32>,
         /// Encode-stage GPU pin.
         #[serde(default)]
         gpu_pin: Option<DevicePinDoc>,
