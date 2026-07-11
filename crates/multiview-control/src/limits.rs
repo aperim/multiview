@@ -1503,6 +1503,40 @@ mod connection_admission_tests {
     }
 
     #[test]
+    fn a_per_ip_rejection_releases_its_already_acquired_global_permit() {
+        // The reject path is DISTINCT from guard-Drop: `try_admit` takes the global
+        // permit FIRST, then may fail the per-IP check and `return None`. That
+        // just-acquired permit must be released on the way out (the local permit's RAII
+        // drop) — otherwise a single attacker IP already at its per-IP cap would drain
+        // one global slot per *rejected* attempt and permanently degrade the global cap
+        // for every other source: a slow DoS on the security floor itself. Global cap 4,
+        // per-IP cap 1.
+        let admission = ConnectionAdmission::new(4, 1);
+        // The attacker's one legitimate connection takes its single per-IP slot (and one
+        // of the four global slots); hold it so every further attempt from this IP fails
+        // the per-IP check AFTER acquiring a global permit.
+        let _attacker = admission
+            .try_admit(ip(1))
+            .expect("the attacker's first connection admits");
+        // A flood of over-per-IP attempts. Each acquires a global permit then fails the
+        // per-IP check and must release it; a leak would exhaust the three remaining
+        // global slots after only three attempts, so ten guarantees exhaustion if the
+        // permit is leaked rather than released.
+        for _ in 0..10 {
+            assert!(
+                admission.try_admit(ip(1)).is_none(),
+                "an attempt over the per-IP cap must be rejected"
+            );
+        }
+        // The global cap is intact: only the attacker's one legitimate connection holds a
+        // slot, so a fresh source IP still admits. This assertion fails iff a rejected
+        // attempt leaked its already-acquired global permit.
+        let _fresh = admission
+            .try_admit(ip(2))
+            .expect("a fresh IP still admits — rejected attempts must not leak global slots");
+    }
+
+    #[test]
     fn the_per_ip_entry_is_evicted_when_its_last_connection_closes() {
         // The bounded-memory property (nit 1): the per-IP map is bounded by the number
         // of *concurrent distinct* IPs, not all-IPs-ever — so an entry is removed the
