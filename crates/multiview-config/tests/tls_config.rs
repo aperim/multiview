@@ -65,10 +65,16 @@ fn unknown_mode_fails_to_parse() {
 fn static_mode_requires_cert_and_key() {
     let no_key: Result<TlsConfig, _> =
         serde_json::from_str(r#"{ "mode": "static", "cert": "/c" }"#);
-    assert!(no_key.is_err(), "static mode without a key must fail to parse");
+    assert!(
+        no_key.is_err(),
+        "static mode without a key must fail to parse"
+    );
     let no_cert: Result<TlsConfig, _> =
         serde_json::from_str(r#"{ "mode": "static", "key": "/k" }"#);
-    assert!(no_cert.is_err(), "static mode without a cert must fail to parse");
+    assert!(
+        no_cert.is_err(),
+        "static mode without a cert must fail to parse"
+    );
 }
 
 /// An empty cert path is rejected by validation (fail-closed at config load —
