@@ -71,6 +71,7 @@ pub mod routes;
 pub mod routing;
 pub mod salvo_store;
 pub mod state;
+pub mod system;
 pub mod support_bundle;
 pub mod support_store;
 pub mod tally_ingest;
