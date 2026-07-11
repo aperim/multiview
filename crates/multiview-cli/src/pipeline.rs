@@ -2165,6 +2165,21 @@ impl Pipeline {
             #[cfg(feature = "aes67")]
             if matches!(source.kind, SourceKind::Aes67 { .. }) {
                 let (session, group) = resolve_aes67_source(source)?;
+                // An AES67 source decodes no pixels, so it has NO backing
+                // `TileStore`. A layout cell bound to it would carry tile geometry
+                // with nothing to composite — reject fail-closed rather than leave a
+                // dangling tile (the video path below is only reached for pixel
+                // sources).
+                if cell_pixel_size(&layout, &source.id).is_some() {
+                    return Err(PipelineError::Config(
+                        multiview_config::ConfigError::Validation(format!(
+                            "layout cell bound to audio-only AES67 source `{}`: an \
+                             AES67 / ST 2110-30 source carries no video and cannot \
+                             occupy a layout tile",
+                            source.id
+                        )),
+                    ));
+                }
                 let store = crate::audio::new_store();
                 audio_stores.insert(source.id.clone(), Arc::clone(&store));
                 aes67_rx_plans.push(Aes67RxPlan {
