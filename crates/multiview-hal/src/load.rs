@@ -2852,9 +2852,9 @@ mod tests {
         fn tracker_differences_two_snapshots_into_a_fraction() {
             // The tracker holds the previous snapshot + the instant it was
             // captured; each poll diffs the new snapshot against it over the
-            // elapsed between the two SNAPSHOT instants (not a poll-entry delta —
-            // F1). media delta 500_000 ns over a 1 ms snapshot interval => 0.5
-            // busy for the merged engine.
+            // elapsed between the two instants it is handed (the F1 divisor).
+            // media delta 500_000 ns over a 1 ms interval => 0.5 busy for the
+            // merged engine.
             let earlier = {
                 let mut s = FdinfoMediaSnapshot::default();
                 s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000 ns\n");
@@ -2914,9 +2914,9 @@ mod tests {
             // between the two SNAPSHOT instants the tracker retains, so the SAME
             // counter delta over a LONGER snapshot interval yields a
             // proportionally SMALLER fraction. A regression that divided by a
-            // fixed or poll-entry interval would instead report the same fraction
-            // for both. The end-to-end proof that the probe/poller seam feeds the
-            // walk-capture instant into this divisor lives in
+            // fixed interval would instead report the same fraction for both. The
+            // end-to-end proof that the probe/poller seam feeds the
+            // snapshot-to-snapshot interval into this divisor lives in
             // `sysfs_poller_folds_media_across_polls_and_exposes_base_load`.
             let base = {
                 let mut s = FdinfoMediaSnapshot::default();
@@ -3031,8 +3031,11 @@ mod tests {
             // yields the EXACT merged media fraction (0.5 — a 500_000 ns counter
             // delta over a 1 ms injected interval) folded into BOTH enc and dec.
             // Asserting the exact non-saturated fraction through
-            // `sample_all_with_media` proves the divisor is the walk-instant
-            // interval, not a poll-entry delta and not a saturated clamp.
+            // `sample_all_with_media` de-saturates the fold and proves the
+            // divisor is the snapshot-to-snapshot interval (not a saturated
+            // clamp). It does NOT pin the within-poll capture POINT (walk vs
+            // poll-entry) — the injected clock is constant within a poll, so
+            // that <0.001%-impact distinction is an accepted residual.
             let drm = std::env::temp_dir().join(format!(
                 "mv-eng4b-drm-{}-{}",
                 std::process::id(),
@@ -3151,8 +3154,8 @@ mod tests {
             // snapshot-to-snapshot interval exact, so this asserts the EXACT
             // merged fraction end-to-end through `LoadSource::poll` (0.5 over a
             // 1 ms interval, then 0.25 for the SAME counter delta over 2 ms —
-            // proving the divisor tracks the injected interval, not a fixed or
-            // poll-entry constant, and never a saturated clamp).
+            // proving the divisor tracks the injected snapshot-to-snapshot
+            // interval, not a fixed constant, and never a saturated clamp).
             use super::super::{LoadSource, SysfsLoadPoller};
 
             let drm = std::env::temp_dir().join(format!(
@@ -3218,7 +3221,7 @@ mod tests {
             // Poll 3: the SAME 500_000 ns counter delta over a 2 ms injected
             // interval => 0.25 (proportionally smaller). Proves the divisor at
             // the poll seam IS the injected snapshot-to-snapshot interval — a
-            // fixed or poll-entry divisor would report 0.5 again.
+            // fixed divisor would report 0.5 again.
             *clock.lock().expect("clock") = t0 + Duration::from_millis(3);
             std::fs::write(
                 proc.join("4242").join("fdinfo").join("3"),
