@@ -7,7 +7,7 @@
 //! ## What the epoch is
 //!
 //! The output clock pins `out_pts = f(tick)` on the run's monotonic
-//! [`TimeSource`](crate::clock::TimeSource) timeline: tick `i` is due at
+//! [`TimeSource`] timeline: tick `i` is due at
 //! `seed + pts_at(i)` (see [`EngineRuntime::seed_nanos`]). The epoch is the
 //! **observation** of where that timeline sits on the disciplined wall clock:
 //!
@@ -242,7 +242,7 @@ impl EpochTracker {
 
 /// One paired wall/monotonic reading: the wall instant bracketed by two
 /// monotonic reads (the same sandwich shape as
-/// [`PhcReading`](crate::ptp::phc::PhcReading)), so the wall value is bound
+/// `PhcReading`), so the wall value is bound
 /// to the monotonic midpoint with the read latency as its uncertainty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WallSample {
@@ -481,7 +481,7 @@ impl<W: WallClockSampler, Q: NtpQuery> EpochSampler<W, Q> {
     }
 
     /// Attach the PTP reference snapshot handle (filled by the `ptp`-feature
-    /// [`PhcSampler`](crate::ptp::phc::PhcSampler)). While that reference is
+    /// `PhcSampler`). While that reference is
     /// disciplined it outranks the system clock (ADR-T012 §1).
     #[must_use]
     pub fn with_ptp(mut self, handle: LatestState<ReferenceStatus>) -> Self {

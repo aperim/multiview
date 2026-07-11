@@ -91,7 +91,7 @@ pub trait Pacer {
     /// ignored `stop` would spin/sleep on an unreachable deadline forever once the
     /// clock is frozen or merely slow (a contended host), and the loop could never
     /// observe the stop. The pacer therefore returns promptly (within
-    /// [`PACER_STOP_POLL`] for the real pacer; a single cooperative yield for the
+    /// `PACER_STOP_POLL` for the real pacer; a single cooperative yield for the
     /// test pacer) once `stop` is set; the caller re-checks `stop` immediately
     /// after and returns without composing an unwanted tick.
     ///
@@ -112,7 +112,7 @@ pub trait Pacer {
 /// Production pacer: a real [`tokio::time::sleep`] until the deadline.
 ///
 /// Computes the remaining duration from the time source and sleeps it (in steps
-/// of at most [`PACER_STOP_POLL`] so a raised [`StopSignal`] is observed
+/// of at most `PACER_STOP_POLL` so a raised [`StopSignal`] is observed
 /// promptly); on wakeup it re-checks (a spurious early wake or accumulated
 /// rounding never advances the tick before its deadline). Paused-time aware, so
 /// it also works under `tokio::time::pause`.

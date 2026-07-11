@@ -2,10 +2,10 @@
 //!
 //! The control plane submits `Command::RouteVideo` / `RouteAudio` /
 //! `RouteSubtitle` onto the bounded, non-back-pressuring command bus; the engine
-//! drains that bus at the frame boundary (between [`clock.tick()`] and
-//! [`drive.compose()`], `runtime.rs`). This module is what the drain *does* with
+//! drains that bus at the frame boundary (between `clock.tick()` and
+//! `drive.compose()`, `runtime.rs`). This module is what the drain *does* with
 //! a drained batch of routes: it resolves each [`StreamRef`]'s
-//! [`StreamSelector`](multiview_config::routing::StreamSelector) against the
+//! [`StreamSelector`] against the
 //! input's [`StreamInventory`] to the concrete stream, then re-points the live
 //! crosspoint by calling the existing O(1) primitives —
 //!
