@@ -51,8 +51,10 @@ The **producer proper** — `FailureSignal` emission at the `multiview-ffmpeg` f
 not exist yet** (the 0-non-test-emitter gap above); it is the new machinery the Decision's point 1
 builds. So the ledger has two live host sites and one seam still to raise the signal.
 
-So this is a pure **connect** job — not new machinery — but a connect that is **size L** and
-touches an AES67-locked file.
+So the shape is **mostly a connect** — wiring the two existing host sites is not new machinery —
+with **one** genuinely new piece: the producer emission (Decision point 1), the `FailureSignal`
+raises at the `multiview-ffmpeg` fault seams that do not exist yet. Even as connect-plus-one-producer
+it is **size L** and touches an AES67-locked file.
 
 ## Decision
 
