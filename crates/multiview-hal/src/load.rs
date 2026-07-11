@@ -1254,6 +1254,46 @@ mod linux_sysfs {
         root: DrmRoot,
         proc_root: PathBuf,
         media_tracker: FdinfoMediaTracker,
+        /// The monotonic clock read to timestamp each fdinfo snapshot at its
+        /// walk (F1). Always [`SnapshotClock::Monotonic`] in production; a unit
+        /// test injects a controllable clock to drive an exact
+        /// snapshot-to-snapshot interval through the real poll seam.
+        clock: SnapshotClock,
+    }
+
+    /// The monotonic clock the media pass reads to timestamp each fdinfo
+    /// snapshot at its walk — the F1 divisor is the elapsed between the two
+    /// SNAPSHOT reads, so the timestamp is taken *after* the walk.
+    ///
+    /// Production always reads the real monotonic clock (`Instant::now()`); a
+    /// unit test injects a controllable clock so the snapshot-to-snapshot
+    /// interval — and thus the exact merged-media fraction — is deterministic
+    /// when driven through the real `sample_all_with_media` / `LoadSource::poll`
+    /// seam, rather than relying on a saturating counter delta.
+    #[derive(Debug, Clone, Default)]
+    pub(crate) enum SnapshotClock {
+        /// The real monotonic clock, used in production.
+        #[default]
+        Monotonic,
+        /// A test clock whose value each read takes from shared state the test
+        /// advances between polls.
+        #[cfg(test)]
+        Manual(std::sync::Arc<std::sync::Mutex<Instant>>),
+    }
+
+    impl SnapshotClock {
+        /// Read the current instant — the real monotonic clock in production,
+        /// the injected value under test. A poisoned test clock degrades to the
+        /// real clock (never panics; a test never leaves it poisoned).
+        fn now(&self) -> Instant {
+            match self {
+                SnapshotClock::Monotonic => Instant::now(),
+                #[cfg(test)]
+                SnapshotClock::Manual(at) => {
+                    at.lock().map_or_else(|_| Instant::now(), |guard| *guard)
+                }
+            }
+        }
     }
 
     impl Default for SysfsLoadProbe {
@@ -1292,6 +1332,17 @@ mod linux_sysfs {
             self
         }
 
+        /// Inject the clock the media pass reads to timestamp each snapshot at
+        /// its walk (tests only — production always reads the real monotonic
+        /// clock). Lets a test drive an exact snapshot-to-snapshot interval
+        /// through the real `sample_all_with_media` / `LoadSource::poll` seam.
+        #[cfg(test)]
+        #[must_use]
+        pub(crate) fn with_clock(mut self, clock: SnapshotClock) -> Self {
+            self.clock = clock;
+            self
+        }
+
         /// Sample every visible device, then enrich each with the merged
         /// media-engine busy fraction derived from the caller's own PIDs'
         /// `/proc/<pid>/fdinfo`.
@@ -1314,8 +1365,10 @@ mod linux_sysfs {
             let mut loads = self.sample_all();
             let snapshot = FdinfoMediaSnapshot::walk_proc(&self.proc_root, pids);
             // Timestamp the snapshot at its read (not at poll entry) so the
-            // tracker's divisor matches the counter delta it divides (F1).
-            let snapshot_at = Instant::now();
+            // tracker's divisor matches the counter delta it divides (F1). The
+            // clock is injectable so a unit test drives an exact interval; it is
+            // the real monotonic clock in production.
+            let snapshot_at = self.clock.now();
             for load in &mut loads {
                 let pdev = load.device_id.stable_id();
                 if let Some(frac) =
@@ -1495,6 +1548,7 @@ mod linux_sysfs {
                 root: self,
                 proc_root: PathBuf::from("/nonexistent/multiview/no-proc-for-test-root"),
                 media_tracker: FdinfoMediaTracker::default(),
+                clock: SnapshotClock::default(),
             }
         }
 
@@ -2742,9 +2796,10 @@ mod tests {
     #[cfg(any(feature = "vaapi", feature = "qsv"))]
     mod fdinfo_walk {
         use super::super::linux_sysfs::{
-            parse_fdinfo_pdev, DrmRoot, FdinfoMediaSnapshot, FdinfoMediaTracker,
+            parse_fdinfo_pdev, DrmRoot, FdinfoMediaSnapshot, FdinfoMediaTracker, SnapshotClock,
         };
         use super::super::Vendor;
+        use std::sync::{Arc, Mutex};
         use std::time::{Duration, Instant};
 
         #[test]
@@ -2797,9 +2852,9 @@ mod tests {
         fn tracker_differences_two_snapshots_into_a_fraction() {
             // The tracker holds the previous snapshot + the instant it was
             // captured; each poll diffs the new snapshot against it over the
-            // elapsed between the two SNAPSHOT instants (not a poll-entry delta —
-            // F1). media delta 500_000 ns over a 1 ms snapshot interval => 0.5
-            // busy for the merged engine.
+            // elapsed between the two instants it is handed (the F1 divisor).
+            // media delta 500_000 ns over a 1 ms interval => 0.5 busy for the
+            // merged engine.
             let earlier = {
                 let mut s = FdinfoMediaSnapshot::default();
                 s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000 ns\n");
@@ -2855,11 +2910,14 @@ mod tests {
 
         #[test]
         fn tracker_fraction_scales_with_the_snapshot_interval() {
-            // F1 regression: the divisor is the elapsed between the two SNAPSHOT
-            // instants the tracker retains, so the SAME counter delta over a
-            // LONGER snapshot interval yields a proportionally SMALLER fraction.
-            // A regression that divided by a fixed or poll-entry interval would
-            // instead report the same fraction for both.
+            // F1 regression (pure differencing unit): the divisor is the elapsed
+            // between the two SNAPSHOT instants the tracker retains, so the SAME
+            // counter delta over a LONGER snapshot interval yields a
+            // proportionally SMALLER fraction. A regression that divided by a
+            // fixed interval would instead report the same fraction for both. The
+            // end-to-end proof that the probe/poller seam feeds the
+            // snapshot-to-snapshot interval into this divisor lives in
+            // `sysfs_poller_folds_media_across_polls_and_exposes_base_load`.
             let base = {
                 let mut s = FdinfoMediaSnapshot::default();
                 s.accumulate_fd("drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t0 ns\n");
@@ -2965,10 +3023,19 @@ mod tests {
 
         #[test]
         fn probe_folds_merged_media_into_enc_and_dec_after_two_polls() {
-            // End-to-end of the ENG-4b wiring: a synthetic DRM card + a synthetic
-            // /proc tree whose fdinfo media counter advances between polls. The
+            // End-to-end of the ENG-4b wiring through the REAL capture seam: a
+            // synthetic DRM card + a synthetic /proc tree whose fdinfo media
+            // counter advances between polls, with an INJECTED snapshot clock so
+            // the snapshot-to-snapshot interval is exact and deterministic. The
             // first poll has no prior snapshot (enc/dec stay None); the second
-            // yields the merged media fraction folded into BOTH enc and dec.
+            // yields the EXACT merged media fraction (0.5 — a 500_000 ns counter
+            // delta over a 1 ms injected interval) folded into BOTH enc and dec.
+            // Asserting the exact non-saturated fraction through
+            // `sample_all_with_media` de-saturates the fold and proves the
+            // divisor is the snapshot-to-snapshot interval (not a saturated
+            // clamp). It does NOT pin the within-poll capture POINT (walk vs
+            // poll-entry) — the injected clock is constant within a poll, so
+            // that <0.001%-impact distinction is an accepted residual.
             let drm = std::env::temp_dir().join(format!(
                 "mv-eng4b-drm-{}-{}",
                 std::process::id(),
@@ -2983,9 +3050,16 @@ mod tests {
             let _ = std::fs::remove_dir_all(&proc);
             write_amd_card(&drm).expect("amd card");
 
-            let mut probe = DrmRoot::at(&drm).into_probe().with_proc_root(&proc);
+            // Inject a controllable snapshot clock so the two walks are an exact
+            // interval apart (production reads the real monotonic clock).
+            let clock = Arc::new(Mutex::new(Instant::now()));
+            let t0 = *clock.lock().expect("clock");
+            let mut probe = DrmRoot::at(&drm)
+                .into_probe()
+                .with_proc_root(&proc)
+                .with_clock(SnapshotClock::Manual(Arc::clone(&clock)));
 
-            // Poll 1: media counter at 1_000_000 ns; no prior snapshot yet.
+            // Poll 1 at t0: media counter at 1_000_000 ns; no prior snapshot yet.
             write_proc_fd(
                 &proc,
                 4242,
@@ -3000,15 +3074,14 @@ mod tests {
                 "first poll has no prior snapshot => unknown, not a fabricated zero"
             );
 
-            // Poll 2: the counter jumps by a large delta; over the sub-ms real
-            // interval between the two snapshot reads this saturates the merged
-            // media fraction to 1.0, folded into BOTH enc and dec. The probe now
-            // times each snapshot at its walk (not at poll entry — F1), so the
-            // exact-arithmetic proof lives in the tracker unit tests; here we
-            // prove the probe wires a real walk-instant snapshot through the fold.
+            // Advance the injected clock by EXACTLY 1 ms and the counter by
+            // EXACTLY 500_000 ns => 0.5 busy for the merged engine, folded into
+            // BOTH enc and dec. The exact (non-saturated) fraction only holds if
+            // the divisor is the injected snapshot-to-snapshot interval.
+            *clock.lock().expect("clock") = t0 + Duration::from_millis(1);
             std::fs::write(
                 proc.join("4242").join("fdinfo").join("3"),
-                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000000000000 ns\n",
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1500000 ns\n",
             )
             .expect("fd v2");
             let second = probe.sample_all_with_media(&[4242]);
@@ -3018,14 +3091,8 @@ mod tests {
             let enc = load.enc_util_frac.expect("enc folded from merged media");
             let dec = load.dec_util_frac.expect("dec folded from merged media");
             // VCN4+ merges decode+encode — both carry the same combined term.
-            assert!(
-                (enc - 1.0).abs() < 1e-4,
-                "saturated enc expected, got {enc}"
-            );
-            assert!(
-                (dec - 1.0).abs() < 1e-4,
-                "saturated dec expected, got {dec}"
-            );
+            assert!((enc - 0.5).abs() < 1e-4, "0.5 enc over 1 ms, got {enc}");
+            assert!((dec - 0.5).abs() < 1e-4, "0.5 dec over 1 ms, got {dec}");
 
             let _ = std::fs::remove_dir_all(&drm);
             let _ = std::fs::remove_dir_all(&proc);
@@ -3083,8 +3150,12 @@ mod tests {
             // seam, retaining the prior snapshot + its capture instant across
             // polls behind interior mutability. The base sysfs load (gpu-busy,
             // VRAM) flows on every poll; the merged media term appears once a
-            // prior snapshot exists — proving the whole AMD/Intel sysfs probe is
-            // wired, not just parsed.
+            // prior snapshot exists. An INJECTED snapshot clock makes the
+            // snapshot-to-snapshot interval exact, so this asserts the EXACT
+            // merged fraction end-to-end through `LoadSource::poll` (0.5 over a
+            // 1 ms interval, then 0.25 for the SAME counter delta over 2 ms —
+            // proving the divisor tracks the injected snapshot-to-snapshot
+            // interval, not a fixed constant, and never a saturated clamp).
             use super::super::{LoadSource, SysfsLoadPoller};
 
             let drm = std::env::temp_dir().join(format!(
@@ -3108,7 +3179,12 @@ mod tests {
             )
             .expect("fd v1");
 
-            let probe = DrmRoot::at(&drm).into_probe().with_proc_root(&proc);
+            let clock = Arc::new(Mutex::new(Instant::now()));
+            let t0 = *clock.lock().expect("clock");
+            let probe = DrmRoot::at(&drm)
+                .into_probe()
+                .with_proc_root(&proc)
+                .with_clock(SnapshotClock::Manual(Arc::clone(&clock)));
             let poller = SysfsLoadPoller::from_probe(probe, vec![4242]);
 
             // Poll 1: base load present, media unknown (no prior snapshot yet —
@@ -3125,14 +3201,13 @@ mod tests {
                 "first poll has no prior media snapshot"
             );
 
-            // Poll 2: the counter jumps by a large delta; over the sub-ms real
-            // interval between the two snapshot reads the merged media fraction
-            // saturates to 1.0, folded into BOTH enc and dec (VCN4+ merges the
-            // media engines). The exact arithmetic is proven in the tracker unit
-            // tests; here we prove the LoadSource::poll seam wires it end-to-end.
+            // Poll 2 at t0 + 1 ms with the counter advanced by EXACTLY 500_000 ns
+            // => EXACTLY 0.5, folded into BOTH enc and dec (VCN4+ merges the media
+            // engines) through the real LoadSource::poll seam — no saturation.
+            *clock.lock().expect("clock") = t0 + Duration::from_millis(1);
             std::fs::write(
                 proc.join("4242").join("fdinfo").join("3"),
-                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000000000000 ns\n",
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1500000 ns\n",
             )
             .expect("fd v2");
             let second = LoadSource::poll(&poller);
@@ -3140,14 +3215,29 @@ mod tests {
             let load = &second[0];
             let enc = load.enc_util_frac.expect("enc folded from merged media");
             let dec = load.dec_util_frac.expect("dec folded from merged media");
-            assert!(
-                (enc - 1.0).abs() < 1e-4,
-                "saturated enc expected, got {enc}"
-            );
-            assert!(
-                (dec - 1.0).abs() < 1e-4,
-                "saturated dec expected, got {dec}"
-            );
+            assert!((enc - 0.5).abs() < 1e-4, "0.5 enc over 1 ms, got {enc}");
+            assert!((dec - 0.5).abs() < 1e-4, "0.5 dec over 1 ms, got {dec}");
+
+            // Poll 3: the SAME 500_000 ns counter delta over a 2 ms injected
+            // interval => 0.25 (proportionally smaller). Proves the divisor at
+            // the poll seam IS the injected snapshot-to-snapshot interval — a
+            // fixed divisor would report 0.5 again.
+            *clock.lock().expect("clock") = t0 + Duration::from_millis(3);
+            std::fs::write(
+                proc.join("4242").join("fdinfo").join("3"),
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t2000000 ns\n",
+            )
+            .expect("fd v3");
+            let third = LoadSource::poll(&poller);
+            assert_eq!(third.len(), 1);
+            let enc3 = third[0]
+                .enc_util_frac
+                .expect("enc folded from merged media");
+            let dec3 = third[0]
+                .dec_util_frac
+                .expect("dec folded from merged media");
+            assert!((enc3 - 0.25).abs() < 1e-4, "0.25 enc over 2 ms, got {enc3}");
+            assert!((dec3 - 0.25).abs() < 1e-4, "0.25 dec over 2 ms, got {dec3}");
 
             let _ = std::fs::remove_dir_all(&drm);
             let _ = std::fs::remove_dir_all(&proc);
