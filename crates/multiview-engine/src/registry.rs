@@ -30,6 +30,7 @@
 //! called from a synchronous teardown context.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -192,6 +193,12 @@ pub struct SourceRegistry<T> {
     entries: Mutex<HashMap<SourceKey, Entry<T>>>,
     reaper_tx: Sender<Reap>,
     reaper_join: Mutex<Option<JoinHandle<()>>>,
+    /// Count of source teardowns currently in flight (a blocking decode-thread
+    /// join). Shared with the reaper (and, once teardowns run off-loop, with each
+    /// teardown helper thread) so the isolation guarantee is observable via
+    /// [`SourceRegistry::pending_teardowns`]. An [`Arc`] so a detached straggler
+    /// thread can still decrement it after the registry itself is gone.
+    pending_teardowns: Arc<AtomicUsize>,
 }
 
 impl<T> SourceRegistry<T> {
@@ -205,18 +212,21 @@ impl<T> SourceRegistry<T> {
     #[must_use]
     pub fn new() -> Arc<Self> {
         let (tx, rx) = mpsc::channel::<Reap>();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let pending_for_reaper = Arc::clone(&pending);
         // The reaper performs every blocking decode-thread join off the hot path.
         // If the thread cannot be spawned (never in practice), `rx` is dropped and
         // later teardowns fall back to dropping the actor (its non-blocking Drop) —
         // `release` stays infallible either way.
         let join = std::thread::Builder::new()
             .name("mv-source-reaper".to_owned())
-            .spawn(move || reaper_loop(&rx))
+            .spawn(move || reaper_loop(&rx, &pending_for_reaper))
             .ok();
         Arc::new(Self {
             entries: Mutex::new(HashMap::new()),
             reaper_tx: tx,
             reaper_join: Mutex::new(join),
+            pending_teardowns: pending,
         })
     }
 
@@ -331,6 +341,17 @@ impl<T> SourceRegistry<T> {
         lock(&self.entries).len()
     }
 
+    /// The number of source teardowns (blocking decode-thread joins) currently in
+    /// flight. A telemetry/test observable of the isolation guarantee (inv #10): a
+    /// single wedged `shutdown()` occupies exactly one teardown slot and never
+    /// blocks the reaper's consume loop, so a sustained stream of healthy
+    /// last-releases keeps this count **bounded** instead of growing an unbounded
+    /// teardown backlog behind a stuck join.
+    #[must_use]
+    pub fn pending_teardowns(&self) -> usize {
+        self.pending_teardowns.load(Ordering::Relaxed)
+    }
+
     /// Whether a source with `key` is currently registered (has ≥ 1 reference).
     #[must_use]
     pub fn contains(&self, key: &SourceKey) -> bool {
@@ -424,13 +445,19 @@ impl<T> Drop for SourceRegistry<T> {
 /// The reaper thread body: stop-and-join each actor off every hot path, and on
 /// [`Reap::Stop`] drain any already-queued teardowns before exiting so an explicit
 /// [`SourceRegistry::shutdown`] joins **all** pending decodes.
-fn reaper_loop(rx: &Receiver<Reap>) {
+fn reaper_loop(rx: &Receiver<Reap>, pending: &Arc<AtomicUsize>) {
     while let Ok(msg) = rx.recv() {
         match msg {
-            Reap::Actor(actor) => actor.shutdown(),
+            Reap::Actor(actor) => {
+                pending.fetch_add(1, Ordering::Relaxed);
+                actor.shutdown();
+                pending.fetch_sub(1, Ordering::Relaxed);
+            }
             Reap::Stop => {
                 while let Ok(Reap::Actor(actor)) = rx.try_recv() {
+                    pending.fetch_add(1, Ordering::Relaxed);
                     actor.shutdown();
+                    pending.fetch_sub(1, Ordering::Relaxed);
                 }
                 return;
             }
@@ -449,5 +476,210 @@ fn lock<U>(m: &Mutex<U>) -> MutexGuard<'_, U> {
     match m.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RequestedSize, SourceActor, SourceInit, SourceKey, SourceRegistry};
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
+
+    /// A test ingest/decode actor. Its `shutdown` (the reaper's blocking join)
+    /// optionally spins on `gate` first — simulating a decode-thread join wedged
+    /// forever — then records completion by bumping `completed`.
+    struct TestActor {
+        completed: Arc<AtomicUsize>,
+        /// When `Some`, `shutdown` blocks until the gate is cleared (a stuck join).
+        gate: Option<Arc<AtomicBool>>,
+    }
+
+    impl SourceActor for TestActor {
+        fn shutdown(self: Box<Self>) {
+            if let Some(gate) = &self.gate {
+                while gate.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            self.completed.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    /// Clears a wedge gate on drop, so a panicking assertion (a RED run) still lets
+    /// the wedged teardown thread exit instead of leaking it for the rest of the
+    /// test binary.
+    struct ClearGateOnDrop(Arc<AtomicBool>);
+    impl Drop for ClearGateOnDrop {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+
+    fn store(id: &str) -> Arc<TileStore<u64>> {
+        Arc::new(TileStore::new(
+            id,
+            TileThresholds::default(),
+            NoSignalPolicy::HoldForever,
+        ))
+    }
+
+    fn size(width: u32, height: u32) -> RequestedSize {
+        RequestedSize { width, height }
+    }
+
+    fn wait_until(mut cond: impl FnMut() -> bool, within: Duration, what: &str) {
+        let start = Instant::now();
+        while !cond() {
+            assert!(start.elapsed() < within, "timed out waiting for: {what}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn reaper_keeps_draining_under_a_wedged_teardown() {
+        // F1 CHAOS (inv #10): one source teardown wedged FOREVER in `shutdown()`
+        // must not stop the reaper draining a SUSTAINED stream of healthy
+        // last-releases, and `pending_teardowns()` must stay BOUNDED — a stuck join
+        // must never grow an unbounded teardown backlog behind it. A reaper that
+        // joins inline FAILS this: the wedged join blocks the consume loop, so no
+        // healthy teardown behind it ever runs.
+        let reg = SourceRegistry::<u64>::new();
+
+        // A wedged teardown: its `shutdown` spins on the gate until the test clears it.
+        let gate = Arc::new(AtomicBool::new(true));
+        let _clear = ClearGateOnDrop(gate.clone());
+        let wedged_done = Arc::new(AtomicUsize::new(0));
+        let hw = reg
+            .acquire(
+                SourceKey::from_canonical("rtsp://wedged"),
+                size(1920, 1080),
+                {
+                    let completed = wedged_done.clone();
+                    let gate = gate.clone();
+                    move |_r| {
+                        Ok::<_, Infallible>(SourceInit::new(
+                            store("wedged"),
+                            TestActor {
+                                completed,
+                                gate: Some(gate),
+                            },
+                        ))
+                    }
+                },
+            )
+            .unwrap();
+        // Reap the wedged actor FIRST (the mpsc is FIFO): the reaper picks it up
+        // before any healthy teardown in the stream.
+        drop(hw);
+
+        // A SUSTAINED stream of healthy last-releases (distinct keys → each a
+        // last-release handed to the reaper). Sample `pending_teardowns()` as we go.
+        const HEALTHY: usize = 1000;
+        const PENDING_BOUND: usize = 256;
+        let healthy_done = Arc::new(AtomicUsize::new(0));
+        let mut max_pending = 0;
+        for i in 0..HEALTHY {
+            let completed = healthy_done.clone();
+            let h = reg
+                .acquire(
+                    SourceKey::from_canonical(format!("rtsp://healthy/{i}")),
+                    size(320, 180),
+                    move |_r| {
+                        Ok::<_, Infallible>(SourceInit::new(
+                            store("healthy"),
+                            TestActor {
+                                completed,
+                                gate: None,
+                            },
+                        ))
+                    },
+                )
+                .unwrap();
+            drop(h);
+            max_pending = max_pending.max(reg.pending_teardowns());
+        }
+
+        // The reaper must keep draining despite the wedged teardown: every healthy
+        // teardown eventually runs. (An inline-join reaper never gets here → RED.)
+        wait_until(
+            || healthy_done.load(Ordering::Acquire) >= HEALTHY,
+            Duration::from_secs(10),
+            "all healthy teardowns complete while one teardown is wedged forever",
+        );
+        // In-flight teardowns stay bounded — never scaling with the stream length.
+        assert!(
+            max_pending <= PENDING_BOUND,
+            "pending_teardowns must stay bounded under a wedged straggler \
+             (saw {max_pending}, bound {PENDING_BOUND}, stream {HEALTHY})"
+        );
+        assert_eq!(
+            wedged_done.load(Ordering::Acquire),
+            0,
+            "the wedged teardown must still be stuck (running off the consume loop)"
+        );
+
+        // Release the wedge and tidy up.
+        gate.store(false, Ordering::Release);
+        reg.shutdown();
+    }
+
+    #[test]
+    fn shutdown_grace_joins_then_detaches_a_wedged_teardown() {
+        // F1: the explicit `shutdown()` (Stop path) must bounded-grace-join
+        // in-flight teardowns then DETACH stragglers — it must NOT block forever on
+        // a wedged decode-thread join. An inline-join reaper makes `shutdown()`
+        // block on the reaper stuck in the wedged join → RED (never returns).
+        let reg = SourceRegistry::<u64>::new();
+        let gate = Arc::new(AtomicBool::new(true));
+        let _clear = ClearGateOnDrop(gate.clone());
+        let done = Arc::new(AtomicUsize::new(0));
+        let hw = reg
+            .acquire(
+                SourceKey::from_canonical("rtsp://wedged-shutdown"),
+                size(1, 1),
+                {
+                    let completed = done.clone();
+                    let gate = gate.clone();
+                    move |_r| {
+                        Ok::<_, Infallible>(SourceInit::new(
+                            store("wedged-shutdown"),
+                            TestActor {
+                                completed,
+                                gate: Some(gate),
+                            },
+                        ))
+                    }
+                },
+            )
+            .unwrap();
+        drop(hw); // last-release → wedged teardown handed to the reaper
+
+        // Run shutdown() on a helper thread so a (buggy) forever-block cannot hang
+        // the test; assert it RETURNS within a bounded budget.
+        let returned = Arc::new(AtomicBool::new(false));
+        let reg_bg = Arc::clone(&reg);
+        let returned_bg = returned.clone();
+        let joiner = std::thread::spawn(move || {
+            reg_bg.shutdown();
+            returned_bg.store(true, Ordering::Release);
+        });
+        wait_until(
+            || returned.load(Ordering::Acquire),
+            Duration::from_secs(10),
+            "shutdown() must bounded-grace-join then detach a wedged teardown, not block forever",
+        );
+        // The wedged teardown was detached, never joined — it never completed.
+        assert_eq!(
+            done.load(Ordering::Acquire),
+            0,
+            "the wedged teardown is detached, not joined to completion"
+        );
+
+        gate.store(false, Ordering::Release); // let the detached straggler exit
+        let _ = joiner.join();
     }
 }
