@@ -25,7 +25,7 @@
 //! faulted. The stream is *sampled*, never *pacing* — a stalled or absent RTP
 //! source simply stops yielding and the store rides silence-fill.
 
-use super::v30::{Aes3Format, V30Payload};
+use super::v30::{Aes3Format, SampleDepth, V30Payload};
 
 /// Convert one depacketized ST 2110-30 payload to interleaved canonical `f32`
 /// (frame-major, length `group_count * channels`).
@@ -40,9 +40,34 @@ use super::v30::{Aes3Format, V30Payload};
 pub fn pcm_to_f32(payload: &V30Payload<'_>) -> Vec<f32> {
     let channels = usize::from(payload.format.channels);
     let groups = payload.group_count();
-    // RED scaffold (ADR-0033 §3, replaced in the GREEN commit): the right shape
-    // but silence — the real big-endian L16/L24 -> f32 conversion lands next.
-    vec![0.0_f32; groups.saturating_mul(channels)]
+    let depth = payload.format.depth;
+    let mut out = Vec::with_capacity(groups.saturating_mul(channels));
+    for group in 0..groups {
+        for channel in 0..channels {
+            // `sample` returns `None` only out of range, which the `0..groups` /
+            // `0..channels` bounds never hit; a defensive `unwrap_or(0)` keeps
+            // the decode panic-free on the data plane rather than indexing.
+            let code = payload.sample(group, channel).unwrap_or(0);
+            out.push(code_to_unit_f32(code, depth));
+        }
+    }
+    out
+}
+
+/// Convert one signed PCM code to a unit-range `f32` for the given depth
+/// (**L16** `/32768`, **L24** `/8388608`).
+#[allow(clippy::as_conversions, clippy::cast_precision_loss)]
+// reason: `code` magnitude is <= 2^15 (L16) or <= 2^23 (L24), both < 2^24 and
+// therefore exactly representable in `f32`; dividing by the 2^k scale yields a
+// value in [-1.0, 1.0). There is no allocation-free fallible `i32 -> f32`; this
+// mirrors the reviewed float<->int pattern in `st2110::packetize` and
+// `multiview-audio::mixer`.
+fn code_to_unit_f32(code: i32, depth: SampleDepth) -> f32 {
+    let scale = match depth {
+        SampleDepth::L16 => 32_768.0_f32,
+        SampleDepth::L24 => 8_388_608.0_f32,
+    };
+    code as f32 / scale
 }
 
 /// One depacketized ST 2110-30 / AES67 audio unit yielded by
