@@ -435,7 +435,7 @@ async fn revert_after_a_file_watch_apply_returns_to_loaded() {
     // External boot-file edit: in_a goes near-white; the watcher applies it.
     // Driven by manual ticks (no wall-clock race): one poll registers the
     // candidate, the second crosses the debounce and applies.
-    std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#f0f0f0")).expect("edit boot file");
+    external_edit(&r.boot_path, &BOOT_DOC.replace("#101418", "#f0f0f0"));
     drive_polls(&mut poll, 2).await;
     assert_eq!(
         r.state.config_watch.snapshot().applied_count,
@@ -642,7 +642,7 @@ async fn promote_does_not_retrigger_a_file_watch_apply() {
     // Watching resumes against the ADOPTED baseline: a real external edit
     // still applies (candidate on the first poll, applied on the second).
     let text = std::fs::read_to_string(&r.boot_path).expect("read promoted file");
-    std::fs::write(&r.boot_path, text.replace("#c0c0c0", "#101418")).expect("external edit");
+    external_edit(&r.boot_path, &text.replace("#c0c0c0", "#101418"));
     drive_polls(&mut poll, 2).await;
     assert_eq!(
         r.state.config_watch.snapshot().applied_count,
@@ -791,7 +791,7 @@ async fn a_resumed_run_does_not_reapply_the_unchanged_boot_file() {
 
     // A REAL edit still hot-applies, diffed against the RESUMED baseline
     // (candidate on the first poll, applied on the second).
-    std::fs::write(&boot_path, BOOT_DOC.replace("#101418", "#123456")).expect("edit boot file");
+    external_edit(&boot_path, &BOOT_DOC.replace("#101418", "#123456"));
     drive_polls(&mut poll, 2).await;
     assert_eq!(
         state.config_watch.snapshot().applied_count,
@@ -2917,6 +2917,29 @@ fn force_mtime(path: &Path, mtime: std::time::SystemTime) {
     file.set_modified(mtime).expect("set the boot file mtime");
 }
 
+/// Simulate a real external boot-file edit: an ATOMIC temp-file save (write a
+/// freshly-named sibling temp, then `rename(2)` it over the path), exactly how
+/// an editor saves and precisely what the watcher's fingerprint is built to
+/// detect (`config_watch.rs` module docs: "a write-temp + `rename(2)` lands as
+/// a normal change (new inode)").
+///
+/// The rename gives the path a BRAND-NEW inode — the temp is created while the
+/// old file is still linked, so its inode can never be the still-linked one —
+/// so the `len + mtime + inode` fingerprint always differs from the
+/// previously-applied one. An in-place `std::fs::write` truncate instead reuses
+/// the SAME inode and, for a same-length rewrite within the filesystem's mtime
+/// granularity, produces an IDENTICAL fingerprint the watcher misses (~293/300
+/// same-length in-place rewrites alias on this tmpfs). Deterministic on any
+/// POSIX filesystem; tests that rely on the watcher DETECTING an edit must use
+/// this, never an in-place same-length write.
+fn external_edit(path: &Path, content: &str) {
+    let dir = path.parent().expect("the boot path has a parent directory");
+    let tmp = tempfile::NamedTempFile::new_in(dir).expect("create a temp for the atomic edit");
+    std::fs::write(tmp.path(), content).expect("write the external-edit content to the temp");
+    tmp.persist(path)
+        .expect("atomically rename the external edit into place");
+}
+
 /// DETERMINISTIC equivalent of `revert_after_a_file_watch_apply_returns_to_loaded`'s
 /// apply gate: an external boot-file edit hot-applies through the watcher, driven
 /// by manual ticks with ZERO wall-clock waits. Proves the manual-poll seam
@@ -2946,7 +2969,7 @@ async fn manual_poll_drives_an_external_edit_apply_deterministically() {
 
     // External edit: in_a goes near-white. One tick registers the new
     // fingerprint as a candidate; the second crosses the debounce and applies.
-    std::fs::write(&r.boot_path, BOOT_DOC.replace("#101418", "#f0f0f0")).expect("edit boot file");
+    external_edit(&r.boot_path, &BOOT_DOC.replace("#101418", "#f0f0f0"));
     assert!(poll.poll_once().await, "first poll: candidate registered");
     assert_eq!(
         r.state.config_watch.snapshot().applied_count,
@@ -3037,7 +3060,7 @@ async fn external_edit_after_promote_applies_regardless_of_mtime_granularity() {
     // same length) — the original flaky write path.
     let promoted = std::fs::read_to_string(&r.boot_path).expect("read the promoted file");
     let edited = promoted.replace("#c0c0c0", "#101418");
-    std::fs::write(&r.boot_path, &edited).expect("external edit");
+    external_edit(&r.boot_path, &edited);
     // Remove mtime as a discriminator — force the worst case the coarse fs
     // granularity produces by accident, so ONLY the inode can tell the edit
     // apart from the adopted content.
