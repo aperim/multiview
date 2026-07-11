@@ -177,6 +177,45 @@ mod producer {
         );
     }
 
+    #[test]
+    fn ssrc_change_resets_the_sequence_watermark() {
+        // P2-F5: the sequence watermark must be SSRC-scoped. A new SSRC is a new
+        // stream with its OWN sequence space; if the watermark is still judged
+        // against the OLD SSRC's value, a new-stream sequence that serial
+        // arithmetic reads as "before" the old watermark is treated as stale and
+        // never updates it — so real gaps on the new stream are silently missed.
+        let format = Aes3Format::new(1, SampleDepth::L16).expect("mono L16");
+        let packetizer = Aes67Packetizer::new(1, SampleDepth::L16).expect("mono L16");
+        let pcm = packetizer.encode(&[0.0_f32]).expect("one mono group");
+
+        // Stream A at a low sequence, then stream B (a NEW SSRC) at a HIGH
+        // sequence base that RFC 1982 arithmetic reads as "before" A's, then a
+        // genuine gap on B (60001 -> 60003, packet 60002 lost).
+        let source = ScriptedSource::new(vec![
+            audio_packet(0, 100, 0xAAAA_AAAA, pcm.clone()), // A anchors
+            audio_packet(0, 60_000, 0xBBBB_BBBB, pcm.clone()), // B: new stream anchors
+            audio_packet(48, 60_001, 0xBBBB_BBBB, pcm.clone()), // B: contiguous
+            audio_packet(96, 60_003, 0xBBBB_BBBB, pcm), // B: 60001 -> 60003 gap
+        ]);
+        let mut producer = Aes67AudioProducer::new(Box::new(source), format);
+
+        let a = producer.next_audio().unwrap().expect("A anchors");
+        assert!(!a.discontinuity, "first packet of stream A anchors, no gap");
+        let b0 = producer.next_audio().unwrap().expect("B anchor");
+        assert!(
+            !b0.discontinuity,
+            "the first packet of a NEW SSRC anchors the new stream, not a gap"
+        );
+        let b1 = producer.next_audio().unwrap().expect("B contiguous");
+        assert!(!b1.discontinuity, "60000 -> 60001 is contiguous on stream B");
+        let b2 = producer.next_audio().unwrap().expect("B gap");
+        assert!(
+            b2.discontinuity,
+            "a real gap on the new stream (60001 -> 60003) must be flagged — the \
+             watermark tracks THIS SSRC, not the stale prior one (P2-F5)"
+        );
+    }
+
     /// A [`PacketSource`] that yields `remaining` malformed units — each a
     /// counted poll — then drains to `None`, so a test can prove the producer
     /// never drains an unbounded flood in one call (F1 / inv #1).
