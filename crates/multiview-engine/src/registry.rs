@@ -25,8 +25,8 @@
 //!
 //! When the **last** reference to a source is released the entry is removed and its
 //! decode actor is torn down **off every hot path** by a fixed-size **teardown pool**:
-//! [`TEARDOWN_WORKERS`] worker threads draining a **bounded** queue of depth
-//! [`TEARDOWN_QUEUE_DEPTH`]. The releasing `Drop` only *offers* the actor with a
+//! `TEARDOWN_WORKERS` worker threads draining a **bounded** queue of depth
+//! `TEARDOWN_QUEUE_DEPTH`. The releasing `Drop` only *offers* the actor with a
 //! non-blocking, bounded `try_send` — it never blocks and never spawns a thread. A
 //! worker runs the blocking `shutdown()` (the decode-thread stop-and-join), so a join
 //! that wedges forever ties up **at most one worker** and never stalls the releasing
@@ -43,7 +43,7 @@
 //! terminate ([`request_stop`](SourceActor::request_stop)) then drops the boxed actor instead
 //! of enqueuing it — a wait-free, thread-free bound, never a blocking join inside a Tokio
 //! async destructor. The explicit [`SourceRegistry::shutdown`] (synchronous teardown context)
-//! disconnects the queue, **bounded-grace-joins** the workers for [`TEARDOWN_GRACE`], then
+//! disconnects the queue, **bounded-grace-joins** the workers for `TEARDOWN_GRACE`, then
 //! **detaches** any still wedged rather than blocking forever.
 //!
 //! ## Scope: the pool is bounded now; a real decode actor's promptness is forward
@@ -373,7 +373,7 @@ impl<T> SourceRegistry<T> {
     }
 
     /// Acquire a ref-counted handle to a source whose decode teardown is owned
-    /// **externally** — the store-only sibling of [`acquire`].
+    /// **externally** — the store-only sibling of [`acquire`](SourceRegistry::acquire).
     ///
     /// This is the adoption seam for callers (e.g. the CLI `Pipeline`) that own the
     /// shared store + its sizing here but whose decode thread's stop/join still
@@ -382,11 +382,11 @@ impl<T> SourceRegistry<T> {
     /// threads do not exist yet, so there is genuinely no actor to own: the entry
     /// registers with **no** [`SourceActor`], and last-release removes it without a
     /// reaper hand-off (nothing to join). Decode-once/use-many and per-axis
-    /// supremum growth are identical to [`acquire`]; on the **first** reference the
+    /// supremum growth are identical to [`acquire`](SourceRegistry::acquire); on the **first** reference the
     /// `factory` builds only the shared store, and every later reference shares an
     /// [`Arc`] clone of it. `factory` runs under the registry lock and MUST be
     /// non-blocking and MUST NOT re-enter the registry. When the decode lifecycle is
-    /// later hoisted, callers move to [`acquire`] and pass the owning actor.
+    /// later hoisted, callers move to [`acquire`](SourceRegistry::acquire) and pass the owning actor.
     ///
     /// # Errors
     ///
@@ -457,7 +457,7 @@ impl<T> SourceRegistry<T> {
 
     /// The number of source teardowns currently **reserved** (queued plus in flight) — a
     /// telemetry/test observable of the isolation guarantee (inv #10). A last-release reserves
-    /// a slot with a bounded CAS ([`reserve_slot`]) capped at `TEARDOWN_QUEUE_DEPTH +
+    /// a slot with a bounded CAS (`reserve_slot`) capped at `TEARDOWN_QUEUE_DEPTH +
     /// TEARDOWN_WORKERS`; at the cap it sheds without reserving. So this count can **never
     /// exceed `TEARDOWN_QUEUE_DEPTH + TEARDOWN_WORKERS`** — by construction, however many
     /// last-releases arrive concurrently or how many teardowns wedge. A wedged `shutdown()`
@@ -499,7 +499,7 @@ impl<T> SourceRegistry<T> {
     }
 
     /// Stop the teardown pool: disconnect the queue so the workers drain what is
-    /// buffered then exit, **bounded-grace-join** them for [`TEARDOWN_GRACE`], then
+    /// buffered then exit, **bounded-grace-join** them for `TEARDOWN_GRACE`, then
     /// **detach** any still wedged rather than blocking forever.
     ///
     /// Call from a **synchronous** teardown context **after** all handles have been
