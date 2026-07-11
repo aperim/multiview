@@ -110,7 +110,12 @@ use crate::st2110::transport::PacketSource;
 pub struct Aes67AudioProducer {
     source: Box<dyn PacketSource + Send>,
     format: Aes3Format,
-    /// The highest in-stream RTP sequence accepted so far (for gap detection).
+    /// The SSRC the [`last_sequence`](Self::last_sequence) watermark belongs to.
+    /// Sequence numbers are only comparable within one synchronization source, so
+    /// a change resets the watermark (a new SSRC is a new sequence space).
+    last_ssrc: Option<u32>,
+    /// The highest in-stream RTP sequence accepted so far **for `last_ssrc`** (for
+    /// gap detection). Reset whenever the SSRC changes.
     last_sequence: Option<u16>,
 }
 
@@ -120,6 +125,7 @@ impl core::fmt::Debug for Aes67AudioProducer {
         // `Box<dyn PacketSource>` is not `Debug` (like the video St2110Producer).
         f.debug_struct("Aes67AudioProducer")
             .field("format", &self.format)
+            .field("last_ssrc", &self.last_ssrc)
             .field("last_sequence", &self.last_sequence)
             .finish_non_exhaustive()
     }
@@ -145,6 +151,7 @@ impl Aes67AudioProducer {
         Self {
             source,
             format,
+            last_ssrc: None,
             last_sequence: None,
         }
     }
@@ -186,7 +193,7 @@ impl Aes67AudioProducer {
             let Ok(payload) = V30Payload::parse(&packet.payload, self.format) else {
                 continue;
             };
-            let discontinuity = self.observe_sequence(packet.sequence);
+            let discontinuity = self.observe_sequence(packet.ssrc, packet.sequence);
             let samples = pcm_to_f32(&payload);
             return Ok(Some(Aes67AudioFrame {
                 raw_timestamp: packet.timestamp,
@@ -201,10 +208,25 @@ impl Aes67AudioProducer {
         Ok(None)
     }
 
-    /// Update the sequence watermark and report whether a forward gap (a lost
-    /// packet) was observed. A stale reordered packet does not move the
+    /// Update the sequence watermark for `ssrc` and report whether a forward gap
+    /// (a lost packet) was observed. A stale reordered packet does not move the
     /// watermark, so a later in-order packet still detects its own gap.
-    fn observe_sequence(&mut self, sequence: u16) -> bool {
+    ///
+    /// Sequence numbers are only comparable **within one synchronization
+    /// source**, so a change of `ssrc` is a new stream: the watermark resets to
+    /// this packet's sequence and no gap is reported (the first packet of a stream
+    /// anchors — it is not a lost-packet gap; the shared
+    /// [`RtpAudioRebaser`](crate::rtp_audio) re-anchors on the SSRC change
+    /// itself). Without this, a new stream whose sequence base RFC 1982 arithmetic
+    /// reads as "before" the old watermark would be judged perpetually stale, the
+    /// watermark would never advance, and real gaps on the new stream would be
+    /// missed (P2-F5).
+    fn observe_sequence(&mut self, ssrc: u32, sequence: u16) -> bool {
+        if self.last_ssrc != Some(ssrc) {
+            self.last_ssrc = Some(ssrc);
+            self.last_sequence = Some(sequence);
+            return false;
+        }
         let gap = self.last_sequence.is_some_and(|prev| {
             sequence != prev.wrapping_add(1) && crate::st2110::rtp::seq_after(prev, sequence)
         });
