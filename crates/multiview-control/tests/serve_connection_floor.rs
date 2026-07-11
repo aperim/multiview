@@ -7,9 +7,10 @@
 //! * **F1 — HTTP/2 is refused.** The header-read timeout only bounds HTTP/1 header
 //!   reads; hyper's HTTP/2 server has no equivalent, so an HTTP/2 connection (which
 //!   the old `auto` builder would negotiate on the h2 preface) could pin a slot
-//!   forever. Serving on `hyper::server::conn::http1::Builder` subjects *every*
-//!   connection — the h2 preface included — to the header-read timeout, so a slot
-//!   can never be held open past the deadline.
+//!   forever. Serving on `hyper::server::conn::http1::Builder` bounds every slow-header
+//!   connection by the header-read timeout, and the h2 preface — a complete but invalid
+//!   HTTP/1 request line — is rejected immediately by the parser, so no slot is ever
+//!   pinned open past the deadline.
 //! * **F2 — accept-level population cap.** A flood of half-open connections is bounded
 //!   at accept (global + per-IP), before any request headers parse.
 //! * **F3 — bounded drain.** At shutdown, in-flight connection tasks are tracked and
@@ -38,9 +39,6 @@ use multiview_engine::EnginePublisher;
 use multiview_events::Event;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-
-/// A short header-read deadline keeps the test fast; production defaults to 20 s.
-const TEST_HEADER_READ_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The HTTP/2 connection preface a client sends to begin an h2 session over cleartext
 /// (RFC 9113 §3.4). The old `auto` builder negotiates HTTP/2 on seeing this; an
@@ -82,38 +80,57 @@ async fn serve_with(
     (addr, shutdown_tx, server)
 }
 
-/// F1: an HTTP/2 client (one that sends the h2 preface, then stalls without ever
-/// completing an HTTP/1 header block) must have its connection dropped at the
-/// header-read deadline — never negotiated into a timeout-free HTTP/2 session that
-/// pins the slot open forever. The header-read timeout only bounds HTTP/1 header
-/// reads, so this is the whole point of serving HTTP/1-only: the preface is parsed as
-/// a (bad) HTTP/1 request line and is therefore subject to the same deadline.
+/// F3 (panel round-2): an HTTP/2 client (one that sends the h2 preface, then stalls
+/// without ever completing an HTTP/1 header block) must be rejected **immediately by the
+/// HTTP/1-only parser** — the preface's first line, `PRI * HTTP/2.0`, is a complete but
+/// invalid HTTP/1 request line, so it is rejected on parse, well **before** the
+/// header-read deadline (never negotiated into a timeout-free HTTP/2 session that pins the
+/// slot open). A deliberately LONG header-read deadline makes the distinction observable:
+/// a prompt close proves parser-rejection, whereas a close only near the deadline would
+/// mean the preface was (wrongly) treated as a slow, still-arriving header block.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_http2_preface_is_refused_not_held_open_as_a_timeout_free_session() {
-    let options = ServeOptions::default().with_header_read_timeout(Some(TEST_HEADER_READ_TIMEOUT));
+async fn an_http2_preface_is_rejected_promptly_by_the_http1_parser() {
+    // A deliberately LONG header-read deadline: a parser-rejection closes in
+    // milliseconds, so a close well within a small fraction of this proves the preface
+    // was rejected on parse, not merely dropped at the deadline.
+    const LONG_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(4);
+    // The close must land well inside the deadline (a quarter of it). If the preface were
+    // (wrongly) treated as an incomplete header block it would close at
+    // ~LONG_HEADER_READ_TIMEOUT; if h2 were negotiated the read would never resolve.
+    const PROMPT_BOUND: Duration = Duration::from_secs(1);
+
+    let options =
+        ServeOptions::default().with_header_read_timeout(Some(LONG_HEADER_READ_TIMEOUT));
     let (addr, shutdown_tx, server) = serve_with(options).await;
 
-    // Send the h2 connection preface and nothing else — an h2 server would reply with
-    // a SETTINGS frame and then wait for the client's frames indefinitely (no
-    // header-read timeout applies to h2), pinning the connection. An HTTP/1-only
-    // server drops it at the header-read deadline instead.
+    // Send the h2 connection preface and nothing else — an h2 server would reply with a
+    // SETTINGS frame and then wait for the client's frames indefinitely (no header-read
+    // timeout applies to h2), pinning the connection. The HTTP/1-only parser rejects the
+    // preface's invalid request line immediately instead.
     let mut stream = TcpStream::connect(addr).await.unwrap();
     stream.write_all(H2_PREFACE).await.unwrap();
 
     let mut buf = Vec::new();
     let start = std::time::Instant::now();
-    let closed = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buf)).await;
+    let closed = tokio::time::timeout(PROMPT_BOUND, stream.read_to_end(&mut buf)).await;
     let elapsed = start.elapsed();
 
-    // The connection must be CLOSED (the read resolved) rather than held open until the
-    // 5 s outer bound — the "h2 has no header-read timeout" failure. Under the old
-    // `auto` builder the preface negotiates a live h2 session that never closes, so
-    // this read hits the outer timeout (`closed.is_err()`).
+    // Rejected PROMPTLY: the read resolves well within the (long) deadline. Under the old
+    // `auto` builder the preface negotiates a live h2 session that never closes
+    // (`closed.is_err()`); if the preface were treated as a slow header block it would
+    // only close at ~LONG_HEADER_READ_TIMEOUT, also tripping this bound.
     assert!(
         closed.is_ok(),
-        "the server held an HTTP/2-preface connection open past the {TEST_HEADER_READ_TIMEOUT:?} \
-         header-read deadline — HTTP/2 was negotiated and its slot pinned with no header timeout \
-         (serve HTTP/1-only so the preface is bounded by the deadline). elapsed={elapsed:?}"
+        "the HTTP/2 preface was not rejected promptly (within {PROMPT_BOUND:?}) — it was \
+         either negotiated into a timeout-free h2 session or held to the \
+         {LONG_HEADER_READ_TIMEOUT:?} header-read deadline instead of rejected on parse. \
+         elapsed={elapsed:?}"
+    );
+    assert!(
+        elapsed < PROMPT_BOUND,
+        "the HTTP/2 preface close took {elapsed:?} — not the prompt parser-rejection a \
+         complete-but-invalid HTTP/1 request line must get (deadline was \
+         {LONG_HEADER_READ_TIMEOUT:?})"
     );
     // And no working exchange happened: no HTTP/1 success and no live h2 session.
     let response = String::from_utf8_lossy(&buf);
