@@ -515,7 +515,7 @@ msgstr ""
 msgid "Accessible toasts announce via a live region."
 msgstr ""
 
-#: src/app/navigation.tsx:71
+#: src/app/navigation.tsx:73
 #: src/pages/AccountPage.tsx:139
 msgid "Account"
 msgstr ""
@@ -728,7 +728,7 @@ msgstr ""
 msgid "Alarm when offline"
 msgstr ""
 
-#: src/app/navigation.tsx:62
+#: src/app/navigation.tsx:63
 #: src/docs/registry.ts:262
 #: src/pages/AlarmsPage.tsx:152
 #: src/pages/docs/FeaturesPage.tsx:164
@@ -1004,7 +1004,7 @@ msgstr ""
 msgid "Attached automatically"
 msgstr ""
 
-#: src/app/navigation.tsx:52
+#: src/app/navigation.tsx:53
 #: src/pages/AudioPage.tsx:339
 #: src/pages/OutputsPage.tsx:581
 msgid "Audio"
@@ -1022,7 +1022,7 @@ msgstr ""
 msgid "Audio silence"
 msgstr ""
 
-#: src/app/navigation.tsx:66
+#: src/app/navigation.tsx:68
 #: src/pages/AuditPage.tsx:55
 msgid "Audit"
 msgstr ""
@@ -1071,6 +1071,11 @@ msgstr ""
 msgid "AV1 is the open, royalty-free codec developed by the Alliance for Open Media. It compresses better than HEVC and has fast hardware decode support arriving across recent GPUs and devices, with hardware encoding available on the newest generations. For live work its software encoders are still heavy, so AV1 is the right choice when the audience's players are known to support it and bandwidth is at a premium."
 msgstr ""
 
+#: src/pages/CapabilitiesPage.tsx:78
+msgid "Availability"
+msgstr ""
+
+#: src/pages/CapabilitiesPage.tsx:93
 #: src/pages/docs/components.tsx:143
 msgid "Available"
 msgstr ""
@@ -1081,6 +1086,14 @@ msgstr ""
 
 #: src/pages/SystemActionsPage.tsx:281
 msgid "Back to start"
+msgstr ""
+
+#: src/pages/CapabilitiesPage.tsx:72
+msgid "Backend"
+msgstr ""
+
+#: src/pages/CapabilitiesPage.tsx:58
+msgid "Backends"
 msgstr ""
 
 #: src/pages/docs/ConfigPage.tsx:94
@@ -1238,6 +1251,10 @@ msgstr ""
 msgid "Buffers and lags under loss"
 msgstr ""
 
+#: src/pages/CapabilitiesPage.tsx:169
+msgid "Build & licence"
+msgstr ""
+
 #: src/pages/DataPage.tsx:360
 msgid "Build diagnostics snapshot"
 msgstr ""
@@ -1333,6 +1350,8 @@ msgstr ""
 msgid "Canvas width in pixels."
 msgstr ""
 
+#: src/app/navigation.tsx:65
+#: src/pages/CapabilitiesPage.tsx:235
 #: src/pages/DeviceDetailPage.tsx:490
 msgid "Capabilities"
 msgstr ""
@@ -1349,7 +1368,7 @@ msgstr ""
 msgid "Carry the file to an online portal to obtain a signed lease."
 msgstr ""
 
-#: src/app/navigation.tsx:55
+#: src/app/navigation.tsx:56
 #: src/pages/CastPage.tsx:215
 #: src/pages/CastPage.tsx:257
 msgid "Cast"
@@ -1528,6 +1547,10 @@ msgstr ""
 msgid "Claiming with a code requires licence-server connectivity (not yet wired in this build). Use the offline path below to license this machine now."
 msgstr ""
 
+#: src/pages/CapabilitiesPage.tsx:132
+msgid "Class"
+msgstr ""
+
 #: src/pages/RoutingPage.tsx:141
 msgid "Class-1 — hot, seamless at a frame boundary"
 msgstr ""
@@ -1572,6 +1595,10 @@ msgstr ""
 #: src/pages/OutputsPage.tsx:523
 #: src/pages/OutputsPage.tsx:672
 msgid "Codec"
+msgstr ""
+
+#: src/pages/CapabilitiesPage.tsx:61
+msgid "Codec and compositor backends this build can use. A backend is available when it is compiled in and a usable device is present."
 msgstr ""
 
 #: src/docs/registry.ts:507
@@ -1637,6 +1664,10 @@ msgstr ""
 msgid "Community support"
 msgstr ""
 
+#: src/pages/CapabilitiesPage.tsx:196
+msgid "Compiled features"
+msgstr ""
+
 #: src/pages/ProbesPage.tsx:303
 msgid "Compliance standard"
 msgstr ""
@@ -1660,6 +1691,10 @@ msgstr ""
 
 #: src/pages/LayoutEditorPage.tsx:336
 msgid "Compose the output multiview. The Canvas tab is drag-and-drop; the Cells tab is the fully keyboard-operable equivalent."
+msgstr ""
+
+#: src/pages/CapabilitiesPage.tsx:120
+msgid "Compositor"
 msgstr ""
 
 #: src/pages/SystemPage.tsx:145
@@ -1878,6 +1913,10 @@ msgstr ""
 
 #: src/pages/MediaPlayersPage.tsx:208
 msgid "Could not load asset"
+msgstr ""
+
+#: src/pages/CapabilitiesPage.tsx:249
+msgid "Could not load capabilities."
 msgstr ""
 
 #: src/pages/CastPage.tsx:303
@@ -2184,12 +2223,12 @@ msgstr ""
 msgid "D:HH:MM:SS (drop day when zero)"
 msgstr ""
 
-#: src/app/navigation.tsx:47
+#: src/app/navigation.tsx:48
 #: src/pages/DashboardPage.tsx:50
 msgid "Dashboard"
 msgstr ""
 
-#: src/app/navigation.tsx:72
+#: src/app/navigation.tsx:74
 #: src/pages/DataPage.tsx:377
 msgid "Data"
 msgstr ""
@@ -2387,6 +2426,7 @@ msgid "Detect per-cell fail states — black, freeze, silence, and loudness viol
 msgstr ""
 
 #: src/devices/FromDevice.tsx:85
+#: src/pages/CapabilitiesPage.tsx:139
 msgid "Device"
 msgstr ""
 
@@ -2398,7 +2438,7 @@ msgstr ""
 msgid "Device-reported streams"
 msgstr ""
 
-#: src/app/navigation.tsx:54
+#: src/app/navigation.tsx:55
 #: src/docs/registry.ts:158
 #: src/pages/DevicesPage.tsx:656
 #: src/pages/docs/ConfigPage.tsx:329
@@ -2524,7 +2564,7 @@ msgstr ""
 msgid "docker run and docker compose, GPU access, volumes, healthchecks, and the API token."
 msgstr ""
 
-#: src/app/navigation.tsx:67
+#: src/app/navigation.tsx:69
 msgid "Docs"
 msgstr ""
 
@@ -2572,6 +2612,7 @@ msgstr ""
 msgid "Drift-alarm threshold, 1–10000 ms: a member drifting past this raises a warning alarm."
 msgstr ""
 
+#: src/pages/CapabilitiesPage.tsx:147
 #: src/pages/DeviceDetailPage.tsx:459
 #: src/pages/DevicesPage.tsx:134
 #: src/pages/DevicesPage.tsx:545
@@ -2810,6 +2851,10 @@ msgstr ""
 #: src/pages/SyncGroupsPage.tsx:300
 #: src/pages/SyncGroupsPage.tsx:329
 msgid "Edit sync group"
+msgstr ""
+
+#: src/pages/CapabilitiesPage.tsx:182
+msgid "Effective licence"
 msgstr ""
 
 #: src/pages/TallyPage.tsx:218
@@ -3817,7 +3862,7 @@ msgstr ""
 msgid "Layout saved, but apply failed"
 msgstr ""
 
-#: src/app/navigation.tsx:48
+#: src/app/navigation.tsx:49
 #: src/docs/registry.ts:227
 #: src/pages/DashboardPage.tsx:58
 #: src/pages/docs/FeaturesPage.tsx:25
@@ -3881,7 +3926,7 @@ msgstr ""
 msgid "Level"
 msgstr ""
 
-#: src/app/navigation.tsx:70
+#: src/app/navigation.tsx:72
 #: src/pages/LicencePage.tsx:459
 msgid "Licence"
 msgstr ""
@@ -4035,6 +4080,10 @@ msgstr ""
 msgid "Loading canvas…"
 msgstr ""
 
+#: src/pages/CapabilitiesPage.tsx:245
+msgid "Loading capabilities…"
+msgstr ""
+
 #: src/pages/CastPage.tsx:299
 msgid "Loading cast sessions…"
 msgstr ""
@@ -4160,7 +4209,7 @@ msgstr ""
 msgid "Locking every device's frame timing to one shared reference signal so all frames start at the same instant across a facility. Classically an analog black-burst or tri-level signal; in IP facilities PTP carries the same role. Genlock aligns <0>phase</0>; timecode merely labels frames."
 msgstr ""
 
-#: src/app/navigation.tsx:65
+#: src/app/navigation.tsx:67
 #: src/pages/LogsPage.tsx:90
 msgid "Logs"
 msgstr ""
@@ -4265,6 +4314,10 @@ msgstr ""
 msgid "Matrix"
 msgstr ""
 
+#: src/pages/CapabilitiesPage.tsx:81
+msgid "Max resolution"
+msgstr ""
+
 #: src/pages/ProbesPage.tsx:328
 msgid "Max true-peak (dBTP)"
 msgstr ""
@@ -4300,7 +4353,7 @@ msgstr ""
 msgid "Measurement running"
 msgstr ""
 
-#: src/app/navigation.tsx:60
+#: src/app/navigation.tsx:61
 #: src/docs/registry.ts:257
 #: src/pages/docs/FeaturesPage.tsx:149
 #: src/pages/MediaPlayersPage.tsx:220
@@ -4334,7 +4387,7 @@ msgstr ""
 msgid "Memory"
 msgstr ""
 
-#: src/app/navigation.tsx:73
+#: src/app/navigation.tsx:75
 #: src/pages/MeshPage.tsx:281
 msgid "Mesh"
 msgstr ""
@@ -4398,7 +4451,7 @@ msgstr ""
 msgid "Momentary (400 ms)"
 msgstr ""
 
-#: src/app/navigation.tsx:57
+#: src/app/navigation.tsx:58
 #: src/pages/MonitoringPage.tsx:117
 msgid "Monitoring"
 msgstr ""
@@ -4662,6 +4715,7 @@ msgstr ""
 msgid "Next page"
 msgstr ""
 
+#: src/pages/CapabilitiesPage.tsx:191
 #: src/pages/MeshPage.tsx:255
 #: src/pages/MeshPage.tsx:263
 msgid "No"
@@ -4905,6 +4959,10 @@ msgstr ""
 
 #: src/pages/DeviceDetailPage.tsx:703
 msgid "Not a member of any sync group."
+msgstr ""
+
+#: src/pages/CapabilitiesPage.tsx:95
+msgid "Not available"
 msgstr ""
 
 #: src/resources/CrudPage.tsx:229
@@ -5176,7 +5234,7 @@ msgstr ""
 msgid "Output path"
 msgstr ""
 
-#: src/app/navigation.tsx:50
+#: src/app/navigation.tsx:51
 #: src/docs/registry.ts:153
 #: src/docs/registry.ts:237
 #: src/pages/docs/ConfigPage.tsx:258
@@ -5193,7 +5251,7 @@ msgstr ""
 msgid "Over the layout drop zone."
 msgstr ""
 
-#: src/app/navigation.tsx:51
+#: src/app/navigation.tsx:52
 #: src/docs/registry.ts:148
 #: src/docs/registry.ts:242
 #: src/layout/components/SourcePalette.tsx:224
@@ -5393,7 +5451,7 @@ msgstr ""
 msgid "Probe requested"
 msgstr ""
 
-#: src/app/navigation.tsx:61
+#: src/app/navigation.tsx:62
 #: src/pages/ProbesPage.tsx:474
 msgid "Probes"
 msgstr ""
@@ -5606,6 +5664,10 @@ msgstr ""
 
 #: src/pages/SupportPage.tsx:494
 msgid "Redactions in this pack"
+msgstr ""
+
+#: src/pages/CapabilitiesPage.tsx:188
+msgid "Redistributable"
 msgstr ""
 
 #: src/pages/OutputsPage.tsx:487
@@ -5842,7 +5904,7 @@ msgstr ""
 msgid "Routes to"
 msgstr ""
 
-#: src/app/navigation.tsx:56
+#: src/app/navigation.tsx:57
 #: src/pages/RoutingPage.tsx:227
 msgid "Routing"
 msgstr ""
@@ -5931,7 +5993,7 @@ msgstr ""
 msgid "Salvo saved"
 msgstr ""
 
-#: src/app/navigation.tsx:59
+#: src/app/navigation.tsx:60
 #: src/docs/registry.ts:252
 #: src/pages/docs/FeaturesPage.tsx:137
 #: src/pages/SalvosPage.tsx:171
@@ -6132,7 +6194,7 @@ msgstr ""
 msgid "Set volume"
 msgstr ""
 
-#: src/app/navigation.tsx:68
+#: src/app/navigation.tsx:70
 #: src/pages/SettingsPage.tsx:147
 msgid "Settings"
 msgstr ""
@@ -6235,7 +6297,7 @@ msgstr ""
 msgid "Source URL"
 msgstr ""
 
-#: src/app/navigation.tsx:49
+#: src/app/navigation.tsx:50
 #: src/docs/registry.ts:138
 #: src/docs/registry.ts:232
 #: src/layout/components/SourcePalette.tsx:203
@@ -6276,6 +6338,10 @@ msgstr ""
 
 #: src/pages/OverlaysPage.tsx:309
 msgid "Stacking order"
+msgstr ""
+
+#: src/pages/CapabilitiesPage.tsx:75
+msgid "Stage"
 msgstr ""
 
 #: src/components/TileStateBadge.tsx:35
@@ -6443,7 +6509,7 @@ msgstr ""
 msgid "Successive frames differing by less than this per-mille of full-scale luma count as frozen."
 msgstr ""
 
-#: src/app/navigation.tsx:74
+#: src/app/navigation.tsx:76
 #: src/pages/SupportPage.tsx:527
 msgid "Support"
 msgstr ""
@@ -6488,12 +6554,12 @@ msgstr ""
 msgid "Synthetic sources (bars, solid colour, clock, timer) apply to the running engine immediately when saved, and deleting any source removes it from the running engine immediately. Network and file sources (RTSP, HLS, MPEG-TS, SRT, RTMP, RIST, file) also apply live on a full-engine run; on the software engine, and for NDI / YouTube / AES67, they are stored and go live via config export + restart. Each save response declares which applied (X-Multiview-Apply: live or restart)."
 msgstr ""
 
-#: src/app/navigation.tsx:63
+#: src/app/navigation.tsx:64
 #: src/pages/SystemPage.tsx:236
 msgid "System"
 msgstr ""
 
-#: src/app/navigation.tsx:64
+#: src/app/navigation.tsx:66
 #: src/pages/SystemActionsPage.tsx:297
 msgid "System actions"
 msgstr ""
@@ -6528,7 +6594,7 @@ msgstr ""
 msgid "Takes effect at the next frame boundary."
 msgstr ""
 
-#: src/app/navigation.tsx:58
+#: src/app/navigation.tsx:59
 #: src/docs/registry.ts:247
 #: src/docs/registry.ts:753
 #: src/pages/docs/concepts/GlossaryPage.tsx:326
@@ -6747,6 +6813,10 @@ msgstr ""
 msgid "The driver probes on its own cadence; the latest status shows here as it lands."
 msgstr ""
 
+#: src/pages/CapabilitiesPage.tsx:172
+msgid "The effective build-profile licence of this artifact (its codec-linking licence), distinct from the project’s source-available licence."
+msgstr ""
+
 #: src/pages/docs/ComposePage.tsx:46
 msgid "The engine. It ingests that feed plus three built-in test patterns into a 2x2 canvas, encodes once, and writes HLS to a named volume."
 msgstr ""
@@ -6757,6 +6827,10 @@ msgstr ""
 
 #: src/pages/docs/OverviewPage.tsx:89
 msgid "The fastest way to see Multiview running is the quick-start compose stack. It publishes a synthetic test feed, composites a 2x2 canvas, and serves the result over HTTP so you can open it in a player — no real cameras or private feeds required."
+msgstr ""
+
+#: src/pages/CapabilitiesPage.tsx:123
+msgid "The GPU acceleration tier the compositor resolved on this host. A class of “none” means the CPU composite path only."
 msgstr ""
 
 #: src/layout/components/GridLayoutEditor.tsx:795
@@ -7631,6 +7705,10 @@ msgstr ""
 msgid "What the LIVE, STALE, RECONNECTING, and NO SIGNAL badges mean, and why the output never stalls on a bad input."
 msgstr ""
 
+#: src/pages/CapabilitiesPage.tsx:237
+msgid "What this build can do: available backends, the compositor tier, and the effective licence."
+msgstr ""
+
 #: src/pages/DataPage.tsx:379
 msgid "What this machine sends, and to whom. Two separate pipes: the mandatory licensing heartbeat and the opt-in product telemetry."
 msgstr ""
@@ -7731,6 +7809,7 @@ msgstr ""
 msgid "Writes an HLS playlist and segments to <0>path</0> with a <1>codec</1> and a <2>segment_ms</2> duration."
 msgstr ""
 
+#: src/pages/CapabilitiesPage.tsx:191
 #: src/pages/MeshPage.tsx:255
 #: src/pages/MeshPage.tsx:260
 msgid "Yes"

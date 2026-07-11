@@ -893,6 +893,14 @@ pub struct AppState {
     /// software-engine truth); the full-pipeline run upgrades to
     /// [`LiveSourceCapability::synthetic_and_network`].
     pub live_sources: LiveSourceCapability,
+    /// The static system capability + licence snapshot served by
+    /// `GET /api/v1/system/capabilities` (ADR-W030): which codec/compositor
+    /// backends are available, the compositor class, the effective build-profile
+    /// licence, and the NDI attribution. The binary maps `hal::probe()` +
+    /// compiled features + the resolved adapter into this at startup
+    /// (`with_capabilities`); the default is the coarse software-only surface. A
+    /// one-shot snapshot — never an engine channel (invariant #10).
+    pub capabilities: crate::system::SystemCapabilities,
     /// The bounded, drop-oldest structured **log-tail ring** (ADR-0060 §4.4):
     /// recent attributed [`LogRecord`](multiview_telemetry::LogRecord)s the
     /// `GET /api/v1/logs` read route serves. The binary installs the telemetry
@@ -1039,6 +1047,10 @@ impl AppState {
             // kinds live-apply. The binary upgrades this per run path
             // (`with_live_sources`) — the header never over-claims.
             live_sources: LiveSourceCapability::synthetic_only(),
+            // The coarse honest software-only capability surface until the binary
+            // maps the real HAL probe + compiled features (`with_capabilities`,
+            // ADR-W030). A static snapshot (inv #10).
+            capabilities: crate::system::SystemCapabilities::default(),
             // An empty bounded log ring by default (ADR-0060 §4.4). The binary
             // installs the telemetry capture layer feeding the same Arc; with no
             // capture installed the endpoint honestly returns nothing. Drop-oldest
@@ -1180,6 +1192,17 @@ impl AppState {
     #[must_use]
     pub fn with_live_sources(mut self, live_sources: LiveSourceCapability) -> Self {
         self.live_sources = live_sources;
+        self
+    }
+
+    /// Install the static system capability + licence snapshot served by
+    /// `GET /api/v1/system/capabilities` (ADR-W030). The binary maps
+    /// `hal::probe()` + compiled features + the resolved compositor adapter into
+    /// this at startup; the default is the coarse software-only surface. A
+    /// one-shot snapshot — never an engine channel (invariant #10).
+    #[must_use]
+    pub fn with_capabilities(mut self, capabilities: crate::system::SystemCapabilities) -> Self {
+        self.capabilities = capabilities;
         self
     }
 

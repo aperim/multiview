@@ -45,6 +45,7 @@ pub mod salvos;
 pub mod sources;
 pub mod support;
 pub mod sync_groups;
+pub mod system;
 pub mod tally;
 pub mod telemetry;
 pub mod whep_output;
@@ -1010,6 +1011,11 @@ pub fn api_router() -> Router<AppState> {
         // Read-only health warnings (SA-0 / ADR-0035): active capability mismatches
         // (e.g. GPU present but compositing fell back to CPU) with remediation.
         .route("/health", get(health::list_health))
+        // Read-only system capability + licence surface (ADR-W030): which
+        // codec/compositor backends are available, the compositor class, the
+        // effective build-profile licence, and the NDI attribution. System-global
+        // (no per-object axis) — a viewer may read it.
+        .route("/system/capabilities", get(system::system_capabilities))
         // Salvo operator surface: CRUD + arm/take/cancel.
         .route("/salvos", get(salvos::list_salvos))
         .route(
