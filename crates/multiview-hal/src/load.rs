@@ -2920,6 +2920,104 @@ mod tests {
             let _ = std::fs::remove_dir_all(&drm);
             let _ = std::fs::remove_dir_all(&proc);
         }
+
+        #[test]
+        fn sysfs_poller_folds_media_over_interval_and_exposes_base_load() {
+            // The rule-6 wire: `SysfsLoadPoller` drives `SysfsLoadProbe`'s
+            // stateful two-snapshot media path through the `LoadSource` seam,
+            // retaining the prior snapshot across polls behind interior
+            // mutability. The base sysfs load (gpu-busy, VRAM) flows on every
+            // poll; the merged media term appears once a prior snapshot exists —
+            // proving the whole AMD/Intel sysfs probe is wired, not just parsed.
+            use super::super::{LoadSource, SysfsLoadPoller};
+
+            let drm = std::env::temp_dir().join(format!(
+                "mv-eng4b-poller-drm-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let proc = std::env::temp_dir().join(format!(
+                "mv-eng4b-poller-proc-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&drm);
+            let _ = std::fs::remove_dir_all(&proc);
+            write_amd_card(&drm).expect("amd card");
+            write_proc_fd(
+                &proc,
+                4242,
+                3,
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1000000 ns\n",
+            )
+            .expect("fd v1");
+
+            let probe = DrmRoot::at(&drm).into_probe().with_proc_root(&proc);
+            let poller = SysfsLoadPoller::from_probe(probe, vec![4242]);
+
+            // Poll 1 (fixed 1 ms interval): base load present, media unknown (no
+            // prior snapshot yet — honest None, never a fabricated zero).
+            let first = poller.sample_with_interval(1_000_000);
+            assert_eq!(first.len(), 1, "the one synthetic AMD card");
+            assert!(
+                (first[0].gpu_busy_frac.expect("busy known") - 0.30).abs() < 1e-4,
+                "base sysfs gpu-busy flows through the poller"
+            );
+            assert_eq!(first[0].vram_total_bytes, Some(17_163_091_968));
+            assert!(
+                first[0].enc_util_frac.is_none() && first[0].dec_util_frac.is_none(),
+                "first poll has no prior media snapshot"
+            );
+
+            // Poll 2: the counter advances 500_000 ns over the 1 ms interval =>
+            // 0.5, folded into BOTH enc and dec (VCN4+ merges the media engines).
+            std::fs::write(
+                proc.join("4242").join("fdinfo").join("3"),
+                "drm-pdev:\t0000:03:00.0\ndrm-engine-enc:\t1500000 ns\n",
+            )
+            .expect("fd v2");
+            let second = poller.sample_with_interval(1_000_000);
+            assert_eq!(second.len(), 1);
+            let load = &second[0];
+            let enc = load.enc_util_frac.expect("enc folded from merged media");
+            let dec = load.dec_util_frac.expect("dec folded from merged media");
+            assert!((enc - 0.5).abs() < 1e-4, "0.5 enc expected, got {enc}");
+            assert!((dec - 0.5).abs() < 1e-4, "0.5 dec expected, got {dec}");
+
+            let _ = std::fs::remove_dir_all(&drm);
+            let _ = std::fs::remove_dir_all(&proc);
+        }
+
+        #[test]
+        fn sysfs_poller_poll_trait_yields_base_load_and_is_send_sync() {
+            // The `LoadSource::poll(&self)` seam (the one `default_load_source`
+            // hands the metrics task) yields the base sysfs load on a
+            // live-interval poll; and the poller is `Send + Sync`, so it fits the
+            // `Box<dyn LoadSource + Send + Sync>` the task stores.
+            use super::super::{LoadSource, SysfsLoadPoller};
+
+            fn assert_send_sync<T: Send + Sync>() {}
+            assert_send_sync::<SysfsLoadPoller>();
+
+            let drm = std::env::temp_dir().join(format!(
+                "mv-eng4b-poller-trait-{}-{}",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_dir_all(&drm);
+            write_amd_card(&drm).expect("amd card");
+
+            let probe = DrmRoot::at(&drm).into_probe();
+            let poller = SysfsLoadPoller::from_probe(probe, vec![std::process::id()]);
+            let loads: Vec<_> = LoadSource::poll(&poller);
+            assert_eq!(loads.len(), 1, "the one synthetic AMD card via the trait");
+            assert!(
+                (loads[0].gpu_busy_frac.expect("busy") - 0.30).abs() < 1e-4,
+                "base sysfs load via LoadSource::poll"
+            );
+
+            let _ = std::fs::remove_dir_all(&drm);
+        }
     }
 
     // ------------------------------------------------------------------------
