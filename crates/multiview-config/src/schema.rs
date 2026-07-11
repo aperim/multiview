@@ -678,8 +678,12 @@ pub enum SourceKind {
         /// (Tier 1/2, a later slice). Absent ⇒ the static `sdp` is authoritative.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
-        /// Optional multicast `group:port` override (`[ff3e::1]:5004`). Absent ⇒
-        /// derived from the SDP connection + `m=audio` lines at ingest.
+        /// The multicast `group:port` the AES67 receiver binds and joins
+        /// (`[ff3e::1]:5004`). **Required**: the ST 2110-30 SDP parser deliberately
+        /// ignores the SDP `c=` connection line (the transport binding is carried
+        /// in config by design), so absent ⇒ a typed error when the pipeline is
+        /// built, never a value derived from the SDP. (`Option` only so a config
+        /// omitting it parses, then fails closed with a clear message.)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         multicast: Option<String>,
         /// Optional receive jitter-buffer lead in milliseconds (the AES67 link

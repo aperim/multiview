@@ -46,6 +46,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// ADR-0033 — AES67 / SMPTE ST 2110-30 PCM-audio RTP egress: the first output
+/// with no encode/GPU stage. The pure send framing (`f32` → big-endian L16/L24
+/// + the RTP header builder) and the bounded drop-oldest `Aes67Sender` are
+/// always compiled and CI-tested; only `aes67::transport` (the UDP send loop,
+/// feature `aes67`) touches a socket.
+pub mod aes67;
+
 /// DEV-B1 / ADR-0044 — local DRM/KMS display output: the raw-frame sink that
 /// scans the pre-encode NV12 canvas out to HDMI/DP glass via atomic page
 /// flips. The mailbox, mode policy (EDID/CVT-RB), flip state machine, and the

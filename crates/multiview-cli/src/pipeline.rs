@@ -1487,6 +1487,35 @@ enum RunnableOutput {
         /// The advertised NDI source name (for the run report).
         name: String,
     },
+    /// An AES67 / ST 2110-30 raw-PCM audio output (#103, ADR-0033/T013): a
+    /// **mux-free** sink that multicasts the mixed program audio as L16/L24 RTP.
+    /// It consumes NO coded packets — the packet fan-out `rx` is used purely as
+    /// the end-of-program pulse (like the NDI / display heads) — because the
+    /// program audio arrives out-of-band via the paired
+    /// [`Aes67SenderHandle`](multiview_output::aes67::Aes67SenderHandle) the bake
+    /// consumer pushes each post-loudnorm block into. The serve side
+    /// ([`Aes67Sender`](multiview_output::aes67::Aes67Sender)) drains that shared
+    /// drop-oldest FIFO on its OWN media-clock timer and sends UDP; a slow/absent
+    /// network drops at the FIFO and can never back-pressure the bake consumer, let
+    /// alone the engine (invariants #1 + #10). Only under `aes67`.
+    #[cfg(feature = "aes67")]
+    Aes67 {
+        /// The output's stable config id (ADR-0060 `output` resource scope).
+        id: String,
+        /// The serve-side sender: drains the shared FIFO the bake consumer's
+        /// [`Aes67SenderHandle`](multiview_output::aes67::Aes67SenderHandle) feeds
+        /// and frames each packet-time of PCM into a continuous RTP packet.
+        sender: multiview_output::aes67::Aes67Sender,
+        /// The local bind address (an ephemeral port on the group's-family
+        /// wildcard) the sender egresses from.
+        local: std::net::SocketAddr,
+        /// The multicast `group:port` destination the RTP is sent to.
+        dest: std::net::SocketAddr,
+        /// The multicast egress interface (default: OS-chosen).
+        interface: multiview_output::aes67::transport::MulticastInterface,
+        /// A short label + the output id (for the run report + logs).
+        label: String,
+    },
 }
 
 impl RunnableOutput {
@@ -1500,6 +1529,8 @@ impl RunnableOutput {
             Self::WebRtc { id, .. } => id,
             #[cfg(feature = "ndi-bindings")]
             Self::Ndi { id, .. } => id,
+            #[cfg(feature = "aes67")]
+            Self::Aes67 { id, .. } => id,
         }
     }
 }
@@ -1680,6 +1711,18 @@ pub struct Pipeline {
     /// like any source's audio). Built only for media players whose default asset
     /// declares a vamp window; empty when this run did not opt into program audio.
     player_audio_ingest_plans: Vec<crate::audio::PlayerAudioPlan>,
+    /// Per-source **AES67 / ST 2110-30** audio RX plans (#103, ADR-0033/T013):
+    /// how to bind + receive each AES67 multicast PCM source. The drive starts one
+    /// supervised RX thread per plan (a peer of the audio decode threads) that
+    /// depacketizes → rebases (ADR-T013) → publishes into that source's
+    /// [`Self::audio_stores`] entry, which the program bus samples like any
+    /// source's audio. An AES67 source is AUDIO-ONLY — it takes no video
+    /// [`TileStore`], no [`source_registry`](Self::source_registry) entry, and no
+    /// layout tile. Built only for `SourceKind::Aes67` sources; spawned only when
+    /// this run opted into program audio (else there is no bus to consume the
+    /// store). Only under the off-by-default `aes67` feature.
+    #[cfg(feature = "aes67")]
+    aes67_rx_plans: Vec<Aes67RxPlan>,
     /// The fixed canvas color (ADR-C001 SDR BT.709 limited).
     canvas_color: CanvasColor,
     /// The "no signal" slate composited for tiles with no usable frame.
@@ -1694,6 +1737,15 @@ pub struct Pipeline {
     encode_cfg: EncodeConfig,
     /// The runnable outputs declared in the config.
     outputs: Vec<RunnableOutput>,
+    /// The bake-consumer push handles for the configured AES67 outputs (#103),
+    /// paired with the serve-side `Aes67Sender` inside each `RunnableOutput::Aes67`.
+    /// `drive_streaming` hands these to the bake consumer, which pushes every
+    /// post-loudnorm program block into each (drop-oldest) — exactly like it feeds
+    /// the display heads. A slow/absent AES67 network drops at the FIFO and can
+    /// never back-pressure the consumer or the engine (invariants #1 + #10). Empty
+    /// when no AES67 output is configured. Only under `aes67`.
+    #[cfg(feature = "aes67")]
+    aes67_send_handles: Vec<multiview_output::aes67::Aes67SenderHandle>,
     /// The configured DRM/KMS display heads (DEV-B1 / ADR-0044, feature
     /// `display-kms`): **raw-frame** sinks fed the pre-encode NV12 canvas
     /// through wait-free mailboxes — never part of the packet fan-out. Taken
@@ -1911,6 +1963,132 @@ struct IngestPlan {
     youtube_url_slot: Option<Arc<arc_swap::ArcSwapOption<String>>>,
 }
 
+/// Everything one AES67 / ST 2110-30 audio source needs to be received on its own
+/// supervised RX thread (#103, ADR-0033/T013): the resolved SDP session (PCM
+/// format + RTP clock + payload type), the multicast `group:port` to bind + join,
+/// and the last-good [`AudioStore`](multiview_audio::store::AudioStore) its
+/// rebased 48 kHz PCM is published into (shared with the program bus). Audio-only
+/// — there is no [`TileStore`], no cell, and no video decode.
+#[cfg(feature = "aes67")]
+struct Aes67RxPlan {
+    /// The source id (diagnostics + the run's stop-flag key).
+    id: String,
+    /// The parsed SDP session: PCM format (channels + L16/L24), RTP clock rate,
+    /// and dynamic payload type. The multicast binding is deliberately NOT read
+    /// from here (the SDP parser ignores the `c=` line — the transport binding is
+    /// a config concern); it comes from [`Self::group`].
+    session: multiview_input::st2110::sdp::AudioSdpSession,
+    /// The resolved multicast `group:port` (from the config `multicast` override)
+    /// the receiver binds the port of and joins the group of.
+    group: std::net::SocketAddr,
+    /// The last-good `AudioStore` the rebased 48 kHz PCM is published into — shared
+    /// with the [`ProgramBus`](multiview_audio::program::ProgramBus), which samples
+    /// it per tick (a best-effort writer of a lock-free store, inv #1/#10).
+    store: Arc<multiview_audio::store::AudioStore>,
+}
+
+/// Reject a layout cell bound to an audio-only AES67 source (#103).
+///
+/// An AES67 / ST 2110-30 source decodes no pixels — it has no `TileStore` — so a
+/// layout cell referencing it would carry tile geometry with nothing to
+/// composite. This checks the RAW config bindings (`cells[].source.input_id`),
+/// independent of geometry solving, so the audio-binding is rejected with a clear
+/// message even when the cell's area does not resolve — which `solve_layout` would
+/// otherwise report as a generic "unknown grid area" error, masking the root
+/// cause. Fail-closed, and decoupled from any tile-sizing predicate.
+///
+/// # Errors
+///
+/// [`PipelineError::Config`] naming the source when any cell binds an AES67 source.
+#[cfg(feature = "aes67")]
+fn ensure_no_cell_binds_an_aes67_source(config: &MultiviewConfig) -> Result<(), PipelineError> {
+    for cell in &config.cells {
+        let Some(bound) = cell.source.input_id.as_deref() else {
+            continue;
+        };
+        let binds_aes67 = config
+            .sources
+            .iter()
+            .any(|source| source.id == bound && matches!(source.kind, SourceKind::Aes67 { .. }));
+        if binds_aes67 {
+            return Err(PipelineError::Config(
+                multiview_config::ConfigError::Validation(format!(
+                    "layout cell bound to audio-only AES67 source `{bound}`: an AES67 / \
+                     ST 2110-30 source carries no video and cannot occupy a layout tile"
+                )),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve an AES67 source's SDP session + multicast `group:port` binding (#103).
+///
+/// The SDP (RFC 4566/8866) carries the PCM format, RTP clock, and payload type;
+/// the multicast binding comes from the config `multicast` override (the SDP
+/// parser ignores the `c=` connection line by design — the transport binding is a
+/// config concern, `multiview-input`'s `st2110::sdp` module contract). A
+/// missing/malformed SDP or a missing/invalid override is a typed refusal at build
+/// time (never a silent skip — the fail-closed contract).
+///
+/// # Errors
+/// [`PipelineError::Ingest`] when the source is not AES67, the SDP does not parse,
+/// the `multicast` override is absent, or it is not a valid `group:port`.
+#[cfg(feature = "aes67")]
+fn resolve_aes67_source(
+    source: &Source,
+) -> Result<
+    (
+        multiview_input::st2110::sdp::AudioSdpSession,
+        std::net::SocketAddr,
+    ),
+    PipelineError,
+> {
+    let SourceKind::Aes67 { sdp, multicast, .. } = &source.kind else {
+        return Err(PipelineError::Ingest {
+            id: source.id.clone(),
+            reason: "resolve_aes67_source called on a non-aes67 source".to_owned(),
+        });
+    };
+    let session = multiview_input::st2110::sdp::AudioSdpSession::parse(sdp).map_err(|e| {
+        PipelineError::Ingest {
+            id: source.id.clone(),
+            reason: format!("aes67 sdp parse failed: {e}"),
+        }
+    })?;
+    let group_str = multicast.as_deref().ok_or_else(|| PipelineError::Ingest {
+        id: source.id.clone(),
+        reason: "aes67 source requires a `multicast` group:port override (e.g. \
+                 \"[ff3e::1]:5004\"); the SDP connection line is not used for the \
+                 transport binding"
+            .to_owned(),
+    })?;
+    let group = group_str
+        .parse::<std::net::SocketAddr>()
+        .map_err(|e| PipelineError::Ingest {
+            id: source.id.clone(),
+            reason: format!("aes67 multicast `{group_str}` is not a valid group:port: {e}"),
+        })?;
+    // The RX publishes into the canonical 48 kHz program-audio store and the
+    // shared ADR-T013 rebaser only rescales the RTP *timestamp* onto that index —
+    // it does NOT resample the PCM. A non-48 kHz wire clock would deliver a sample
+    // count per packet that disagrees with the rebased store cadence
+    // (overlaps/gaps/wrong pitch), so a non-48 kHz session is rejected fail-closed
+    // rather than silently mis-timed. (A resampling RX is a later slice.)
+    if session.clock_rate != AES67_STORE_RATE_HZ {
+        return Err(PipelineError::Ingest {
+            id: source.id.clone(),
+            reason: format!(
+                "aes67 session clock rate {} Hz is unsupported: only 48 kHz \
+                 ST 2110-30 sessions are supported (the RX publishes at the \
+                 canonical 48 kHz store rate and does not resample)",
+                session.clock_rate
+            ),
+        });
+    }
+    Ok((session, group))
+}
+
 /// The in-container subtitle decode route stashed on an [`IngestPlan`]: which
 /// muxed subtitle stream to decode (index + its time-base), the decoder kind
 /// (DVB-sub bitmap or `ass`/`subrip`/`mov_text` text), and the per-source cue
@@ -1960,6 +2138,21 @@ impl Pipeline {
     // ingest plan per source, wires native captions, and assembles the outputs —
     // each step is in-scope and splitting it would only scatter the wiring.
     pub fn build(config: &MultiviewConfig) -> Result<Self, PipelineError> {
+        // Fail-closed (#103): an AES67 PCM-audio source in a non-`aes67` build is a
+        // config this binary cannot honour — reject it clearly up front, never wire
+        // it dark (the same contract as a `display` source/output in a non-
+        // `display-kms` build).
+        crate::outputs::ensure_aes67_sources_supported(&config.sources).map_err(|reason| {
+            PipelineError::Config(multiview_config::ConfigError::Validation(reason))
+        })?;
+        // #103: an AES67 / ST 2110-30 source is AUDIO-ONLY (no TileStore). Reject a
+        // layout cell bound to one here — on the RAW config bindings, BEFORE
+        // `solve_layout` — so the audio-binding is named clearly and rejected
+        // whether or not the cell's geometry resolves (a bad-geometry cell would
+        // otherwise be masked by `solve_layout`'s generic area error, and the guard
+        // must not depend on tile-sizing at all). Fail-closed.
+        #[cfg(feature = "aes67")]
+        ensure_no_cell_binds_an_aes67_source(config)?;
         let layout = Arc::new(config.solve_layout()?);
         let cadence = config.canvas.fps.rational();
         let canvas_color = CanvasColor::default();
@@ -1982,6 +2175,13 @@ impl Pipeline {
         let mut audio_ingest_plans: Vec<crate::audio::AudioIngestPlan> = Vec::new();
         // AUD-5: synthetic line-up tone plans (the `bars` source's 1 kHz companion).
         let mut tone_ingest_plans: Vec<crate::audio::ToneIngestPlan> = Vec::new();
+        // #103: AES67 / ST 2110-30 audio RX plans. Each `SourceKind::Aes67` source
+        // is AUDIO-ONLY — the source loop below SKIPS the entire video path for it
+        // (no TileStore, no registry entry, no ingest plan) and queues one RX plan
+        // here, spawned in `drive_streaming`. Only under the `aes67` feature; a
+        // non-`aes67` build rejected any aes67 source up front (the gate above).
+        #[cfg(feature = "aes67")]
+        let mut aes67_rx_plans: Vec<Aes67RxPlan> = Vec::new();
 
         // Per-source native caption stores + reader plans. Built best-effort: a
         // source whose selector resolves to an HLS WebVTT rendition gets a store
@@ -2015,6 +2215,30 @@ impl Pipeline {
             Vec::with_capacity(config.sources.len());
 
         for source in &config.sources {
+            // #103: an AES67 / ST 2110-30 source is AUDIO-ONLY. It decodes no
+            // pixels, so it takes NO video TileStore, NO SourceRegistry entry, and
+            // NO layout tile — the MP-2 decode-once video seam (ADR-0030 §3) never
+            // sees it. It contributes an AudioStore (routed onto the program bus
+            // like any source's audio, so it "joins" the bus at the routing loop
+            // below) plus a supervised RX plan (bound + received on its own thread
+            // in `drive_streaming`). Skip the entire video path for it.
+            #[cfg(feature = "aes67")]
+            if matches!(source.kind, SourceKind::Aes67 { .. }) {
+                // An AES67 source decodes no pixels, so it takes NO video path (no
+                // TileStore / registry entry / layout tile). A cell bound to it is
+                // already rejected up front by `ensure_no_cell_binds_an_aes67_source`
+                // (before `solve_layout`), so here it is purely audio-only.
+                let (session, group) = resolve_aes67_source(source)?;
+                let store = crate::audio::new_store();
+                audio_stores.insert(source.id.clone(), Arc::clone(&store));
+                aes67_rx_plans.push(Aes67RxPlan {
+                    id: source.id.clone(),
+                    session,
+                    group,
+                    store,
+                });
+                continue;
+            }
             let (tile_w, tile_h) = cell_pixel_size(&layout, &source.id)
                 .unwrap_or((config.canvas.width, config.canvas.height));
             // The registry owns the shared store, sized to the per-axis supremum;
@@ -2270,6 +2494,8 @@ impl Pipeline {
             audio_ingest_plans,
             tone_ingest_plans,
             player_audio_ingest_plans,
+            #[cfg(feature = "aes67")]
+            aes67_rx_plans,
             inventories,
             #[cfg(feature = "overlay")]
             caption_stores,
@@ -2287,6 +2513,8 @@ impl Pipeline {
             display_plans: built.display,
             #[cfg(feature = "ndi-bindings")]
             ndi_publishers: built.ndi_publishers,
+            #[cfg(feature = "aes67")]
+            aes67_send_handles: built.aes67_handles,
             #[cfg(feature = "overlay")]
             subtitles: None,
             #[cfg(feature = "overlay")]
@@ -2513,6 +2741,38 @@ impl Pipeline {
     #[must_use]
     pub fn has_program_audio(&self) -> bool {
         self.encode_cfg.audio.is_some()
+    }
+
+    /// Fail closed if this run declares an AES67 source or output but carries no
+    /// program audio (#103).
+    ///
+    /// The ST 2110-30 RX publishes into, and the TX taps, the **program-audio
+    /// bus** — which only exists when `enable_program_audio` was called (the
+    /// `--program-audio` invocation). Without it the RX would be spawned to
+    /// nowhere and the TX would multicast silence, both silently. Rather than go
+    /// on air doing neither, refuse the run with a clear message. A no-op when the
+    /// config declares no AES67 endpoint (empty plans/handles) or when program
+    /// audio is on, so non-AES67 and correctly-configured runs are unaffected.
+    ///
+    /// # Errors
+    ///
+    /// [`PipelineError::Config`] when an AES67 endpoint is configured without
+    /// program audio.
+    #[cfg(feature = "aes67")]
+    fn ensure_aes67_has_program_audio(&self) -> Result<(), PipelineError> {
+        if self.encode_cfg.audio.is_some()
+            || (self.aes67_rx_plans.is_empty() && self.aes67_send_handles.is_empty())
+        {
+            return Ok(());
+        }
+        Err(PipelineError::Config(
+            multiview_config::ConfigError::Validation(
+                "an AES67 / ST 2110-30 source or output requires program audio: run \
+                 with `--program-audio` (the ST 2110-30 RX/TX only exists on the \
+                 program-audio bus)"
+                    .to_owned(),
+            ),
+        ))
     }
 
     /// Attach the **program-audio preview tap** (ADR-P006 audio): the bake
@@ -2868,6 +3128,11 @@ impl Pipeline {
         P: Pacer,
         FC: FnMut(&mut CompositorDrive<Nv12Image>),
     {
+        // #103: an AES67 source/output only functions on the program-audio bus, so
+        // fail closed BEFORE the output clock starts if this run carries none —
+        // never go on air silently receiving/emitting silence.
+        #[cfg(feature = "aes67")]
+        self.ensure_aes67_has_program_audio()?;
         let StreamPlan {
             policy,
             runners,
@@ -3027,6 +3292,16 @@ impl Pipeline {
         } else {
             Vec::new()
         };
+        // #103: AES67 / ST 2110-30 audio RX plans (audio-only ST 2110-30 sources).
+        // Spawned ONLY when this run opted into program audio — mirroring the audio
+        // decode plans above: without a `ProgramBus` consuming the store, the
+        // received PCM would go nowhere. Left in place (untouched) when audio is off.
+        #[cfg(feature = "aes67")]
+        let aes67_plans: Vec<Aes67RxPlan> = if self.encode_cfg.audio.is_some() {
+            std::mem::take(&mut self.aes67_rx_plans)
+        } else {
+            Vec::new()
+        };
         // The supervisor registers every producer's per-thread stop flag in the
         // run's shared registry (ADR-W018) — the video decode thread under `{id}`,
         // its audio/tone/caption companions under `{id}/<role>` — so a live
@@ -3039,6 +3314,16 @@ impl Pipeline {
             caption_plans,
             &self.stop_registry,
         );
+        // #103: spawn the AES67 RX threads into the SAME supervisor (its bounded
+        // stop+join teardown), registered under `{id}` like a video source's
+        // producer. An AES67 source has no video decode thread, so `{id}` is its
+        // primary producer flag (a live `RemoveSource` stops it).
+        #[cfg(feature = "aes67")]
+        let supervisor = {
+            let mut supervisor = supervisor;
+            supervisor.spawn_aes67_receivers(aes67_plans, &self.stop_registry);
+            supervisor
+        };
 
         // Prime the first frame per tile BEFORE constructing the runtime (whose
         // `new` seeds tick 0 to "now") and therefore before the output clock's
@@ -3171,6 +3456,14 @@ impl Pipeline {
         #[cfg(feature = "ndi-bindings")]
         let ndi_publishers = std::mem::take(&mut self.ndi_publishers);
 
+        // #103: take the AES67 output push handles for the bake consumer. It pushes
+        // each post-loudnorm program block into every handle (drop-oldest), exactly
+        // like it feeds the display heads; the paired serve-side `Aes67Sender` rides
+        // inside each `RunnableOutput::Aes67` sink runner (spawned by the egress
+        // below). Empty when no AES67 output is configured. Only under `aes67`.
+        #[cfg(feature = "aes67")]
+        let aes67_send_handles = std::mem::take(&mut self.aes67_send_handles);
+
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
         // encoded WHILE the engine keeps ticking (streaming, not batch — ADR-0025).
@@ -3189,6 +3482,8 @@ impl Pipeline {
             loudness_publisher,
             display_audio,
             self.program_audio_preview.clone(),
+            #[cfg(feature = "aes67")]
+            aes67_send_handles,
         );
 
         // Build the single program now (post-prime, ADR-0030 MP-0): the run path
@@ -4024,6 +4319,9 @@ impl StreamEgress {
         loudness_publisher: Option<EnginePublisher<EngineStateSnapshot, Event>>,
         display_audio: DisplayAudioFeed,
         program_audio_preview: Option<crate::preview::ProgramAudioSlot>,
+        #[cfg(feature = "aes67")] aes67_send_handles: Vec<
+            multiview_output::aes67::Aes67SenderHandle,
+        >,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -4085,6 +4383,8 @@ impl StreamEgress {
                     loudness_publisher,
                     display_audio,
                     program_audio_preview,
+                    #[cfg(feature = "aes67")]
+                    aes67_send_handles,
                     &consumer_in_flight,
                 )
             })
@@ -4358,6 +4658,7 @@ fn consumer_main(
     loudness_publisher: Option<EnginePublisher<EngineStateSnapshot, Event>>,
     mut display_audio: DisplayAudioFeed,
     program_audio_preview: Option<crate::preview::ProgramAudioSlot>,
+    #[cfg(feature = "aes67")] aes67_send_handles: Vec<multiview_output::aes67::Aes67SenderHandle>,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -4437,6 +4738,19 @@ fn consumer_main(
             // (invariants #1 + #10).
             for publisher in &display_audio.publishers {
                 publisher.push_audio(&block);
+            }
+            // #103: feed the SAME post-loudnorm program block to every AES67
+            // output's send FIFO (drop-oldest, `&self`) — exactly like the display
+            // heads. The serve-side `Aes67Sender` drains it on its own media-clock
+            // timer; a stalled network drops at the FIFO and can never
+            // back-pressure this consumer, let alone the engine (invariants #1 +
+            // #10). When a run has no program audio the bus is absent and this
+            // branch never runs, so the FIFO stays empty and the serve loop emits
+            // silence (`Aes67Sender::next_packet_into` silence-fills an underrun) —
+            // no dedicated bus is needed here.
+            #[cfg(feature = "aes67")]
+            for handle in &aes67_send_handles {
+                handle.push(&block);
             }
             // ADR-P006 audio: tap the SAME post-loudnorm program block into the
             // WHEP egress preview slot (when wired), so the live WHEP provider can
@@ -4552,6 +4866,11 @@ fn send_bounded(tx: &SyncSender<EncodedPacket>, packet: EncodedPacket) -> bool {
 /// peer is unreachable, by contrast, never fails the run: it is reported and
 /// dropped so the program's local outputs still complete (invariants #1/#10 — a
 /// dead remote consumer must not back-pressure or fail the program).
+#[allow(clippy::too_many_lines)]
+// reason: a flat dispatch `match` over every runnable output kind (file / HLS /
+// push / WebRTC / NDI / AES67), each arm a short delegation to that kind's runner;
+// its value is reading the whole per-kind mapping in one place. Splitting it would
+// scatter the dispatch without reducing complexity.
 fn run_one_output(
     output: RunnableOutput,
     rx: Receiver<EncodedPacket>,
@@ -4673,7 +4992,114 @@ fn run_one_output(
             cadence,
             name,
         } => Ok(run_ndi_output(&mut sink, &reader, rx, cadence, &name)),
+        // AES67 is a raw-PCM audio consumer (program AudioBlock → L16/L24 RTP), NOT
+        // a packet sink: it ignores the coded-packet fan-out and instead drains the
+        // program audio the bake consumer pushes into its send FIFO. The packet
+        // `rx` is used purely as the shared end-of-program pulse (it closes at
+        // end-of-program), which resolves the serve loop's stop future (inv
+        // #1/#10). Under `aes67`.
+        #[cfg(feature = "aes67")]
+        RunnableOutput::Aes67 {
+            id: _,
+            sender,
+            local,
+            dest,
+            interface,
+            label,
+        } => Ok(run_aes67_output(sender, local, dest, interface, rx, &label)),
     }
+}
+
+/// Drive an AES67 / ST 2110-30 raw-PCM output (#103, ADR-0033/T013): multicast the
+/// mixed program audio as a continuous L16/L24 RTP stream until end-of-program.
+///
+/// **Mux-free** — it consumes NO coded packets. The program audio arrives via the
+/// [`Aes67SenderHandle`](multiview_output::aes67::Aes67SenderHandle) the bake
+/// consumer pushes each post-loudnorm block into; this runner drains the paired
+/// serve-side [`Aes67Sender`](multiview_output::aes67::Aes67Sender)'s FIFO on its
+/// OWN media-clock timer ([`Aes67UdpSender::serve`](multiview_output::aes67::transport::Aes67UdpSender::serve))
+/// and sends UDP. The `eop` packet receiver is used purely as the end-of-program
+/// pulse (one item per emitted tick, closing at end-of-program), which resolves the
+/// serve loop's stop future.
+///
+/// The socket + its send loop are async, so this runs them on a small
+/// **current-thread** Tokio runtime on the sink thread (the peer of
+/// [`run_ndi_output`]). **Infallible** by design (returns a [`SinkRunOutcome`],
+/// never an error): an AES67 output whose socket cannot bind or whose send faults
+/// must NOT fail the program — the file/HLS/push outputs keep producing (invariants
+/// #1/#10). The serve loop silence-fills any FIFO underrun, so the multicast never
+/// gaps even when this run carries no program audio.
+///
+/// The `eop` receiver is always fully drained (on a blocking task, off the async
+/// reactor) so the encode-once fan-out can never wedge on this sink.
+#[cfg(feature = "aes67")]
+fn run_aes67_output(
+    mut sender: multiview_output::aes67::Aes67Sender,
+    local: std::net::SocketAddr,
+    dest: std::net::SocketAddr,
+    interface: multiview_output::aes67::transport::MulticastInterface,
+    eop: Receiver<EncodedPacket>,
+    label: &str,
+) -> SinkRunOutcome {
+    use multiview_output::aes67::transport::Aes67UdpSender;
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::warn!(output = label, error = %e, "aes67 output runtime build failed; skipping");
+            // Drain the end-of-program pulses so the fan-out never wedges.
+            let frames = eop.into_iter().count();
+            return SinkRunOutcome {
+                line: format!("{label}: aes67 runtime unavailable"),
+                playlist: None,
+                frames,
+            };
+        }
+    };
+    runtime.block_on(async move {
+        let udp = match Aes67UdpSender::bind(local, dest).await {
+            Ok(u) => u.with_interface(interface),
+            Err(e) => {
+                tracing::warn!(output = label, error = %e, dest = %dest, "aes67 bind failed; skipping");
+                // Drain the pulses off the reactor so the fan-out never wedges.
+                let frames = tokio::task::spawn_blocking(move || eop.into_iter().count())
+                    .await
+                    .unwrap_or(0);
+                return SinkRunOutcome {
+                    line: format!("{label}: aes67 bind failed"),
+                    playlist: None,
+                    frames,
+                };
+            }
+        };
+        tracing::info!(output = label, dest = %dest, "aes67 output sending");
+        // The end-of-program pulses are a std mpsc — drain them on a blocking task
+        // (off the async reactor) so a `recv` never blocks it; the task ends (and
+        // yields the pulse count) when the channel closes at end-of-program.
+        let mut eop_task = tokio::task::spawn_blocking(move || eop.into_iter().count());
+        // Serve on the media-clock timer (its own absolute-deadline cadence +
+        // multicast egress config) with a never-resolving stop, so it runs until
+        // end-of-program cancels it OR it faults. `select!` stops it on whichever
+        // comes first, capturing the pulse count for the report.
+        let frames = tokio::select! {
+            joined = &mut eop_task => joined.unwrap_or(0),
+            result = udp.serve(&mut sender, std::future::pending::<()>()) => {
+                if let Err(e) = result {
+                    tracing::warn!(output = label, error = %e, "aes67 serve faulted; stopping output");
+                }
+                // Wait for end-of-program to fully drain the fan-out (never wedge).
+                (&mut eop_task).await.unwrap_or(0)
+            }
+        };
+        SinkRunOutcome {
+            line: format!("{label}: {frames} tick(s) multicast to {dest}"),
+            playlist: None,
+            frames,
+        }
+    })
 }
 
 /// Drive a WebRTC program output (`webrtc` / `whip_push`) over its fan-out channel
@@ -5773,6 +6199,47 @@ impl Drop for IngestSupervisor {
     }
 }
 
+#[cfg(feature = "aes67")]
+impl IngestSupervisor {
+    /// Spawn one supervised AES67 / ST 2110-30 RX thread per plan (#103), pushing
+    /// each into the SAME `producers` vec every other ingest thread lives in — so
+    /// they share the identical bounded stop+join teardown ([`Self::join_all`]).
+    ///
+    /// Each registers its per-thread stop flag under the source id in the run's
+    /// shared registry (ADR-W018 — a live `RemoveSource` raises exactly this
+    /// flag), like [`spawn_ingest_producer`] does for a video source (an AES67
+    /// source has no video thread, so `{id}` is its primary producer). The RX
+    /// thread only ever WRITES its lock-free `AudioStore`, so it can neither pace
+    /// nor stall the output clock (inv #1/#10); a thread that cannot spawn is
+    /// logged and skipped (its source rides silence on the bus, never failing the
+    /// run — invariant #1).
+    fn spawn_aes67_receivers(
+        &mut self,
+        plans: Vec<Aes67RxPlan>,
+        registry: &crate::live_sources::StopRegistry,
+    ) {
+        for plan in plans {
+            let stop = Arc::new(AtomicBool::new(false));
+            let id = plan.id.clone();
+            let exited = crate::live_sources::register_stop(registry, &id, &stop);
+            // ExitGuard built BEFORE spawn (flips `exited` even if Builder::spawn
+            // fails — the dropped closure drops the guard) (ADR-W018 §5).
+            let exit_guard = crate::live_sources::ExitGuard::new(&exited);
+            let thread_stop = Arc::clone(&stop);
+            let builder = std::thread::Builder::new().name(format!("multiview-aes67-rx-{id}"));
+            match builder.spawn(move || {
+                let _exit = exit_guard;
+                drive_aes67_rx(&plan, &thread_stop);
+            }) {
+                Ok(handle) => self.producers.push((stop, handle)),
+                Err(e) => {
+                    tracing::error!(error = %e, source = %id, "could not spawn aes67 rx thread");
+                }
+            }
+        }
+    }
+}
+
 /// Spawn ONE supervised ingest producer thread for `plan`: create its
 /// per-source stop flag, register it under the source id in the run's shared
 /// stop registry (ADR-W018 — a live remove/edit raises exactly this flag), and
@@ -6340,6 +6807,15 @@ struct BuiltOutputs {
     /// (invariants #1 + #10). Built only under `ndi-bindings`.
     #[cfg(feature = "ndi-bindings")]
     ndi_publishers: Vec<multiview_output::display::FramePublisher<NdiCanvasFrame>>,
+    /// The bake-consumer-side **push handles** of each AES67 output's send FIFO
+    /// (#103), paired with the serve-side `Aes67Sender` inside its
+    /// `RunnableOutput::Aes67`. The bake consumer pushes each post-loudnorm program
+    /// block into every handle (drop-oldest, `&self`), exactly like it feeds the
+    /// display heads — a stalled network drops at the FIFO and can never
+    /// back-pressure the consumer or the engine (invariants #1 + #10). Built only
+    /// under `aes67`.
+    #[cfg(feature = "aes67")]
+    aes67_handles: Vec<multiview_output::aes67::Aes67SenderHandle>,
 }
 
 /// One configured display head (feature `display-kms`): everything
@@ -6819,6 +7295,10 @@ fn build_push_output(
 /// RTP/RTSP protocol stack) and is honestly skipped with a log line rather than
 /// pretended-runnable — a config mixing an unsupported output with a supported
 /// one still produces that supported output.
+#[allow(clippy::too_many_lines)]
+// reason: a flat build loop matching every configured output kind (display / HLS /
+// push / RIST / WebRTC / RTSP / NDI / AES67) to its runnable, each arm a short
+// build/skip; the value is reading the whole per-kind assembly in one place.
 fn build_outputs(
     outputs: &[Output],
     epoch: &multiview_output::SharedEpoch,
@@ -6845,11 +7325,29 @@ fn build_outputs(
             reason,
         }
     })?;
+    // Same fail-closed contract for an AES67 raw-PCM output in a non-`aes67` build
+    // (#103): reject clearly rather than warn-skip it into a dead stream.
+    crate::outputs::ensure_aes67_outputs_supported(outputs).map_err(|reason| {
+        PipelineError::Output {
+            kind: "aes67",
+            reason,
+        }
+    })?;
+    // #103: distinct AES67 senders on ONE multicast group:port must advertise
+    // distinct RTP SSRCs (a receiver demuxes by SSRC within a group — RFC 3550 §8).
+    // The per-output SSRC is a 32-bit fold of id + group:port, so a same-group
+    // collision is astronomically unlikely but not impossible — reject it
+    // fail-closed here (config-time, off the hot path; inv #1/#10) rather than emit
+    // two ambiguous senders. Senders on DIFFERENT groups may share an SSRC.
+    #[cfg(feature = "aes67")]
+    ensure_no_aes67_ssrc_collision(outputs)?;
     let mut runnable = Vec::new();
     #[cfg(feature = "display-kms")]
     let mut display_plans = Vec::new();
     #[cfg(feature = "ndi-bindings")]
     let mut ndi_publishers = Vec::new();
+    #[cfg(feature = "aes67")]
+    let mut aes67_handles = Vec::new();
     for output in outputs {
         match output {
             Output::Display { .. } => {
@@ -6939,6 +7437,19 @@ fn build_outputs(
                     &mut ndi_publishers,
                 );
             }
+            // AES67 / ST 2110-30 raw-PCM audio output (#103, ADR-0033/T013): a
+            // mux-free multicast sink of the mixed program audio. The serve-side
+            // `Aes67Sender` is built here (sync); its push handle is threaded to
+            // the bake consumer, and the async multicast socket is bound later in
+            // `run_aes67_output`. Under `aes67` only; a non-`aes67` build rejected
+            // any aes67 output up front (the gate above), so the fall-through below
+            // is defensive.
+            #[cfg(feature = "aes67")]
+            Output::Aes67 { .. } => {
+                let (runnable_out, handle) = build_aes67_output(output)?;
+                runnable.push(runnable_out);
+                aes67_handles.push(handle);
+            }
             // `Output` is `#[non_exhaustive]`; an unrecognized future kind is
             // skipped rather than silently mishandled.
             _ => {
@@ -6957,7 +7468,238 @@ fn build_outputs(
         display: display_plans,
         #[cfg(feature = "ndi-bindings")]
         ndi_publishers,
+        #[cfg(feature = "aes67")]
+        aes67_handles,
     })
+}
+
+/// AES67 TX channel count (#103): FIXED at 2 — the program bus is stereo, and the
+/// bake consumer pushes that stereo block into the sender, whose channel count MUST
+/// match or the push is silently dropped. Multi-channel / discrete-track AES67 is a
+/// later slice.
+#[cfg(feature = "aes67")]
+const AES67_TX_CHANNELS: usize = 2;
+
+/// AES67 TX dynamic RTP payload type (#103): 97, a common dynamic PT for L24 audio
+/// (the receiver reads the format from the SDP, not the PT; any 96..=127 works).
+#[cfg(feature = "aes67")]
+const AES67_TX_PAYLOAD_TYPE: u8 = 97;
+
+/// AES67 TX send-FIFO depth in frames (#103): 4800 frames = 100 ms @ 48 kHz — a
+/// bounded drop-oldest buffer between the bake consumer (push) and the serve timer
+/// (drain), so a stalled network sheds oldest rather than growing memory (inv #5).
+#[cfg(feature = "aes67")]
+const AES67_TX_CAPACITY_FRAMES: usize = 4_800;
+
+/// AES67 TX default frames-per-packet (#103): 48 = 1 ms @ 48 kHz (Class-A ptime),
+/// the fallback when the `ptime_ms * rate / 1000` widening ever saturates (it never
+/// does for a validated ptime).
+#[cfg(feature = "aes67")]
+const AES67_DEFAULT_FRAMES_PER_PACKET: usize = 48;
+
+/// Build the [`RunnableOutput::Aes67`] for an `Output::Aes67` (#103,
+/// ADR-0033/T013): the serve-side [`Aes67Sender`](multiview_output::aes67::Aes67Sender)
+/// framed from the output's depth/ptime + the fixed 48 kHz **stereo** program bus,
+/// paired with the bake-consumer push
+/// [`Aes67SenderHandle`](multiview_output::aes67::Aes67SenderHandle) the program
+/// audio is fed into. Mux-free (no encode stage) — it multicasts the mixed program
+/// to a `group:port`.
+///
+/// The sender is created here (sync, always-compiled) so its handle can be threaded
+/// to the bake consumer; the async multicast socket is bound later, in
+/// [`run_aes67_output`] (a current-thread runtime on the sink thread). `channels` is
+/// FIXED at 2 to match the stereo program-bus block the consumer pushes —
+/// [`Aes67SenderHandle::push`](multiview_output::aes67::Aes67SenderHandle::push)
+/// silently drops a block whose channel count differs, so the two must agree.
+///
+/// # Errors
+/// [`PipelineError::Output`] when the `multicast` group:port is malformed, the PCM
+/// depth is unsupported, or the sender parameters are out of range
+/// (`Aes67ConfigError`).
+#[cfg(feature = "aes67")]
+fn build_aes67_output(
+    output: &Output,
+) -> Result<(RunnableOutput, multiview_output::aes67::Aes67SenderHandle), PipelineError> {
+    use multiview_output::aes67::{Aes67Sender, PcmDepth};
+
+    let Output::Aes67 {
+        multicast,
+        depth,
+        ptime_ms,
+        ..
+    } = output
+    else {
+        return Err(PipelineError::Output {
+            kind: "aes67",
+            reason: "build_aes67_output called on a non-aes67 output".to_owned(),
+        });
+    };
+    let id = output.id();
+    // The multicast destination `group:port` (a required schema field).
+    let dest = multicast
+        .parse::<std::net::SocketAddr>()
+        .map_err(|e| PipelineError::Output {
+            kind: "aes67",
+            reason: format!(
+                "aes67 output `{id}` multicast `{multicast}` is not a valid group:port: {e}"
+            ),
+        })?;
+    // Egress from an ephemeral port on the group's-family wildcard.
+    let local: std::net::SocketAddr = if dest.is_ipv6() {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    };
+    // L24 (Class-A interop default) unless the config says L16; a future/unknown
+    // depth is a typed refusal (never silently mishandled).
+    let pcm_depth = if depth.eq_ignore_ascii_case("l16") {
+        PcmDepth::L16
+    } else if depth.eq_ignore_ascii_case("l24") {
+        PcmDepth::L24
+    } else {
+        return Err(PipelineError::Output {
+            kind: "aes67",
+            reason: format!(
+                "aes67 output `{id}` has unsupported PCM depth `{depth}` (expected L16 or L24)"
+            ),
+        });
+    };
+    // A zero packet time is nonsensical (and the `.max(1)` below would silently
+    // coerce it to a 1-frame ~0.02 ms packet flood). Reject it fail-closed instead.
+    // (`ptime_ms * 48000 / 1000` is exactly `ptime_ms * 48` for any u32, so a
+    // NON-zero ptime never truncates; an oversized one is caught by
+    // `Aes67Sender::new`'s frames-per-packet bound below.)
+    if *ptime_ms == 0 {
+        return Err(PipelineError::Output {
+            kind: "aes67",
+            reason: format!("aes67 output `{id}` has a zero packet time (`ptime_ms` must be >= 1)"),
+        });
+    }
+    // frames_per_packet = ptime_ms * rate / 1000 (Class-A ptime = 1 ms → 48 frames
+    // @ 48 kHz). Computed in u64 to stay exact, clamped ≥ 1.
+    let frames_per_packet =
+        usize::try_from(u64::from(*ptime_ms).saturating_mul(u64::from(AES67_STORE_RATE_HZ)) / 1000)
+            .unwrap_or(AES67_DEFAULT_FRAMES_PER_PACKET)
+            .max(1);
+    let sender = Aes67Sender::new(
+        AES67_TX_CHANNELS,
+        pcm_depth,
+        AES67_TX_PAYLOAD_TYPE,
+        aes67_ssrc_for(&id, dest),
+        AES67_STORE_RATE_HZ,
+        frames_per_packet,
+        AES67_TX_CAPACITY_FRAMES,
+    )
+    .map_err(|e| PipelineError::Output {
+        kind: "aes67",
+        reason: format!("aes67 output `{id}` sender config invalid: {e}"),
+    })?;
+    let handle = sender.handle();
+    let runnable = RunnableOutput::Aes67 {
+        id: id.clone(),
+        sender,
+        local,
+        dest,
+        interface: multiview_output::aes67::transport::MulticastInterface::Unspecified,
+        label: format!("aes67 {id}"),
+    };
+    Ok((runnable, handle))
+}
+
+/// A stable, non-zero RTP SSRC for an AES67 output, folded from its id AND its
+/// multicast `group:port` (#103).
+///
+/// Uses **FNV-1a** (a small, fully-specified algorithm — mirroring the SAP
+/// [`stable_hash`](multiview_input::sap::stable_hash) approach, P2-F4) over a
+/// **stable byte encoding** of the address: the family tag + the raw IP octets +
+/// the big-endian port, NOT `SocketAddr`'s `Display` string (whose formatting —
+/// especially IPv6 zero-compression — is not a stable cross-version/-target byte
+/// form). So the mapping is stable across toolchain versions, targets, and
+/// restarts: a receiver keyed on the SSRC keeps seeing one sender as the same
+/// stream across a rebuild. `DefaultHasher` (`SipHash`) is explicitly **not** a
+/// stable cross-version contract, so it must never back a wire identifier. The
+/// multicast group+port is folded in (not just the id) so distinct outputs get
+/// distinct SSRCs **with overwhelming probability** (a 32-bit RTP SSRC space) — the
+/// deterministic fold does NOT by itself *guarantee* uniqueness. The one HARD
+/// guarantee is build-time and fail-closed ([`ensure_no_aes67_ssrc_collision`]): no
+/// two AES67 outputs **configured in this build** that share a multicast
+/// `group:port` may fold to the same SSRC. It does NOT detect or resolve a
+/// collision with an EXTERNAL / third-party sender on that group — there is no
+/// runtime RTCP SSRC collision detection or reselection here. Clamped away from `0`
+/// (an ambiguous-but-legal SSRC).
+#[cfg(feature = "aes67")]
+fn aes67_ssrc_for(id: &str, dest: std::net::SocketAddr) -> u32 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    // id, then a separator so ("ab", …) and ("a", "b…") cannot alias to one digest.
+    let mut hash = fnv1a_absorb(FNV_OFFSET, id.as_bytes());
+    hash = fnv1a_absorb(hash, b"@");
+    // Address family tag + raw IP octets (the stable wire bytes) + big-endian port.
+    hash = match dest.ip() {
+        std::net::IpAddr::V4(v4) => fnv1a_absorb(fnv1a_absorb(hash, &[4]), &v4.octets()),
+        std::net::IpAddr::V6(v6) => fnv1a_absorb(fnv1a_absorb(hash, &[6]), &v6.octets()),
+    };
+    hash = fnv1a_absorb(hash, &dest.port().to_be_bytes());
+    // Fold the 64-bit digest into 32 bits, then force non-zero.
+    let folded = (hash ^ (hash >> 32)) & u64::from(u32::MAX);
+    u32::try_from(folded).unwrap_or(1).max(1)
+}
+
+/// One FNV-1a absorb pass: XOR-then-multiply each byte into `hash` (the offset
+/// basis / running digest is supplied by the caller). Split out so the SSRC fold
+/// composes id + address-family + octets + port without repeating the loop.
+#[cfg(feature = "aes67")]
+fn fnv1a_absorb(mut hash: u64, bytes: &[u8]) -> u64 {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+/// Fail closed if two AES67 outputs on the **same multicast group:port** fold to
+/// the **same RTP SSRC** (#103).
+///
+/// [`aes67_ssrc_for`] folds to 32 bits, which is distinct with overwhelming
+/// probability but not *guaranteed* unique. An RTP receiver demuxes by SSRC
+/// **within one multicast group** (RFC 3550 §8), so only a same-`(group:port)`
+/// collision is ambiguous — two senders on **different** groups may share an SSRC
+/// harmlessly and are NOT rejected (no false positives). This runs once at config
+/// time (off the hot path; inv #1/#10). Outputs with a malformed `multicast` are
+/// skipped here — [`build_aes67_output`] reports that separately.
+///
+/// # Errors
+///
+/// [`PipelineError::Config`] naming BOTH colliding output ids and their shared
+/// group + SSRC.
+#[cfg(feature = "aes67")]
+fn ensure_no_aes67_ssrc_collision(outputs: &[Output]) -> Result<(), PipelineError> {
+    // Keyed on (multicast dest, SSRC): a duplicate key is two senders on ONE group
+    // that folded to ONE SSRC — the only ambiguous case.
+    let mut seen: std::collections::HashMap<(std::net::SocketAddr, u32), String> =
+        std::collections::HashMap::new();
+    for output in outputs {
+        let Output::Aes67 { multicast, .. } = output else {
+            continue;
+        };
+        // A malformed multicast is a typed refusal in `build_aes67_output`; this
+        // SSRC-uniqueness pass only considers parseable destinations.
+        let Ok(dest) = multicast.parse::<std::net::SocketAddr>() else {
+            continue;
+        };
+        let id = output.id();
+        let ssrc = aes67_ssrc_for(&id, dest);
+        if let Some(other) = seen.insert((dest, ssrc), id.clone()) {
+            return Err(PipelineError::Config(
+                multiview_config::ConfigError::Validation(format!(
+                    "aes67 outputs `{other}` and `{id}` collide on multicast group \
+                     `{dest}` with the same RTP SSRC {ssrc}: distinct senders on one \
+                     multicast group must have distinct SSRCs — rename one output"
+                )),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Build one live NDI output sink (OUT-4b / NDI-L2): enforce the
@@ -7122,6 +7864,10 @@ fn maybe_prepend_program_ts(mut runnable: Vec<RunnableOutput>, live: bool) -> Ve
         // anchors no `program.ts`.
         #[cfg(feature = "ndi-bindings")]
         RunnableOutput::Ndi { .. } => None,
+        // The AES67 sink is a raw-PCM multicast consumer, not a packet/disk muxer —
+        // it anchors no `program.ts`.
+        #[cfg(feature = "aes67")]
+        RunnableOutput::Aes67 { .. } => None,
     });
     if let Some(path) = file_path {
         runnable.insert(
@@ -9045,6 +9791,196 @@ fn webrtc_audio_block(
     use multiview_audio::format::{AudioBlock, AudioFormat, ChannelLayout};
     let format = AudioFormat::new(samples.rate, ChannelLayout::Stereo);
     AudioBlock::from_interleaved(format, samples.interleaved.clone()).ok()
+}
+
+/// The canonical AES67 audio store / program-bus sample rate (Hz): 48 kHz — the
+/// rate [`crate::audio::new_store`] mints and the program bus mixes, so a rebased
+/// AES67 block is published at exactly this rate (the store's format contract).
+#[cfg(feature = "aes67")]
+const AES67_STORE_RATE_HZ: u32 = 48_000;
+
+/// The AES67 RX socket→packet channel-bridge depth (#103): a bounded drop-oldest
+/// buffer of depacketized RTP units between the async receive loop (writer) and
+/// the [`Aes67AudioProducer`] drain (reader). Bounded so a burst can never grow
+/// memory (inv #5); AES67 Class-A packets are 1 ms, so 512 units is ~0.5 s of
+/// slack — far more than the 2 ms drain cadence needs, and it drops-oldest under
+/// any stall rather than back-pressuring the socket.
+#[cfg(feature = "aes67")]
+const AES67_RX_BRIDGE_CAP: usize = 512;
+
+/// Receive one AES67 / ST 2110-30 multicast PCM source into its `AudioStore`
+/// (#103, ADR-0033/T013), until `stop` is raised or the socket faults.
+///
+/// Binds a UDP receiver to the multicast port, joins the group, and pumps
+/// depacketized audio units through the shared ADR-T013
+/// [`RtpAudioRebaser`](multiview_input::rtp_audio::RtpAudioRebaser) — the SAME
+/// seam the WebRTC-Opus path uses ([`publish_webrtc_audio`]), except AES67 passes
+/// the **real packet SSRC** (not the hardcoded `0`), so an SSRC change re-anchors
+/// the store's absolute-frame timeline. Each rebased block is published into the
+/// source's last-good [`AudioStore`](multiview_audio::store::AudioStore), which the
+/// program bus samples. Every hand-off is sampled, never pacing (inv #1/#10); a
+/// malformed packet is skipped by the producer (bad inputs are the product, inv
+/// #2), and a socket fault ends the session (the tile-less store then silence-fills
+/// on the bus).
+///
+/// The receiver socket + its receive loop are async, but this runs on the ingest
+/// thread (a `std::thread`, the control/IO plane), so it drives them on a small
+/// **current-thread** Tokio runtime (like [`resolve_youtube_master`]) — the output
+/// data plane is never involved. A `select!` drives the receive loop concurrently
+/// with a 2 ms drain poll on the one thread, so the socket makes progress without a
+/// dedicated runtime worker.
+#[cfg(feature = "aes67")]
+fn drive_aes67_rx(plan: &Aes67RxPlan, stop: &AtomicBool) {
+    use multiview_input::st2110::transport::{MulticastInterface, RtpReceiver};
+    use multiview_input::st2110::Aes67AudioProducer;
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!(source = %plan.id, error = %e, "aes67 rx runtime build failed; source silent");
+            return;
+        }
+    };
+
+    // Receiving multicast binds the port on the WILDCARD of the group's address
+    // family (IPv6 `[::]` / IPv4 `0.0.0.0`) and then joins the group — never the
+    // group literal (a portable multicast receive).
+    let port = plan.group.port();
+    let local: std::net::SocketAddr = if plan.group.is_ipv6() {
+        (std::net::Ipv6Addr::UNSPECIFIED, port).into()
+    } else {
+        (std::net::Ipv4Addr::UNSPECIFIED, port).into()
+    };
+
+    runtime.block_on(async {
+        let receiver = match RtpReceiver::bind(local).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(source = %plan.id, error = %e, local = %local, "aes67 rx bind failed; source silent");
+                return;
+            }
+        };
+        if let Err(e) = receiver.join_multicast(plan.group.ip(), MulticastInterface::Unspecified) {
+            tracing::warn!(source = %plan.id, error = %e, group = %plan.group, "aes67 rx multicast join failed; source silent");
+            return;
+        }
+        tracing::info!(source = %plan.id, group = %plan.group, "aes67 rx receiving");
+        let (packet_source, receive_loop) = receiver.channel_bridge(AES67_RX_BRIDGE_CAP);
+        let mut receive_loop = receive_loop;
+        let mut producer = Aes67AudioProducer::new(
+            Box::new(packet_source),
+            plan.session.format,
+            plan.session.payload_type,
+        );
+        // The ADR-T013 rebaser maps each packet's 32-bit RTP media timestamp onto
+        // the store's absolute 48 kHz frame index. Wire rate is the SDP clock; the
+        // store is canonical 48 kHz.
+        let mut rebaser = multiview_input::rtp_audio::RtpAudioRebaser::new(
+            plan.session.clock_rate,
+            AES67_STORE_RATE_HZ,
+        );
+        loop {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            tokio::select! {
+                // The receive loop drives the socket → packet channel. It resolves
+                // only on a socket fault or when the packet source is dropped —
+                // end the session (the store then silence-fills on the bus).
+                () = &mut receive_loop => {
+                    tracing::info!(source = %plan.id, "aes67 rx socket ended; source holds silence");
+                    return;
+                }
+                // Drain every unit ready this poll and publish it. A 2 ms nap
+                // yields to the runtime so `receive_loop` makes progress (never
+                // spins); AES67 Class-A packets are 1 ms, so this keeps pace.
+                () = tokio::time::sleep(Duration::from_millis(2)) => {
+                    if !drain_aes67_producer(plan, &mut producer, &mut rebaser) {
+                        return; // producer fault: end the session.
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Drain every AES67 audio unit ready this poll, rebasing + publishing each into
+/// the source's store. Returns `false` on a producer fault (end the session),
+/// `true` to keep receiving. Never paces the engine (inv #1/#10); a rejected
+/// publish or degenerate block is logged/skipped, never fatal (inv #2).
+#[cfg(feature = "aes67")]
+fn drain_aes67_producer(
+    plan: &Aes67RxPlan,
+    producer: &mut multiview_input::st2110::Aes67AudioProducer,
+    rebaser: &mut multiview_input::rtp_audio::RtpAudioRebaser,
+) -> bool {
+    loop {
+        match producer.next_audio() {
+            Ok(Some(frame)) => {
+                // AES67 passes the REAL SSRC (not the WebRTC path's hardcoded 0),
+                // so a mid-stream SSRC change re-anchors the store timeline.
+                let anchor = rebaser.rebase(frame.raw_timestamp, frame.ssrc, frame.discontinuity);
+                let Some(block) = aes67_audio_block(&frame) else {
+                    continue; // degenerate shape: skip (bad inputs are the product).
+                };
+                if let Err(e) = plan.store.publish_at(anchor.store_frame, &block) {
+                    tracing::debug!(source = %plan.id, error = %e, "aes67 audio publish rejected");
+                }
+            }
+            Ok(None) => return true, // nothing ready this poll.
+            Err(e) => {
+                tracing::warn!(source = %plan.id, error = %e, "aes67 producer faulted");
+                return false;
+            }
+        }
+    }
+}
+
+/// Bridge a depacketized [`Aes67AudioFrame`](multiview_input::st2110::Aes67AudioFrame)
+/// (interleaved canonical f32, frame-major) into the [`AudioBlock`] the
+/// `AudioStore` consumes, at the store's canonical 48 kHz **stereo**. The per-source
+/// store + program bus are stereo, so the block must be stereo whatever the source
+/// channel count: mono is duplicated L=R, a >2-channel stream keeps its first two
+/// channels (a full downmix is a later slice). Returns `None` (panic-free) on a
+/// degenerate shape.
+#[cfg(feature = "aes67")]
+fn aes67_audio_block(
+    frame: &multiview_input::st2110::Aes67AudioFrame,
+) -> Option<multiview_audio::format::AudioBlock> {
+    use multiview_audio::format::{AudioBlock, AudioFormat, ChannelLayout};
+    let channels = usize::from(frame.format.channels).max(1);
+    let stereo = interleave_to_stereo(&frame.samples, channels);
+    let format = AudioFormat::new(AES67_STORE_RATE_HZ, ChannelLayout::Stereo);
+    AudioBlock::from_interleaved(format, stereo).ok()
+}
+
+/// Convert an interleaved, frame-major f32 buffer at `channels` into interleaved
+/// STEREO (`L,R,…`): stereo passes through, mono duplicates each sample to both
+/// channels, and >2 channels keep the first two. `channels` is clamped to ≥1 so
+/// the frame stride is never zero.
+#[cfg(feature = "aes67")]
+fn interleave_to_stereo(samples: &[f32], channels: usize) -> Vec<f32> {
+    let channels = channels.max(1);
+    if channels == 2 {
+        return samples.to_vec();
+    }
+    let frames = samples.len() / channels;
+    let mut out = Vec::with_capacity(frames.saturating_mul(2));
+    for f in 0..frames {
+        let base = f.saturating_mul(channels);
+        let left = samples.get(base).copied().unwrap_or(0.0);
+        let right = if channels == 1 {
+            left
+        } else {
+            samples.get(base.saturating_add(1)).copied().unwrap_or(left)
+        };
+        out.push(left);
+        out.push(right);
+    }
+    out
 }
 
 /// Map one decoded frame onto the timeline the store is stamped with.
@@ -13562,6 +14498,803 @@ segment_ms = 1000
         assert!(
             std::sync::Arc::ptr_eq(mapped, &owned),
             "the stores map must hold the registry's store Arc (decode-once ownership)"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "aes67"))]
+mod aes67_wiring_guardrails {
+    //! #103: an AES67 audio source is AUDIO-ONLY. It must contribute an
+    //! [`AudioStore`](multiview_audio::store::AudioStore) (routed onto the program
+    //! bus like any source's audio) but NEVER a video [`TileStore`], never a
+    //! [`SourceRegistry`] entry, and never a layout tile. These guardrails protect
+    //! the just-merged MP-2 decode-once / tile / per-axis-supremum seam (ADR-0030
+    //! §3): the video path must stay byte-identical for the non-AES67 sources of a
+    //! mixed config — the aes67 branch is a pure skip-the-video-path addition.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    /// A minimal valid AES67 Class-A L24 stereo SDP (RFC 4566/8866), IPv6-first
+    /// (`c=IN IP6`) — the same fixture shape `multiview-input`'s SDP parser
+    /// round-trips. CR/LF line endings are real bytes (the parser accepts them).
+    const AES67_SDP: &str = "v=0\r\n\
+o=- 1 1 IN IP6 2001:db8::1\r\n\
+s=Multiview AES67\r\n\
+c=IN IP6 ff3e::1\r\n\
+t=0 0\r\n\
+m=audio 5004 RTP/AVP 98\r\n\
+a=rtpmap:98 L24/48000/2\r\n\
+a=ptime:1\r\n\
+a=ts-refclk:ptp=IEEE1588-2008:AA-BB-CC-DD-EE-FF-00-11:0\r\n\
+a=mediaclk:direct=0\r\n";
+
+    /// A config with ONE video source (`cam1`, bars) bound to the single cell and
+    /// ONE audio-only AES67 source (`aes67-in`) bound to no cell. The SDP is
+    /// injected as a TOML literal (`'''…'''`) string so its newlines survive.
+    fn video_plus_aes67_config() -> multiview_config::MultiviewConfig {
+        let doc = format!(
+            r##"schema_version = 1
+[canvas]
+width = 640
+height = 480
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[sources]]
+id = "aes67-in"
+kind = "aes67"
+multicast = "[ff3e::1]:5004"
+sdp = '''
+{AES67_SDP}'''
+[[cells]]
+id = "only"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[outputs]]
+kind = "hls"
+path = "/tmp/aes67-guardrail.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##
+        );
+        multiview_config::MultiviewConfig::load_from_toml(&doc).expect("test config parses")
+    }
+
+    #[test]
+    fn aes67_source_makes_an_audio_store_but_no_video_tile_or_registry_entry() {
+        let config = video_plus_aes67_config();
+        let pipeline = Pipeline::build(&config).expect("pipeline builds with an aes67 source");
+
+        // AUDIO-ONLY: the aes67 source joins the program-audio path (an AudioStore
+        // keyed by its id, which the bus routes when this run carries audio) ...
+        assert!(
+            pipeline.audio_stores.contains_key("aes67-in"),
+            "an aes67 source must contribute an AudioStore (program-bus routed)"
+        );
+        // ... but contributes NO video TileStore (it decodes no pixels).
+        assert!(
+            !pipeline.stores.contains_key("aes67-in"),
+            "an aes67 source must NOT create a video TileStore (audio-only)"
+        );
+
+        // ... and NO SourceRegistry entry — the MP-2 decode-once video seam never
+        // sees it, so the registry still holds exactly the ONE video source.
+        let aes67_key = multiview_engine::SourceKey::from_canonical("aes67-in");
+        assert!(
+            pipeline.source_registry.store(&aes67_key).is_none(),
+            "an aes67 source must never take a video decode registry entry"
+        );
+        assert_eq!(
+            pipeline.source_registry.active_len(),
+            1,
+            "only the one video source takes a registry entry (aes67 excluded)"
+        );
+
+        // ... and NO layout tile (it is bound to no cell — audio has no geometry).
+        assert!(
+            cell_pixel_size(&pipeline.layout, "aes67-in").is_none(),
+            "an aes67 source is bound to no cell → no layout tile"
+        );
+
+        // The video source is UNAFFECTED: it keeps its TileStore + registry entry
+        // (the video path is byte-identical to a config without the aes67 source).
+        assert!(
+            pipeline.stores.contains_key("cam1"),
+            "the video source keeps its TileStore (video path byte-identical)"
+        );
+        let cam_key = multiview_engine::SourceKey::from_canonical("cam1");
+        assert!(
+            pipeline.source_registry.store(&cam_key).is_some(),
+            "the video source keeps its registry entry"
+        );
+    }
+
+    /// A 2x2 grid where `cam1` is bound by two DIFFERENT-sized cells (area `a` =
+    /// 400x480, area `d` = 800x240 on 1200x720 → per-axis supremum 800x480), PLUS
+    /// an audio-only aes67 source — proving the aes67 branch never disturbs the
+    /// MP-2 decode-once/supremum video seam.
+    fn two_cells_plus_aes67_config() -> multiview_config::MultiviewConfig {
+        let doc = format!(
+            r##"schema_version = 1
+[canvas]
+width = 1200
+height = 720
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "2fr"]
+rows = ["2fr", "1fr"]
+areas = ["a b", "c d"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[sources]]
+id = "aes67-in"
+kind = "aes67"
+multicast = "[ff3e::1]:5004"
+sdp = '''
+{AES67_SDP}'''
+[[cells]]
+id = "small"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[cells]]
+id = "wide"
+area = "d"
+[cells.source]
+input_id = "cam1"
+[[outputs]]
+kind = "hls"
+path = "/tmp/aes67-mixed.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##
+        );
+        multiview_config::MultiviewConfig::load_from_toml(&doc).expect("test config parses")
+    }
+
+    #[test]
+    fn mixed_config_still_decode_once_shares_the_video() {
+        let config = two_cells_plus_aes67_config();
+        let pipeline = Pipeline::build(&config).expect("pipeline builds (mixed aes67 + video)");
+        let cam_key = multiview_engine::SourceKey::from_canonical("cam1");
+
+        // ONE registry entry for the ONE video source, regardless of how many
+        // cells bind it — and the audio-only aes67 source adds none.
+        assert_eq!(
+            pipeline.source_registry.active_len(),
+            1,
+            "two cells binding one video source (+ an aes67 source) => ONE entry"
+        );
+
+        // The decode target the registry records is the per-axis supremum across
+        // cam1's two binding cells — unchanged by the aes67 source's presence.
+        let expect = cell_pixel_size(&pipeline.layout, "cam1").expect("cam1 is bound");
+        assert_eq!(
+            pipeline.source_registry.requested_supremum(&cam_key),
+            Some(multiview_engine::RequestedSize {
+                width: expect.0,
+                height: expect.1,
+            }),
+            "the registry still decodes cam1 at the per-axis supremum (MP-2 intact)"
+        );
+
+        // The `stores` map still holds the registry's OWN store Arc (decode-once
+        // ownership) — the aes67 branch did not fork it.
+        let mapped = pipeline.stores.get("cam1").expect("cam1 has a store");
+        let owned = pipeline
+            .source_registry
+            .store(&cam_key)
+            .expect("the registry owns cam1's store");
+        assert!(
+            std::sync::Arc::ptr_eq(mapped, &owned),
+            "the stores map still holds the registry's store Arc (MP-2 decode-once)"
+        );
+
+        // The aes67 source remains audio-only: an AudioStore, no video store.
+        assert!(pipeline.audio_stores.contains_key("aes67-in"));
+        assert!(!pipeline.stores.contains_key("aes67-in"));
+    }
+
+    /// A config that (wrongly) binds a layout CELL to the audio-only aes67 source.
+    /// An AES67 source decodes no pixels, so a cell referencing it would carry tile
+    /// geometry with NO backing `TileStore` (the source loop skips the video path
+    /// for it). The build must reject this fail-closed rather than leave a dangling
+    /// tile. `cam1` occupies area `a`; `aes67-in` is wrongly bound to area `b`.
+    fn aes67_source_bound_to_a_cell_config() -> multiview_config::MultiviewConfig {
+        let doc = format!(
+            r##"schema_version = 1
+[canvas]
+width = 1200
+height = 720
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "1fr"]
+rows = ["1fr"]
+areas = ["a b"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[sources]]
+id = "aes67-in"
+kind = "aes67"
+multicast = "[ff3e::1]:5004"
+sdp = '''
+{AES67_SDP}'''
+[[cells]]
+id = "video"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[cells]]
+id = "oops-audio"
+area = "b"
+[cells.source]
+input_id = "aes67-in"
+[[outputs]]
+kind = "hls"
+path = "/tmp/aes67-cell-reject.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##
+        );
+        multiview_config::MultiviewConfig::load_from_toml(&doc).expect("test config parses")
+    }
+
+    #[test]
+    fn a_layout_cell_bound_to_an_aes67_source_is_rejected() {
+        let config = aes67_source_bound_to_a_cell_config();
+        let err = Pipeline::build(&config)
+            .err()
+            .expect("a layout cell bound to an audio-only aes67 source must fail the build");
+        // Fail-closed and honest: the error names the offending audio-only source.
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("aes67-in"),
+            "the rejection names the audio-only source wrongly bound to a cell: {rendered}"
+        );
+    }
+
+    /// Like [`aes67_source_bound_to_a_cell_config`] but the aes67-bound cell
+    /// references an UNKNOWN grid area, so its geometry does not resolve. The
+    /// audio-binding rejection must still fire (and name the source) rather than be
+    /// masked by a generic geometry-resolution error — the guard must key on the
+    /// source binding, not on tile geometry (`solve_layout` errors on the bad area
+    /// first, so a geometry-coupled guard never sees the cell).
+    fn aes67_cell_with_unresolved_geometry_config() -> multiview_config::MultiviewConfig {
+        let doc = format!(
+            r##"schema_version = 1
+[canvas]
+width = 640
+height = 480
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[sources]]
+id = "aes67-in"
+kind = "aes67"
+multicast = "[ff3e::1]:5004"
+sdp = '''
+{AES67_SDP}'''
+[[cells]]
+id = "video"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[cells]]
+id = "oops-audio"
+area = "does-not-exist"
+[cells.source]
+input_id = "aes67-in"
+[[outputs]]
+kind = "hls"
+path = "/tmp/aes67-unresolved-cell.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##
+        );
+        multiview_config::MultiviewConfig::load_from_toml(&doc).expect("test config parses")
+    }
+
+    #[test]
+    fn a_geometry_unresolved_cell_bound_to_an_aes67_source_is_rejected_by_name() {
+        let config = aes67_cell_with_unresolved_geometry_config();
+        let err = Pipeline::build(&config)
+            .err()
+            .expect("a cell bound to an audio-only aes67 source must fail the build");
+        // The rejection must name the AUDIO-BINDING root cause — not be masked by a
+        // generic "unknown grid area" geometry error — so the guard is effective
+        // even when the bound cell's geometry does not resolve (decoupled from
+        // tile-sizing, which `solve_layout` errors on first).
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("aes67-in"),
+            "the rejection names the audio-only source, not just a geometry error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_aes67_source_without_program_audio_is_rejected_before_going_on_air() {
+        let config = video_plus_aes67_config();
+        let pipeline = Pipeline::build(&config).expect("pipeline builds with an aes67 source");
+        // No program audio: the ST 2110-30 RX has no `ProgramBus` to publish into,
+        // so the run must fail closed rather than silently receive/emit silence.
+        assert!(
+            pipeline.ensure_aes67_has_program_audio().is_err(),
+            "an aes67 source with no program audio is a fail-closed run error"
+        );
+
+        let mut with_audio = Pipeline::build(&config).expect("pipeline builds");
+        with_audio.enable_program_audio();
+        assert!(
+            with_audio.ensure_aes67_has_program_audio().is_ok(),
+            "with program audio enabled, the aes67 source is accepted"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "aes67"))]
+mod aes67_tx_and_helpers {
+    //! #103 TX + pure-helper coverage (no socket): `build_aes67_output` maps an
+    //! `Output::Aes67` to a mux-free `RunnableOutput::Aes67` + a bake-consumer push
+    //! handle (rejecting a bad depth / malformed multicast); `Pipeline::build`
+    //! threads that handle onto the pipeline; and the RX bridging helpers
+    //! (`resolve_aes67_source`, `interleave_to_stereo`, `aes67_audio_block`) behave
+    //! correctly. The socket-bound RX/TX loops are hardware/network-gated.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    const AES67_SDP: &str = "v=0\r\n\
+o=- 1 1 IN IP6 2001:db8::1\r\n\
+s=Multiview AES67\r\n\
+c=IN IP6 ff3e::1\r\n\
+t=0 0\r\n\
+m=audio 5004 RTP/AVP 98\r\n\
+a=rtpmap:98 L24/48000/2\r\n\
+a=ptime:1\r\n\
+a=ts-refclk:ptp=IEEE1588-2008:AA-BB-CC-DD-EE-FF-00-11:0\r\n\
+a=mediaclk:direct=0\r\n";
+
+    /// An `Output::Aes67` value (via serde, bypassing config validation so the
+    /// malformed cases reach `build_aes67_output`).
+    fn aes67_output_value(multicast: &str, depth: &str) -> Output {
+        serde_json::from_value(serde_json::json!({
+            "kind": "aes67",
+            "label": "aes-out",
+            "multicast": multicast,
+            "depth": depth,
+        }))
+        .expect("aes67 output parses")
+    }
+
+    /// A `SourceKind::Aes67` source value, optionally carrying the multicast override.
+    fn aes67_source_value(multicast: Option<&str>) -> Source {
+        let mut map = serde_json::Map::new();
+        map.insert("id".to_owned(), serde_json::json!("aes-in"));
+        map.insert("kind".to_owned(), serde_json::json!("aes67"));
+        map.insert("sdp".to_owned(), serde_json::json!(AES67_SDP));
+        if let Some(m) = multicast {
+            map.insert("multicast".to_owned(), serde_json::json!(m));
+        }
+        serde_json::from_value(serde_json::Value::Object(map)).expect("aes67 source parses")
+    }
+
+    #[test]
+    fn build_aes67_output_makes_a_mux_free_runnable_and_a_push_handle() {
+        let output = aes67_output_value("[ff3e::1]:5004", "L24");
+        let (runnable, _handle) = build_aes67_output(&output).expect("valid aes67 output builds");
+        let RunnableOutput::Aes67 {
+            dest, local, id, ..
+        } = runnable
+        else {
+            panic!("expected a RunnableOutput::Aes67");
+        };
+        assert_eq!(
+            dest,
+            "[ff3e::1]:5004".parse().unwrap(),
+            "dest is the configured multicast group:port"
+        );
+        assert!(
+            local.is_ipv6(),
+            "an ipv6 group egresses from an ipv6 wildcard"
+        );
+        assert!(
+            local.ip().is_unspecified(),
+            "egress binds the family wildcard"
+        );
+        assert_eq!(local.port(), 0, "egress uses an ephemeral local port");
+        assert_eq!(id, "aes-out", "the id derives from the label when unset");
+    }
+
+    #[test]
+    fn build_aes67_output_rejects_an_unknown_pcm_depth() {
+        let output = aes67_output_value("[ff3e::1]:5004", "L99");
+        assert!(
+            build_aes67_output(&output).is_err(),
+            "an unknown PCM depth is a typed refusal (not a silent default)"
+        );
+    }
+
+    #[test]
+    fn build_aes67_output_rejects_a_malformed_multicast() {
+        let output = aes67_output_value("not-a-socket-addr", "L24");
+        assert!(
+            build_aes67_output(&output).is_err(),
+            "a malformed multicast group:port is a typed refusal"
+        );
+    }
+
+    /// Build an `Output::Aes67` with an explicit id + multicast (via serde).
+    fn aes67_output_named(id: &str, multicast: &str) -> Output {
+        serde_json::from_value(serde_json::json!({
+            "kind": "aes67",
+            "id": id,
+            "label": id,
+            "multicast": multicast,
+        }))
+        .expect("aes67 output parses")
+    }
+
+    #[test]
+    fn aes67_outputs_that_collide_on_ssrc_within_one_group_are_rejected() {
+        // A PINNED brute-forced collision: at [ff3e::1]:5004 the ids "bzhq" and
+        // "fnmw" fold to the SAME 32-bit RTP SSRC (17_309_552). Two senders on ONE
+        // multicast group with one SSRC are ambiguous to an RTP receiver (RFC 3550
+        // §8), so the build must reject them, naming both. (Found offline by a
+        // birthday search over short ascii ids; the search loop is NOT committed.)
+        let g: std::net::SocketAddr = "[ff3e::1]:5004".parse().unwrap();
+        assert_eq!(
+            aes67_ssrc_for("bzhq", g),
+            aes67_ssrc_for("fnmw", g),
+            "the pinned collision holds under the real fold"
+        );
+
+        let err = ensure_no_aes67_ssrc_collision(&[
+            aes67_output_named("bzhq", "[ff3e::1]:5004"),
+            aes67_output_named("fnmw", "[ff3e::1]:5004"),
+        ])
+        .expect_err("a same-group ssrc collision is rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("bzhq") && msg.contains("fnmw"),
+            "the rejection names BOTH colliding outputs: {msg}"
+        );
+
+        // Distinct, non-colliding ids on the same group pass.
+        assert!(
+            ensure_no_aes67_ssrc_collision(&[
+                aes67_output_named("bzhq", "[ff3e::1]:5004"),
+                aes67_output_named("cam-audio", "[ff3e::1]:5004"),
+            ])
+            .is_ok(),
+            "distinct non-colliding same-group ids pass"
+        );
+
+        // The SAME colliding pair on DIFFERENT multicast groups is harmless — an RTP
+        // receiver demuxes per group, so those SSRCs never coexist. Not a conflict.
+        assert!(
+            ensure_no_aes67_ssrc_collision(&[
+                aes67_output_named("bzhq", "[ff3e::1]:5004"),
+                aes67_output_named("fnmw", "[ff3e::2]:5004"),
+            ])
+            .is_ok(),
+            "the same collision on different groups is not a conflict"
+        );
+    }
+
+    #[test]
+    fn pipeline_build_rejects_two_aes67_outputs_that_collide_on_ssrc() {
+        // The SSRC-collision guard is wired into `build_outputs`, not merely
+        // callable: a FULL `Pipeline::build` of a config with the pinned colliding
+        // pair on one multicast group fails closed. (Kills the mutant that drops the
+        // `ensure_no_aes67_ssrc_collision` call from `build_outputs`.)
+        let doc = r##"schema_version = 1
+[canvas]
+width = 640
+height = 480
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[cells]]
+id = "only"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[outputs]]
+kind = "aes67"
+id = "bzhq"
+label = "bzhq"
+multicast = "[ff3e::1]:5004"
+[[outputs]]
+kind = "aes67"
+id = "fnmw"
+label = "fnmw"
+multicast = "[ff3e::1]:5004"
+"##;
+        let config = multiview_config::MultiviewConfig::load_from_toml(doc).expect("config parses");
+        // `Pipeline` is not `Debug`, so `.err().expect(...)` (not `expect_err`).
+        let err = Pipeline::build(&config)
+            .err()
+            .expect("colliding aes67 outputs fail the build");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("bzhq") && msg.contains("fnmw"),
+            "the build rejection names both colliding outputs: {msg}"
+        );
+    }
+
+    #[test]
+    fn aes67_ssrc_is_stable_nonzero_and_folds_in_the_multicast_binding() {
+        let g1: std::net::SocketAddr = "[ff3e::1]:5004".parse().unwrap();
+        let g1_alt_port: std::net::SocketAddr = "[ff3e::1]:5006".parse().unwrap();
+        let g2: std::net::SocketAddr = "[ff3e::2]:5004".parse().unwrap();
+        // Never the ambiguous 0.
+        assert_ne!(
+            aes67_ssrc_for("out-a", g1),
+            0,
+            "ssrc is never the ambiguous 0"
+        );
+        // Deterministic for the same (id, group:port).
+        assert_eq!(
+            aes67_ssrc_for("out-a", g1),
+            aes67_ssrc_for("out-a", g1),
+            "the same id + binding always advertises the same ssrc"
+        );
+        // The fold mixes id AND group:port, so different inputs map to different
+        // SSRCs with overwhelming probability (a 32-bit space) — NOT a guarantee.
+        // These particular inputs differ (a hard same-group guarantee is enforced
+        // separately by `ensure_no_aes67_ssrc_collision`, tested above).
+        // Distinct output ids on one group differ (here).
+        assert_ne!(
+            aes67_ssrc_for("out-a", g1),
+            aes67_ssrc_for("out-b", g1),
+            "these distinct output ids fold to distinct ssrcs"
+        );
+        // A different port folds in, so these differ.
+        assert_ne!(
+            aes67_ssrc_for("out-a", g1),
+            aes67_ssrc_for("out-a", g1_alt_port),
+            "this different port folds to a different ssrc"
+        );
+        // A different group folds in, so these differ.
+        assert_ne!(
+            aes67_ssrc_for("out-a", g1),
+            aes67_ssrc_for("out-a", g2),
+            "this different group folds to a different ssrc"
+        );
+        // Pinned FNV-1a value over STABLE address bytes (family + raw IP octets +
+        // big-endian port), NOT the `SocketAddr` Display string (whose formatting
+        // is not a stable cross-version/-target byte encoding). The mapping is a
+        // fixed contract — a `DefaultHasher`/SipHash fold, or a Display-string fold,
+        // is not stable across releases, so a rebuild could change every sender's
+        // advertised SSRC. Changing this constant is a deliberate, reviewed change.
+        assert_eq!(
+            aes67_ssrc_for("out", g1),
+            3_149_784_790,
+            "the ssrc is a pinned FNV-1a fold of id + address family/octets/port"
+        );
+    }
+
+    #[test]
+    fn pipeline_build_threads_the_aes67_send_handle_onto_the_pipeline() {
+        // A video source + cell (so the layout solves) plus an AES67 audio output:
+        // the output's serve-side sender rides `outputs`, its push handle is threaded
+        // onto the pipeline for the bake consumer to feed.
+        let doc = r##"schema_version = 1
+[canvas]
+width = 640
+height = 480
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[cells]]
+id = "only"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[outputs]]
+kind = "aes67"
+label = "aes-out"
+multicast = "[ff3e::1]:5004"
+"##;
+        let config = multiview_config::MultiviewConfig::load_from_toml(doc).expect("config parses");
+        let pipeline = Pipeline::build(&config).expect("pipeline builds with an aes67 output");
+        assert_eq!(
+            pipeline.aes67_send_handles.len(),
+            1,
+            "the aes67 output's bake-consumer push handle is threaded onto the pipeline"
+        );
+        assert!(
+            pipeline
+                .outputs
+                .iter()
+                .any(|o| matches!(o, RunnableOutput::Aes67 { .. })),
+            "the aes67 output is a mux-free runnable sink"
+        );
+    }
+
+    #[test]
+    fn resolve_aes67_source_reads_the_sdp_and_requires_a_multicast_override() {
+        // Valid: the SDP parses (format/clock/payload) and the multicast override
+        // gives the transport binding (the SDP c= line is deliberately not used).
+        let src = aes67_source_value(Some("[ff3e::1]:5004"));
+        let (session, group) = resolve_aes67_source(&src).expect("valid aes67 source resolves");
+        assert_eq!(session.clock_rate, 48_000);
+        assert_eq!(session.payload_type, 98);
+        assert_eq!(session.format.channels, 2);
+        assert_eq!(group, "[ff3e::1]:5004".parse().unwrap());
+
+        // A missing multicast override is a typed refusal (not derived from the SDP).
+        assert!(
+            resolve_aes67_source(&aes67_source_value(None)).is_err(),
+            "a missing multicast override is rejected (the SDP c= line is not used)"
+        );
+        // A malformed override is rejected.
+        assert!(
+            resolve_aes67_source(&aes67_source_value(Some("nope"))).is_err(),
+            "a malformed multicast override is rejected"
+        );
+    }
+
+    #[test]
+    fn interleave_to_stereo_maps_mono_stereo_and_multichannel() {
+        // Stereo passes through unchanged.
+        assert_eq!(
+            interleave_to_stereo(&[0.1, 0.2, 0.3, 0.4], 2),
+            vec![0.1, 0.2, 0.3, 0.4]
+        );
+        // Mono duplicates each sample to both L and R.
+        assert_eq!(
+            interleave_to_stereo(&[0.5, 0.6], 1),
+            vec![0.5, 0.5, 0.6, 0.6]
+        );
+        // >2 channels keep the first two channels per frame (f0: 1,2 ; f1: 5,6).
+        assert_eq!(
+            interleave_to_stereo(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 4),
+            vec![1.0, 2.0, 5.0, 6.0]
+        );
+        // Zero channels clamps to mono — never divides by zero.
+        assert_eq!(interleave_to_stereo(&[0.9], 0), vec![0.9, 0.9]);
+    }
+
+    #[test]
+    fn aes67_audio_block_builds_a_48k_stereo_block() {
+        use multiview_input::st2110::v30::{Aes3Format, SampleDepth};
+        let frame = multiview_input::st2110::Aes67AudioFrame {
+            raw_timestamp: 0,
+            ssrc: 42,
+            discontinuity: false,
+            format: Aes3Format {
+                channels: 2,
+                depth: SampleDepth::L24,
+            },
+            samples: vec![0.1, -0.1, 0.2, -0.2], // 2 stereo frames
+        };
+        let block = aes67_audio_block(&frame).expect("builds a canonical block");
+        assert_eq!(block.frame_count(), 2, "two stereo frames");
+        assert_eq!(block.format().channel_count(), 2, "canonical stereo");
+        assert_eq!(block.format().sample_rate(), 48_000, "canonical 48 kHz");
+        assert_eq!(block.interleaved(), &[0.1, -0.1, 0.2, -0.2]);
+    }
+
+    /// A well-formed AES67 SDP at an arbitrary L24 clock rate (the parser accepts
+    /// 48 kHz and 96 kHz).
+    fn aes67_source_value_at_rate(clock_rate: u32) -> Source {
+        let sdp = format!(
+            "v=0\r\n\
+o=- 1 1 IN IP6 2001:db8::1\r\n\
+s=Multiview AES67\r\n\
+c=IN IP6 ff3e::1\r\n\
+t=0 0\r\n\
+m=audio 5004 RTP/AVP 98\r\n\
+a=rtpmap:98 L24/{clock_rate}/2\r\n\
+a=ptime:1\r\n\
+a=ts-refclk:ptp=IEEE1588-2008:AA-BB-CC-DD-EE-FF-00-11:0\r\n\
+a=mediaclk:direct=0\r\n"
+        );
+        let mut map = serde_json::Map::new();
+        map.insert("id".to_owned(), serde_json::json!("aes-in"));
+        map.insert("kind".to_owned(), serde_json::json!("aes67"));
+        map.insert("sdp".to_owned(), serde_json::json!(sdp));
+        map.insert("multicast".to_owned(), serde_json::json!("[ff3e::1]:5004"));
+        serde_json::from_value(serde_json::Value::Object(map)).expect("aes67 source parses")
+    }
+
+    #[test]
+    fn resolve_aes67_source_rejects_a_non_48khz_session() {
+        // A 48 kHz session resolves (the canonical store rate).
+        assert!(
+            resolve_aes67_source(&aes67_source_value_at_rate(48_000)).is_ok(),
+            "a 48 kHz aes67 session is supported"
+        );
+        // A 96 kHz session PARSES, but the RX rebaser only rescales the RTP
+        // timestamp onto the 48 kHz store index — it does NOT resample the PCM.
+        // Publishing 96 samples/ms against a +48/ms store anchor overlaps/gaps the
+        // store, so a non-48 kHz session must be rejected fail-closed, not accepted.
+        assert!(
+            resolve_aes67_source(&aes67_source_value_at_rate(96_000)).is_err(),
+            "a non-48 kHz aes67 session is rejected (the RX path does not resample)"
+        );
+    }
+
+    /// An `Output::Aes67` value with an explicit `ptime_ms` (via serde, bypassing
+    /// config validation so degenerate cases reach `build_aes67_output`).
+    fn aes67_output_value_with_ptime(ptime_ms: u32) -> Output {
+        serde_json::from_value(serde_json::json!({
+            "kind": "aes67",
+            "label": "aes-out",
+            "multicast": "[ff3e::1]:5004",
+            "depth": "L24",
+            "ptime_ms": ptime_ms,
+        }))
+        .expect("aes67 output parses")
+    }
+
+    #[test]
+    fn build_aes67_output_rejects_a_zero_ptime() {
+        // A 1 ms ptime builds (48 frames/packet @ 48 kHz).
+        assert!(
+            build_aes67_output(&aes67_output_value_with_ptime(1)).is_ok(),
+            "a 1 ms packet time builds"
+        );
+        // A zero packet time is nonsensical; the framing must reject it fail-closed
+        // rather than silently coerce it to a 1-frame (~0.02 ms) packet flood.
+        assert!(
+            build_aes67_output(&aes67_output_value_with_ptime(0)).is_err(),
+            "a zero packet time is a typed refusal, not a silent coercion to 1 frame"
         );
     }
 }

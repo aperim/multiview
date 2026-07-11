@@ -3328,6 +3328,7 @@ name = "multiview-input"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "miniz_oxide",
  "multiview-core",
  "multiview-ffmpeg",
  "multiview-framestore",
@@ -3335,6 +3336,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "socket2 0.6.4",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3424,6 +3426,7 @@ dependencies = [
  "multiview-telemetry",
  "proptest",
  "rustix",
+ "socket2 0.6.4",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
