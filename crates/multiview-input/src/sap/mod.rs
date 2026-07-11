@@ -14,8 +14,8 @@
 //!
 //! * [`packet`] — the pure byte-slice ⇄ typed [`SapPacket`] codec (parse +
 //!   encode), with the adversarially-corrected wire details honoured (3-bit
-//!   version, `auth_len` counted in 32-bit **words**, `E=1`/hash-0/compression
-//!   rejected).
+//!   version, `auth_len` counted in 32-bit **words**, `E=1`/hash-0 rejected,
+//!   `C=1` inflated under a hard cap).
 //! * [`groups`] — the multicast group set a listener joins and the scope
 //!   selector that picks the announce group from the media address.
 //! * [`session`] — a bounded, fixed-capacity, drop-oldest table of discovered
@@ -39,8 +39,9 @@
 //! SAP is unauthenticated and trivially spoofable. Discovered sessions are
 //! **untrusted candidates** requiring explicit operator confirm-to-bind — never
 //! auto-ingested. The table is hard-capped (a global capacity **and** a
-//! per-origin cap so one source cannot monopolise it), encrypted (`E=1`) and
-//! compressed (`C=1`) packets are rejected, and inbound deletions (`T=1`)
+//! per-origin cap so one source cannot monopolise it), encrypted (`E=1`)
+//! packets are rejected while compressed (`C=1`) packets are inflated under a
+//! hard size cap (a decompression-bomb guard), and inbound deletions (`T=1`)
 //! against a tracked entry are ignored (a hijack vector).
 //!
 //! [ADR-0041]: ../../../docs/decisions/ADR-0041.md
@@ -99,12 +100,20 @@ pub enum SapError {
     #[error("sap encrypted (E=1) announcements are unsupported")]
     Encrypted,
 
-    /// The compression bit (`C=1`, zlib) was set. Inbound compression is
-    /// rejected: `flate2` is not a dependency, so there is no bounded inflate
-    /// path (an unbounded inflate would be a decompression-bomb `DoS`). Our own
-    /// announcer always emits `C=0`.
-    #[error("sap compressed (C=1) announcements are unsupported")]
-    CompressionUnsupported,
+    /// A `C=1` (zlib) body could not be inflated: it was not a valid zlib stream
+    /// (corrupt or truncated). SAP is unauthenticated, so a malformed compressed
+    /// announcement is simply dropped. Our own announcer always emits `C=0`.
+    #[error("sap compressed (C=1) body is not a valid zlib stream")]
+    DecompressFailed,
+
+    /// Inflating a `C=1` (zlib) body would exceed [`packet::MAX_SDP_PAYLOAD`] — a
+    /// decompression-bomb guard. The cap is enforced *during* inflate, so an
+    /// adversarial announcement can never allocate past it (brief §9).
+    #[error("sap decompressed body exceeds the {max}-byte cap (decompression-bomb guard)")]
+    DecompressedTooLarge {
+        /// The enforced maximum ([`packet::MAX_SDP_PAYLOAD`]).
+        max: usize,
+    },
 
     /// The (opaque) SDP payload exceeded [`packet::MAX_SDP_PAYLOAD`] — a hard
     /// bound so an adversarial announcement can never make the parser allocate

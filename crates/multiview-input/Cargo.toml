@@ -17,6 +17,14 @@ multiview-framestore = { workspace = true }
 # Lock-free read-copy-update for the per-source caption cue store (same
 # primitive the frame stores use); no native deps, keeps the crate `unsafe`-free.
 arc-swap = "1.9.1"
+# Bounded zlib inflate for the RFC 2974 SAP `C=1` (compressed) packet path
+# (ADR-0041 Decision 8). `decompress_to_vec_zlib_with_limit` enforces a hard
+# decompressed-size cap DURING inflate, so an unauthenticated compressed
+# announcement can never become a decompression bomb. Pure Rust (miniz backend),
+# no native deps, LGPL-clean (MIT/Zlib/Apache-2.0) — the crate stays
+# `unsafe_code = forbid`. Always compiled: the SAP packet codec is
+# feature-independent (only the socket transport sits behind `st2110`).
+miniz_oxide = "0.8.9"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }

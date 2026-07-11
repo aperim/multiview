@@ -25,9 +25,10 @@
 //! **version is the top 3 bits** (`flags >> 5 == 1`); `auth_len` counts 32-bit
 //! **words** (`skip auth_len*4` — never VLC's byte-count bug); the message-id
 //! **hash is never 0** (rejected on parse, never emitted); **`E=1` is
-//! rejected** (no `SAPv2` algorithm); **`C=1` is rejected** (`flate2` is not a
-//! dependency — no bounded inflate); all arithmetic is checked, nothing panics
-//! or indexes out of range.
+//! rejected** (no `SAPv2` algorithm); **`C=1` (zlib) is inflated under a hard
+//! output cap** (`MAX_SDP_PAYLOAD`), so a compressed announcement can never
+//! become a decompression bomb; all arithmetic is checked, nothing panics or
+//! indexes out of range.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU16;
@@ -46,9 +47,10 @@ pub const SDP_MIME_TYPE: &str = "application/sdp";
 ///
 /// 64 KiB — larger than any real SDP, small enough that an adversarial
 /// announcement can never make the parser allocate unboundedly (brief §9). A
-/// datagram claiming more is rejected with [`SapError::PayloadTooLarge`]. This
-/// is also the size a hypothetical `C=1` zlib path would cap inflate at — but
-/// inbound compression is rejected outright ([`SapError::CompressionUnsupported`]).
+/// datagram claiming more is rejected with [`SapError::PayloadTooLarge`]. It is
+/// also the hard output cap the `C=1` zlib inflate path enforces, so a
+/// compressed announcement's decompressed SDP is bounded exactly as an
+/// uncompressed one ([`SapError::DecompressedTooLarge`] past the cap).
 pub const MAX_SDP_PAYLOAD: usize = 64 * 1024;
 
 /// `A` — address-type bit: 0 = IPv4 (32-bit) origin, 1 = IPv6 (128-bit) origin.
@@ -57,7 +59,8 @@ const FLAG_ADDR_V6: u8 = 0x10;
 const FLAG_DELETE: u8 = 0x04;
 /// `E` — encryption bit (rejected on parse; never set on encode).
 const FLAG_ENCRYPTED: u8 = 0x02;
-/// `C` — compression bit (rejected on parse; never set on encode).
+/// `C` — compression bit (a `C=1` zlib body is inflated under a cap on parse;
+/// never set on encode).
 const FLAG_COMPRESSED: u8 = 0x01;
 
 /// Byte offset of the 16-bit message-id hash.
@@ -105,10 +108,12 @@ pub struct SapPacket {
 impl SapPacket {
     /// Parse a SAP packet from `bytes`.
     ///
-    /// Validates the version (top 3 bits), rejects encrypted/compressed/zero-hash
-    /// packets, reads the origin per the `A` bit, **skips `auth_len` × 4** bytes
-    /// of auth data, and splits the payload-type (omitted when the body begins
-    /// `v=0`) from the opaque SDP payload.
+    /// Validates the version (top 3 bits), rejects encrypted/zero-hash packets,
+    /// reads the origin per the `A` bit, **skips `auth_len` × 4** bytes of auth
+    /// data, **inflates the body under a hard cap when `C=1`** (RFC 2974 §3
+    /// compresses the payload-type + payload together), and splits the
+    /// payload-type (omitted when the body begins `v=0`) from the opaque SDP
+    /// payload.
     ///
     /// # Errors
     ///
@@ -116,8 +121,10 @@ impl SapPacket {
     ///   structure (flags, auth-length, hash, origin, `auth_len`×4 auth words)
     ///   declares.
     /// * [`SapError::BadVersion`] if the version field is not [`SAP_VERSION`].
-    /// * [`SapError::Encrypted`] if `E=1` / [`SapError::CompressionUnsupported`]
-    ///   if `C=1`.
+    /// * [`SapError::Encrypted`] if `E=1`.
+    /// * [`SapError::DecompressFailed`] if `C=1` and the body is not a valid zlib
+    ///   stream; [`SapError::DecompressedTooLarge`] if inflating it would exceed
+    ///   [`MAX_SDP_PAYLOAD`] (a decompression-bomb guard).
     /// * [`SapError::ZeroHash`] if the message-id hash is 0 (reserved).
     /// * [`SapError::PayloadTooLarge`] if the SDP body exceeds
     ///   [`MAX_SDP_PAYLOAD`].
@@ -135,9 +142,7 @@ impl SapPacket {
         if (flags & FLAG_ENCRYPTED) != 0 {
             return Err(SapError::Encrypted);
         }
-        if (flags & FLAG_COMPRESSED) != 0 {
-            return Err(SapError::CompressionUnsupported);
-        }
+        let compressed = (flags & FLAG_COMPRESSED) != 0;
         let message_type = if (flags & FLAG_DELETE) != 0 {
             SapMessageType::Deletion
         } else {
@@ -184,6 +189,20 @@ impl SapPacket {
             need: body_start,
             got: bytes.len(),
         })?;
+
+        // When `C=1`, the region after the auth header — the payload-type field
+        // AND the payload (RFC 2974 §3 compresses them together) — is a zlib
+        // stream. Inflate it with a HARD output cap so a decompression bomb (a
+        // tiny datagram that expands without bound) cannot exhaust memory: the
+        // decompressed body is bounded by the SAME `MAX_SDP_PAYLOAD` an
+        // uncompressed announcement is, enforced DURING inflate, never after.
+        let inflated;
+        let body = if compressed {
+            inflated = inflate_zlib_capped(body)?;
+            inflated.as_slice()
+        } else {
+            body
+        };
 
         let (payload_type, payload) = split_payload_type(body)?;
         if payload.len() > MAX_SDP_PAYLOAD {
@@ -235,6 +254,30 @@ impl SapPacket {
         out.extend_from_slice(&self.payload);
         out
     }
+}
+
+/// Inflate a `C=1` zlib body ([RFC 2974] §3) with a hard output cap.
+///
+/// The cap ([`MAX_SDP_PAYLOAD`]) is enforced *during* inflate by `miniz_oxide`,
+/// so a decompression bomb — a tiny compressed datagram that would expand
+/// without bound — can never allocate past the cap; the decompressed body is
+/// bounded exactly as an uncompressed one. A stream that would exceed the cap
+/// yields [`SapError::DecompressedTooLarge`]; a corrupt or truncated stream
+/// yields [`SapError::DecompressFailed`] (SAP is unauthenticated, so a malformed
+/// compressed announcement is simply dropped, never a panic).
+///
+/// [RFC 2974]: https://www.rfc-editor.org/rfc/rfc2974
+fn inflate_zlib_capped(compressed: &[u8]) -> Result<Vec<u8>, SapError> {
+    use miniz_oxide::inflate::{decompress_to_vec_zlib_with_limit, TINFLStatus};
+    decompress_to_vec_zlib_with_limit(compressed, MAX_SDP_PAYLOAD).map_err(|err| {
+        if err.status == TINFLStatus::HasMoreOutput {
+            SapError::DecompressedTooLarge {
+                max: MAX_SDP_PAYLOAD,
+            }
+        } else {
+            SapError::DecompressFailed
+        }
+    })
 }
 
 /// Split the body into its optional payload-type and the opaque payload.

@@ -3328,6 +3328,7 @@ name = "multiview-input"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "miniz_oxide",
  "multiview-core",
  "multiview-ffmpeg",
  "multiview-framestore",
