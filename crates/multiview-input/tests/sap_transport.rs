@@ -199,3 +199,51 @@ async fn announcer_run_loop_emits_the_first_cycle_immediately() {
         "the announce run loop emits its first cycle immediately"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn purge_runs_on_its_own_timer_even_when_no_datagrams_arrive() {
+    use multiview_input::sap::announce::announcement;
+    use multiview_input::sap::SapSessionTable;
+    use std::sync::Arc;
+
+    // P2-F3: a shared table pre-seeded with one session at t=0; the listener then
+    // runs with NO datagram ever arriving. Before the fix, purge runs only AFTER
+    // recv_from returns, so a parked receive (announcements stopped) blocks it
+    // forever and the expired session is never reaped.
+    let table = Arc::new(SapSessionTable::with_limits(16, 16));
+    let sdp = b"v=0\r\no=- 1 1 IN IP6 ff3e::1\r\ns=stale\r\n".to_vec();
+    let pkt = announcement(stable_hash(&sdp), IpAddr::V6(Ipv6Addr::LOCALHOST), sdp);
+    table.observe(&pkt, Duration::ZERO);
+    assert_eq!(table.len(), 1, "seeded one session at t=0");
+
+    let listener = SapListener::bind(loopback6(0))
+        .await
+        .unwrap()
+        .with_table(Arc::clone(&table));
+    tokio::spawn(listener.run());
+
+    // Let the listener reach its select! and arm the purge interval at t=0
+    // (before the clock jumps), so the fast-forward crosses a real tick deadline.
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    // Fast-forward past the 1 h purge floor WITHOUT sending any datagram, in steps
+    // so each fired purge tick is processed. The receive loop is parked in
+    // recv_from, so only an INDEPENDENT purge timer can reap the expired session
+    // (P2-F3).
+    let mut purged = false;
+    for _ in 0..200 {
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        if table.is_empty() {
+            purged = true;
+            break;
+        }
+    }
+    assert!(
+        purged,
+        "the expired session is purged on the independent purge timer with no \
+         datagram ever received (P2-F3)"
+    );
+}
