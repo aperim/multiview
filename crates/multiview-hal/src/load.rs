@@ -1194,14 +1194,18 @@ mod nvml {
 #[cfg(any(feature = "vaapi", feature = "qsv"))]
 pub use self::linux_sysfs::{
     parse_fdinfo_merged_media_frac, parse_fdinfo_pdev, FdinfoMediaSnapshot, FdinfoMediaTracker,
-    FdinfoSample, SysfsLoadProbe,
+    FdinfoSample, SysfsLoadPoller, SysfsLoadProbe,
 };
 
 #[cfg(any(feature = "vaapi", feature = "qsv"))]
 mod linux_sysfs {
-    use super::{percent_to_busy_frac, DeviceId, DeviceLoad, LoadProbe, LoadSample, Vendor};
+    use super::{
+        percent_to_busy_frac, DeviceId, DeviceLoad, LoadProbe, LoadSample, LoadSource, Vendor,
+    };
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::time::Instant;
 
     /// The canonical Linux DRM sysfs root the probe walks (`/sys/class/drm`),
     /// where each physical GPU appears as a `cardN/device/` directory exposing
@@ -1387,6 +1391,93 @@ mod linux_sysfs {
                     reason: "DRM device no longer present",
                 },
             }
+        }
+    }
+
+    /// A bounded, off-hot-path [`LoadSource`] over [`SysfsLoadProbe`] that folds
+    /// the per-process DRM fdinfo merged media-engine term into each AMD/Intel
+    /// [`DeviceLoad`] (ADR-0017 ENG-4b).
+    ///
+    /// [`SysfsLoadProbe::sample_all_with_media`] is stateful (`&mut self`: it
+    /// differences two `/proc/<pid>/fdinfo` snapshots a wall interval apart) and
+    /// needs the caller's own PIDs plus the elapsed interval — neither of which
+    /// the object-safe [`LoadSource::poll`]`(&self)` seam carries. This poller
+    /// owns that state behind a [`Mutex`] (interior mutability for the `&mut`
+    /// media pass) plus the last-poll [`Instant`], and drives it once per metrics
+    /// tick: [`LoadSource::poll`] measures the real wall interval since the
+    /// previous poll and folds the media term over it. It runs on the
+    /// `multiview-cli` system-metrics task (off the output-clock thread), so the
+    /// lock is uncontended and never touches the data plane (inv #1 / #10). A
+    /// poisoned lock (a prior panic) or a no-DRM host degrades to an empty
+    /// snapshot — never a panic, never a fabricated device. The fdinfo walk reads
+    /// only our **own** PIDs.
+    #[derive(Debug)]
+    pub struct SysfsLoadPoller {
+        probe: Mutex<SysfsLoadProbe>,
+        last_poll: Mutex<Option<Instant>>,
+        self_pids: Vec<u32>,
+    }
+
+    impl SysfsLoadPoller {
+        /// Construct the poller bound to the real `/sys/class/drm` + `/proc`
+        /// roots, walking this process's own PID for the fdinfo media term.
+        #[must_use]
+        pub fn new() -> Self {
+            Self::from_probe(SysfsLoadProbe::new(), vec![std::process::id()])
+        }
+
+        /// Wrap a probe with the PID set the fdinfo walk targets.
+        ///
+        /// `self_pids` are the caller's own processes (we only ever read our own
+        /// `/proc/<pid>/fdinfo`). Tests inject a synthetic probe + fixed PIDs.
+        #[must_use]
+        pub(crate) fn from_probe(probe: SysfsLoadProbe, self_pids: Vec<u32>) -> Self {
+            Self {
+                probe: Mutex::new(probe),
+                last_poll: Mutex::new(None),
+                self_pids,
+            }
+        }
+
+        /// One media-augmented sample pass over every visible device, folding the
+        /// merged media term over the given `interval_ns`.
+        ///
+        /// [`LoadSource::poll`] calls this with the measured wall interval since
+        /// the last poll; tests pass a fixed interval for a deterministic
+        /// fraction. A poisoned lock degrades to an empty snapshot (never a
+        /// panic).
+        #[must_use]
+        pub(crate) fn sample_with_interval(&self, interval_ns: u64) -> Vec<DeviceLoad> {
+            let Ok(mut probe) = self.probe.lock() else {
+                return Vec::new();
+            };
+            probe.sample_all_with_media(&self.self_pids, interval_ns)
+        }
+    }
+
+    impl Default for SysfsLoadPoller {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl LoadSource for SysfsLoadPoller {
+        fn poll(&self) -> Vec<DeviceLoad> {
+            // Measure the real wall interval since the previous poll; the first
+            // poll (no prior) yields interval 0, for which the media tracker
+            // returns None anyway (no prior snapshot) while the base sysfs load
+            // still flows. Off the output-clock thread; the lock is uncontended.
+            let now = Instant::now();
+            let interval_ns = {
+                let Ok(mut last) = self.last_poll.lock() else {
+                    return Vec::new();
+                };
+                last.replace(now)
+                    .map(|prev| now.duration_since(prev))
+                    .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok())
+                    .unwrap_or(0)
+            };
+            self.sample_with_interval(interval_ns)
         }
     }
 
@@ -2929,7 +3020,7 @@ mod tests {
             // mutability. The base sysfs load (gpu-busy, VRAM) flows on every
             // poll; the merged media term appears once a prior snapshot exists —
             // proving the whole AMD/Intel sysfs probe is wired, not just parsed.
-            use super::super::{LoadSource, SysfsLoadPoller};
+            use super::super::SysfsLoadPoller;
 
             let drm = std::env::temp_dir().join(format!(
                 "mv-eng4b-poller-drm-{}-{}",
