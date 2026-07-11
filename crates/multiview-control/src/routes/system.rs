@@ -29,7 +29,10 @@ use crate::state::AppState;
         ),
     )
 )]
-pub(crate) async fn capabilities(State(state): State<AppState>, principal: Principal) -> Response {
+pub(crate) async fn system_capabilities(
+    State(state): State<AppState>,
+    principal: Principal,
+) -> Response {
     if let Err(err) = principal.role.require(Action::Read) {
         return err.into_response();
     }

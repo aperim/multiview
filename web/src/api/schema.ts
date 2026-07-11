@@ -1950,6 +1950,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/system/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/system/capabilities` — the build's codec/compositor backend
+         *     availability, compositor classification, effective build-profile licence, and
+         *     NDI attribution (ADR-W030). Role: read.
+         */
+        get: operations["system_capabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tally": {
         parameters: {
             query?: never;
@@ -2591,6 +2612,48 @@ export interface components {
             /** @description The resource collection the object belongs to (e.g. `layout`). */
             object_kind: string;
         };
+        /**
+         * @description The availability + probed capability of one `(kind, stage)` backend.
+         *
+         *     `available` is the honest single signal: the backend is compiled **and** a
+         *     usable device is present. The compiled-but-device-absent distinction
+         *     (`compiled_in`) needs HAL-side feature introspection and is deferred to the
+         *     SA-1+ deep probe (task #180).
+         */
+        BackendCapability: {
+            /** @description Whether the backend is compiled in **and** a usable device is present. */
+            available: boolean;
+            /**
+             * @description Whether the backend can resize during decode — present only on an
+             *     available decode-stage backend (meaningless elsewhere).
+             */
+            decode_resize?: boolean | null;
+            /** @description The backend kind. */
+            kind: components["schemas"]["BackendKind"];
+            max_resolution?: null | components["schemas"]["BackendResolution"];
+            /** @description The pipeline stage this entry describes. */
+            stage: components["schemas"]["PipelineStage"];
+        };
+        /**
+         * @description The concrete kind of a codec/compositor backend. Serialized to match the
+         *     Cargo feature names (`cuda`, `vaapi`, `qsv`, `videotoolbox`, `wgpu`, `metal`,
+         *     `software`).
+         * @enum {string}
+         */
+        BackendKind: "software" | "cuda" | "videotoolbox" | "vaapi" | "qsv" | "wgpu" | "metal";
+        /** @description A backend's maximum supported resolution (as probed). */
+        BackendResolution: {
+            /**
+             * Format: int32
+             * @description Maximum frame height in pixels.
+             */
+            height: number;
+            /**
+             * Format: int32
+             * @description Maximum frame width in pixels.
+             */
+            width: number;
+        };
         /** @description `OpenAPI` mirror of [`multiview_config::BitColor`]. */
         BitColorDoc: {
             /**
@@ -2644,6 +2707,29 @@ export interface components {
             resumed: boolean;
             /** @description The `[control] start` cold-start policy (`boot` | `resume`). */
             start?: string | null;
+        };
+        /**
+         * @description The build-profile compliance surface: effective licence, redistributability,
+         *     the compiled feature set, and whether NDI is present.
+         */
+        BuildInfo: {
+            /** @description The effective codec-linking licence of this artifact. */
+            effective_license: components["schemas"]["EffectiveLicense"];
+            /** @description The compiled, capability/licence-relevant Cargo features. */
+            features: string[];
+            /**
+             * @description Whether the `ndi` feature is compiled (the proprietary, runtime-loaded
+             *     SDK path). When `true`, [`SystemCapabilities::ndi_attribution`] is set.
+             */
+            ndi: boolean;
+            /**
+             * @description Whether the artifact is redistributable. `true` for every shippable
+             *     Multiview build: the default is LGPL-clean, `gpl-codecs` is GPL
+             *     (redistributable under copyleft), and NDI is runtime-loaded (never
+             *     vendored/linked) — there is no non-redistributable `--enable-nonfree`
+             *     closure (no `nonfree` Cargo feature exists).
+             */
+            redistributable: boolean;
         };
         /**
          * @description One composed support bundle: the echoed request, the redacted/diagnostic
@@ -2866,6 +2952,26 @@ export interface components {
             /** @description A short commit message. */
             message?: string;
         };
+        /** @description The compositor's resolved acceleration tier. */
+        CompositorCapability: {
+            /** @description The composite-usability class. */
+            class: components["schemas"]["CompositorClass"];
+            device_type?: null | components["schemas"]["CompositorDeviceType"];
+            /** @description The adapter's driver string — present only when an adapter resolved. */
+            driver?: string | null;
+        };
+        /**
+         * @description The SA-0 composite-usability classification of the resolved wgpu adapter
+         *     (ADR-0035): the acceleration tier the compositor actually runs on. `None`
+         *     means no adapter resolved — the CPU composite path only.
+         * @enum {string}
+         */
+        CompositorClass: "gpu" | "low-confidence-gpu" | "software" | "none";
+        /**
+         * @description The kind of graphics device backing the compositor adapter.
+         * @enum {string}
+         */
+        CompositorDeviceType: "discrete-gpu" | "integrated-gpu" | "virtual-gpu" | "cpu" | "other";
         /** @description One immutable revision of a target's config/layout document. */
         ConfigRevision: {
             /** @description The principal that committed this revision (its key id / subject). */
@@ -3285,6 +3391,14 @@ export interface components {
              */
             up_ms: number;
         };
+        /**
+         * @description The effective **build-profile** licence — the codec-linking licence of the
+         *     compiled artifact (ADR-0012 / AGENTS.md §G). Distinct from the project's
+         *     source-available licence and from NDI's redistribution restriction (carried
+         *     separately by [`BuildInfo::ndi`] / [`NdiAttribution`]).
+         * @enum {string}
+         */
+        EffectiveLicense: "LGPL-clean" | "GPL";
         /**
          * @description `OpenAPI` mirror of [`multiview_licence::EnforcementLevel`].
          *
@@ -3769,6 +3883,16 @@ export interface components {
             via?: string | null;
         };
         /**
+         * @description The mandatory NDI attribution (AGENTS.md §G) — present iff the `ndi` feature
+         *     is compiled.
+         */
+        NdiAttribution: {
+            /** @description The required trademark line. */
+            trademark: string;
+            /** @description A link to the NDI site. */
+            url: string;
+        };
+        /**
          * @description The NMOS access level granted for one API (the `x-nmos-api` value vocabulary).
          * @enum {string}
          */
@@ -4115,6 +4239,11 @@ export interface components {
          * @enum {string}
          */
         PinVendorDoc: "nvidia" | "intel" | "amd" | "apple";
+        /**
+         * @description The pipeline stage a backend serves.
+         * @enum {string}
+         */
+        PipelineStage: "decode" | "composite" | "encode";
         /**
          * @description The `GET /api/v1/preview/capabilities` response (ADR-P006 move 6): what preview
          *     transports this build can serve, so the SPA picks WHEP vs the JPEG ladder
@@ -5162,6 +5291,19 @@ export interface components {
              * @description The per-member presentation offset trim in milliseconds (defaults to 0).
              */
             offset_ms?: number;
+        };
+        /**
+         * @description The `GET /api/v1/system/capabilities` response (ADR-W030): the honest
+         *     default-build capability + licence surface.
+         */
+        SystemCapabilities: {
+            /** @description Per-`(kind, stage)` backend availability. */
+            backends: components["schemas"]["BackendCapability"][];
+            /** @description The build-profile compliance surface. */
+            build: components["schemas"]["BuildInfo"];
+            /** @description The compositor's resolved acceleration tier. */
+            compositor: components["schemas"]["CompositorCapability"];
+            ndi_attribution?: null | components["schemas"]["NdiAttribution"];
         };
         /** @description The `200` body of a hot (Class-1 / Reset-lite) `/routing/{kind}/take`. */
         TakeApplied: {
@@ -11504,6 +11646,35 @@ export interface operations {
             };
             /** @description No sync group with that id. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    system_capabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description System capability + licence surface. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemCapabilities"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

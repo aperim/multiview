@@ -193,7 +193,7 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::routes::config::revert_to_start,
         crate::routes::config::promote_to_boot,
         crate::routes::preview::capabilities,
-        crate::routes::system::capabilities,
+        crate::routes::system::system_capabilities,
         crate::routes::preview::program_whep_open,
         crate::routes::preview::program_whep_close,
         crate::routes::preview::input_whep_open,

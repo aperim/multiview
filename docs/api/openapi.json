@@ -7393,6 +7393,37 @@
         }
       }
     },
+    "/api/v1/system/capabilities": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "`GET /api/v1/system/capabilities` — the build's codec/compositor backend\navailability, compositor classification, effective build-profile licence, and\nNDI attribution (ADR-W030). Role: read.",
+        "operationId": "system_capabilities",
+        "responses": {
+          "200": {
+            "description": "System capability + licence surface.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemCapabilities"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tally": {
       "get": {
         "tags": [
@@ -9111,6 +9142,82 @@
           }
         }
       },
+      "BackendCapability": {
+        "type": "object",
+        "description": "The availability + probed capability of one `(kind, stage)` backend.\n\n`available` is the honest single signal: the backend is compiled **and** a\nusable device is present. The compiled-but-device-absent distinction\n(`compiled_in`) needs HAL-side feature introspection and is deferred to the\nSA-1+ deep probe (task #180).",
+        "required": [
+          "kind",
+          "stage",
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "Whether the backend is compiled in **and** a usable device is present."
+          },
+          "decode_resize": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the backend can resize during decode — present only on an\navailable decode-stage backend (meaningless elsewhere)."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/BackendKind",
+            "description": "The backend kind."
+          },
+          "max_resolution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BackendResolution",
+                "description": "The probed maximum resolution — present only when `available`."
+              }
+            ]
+          },
+          "stage": {
+            "$ref": "#/components/schemas/PipelineStage",
+            "description": "The pipeline stage this entry describes."
+          }
+        }
+      },
+      "BackendKind": {
+        "type": "string",
+        "description": "The concrete kind of a codec/compositor backend. Serialized to match the\nCargo feature names (`cuda`, `vaapi`, `qsv`, `videotoolbox`, `wgpu`, `metal`,\n`software`).",
+        "enum": [
+          "software",
+          "cuda",
+          "videotoolbox",
+          "vaapi",
+          "qsv",
+          "wgpu",
+          "metal"
+        ]
+      },
+      "BackendResolution": {
+        "type": "object",
+        "description": "A backend's maximum supported resolution (as probed).",
+        "required": [
+          "width",
+          "height"
+        ],
+        "properties": {
+          "height": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Maximum frame height in pixels.",
+            "minimum": 0
+          },
+          "width": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Maximum frame width in pixels.",
+            "minimum": 0
+          }
+        }
+      },
       "BitColorDoc": {
         "type": "object",
         "description": "`OpenAPI` mirror of [`multiview_config::BitColor`].",
@@ -9207,6 +9314,37 @@
               "null"
             ],
             "description": "The `[control] start` cold-start policy (`boot` | `resume`)."
+          }
+        }
+      },
+      "BuildInfo": {
+        "type": "object",
+        "description": "The build-profile compliance surface: effective licence, redistributability,\nthe compiled feature set, and whether NDI is present.",
+        "required": [
+          "effective_license",
+          "redistributable",
+          "features",
+          "ndi"
+        ],
+        "properties": {
+          "effective_license": {
+            "$ref": "#/components/schemas/EffectiveLicense",
+            "description": "The effective codec-linking licence of this artifact."
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The compiled, capability/licence-relevant Cargo features."
+          },
+          "ndi": {
+            "type": "boolean",
+            "description": "Whether the `ndi` feature is compiled (the proprietary, runtime-loaded\nSDK path). When `true`, [`SystemCapabilities::ndi_attribution`] is set."
+          },
+          "redistributable": {
+            "type": "boolean",
+            "description": "Whether the artifact is redistributable. `true` for every shippable\nMultiview build: the default is LGPL-clean, `gpl-codecs` is GPL\n(redistributable under copyleft), and NDI is runtime-loaded (never\nvendored/linked) — there is no non-redistributable `--enable-nonfree`\nclosure (no `nonfree` Cargo feature exists)."
           }
         }
       },
@@ -9707,6 +9845,58 @@
             "description": "A short commit message."
           }
         }
+      },
+      "CompositorCapability": {
+        "type": "object",
+        "description": "The compositor's resolved acceleration tier.",
+        "required": [
+          "class"
+        ],
+        "properties": {
+          "class": {
+            "$ref": "#/components/schemas/CompositorClass",
+            "description": "The composite-usability class."
+          },
+          "device_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CompositorDeviceType",
+                "description": "The device type — present only when an adapter resolved."
+              }
+            ]
+          },
+          "driver": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The adapter's driver string — present only when an adapter resolved."
+          }
+        }
+      },
+      "CompositorClass": {
+        "type": "string",
+        "description": "The SA-0 composite-usability classification of the resolved wgpu adapter\n(ADR-0035): the acceleration tier the compositor actually runs on. `None`\nmeans no adapter resolved — the CPU composite path only.",
+        "enum": [
+          "gpu",
+          "low-confidence-gpu",
+          "software",
+          "none"
+        ]
+      },
+      "CompositorDeviceType": {
+        "type": "string",
+        "description": "The kind of graphics device backing the compositor adapter.",
+        "enum": [
+          "discrete-gpu",
+          "integrated-gpu",
+          "virtual-gpu",
+          "cpu",
+          "other"
+        ]
       },
       "ConfigRevision": {
         "type": "object",
@@ -10413,6 +10603,14 @@
           }
         },
         "additionalProperties": false
+      },
+      "EffectiveLicense": {
+        "type": "string",
+        "description": "The effective **build-profile** licence — the codec-linking licence of the\ncompiled artifact (ADR-0012 / AGENTS.md §G). Distinct from the project's\nsource-available licence and from NDI's redistribution restriction (carried\nseparately by [`BuildInfo::ndi`] / [`NdiAttribution`]).",
+        "enum": [
+          "LGPL-clean",
+          "GPL"
+        ]
       },
       "EnforcementLevelDoc": {
         "type": "string",
@@ -11234,6 +11432,24 @@
           }
         },
         "additionalProperties": false
+      },
+      "NdiAttribution": {
+        "type": "object",
+        "description": "The mandatory NDI attribution (AGENTS.md §G) — present iff the `ndi` feature\nis compiled.",
+        "required": [
+          "trademark",
+          "url"
+        ],
+        "properties": {
+          "trademark": {
+            "type": "string",
+            "description": "The required trademark line."
+          },
+          "url": {
+            "type": "string",
+            "description": "A link to the NDI site."
+          }
+        }
       },
       "NmosAccess": {
         "type": "string",
@@ -12302,6 +12518,15 @@
           "intel",
           "amd",
           "apple"
+        ]
+      },
+      "PipelineStage": {
+        "type": "string",
+        "description": "The pipeline stage a backend serves.",
+        "enum": [
+          "decode",
+          "composite",
+          "encode"
         ]
       },
       "PreviewCapabilities": {
@@ -14594,6 +14819,43 @@
             "type": "integer",
             "format": "int64",
             "description": "The per-member presentation offset trim in milliseconds (defaults to 0)."
+          }
+        }
+      },
+      "SystemCapabilities": {
+        "type": "object",
+        "description": "The `GET /api/v1/system/capabilities` response (ADR-W030): the honest\ndefault-build capability + licence surface.",
+        "required": [
+          "backends",
+          "compositor",
+          "build"
+        ],
+        "properties": {
+          "backends": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BackendCapability"
+            },
+            "description": "Per-`(kind, stage)` backend availability."
+          },
+          "build": {
+            "$ref": "#/components/schemas/BuildInfo",
+            "description": "The build-profile compliance surface."
+          },
+          "compositor": {
+            "$ref": "#/components/schemas/CompositorCapability",
+            "description": "The compositor's resolved acceleration tier."
+          },
+          "ndi_attribution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NdiAttribution",
+                "description": "The mandatory NDI attribution — present iff `ndi` is compiled."
+              }
+            ]
           }
         }
       },

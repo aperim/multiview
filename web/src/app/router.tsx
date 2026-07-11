@@ -23,6 +23,7 @@ import { ProbesPage } from "../pages/ProbesPage";
 import { SyncGroupsPage } from "../pages/SyncGroupsPage";
 import { AuditPage } from "../pages/AuditPage";
 import { SystemPage } from "../pages/SystemPage";
+import { CapabilitiesPage } from "../pages/CapabilitiesPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { WelcomePage } from "../pages/WelcomePage";
 import { LicencePage } from "../pages/LicencePage";
@@ -74,6 +75,7 @@ export const router = createBrowserRouter([
       { path: "media-players", element: <MediaPlayersPage /> },
       { path: "alarms", element: <AlarmsPage /> },
       { path: "system", element: <SystemPage /> },
+      { path: "system/capabilities", element: <CapabilitiesPage /> },
       { path: "system/actions", element: <SystemActionsPage /> },
       { path: "logs", element: <LogsPage /> },
       { path: "audit", element: <AuditPage /> },

@@ -1015,7 +1015,7 @@ pub fn api_router() -> Router<AppState> {
         // codec/compositor backends are available, the compositor class, the
         // effective build-profile licence, and the NDI attribution. System-global
         // (no per-object axis) — a viewer may read it.
-        .route("/system/capabilities", get(system::capabilities))
+        .route("/system/capabilities", get(system::system_capabilities))
         // Salvo operator surface: CRUD + arm/take/cancel.
         .route("/salvos", get(salvos::list_salvos))
         .route(
