@@ -39,6 +39,11 @@ fn main() -> ExitCode {
             println!("                 `--features net`). Aliases: iptv-sources.");
             println!("  soak-report    render the DEV-C4 acceptance-soak verdict from a captured");
             println!("                 metrics series: cargo xtask soak-report <capture.json>");
+            println!("  check-release-features  assert no shipped release preset (nvidia/apple/");
+            println!("                 linux-vaapi/full + the Docker combos) resolves a test-only");
+            println!(
+                "                 Cargo seam feature (e.g. multiview-control/_test-seams; #109)"
+            );
             ExitCode::SUCCESS
         }
         "gen-openapi" => match gen_openapi() {
@@ -91,6 +96,20 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "check-release-features" => match xtask::release_features::check_release_features() {
+            Ok(report) => {
+                println!("{}", report.render());
+                if report.has_violations() {
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(err) => {
+                eprintln!("check-release-features failed: {err}");
+                ExitCode::FAILURE
+            }
+        },
         other => {
             eprintln!("unknown task: {other}");
             ExitCode::from(2)

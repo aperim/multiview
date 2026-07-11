@@ -27,6 +27,7 @@
 //! is exactly "no shipped build enables `_test-seams`", while staying
 //! future-proof for any new `*test-seam*` seam.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -86,10 +87,29 @@ pub struct SeamActivation {
 /// optional trailing ` (*)` dedupe marker cargo appends to repeated nodes.
 #[must_use]
 pub fn find_seam_activations(tree_output: &str) -> Vec<SeamActivation> {
-    // RED stub — replaced with the real parser in the GREEN commit. Returning no
-    // activations makes the parser + orchestration tests fail until implemented.
-    let _ = tree_output;
-    Vec::new()
+    let mut found: BTreeSet<SeamActivation> = BTreeSet::new();
+    for line in tree_output.lines() {
+        // Split package (`{p}`) from its feature list (`{f}`). Features never
+        // contain `|`, so the last `|` separates them even if a path contained
+        // one.
+        let Some((pkg, feats)) = line.rsplit_once('|') else {
+            continue;
+        };
+        let Some(krate) = pkg.split_whitespace().next() else {
+            continue;
+        };
+        // Drop the trailing ` (*)` dedupe marker cargo appends to repeated nodes.
+        let feats = feats.strip_suffix(" (*)").unwrap_or(feats);
+        for feature in feats.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+            if is_test_seam_feature(feature) {
+                found.insert(SeamActivation {
+                    krate: krate.to_owned(),
+                    feature: feature.to_owned(),
+                });
+            }
+        }
+    }
+    found.into_iter().collect()
 }
 
 /// The guard result for one release feature spec.
