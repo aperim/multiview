@@ -476,9 +476,13 @@ impl PacketSink {
     /// is already at capacity (genuine drop-oldest — ADR-0033 §7). Never blocks;
     /// the receive task is never back-pressured by a slow reader (invariant #10).
     pub fn push(&self, unit: St2110Packet) {
-        let Ok(mut ring) = self.ring.lock() else {
-            // A poisoned lock means a holder panicked; drop the unit rather than
-            // propagate (the data plane holds last-good, never crashes).
+        // `try_lock`, never a blocking `lock`: the tokio receive task must never
+        // wait on the sync consumer holding the ring (inv #10 — a stalled reader
+        // can never back-pressure the wire). On contention (or a poisoned lock —
+        // a holder panicked) the unit is shed; the critical section is a few O(1)
+        // `VecDeque` ops so genuine contention is nanosecond-scale, and bounded /
+        // never-grow is preserved (only the freshest unit is ever at risk).
+        let Ok(mut ring) = self.ring.try_lock() else {
             return;
         };
         // Genuine drop-oldest (ADR-0033 §7): a full ring evicts its OLDEST unit
@@ -495,7 +499,15 @@ impl PacketSink {
     /// is gone, so the receive task should stop).
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.ring.lock().map_or(true, |ring| ring.consumer_gone)
+        // `try_lock`, never block the receive task on the consumer's lock
+        // (inv #10). Momentary contention is "not closed" (re-checked next loop
+        // iteration); a poisoned lock (a holder panicked) is treated as closed so
+        // the task stops rather than spins.
+        match self.ring.try_lock() {
+            Ok(ring) => ring.consumer_gone,
+            Err(std::sync::TryLockError::WouldBlock) => false,
+            Err(std::sync::TryLockError::Poisoned(_)) => true,
+        }
     }
 }
 
@@ -542,12 +554,19 @@ impl ChannelPacketSource {
     /// (telemetry / test observability).
     #[must_use]
     pub fn dropped(&self) -> u64 {
-        self.ring.lock().map_or(0, |ring| ring.dropped)
+        // Telemetry read: `try_lock`, never block the data plane; report 0 on the
+        // rare momentary contention (the caller re-reads next time).
+        self.ring.try_lock().map_or(0, |ring| ring.dropped)
     }
 }
 
 impl Drop for ChannelPacketSource {
     fn drop(&mut self) {
+        // Teardown, not the data path: a blocking `lock` reliably sets the flag
+        // so the receive task learns the reader is gone. It cannot deadlock (the
+        // consumer's `poll_packet` has already released) and cannot back-pressure
+        // the wire (the flag simply ends the loop); the inv #10 non-blocking
+        // guarantee is on `push`/`poll_packet`, which `try_lock`.
         if let Ok(mut ring) = self.ring.lock() {
             ring.consumer_gone = true;
         }
@@ -556,13 +575,16 @@ impl Drop for ChannelPacketSource {
 
 impl PacketSource for ChannelPacketSource {
     fn poll_packet(&mut self) -> Result<Option<St2110Packet>> {
-        // Pop the oldest buffered unit. An empty ring (nothing ready this tick —
-        // hold, never block, invariant #1) and a dropped sink (the receive task
-        // ended — clean end-of-stream) both surface to the non-blocking producer
-        // as "no frame now".
+        // `try_lock`, never a blocking `lock`: the ingest consumer must never
+        // wait on the tokio receive task holding the ring (inv #10 / F2). Pop the
+        // oldest buffered unit. An empty ring (nothing ready this tick — hold,
+        // never block, inv #1), momentary lock contention (or a poisoned lock),
+        // and a dropped sink (the receive task ended — clean end-of-stream) all
+        // surface to the non-blocking producer as "no frame now"; the producer
+        // re-polls next tick.
         Ok(self
             .ring
-            .lock()
+            .try_lock()
             .ok()
             .and_then(|mut ring| ring.queue.pop_front()))
     }
