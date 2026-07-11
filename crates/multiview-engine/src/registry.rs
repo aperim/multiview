@@ -1976,4 +1976,126 @@ mod tests {
         drop(ha);
         reg.shutdown();
     }
+
+    #[test]
+    fn two_factories_racing_one_key_stop_the_loser_and_keep_the_winner() {
+        // PF1 (#165, BLOCKER — inv #10 + no-leak): on a first-acquire race two threads can BOTH
+        // miss the fast path and BOTH build a source for the SAME key; exactly one wins the
+        // insert. The LOSER's just-built actor must be `signal_and_detach`ed — `request_stop`
+        // (so its detached decode thread actually EXITS, no leak) AND `catch_unwind`-contained
+        // (so a panicking/blocking actor `Drop` can't unwind/stall the acquiring — possibly an
+        // engine/Tokio — thread). The old RP3 code bare-dropped the loser: `ThreadedProbe::Drop`
+        // deliberately does NOT stop, so the loser's decode thread LEAKS and `live` never falls
+        // to 1. RED: `live` stays at 2 (both threads alive) → the wait_until times out.
+        let reg = SourceRegistry::<u64>::new();
+        let key = SourceKey::from_canonical("rtsp://same-key");
+
+        // A 2-party barrier INSIDE each factory holds both first-reference builds in flight
+        // until BOTH have built, before either re-locks to insert — deterministically producing
+        // one winner + one loser (the factory runs OUTSIDE the entries lock, so both can reach
+        // it concurrently; RP3).
+        let both_built = Arc::new(Barrier::new(2));
+        let live = Arc::new(AtomicUsize::new(0));
+        let stop_a = Arc::new(AtomicBool::new(false));
+        let stop_b = Arc::new(AtomicBool::new(false));
+        // Cleanup: even if a RED assertion panics, release BOTH probe threads so neither leaks
+        // into the rest of the test binary.
+        let _cleanup = StopAllOnDrop(vec![stop_a.clone(), stop_b.clone()]);
+
+        let spawn_acquirer = |stop: Arc<AtomicBool>| {
+            let reg = Arc::clone(&reg);
+            let key = key.clone();
+            let both_built = both_built.clone();
+            let live = live.clone();
+            std::thread::spawn(move || {
+                reg.acquire(key, size(1, 1), move |_r| {
+                    let actor = ThreadedProbe::new(stop, None, live);
+                    both_built.wait(); // hold until BOTH factories built → forces the race
+                    Ok::<_, Infallible>(SourceInit::new(store("same"), actor))
+                })
+                .unwrap()
+            })
+        };
+        let ta = spawn_acquirer(stop_a);
+        let tb = spawn_acquirer(stop_b);
+        let ha = ta.join().expect("acquirer a");
+        let hb = tb.join().expect("acquirer b");
+
+        // Decode-once/use-many: both handles share the ONE winning store.
+        assert!(
+            Arc::ptr_eq(ha.store(), hb.store()),
+            "both racing acquires must share the single winning store (decode-once)"
+        );
+
+        // The winner survives; the loser's decode thread is stopped → exactly ONE live thread.
+        wait_until(
+            || live.load(Ordering::Acquire) == 1,
+            Duration::from_secs(5),
+            "the losing racer's decode thread is stopped while the winner survives (live == 1)",
+        );
+
+        // The winner tears down cleanly on last-release → live falls to 0.
+        drop(ha);
+        drop(hb);
+        reg.shutdown();
+        wait_until(
+            || live.load(Ordering::Acquire) == 0,
+            Duration::from_secs(5),
+            "the winner's decode thread stops on last-release (live == 0)",
+        );
+    }
+
+    #[test]
+    fn persistent_spawn_failure_yields_degraded_pool_that_still_sheds_safely() {
+        // PF2b (#167, RP2 degraded-but-safe): when teardown-worker spawn NEVER succeeds (a
+        // permanently thread-exhausted host — the product's target failure mode), construction
+        // must still RETURN (never hang) with a degraded pool of < K workers, and that degraded
+        // pool must remain SAFE: last-releases reserve bounded slots, the bounded queue fills,
+        // and further releases SHED via signal_and_detach — the reserved-slot observable stays
+        // within the D+K (`TEARDOWN_CAPACITY`) ceiling and never grows unbounded, with no
+        // deadlock. (This exercises the retry-exhausted branch of RP2's `build_teardown_pool`.)
+        use super::{SourceRegistry, TEARDOWN_CAPACITY, TEARDOWN_WORKERS};
+        let reg = SourceRegistry::<u64>::with_spawner(|_i, _rx| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "permanent thread exhaustion",
+            ))
+        });
+
+        // Degraded: construction returned (no hang) with a short pool (< K).
+        let workers = super::lock(&reg.teardown_workers).len();
+        assert!(
+            workers < TEARDOWN_WORKERS,
+            "a never-succeeding spawner must yield a degraded pool (< K workers); saw {workers}"
+        );
+
+        // With the pool degraded, a burst of last-releases larger than the ceiling must still
+        // complete (no deadlock) and keep the reserved-slot observable within the hard bound.
+        let live = Arc::new(AtomicUsize::new(0));
+        let stops: Vec<Arc<AtomicBool>> = (0..(TEARDOWN_CAPACITY * 2))
+            .map(|_| Arc::new(AtomicBool::new(false)))
+            .collect();
+        let _cleanup = StopAllOnDrop(stops.clone());
+        for (n, stop) in stops.iter().enumerate() {
+            let key = SourceKey::from_canonical(format!("rtsp://degraded-{n}"));
+            let stop = stop.clone();
+            let live = live.clone();
+            let handle = reg
+                .acquire(key, size(1, 1), move |_r| {
+                    Ok::<_, Infallible>(SourceInit::new(
+                        store("d"),
+                        ThreadedProbe::new(stop, None, live),
+                    ))
+                })
+                .unwrap();
+            drop(handle); // last release → teardown offered; a degraded pool queues then sheds
+            assert!(
+                reg.pending_teardowns() <= TEARDOWN_CAPACITY,
+                "reserved teardown slots must stay within the D+K ceiling even with a degraded \
+                 pool; saw {}",
+                reg.pending_teardowns()
+            );
+        }
+        reg.shutdown();
+    }
 }
