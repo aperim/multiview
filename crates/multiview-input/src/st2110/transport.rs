@@ -606,11 +606,28 @@ impl ChannelPacketSource {
 
 impl Drop for ChannelPacketSource {
     fn drop(&mut self) {
-        // Teardown, not the data path: a blocking `lock` reliably sets the flag
-        // so the receive task learns the reader is gone. It cannot deadlock (the
-        // consumer's `poll_packet` has already released) and cannot back-pressure
-        // the wire (the flag simply ends the loop); the inv #10 non-blocking
-        // guarantee is on `push`/`poll_packet`, which `try_lock`.
+        // Source teardown — NOT the engine data plane. This Drop runs when the
+        // ingest consumer (the sync `St2110Producer`) is torn down, off the output
+        // clock, so inv #10 (a client/consumer must never back-pressure the ENGINE)
+        // does not bind here: there is no engine tick waiting on this lock.
+        //
+        // A blocking `lock` is the RIGHT choice, and its block is bounded: the ring
+        // `Mutex` is only ever held for O(1) `VecDeque` push/pop/flag ops and NEVER
+        // across an `.await` or a socket `send`/`recv` (see `PacketSink::push` and
+        // `poll_packet`, which take it only for those O(1) sections). The single
+        // other contender is the receive task's `push`, so the worst-case wait is
+        // ≤ one push's critical section — a few nanoseconds, never an unbounded
+        // stall — and it cannot deadlock (the consumer's `poll_packet` has already
+        // released; nothing holds this lock across a suspension point).
+        //
+        // Why NOT `try_lock` here (unlike `push`/`poll_packet`/`dropped`, which shed
+        // on contention): Drop runs EXACTLY ONCE, and setting `consumer_gone` is the
+        // only signal the producing receive task gets that the reader is gone. A
+        // `try_lock` that lost the nanosecond race would drop the flag forever (Drop
+        // never runs again) and leave that task spinning on a dead stream until its
+        // socket faults. A guaranteed, bounded one-time block is strictly better
+        // than a best-effort teardown signal. The inv #10 non-blocking guarantee on
+        // the live path stays on `push`/`poll_packet`, which `try_lock`.
         if let Ok(mut ring) = self.ring.lock() {
             ring.consumer_gone = true;
         }
