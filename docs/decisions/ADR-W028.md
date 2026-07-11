@@ -67,15 +67,15 @@ they opt in; the binary installs the configured limits via `AppState::with_limit
 - A single client/IP/key can no longer wedge or monopolise the management plane; the auth
   path is brute-force-throttled. The caps are control-plane-only and **physically cannot
   back-pressure the engine** (they shed, never queue; hold no engine handle — invariant #10).
-- **Connection-level slow-header exhaustion (slowloris) is out of scope for this in-process
-  floor.** All three guards are axum middleware, so they engage only *after* hyper has parsed
-  a request's headers; a client that opens many TCP connections and dribbles partial headers
-  consumes sockets and hyper tasks without ever taking a concurrency permit. `axum::serve`
-  (0.8) does not expose hyper's `header_read_timeout`, so bounding the header-read phase means
-  hand-rolling the accept/serve/graceful-shutdown loop on `hyper_util`'s `conn::auto::Builder`
-  — tracked as a **follow-up**. On the appliance's trusted-network threat model this is
-  acceptable; deployments exposed to untrusted clients should front the plane with a reverse
-  proxy (nginx/HAProxy) enforcing a header/read timeout and a per-connection cap.
+- **Connection-level slow-header exhaustion (slowloris) is addressed separately by a
+  header-read timeout ([ADR-W031](ADR-W031.md), #126).** All three guards here are axum
+  middleware, so they engage only *after* hyper has parsed a request's headers; a client that
+  opens many TCP connections and dribbles partial headers consumes sockets and hyper tasks
+  without ever taking a concurrency permit. Because `axum::serve` (0.8) exposes no
+  `header_read_timeout`, W031 hand-rolls the accept/serve/graceful-shutdown loop on
+  `hyper_util`'s `conn::auto::Builder` (and configures axum-server's builder on the TLS path)
+  to bound the header-read phase. Deployments exposed to untrusted clients may still front the
+  plane with a reverse proxy (nginx/HAProxy) for defence-in-depth.
 - **Behind a reverse proxy**, the per-IP limit keys on the *proxy* IP (`ConnectInfo` is the
   direct peer). Trusting `X-Forwarded-For` is a limiter-bypass vector, so it is **not**
   trusted by default; a trusted-proxy XFF option is a documented follow-up. The per-IP guard
