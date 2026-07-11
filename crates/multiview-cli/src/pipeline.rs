@@ -14898,6 +14898,65 @@ a=mediaclk:direct=0\r\n";
         );
     }
 
+    /// Build an `Output::Aes67` with an explicit id + multicast (via serde).
+    fn aes67_output_named(id: &str, multicast: &str) -> Output {
+        serde_json::from_value(serde_json::json!({
+            "kind": "aes67",
+            "id": id,
+            "label": id,
+            "multicast": multicast,
+        }))
+        .expect("aes67 output parses")
+    }
+
+    #[test]
+    fn aes67_outputs_that_collide_on_ssrc_within_one_group_are_rejected() {
+        // A PINNED brute-forced collision: at [ff3e::1]:5004 the ids "bzhq" and
+        // "fnmw" fold to the SAME 32-bit RTP SSRC (17_309_552). Two senders on ONE
+        // multicast group with one SSRC are ambiguous to an RTP receiver (RFC 3550
+        // §8), so the build must reject them, naming both. (Found offline by a
+        // birthday search over short ascii ids; the search loop is NOT committed.)
+        let g: std::net::SocketAddr = "[ff3e::1]:5004".parse().unwrap();
+        assert_eq!(
+            aes67_ssrc_for("bzhq", g),
+            aes67_ssrc_for("fnmw", g),
+            "the pinned collision holds under the real fold"
+        );
+
+        let err = ensure_no_aes67_ssrc_collision(&[
+            aes67_output_named("bzhq", "[ff3e::1]:5004"),
+            aes67_output_named("fnmw", "[ff3e::1]:5004"),
+        ])
+        .err()
+        .expect("a same-group ssrc collision is rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("bzhq") && msg.contains("fnmw"),
+            "the rejection names BOTH colliding outputs: {msg}"
+        );
+
+        // Distinct, non-colliding ids on the same group pass.
+        assert!(
+            ensure_no_aes67_ssrc_collision(&[
+                aes67_output_named("bzhq", "[ff3e::1]:5004"),
+                aes67_output_named("cam-audio", "[ff3e::1]:5004"),
+            ])
+            .is_ok(),
+            "distinct non-colliding same-group ids pass"
+        );
+
+        // The SAME colliding pair on DIFFERENT multicast groups is harmless — an RTP
+        // receiver demuxes per group, so those SSRCs never coexist. Not a conflict.
+        assert!(
+            ensure_no_aes67_ssrc_collision(&[
+                aes67_output_named("bzhq", "[ff3e::1]:5004"),
+                aes67_output_named("fnmw", "[ff3e::2]:5004"),
+            ])
+            .is_ok(),
+            "the same collision on different groups is not a conflict"
+        );
+    }
+
     #[test]
     fn aes67_ssrc_is_stable_nonzero_and_folds_in_the_multicast_binding() {
         let g1: std::net::SocketAddr = "[ff3e::1]:5004".parse().unwrap();
