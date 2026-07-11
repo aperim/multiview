@@ -453,7 +453,12 @@ pub fn load_tls_material(
 
     // `TlsConfig` is `#[non_exhaustive]` cross-crate; TLS-0 has only `static`. A
     // future `mode` (e.g. ACME) fed to this build is rejected, never panicked.
-    let multiview_config::TlsConfig::Static { cert, key } = tls else {
+    // Rebind the `cert_file`/`key_file` paths to short locals for the loader body.
+    let multiview_config::TlsConfig::Static {
+        cert_file: cert,
+        key_file: key,
+    } = tls
+    else {
         return Err(TlsSetupError::UnsupportedMode);
     };
 

@@ -40,18 +40,23 @@ Add an **off-by-default `tls` Cargo feature** to `multiview-control` (forwarded
 by a `multiview-cli` `tls` feature into the `nvidia`/`apple`/`linux-vaapi`/`full`
 umbrella presets). It pulls `axum-server` (`tls-rustls`), `rustls`, and
 `rustls-pki-types` — all rustls 0.23 / **aws-lc-rs**, already in the lock via the
-`cast` (`tokio-rustls`) and `reqwest` rustls backends. The default `cargo check`
-is byte-unaffected: with `tls` off no TLS dependency is pulled.
+`cast` (`tokio-rustls`) and `reqwest` rustls backends. The default build is
+unchanged at the dependency level: the `TlsConfig` schema types and the CLI's
+feature-off rejection path compile unconditionally (pure Rust, no new crates),
+but with `tls` off **no native TLS dependency** (`rustls`/`aws-lc-rs`/
+`axum-server`) is pulled — so the default `cargo check` stays LGPL-clean and
+native-dep-free.
 
 Concrete shape:
 
 - **Config** (`multiview-config`, always compiled): a new `[control.tls]` section
   — `TlsConfig`, an enum **internally tagged by `mode`**
   (`#[serde(tag = "mode")]`, never `untagged`; `#[non_exhaustive]`). The only
-  TLS-0 variant is `mode = "static"` carrying `cert` + `key` PEM paths. Absent ⇒
-  plain HTTP. `MultiviewConfig::validate` rejects an empty cert/key path
-  fail-closed; file existence/parse is checked at serve time (a config may be
-  authored off the deployment host, mirroring `cast_media_base`).
+  TLS-0 variant is `mode = "static"` carrying `cert_file` + `key_file` PEM paths.
+  Absent ⇒ plain HTTP. `MultiviewConfig::validate` rejects an empty
+  `cert_file`/`key_file` path fail-closed; file existence/parse is checked at
+  serve time (a config may be authored off the deployment host, mirroring
+  `cast_media_base`).
 - **Serve** (`multiview-control`, `#[cfg(feature = "tls")]`):
   - `load_tls_material(&TlsConfig) -> Result<RustlsMaterial, TlsSetupError>` — a
     **separate, synchronous startup step** that reads the PEM chain + key and

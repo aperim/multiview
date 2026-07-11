@@ -14,22 +14,26 @@
 
 use multiview_config::{ControlConfig, TlsConfig};
 
-/// A `[control.tls]` table with `mode = "static"` + cert/key deserializes to the
-/// `Static` variant with both paths, carried on `ControlConfig::tls`.
+/// A `[control.tls]` table with `mode = "static"` + cert_file/key_file
+/// deserializes to the `Static` variant with both paths, carried on
+/// `ControlConfig::tls`.
 #[test]
 fn static_mode_parses_with_cert_and_key() {
     let control: ControlConfig = serde_json::from_str(
         r#"{
             "listen": "[::1]:8080",
-            "tls": { "mode": "static", "cert": "/etc/mv/cert.pem", "key": "/etc/mv/key.pem" }
+            "tls": { "mode": "static", "cert_file": "/etc/mv/cert.pem", "key_file": "/etc/mv/key.pem" }
         }"#,
     )
     .expect("a static-mode tls table must deserialize");
 
     match control.tls {
-        Some(TlsConfig::Static { cert, key }) => {
-            assert_eq!(cert, std::path::PathBuf::from("/etc/mv/cert.pem"));
-            assert_eq!(key, std::path::PathBuf::from("/etc/mv/key.pem"));
+        Some(TlsConfig::Static {
+            cert_file,
+            key_file,
+        }) => {
+            assert_eq!(cert_file, std::path::PathBuf::from("/etc/mv/cert.pem"));
+            assert_eq!(key_file, std::path::PathBuf::from("/etc/mv/key.pem"));
         }
         other => panic!("expected Some(TlsConfig::Static {{ .. }}), got {other:?}"),
     }
@@ -52,55 +56,55 @@ fn absent_tls_is_none() {
 #[test]
 fn unknown_mode_fails_to_parse() {
     let parsed: Result<TlsConfig, _> =
-        serde_json::from_str(r#"{ "mode": "acme-dns01", "cert": "/c", "key": "/k" }"#);
+        serde_json::from_str(r#"{ "mode": "acme-dns01", "cert_file": "/c", "key_file": "/k" }"#);
     assert!(
         parsed.is_err(),
         "an unknown tls mode must fail to parse (mode-tagged, never untagged)"
     );
 }
 
-/// `static` mode requires BOTH a cert and a key: a missing field fails to parse
-/// (no all-optional silent-empty config).
+/// `static` mode requires BOTH a cert_file and a key_file: a missing field fails
+/// to parse (no all-optional silent-empty config).
 #[test]
 fn static_mode_requires_cert_and_key() {
     let no_key: Result<TlsConfig, _> =
-        serde_json::from_str(r#"{ "mode": "static", "cert": "/c" }"#);
+        serde_json::from_str(r#"{ "mode": "static", "cert_file": "/c" }"#);
     assert!(
         no_key.is_err(),
-        "static mode without a key must fail to parse"
+        "static mode without a key_file must fail to parse"
     );
     let no_cert: Result<TlsConfig, _> =
-        serde_json::from_str(r#"{ "mode": "static", "key": "/k" }"#);
+        serde_json::from_str(r#"{ "mode": "static", "key_file": "/k" }"#);
     assert!(
         no_cert.is_err(),
-        "static mode without a cert must fail to parse"
+        "static mode without a cert_file must fail to parse"
     );
 }
 
-/// An empty cert path is rejected by validation (fail-closed at config load —
-/// an empty path would never load a certificate).
+/// An empty cert_file path is rejected by validation (fail-closed at config load
+/// — an empty path would never load a certificate).
 #[test]
 fn empty_cert_path_fails_validation() {
     let tls = TlsConfig::Static {
-        cert: std::path::PathBuf::new(),
-        key: std::path::PathBuf::from("/etc/mv/key.pem"),
+        cert_file: std::path::PathBuf::new(),
+        key_file: std::path::PathBuf::from("/etc/mv/key.pem"),
     };
     assert!(
         tls.validate().is_err(),
-        "an empty cert path must fail config-load validation"
+        "an empty cert_file path must fail config-load validation"
     );
 }
 
-/// An empty key path is rejected by validation (fail-closed at config load).
+/// An empty key_file path is rejected by validation (fail-closed at config load).
 #[test]
 fn empty_key_path_fails_validation() {
     let tls = TlsConfig::Static {
-        cert: std::path::PathBuf::from("/etc/mv/cert.pem"),
-        key: std::path::PathBuf::new(),
+        cert_file: std::path::PathBuf::from("/etc/mv/cert.pem"),
+        key_file: std::path::PathBuf::new(),
     };
     assert!(
         tls.validate().is_err(),
-        "an empty key path must fail config-load validation"
+        "an empty key_file path must fail config-load validation"
     );
 }
 
@@ -108,8 +112,8 @@ fn empty_key_path_fails_validation() {
 #[test]
 fn a_complete_static_config_validates() {
     let tls = TlsConfig::Static {
-        cert: std::path::PathBuf::from("/etc/mv/cert.pem"),
-        key: std::path::PathBuf::from("/etc/mv/key.pem"),
+        cert_file: std::path::PathBuf::from("/etc/mv/cert.pem"),
+        key_file: std::path::PathBuf::from("/etc/mv/key.pem"),
     };
     tls.validate()
         .expect("a static config with both paths present must validate");

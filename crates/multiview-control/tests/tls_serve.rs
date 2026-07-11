@@ -67,7 +67,10 @@ fn self_signed_pem(dir: &std::path::Path) -> (std::path::PathBuf, std::path::Pat
 async fn the_served_tls_control_plane_handshakes_and_rate_limits_per_ip() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (cert, key) = self_signed_pem(dir.path());
-    let tls_cfg = TlsConfig::Static { cert, key };
+    let tls_cfg = TlsConfig::Static {
+        cert_file: cert,
+        key_file: key,
+    };
 
     // Load the operator's PEM material into a rustls server config (explicit
     // aws-lc-rs provider). A load failure here is a hard startup error in the

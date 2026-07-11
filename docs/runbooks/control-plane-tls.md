@@ -28,12 +28,14 @@ listen = "[::]:8080"          # dual-stack IPv6 (accepts IPv4-mapped too)
 
 [control.tls]
 mode = "static"
-cert = "/etc/multiview/tls/fullchain.pem"
-key  = "/etc/multiview/tls/privkey.pem"
+cert_file = "/etc/multiview/tls/fullchain.pem"
+key_file  = "/etc/multiview/tls/privkey.pem"
 ```
 
-- `mode = "static"` is the only TLS-0 mode. `cert`/`key` are filesystem paths.
-- Validation at config load rejects an **empty** `cert`/`key` path. The files
+- `mode = "static"` is the only TLS-0 mode. `cert_file`/`key_file` are filesystem
+  paths.
+- Validation at config load rejects an **empty** `cert_file`/`key_file` path. The
+  files
   themselves are **read at serve time** (so a config can be authored off the
   deployment host); a missing/unreadable/garbage cert or key **aborts startup**
   with a clear error — it never falls back to plain HTTP.
@@ -48,8 +50,8 @@ multiview validate --config /etc/multiview/config.toml
 
 ## Generate a certificate
 
-**Production:** use your CA / internal PKI and point `cert`/`key` at the issued
-PEM files. Concatenate the leaf + intermediates into the `cert` file (leaf
+**Production:** use your CA / internal PKI and point `cert_file`/`key_file` at the
+issued PEM files. Concatenate the leaf + intermediates into the `cert_file` (leaf
 first).
 
 **Lab / self-signed** (browsers/clients will warn — expected):
@@ -80,8 +82,8 @@ TLS accept loop) — this is covered by the `tls_serve` end-to-end test.
 
 ## Rotate / renew
 
-TLS-0 has **no hot-reload**: replace the `cert`/`key` files and **restart** the
-daemon. Plan rotation before expiry; monitor `NotAfter` (the `openssl x509
+TLS-0 has **no hot-reload**: replace the `cert_file`/`key_file` PEMs and
+**restart** the daemon. Plan rotation before expiry; monitor `NotAfter` (the `openssl x509
 -dates` output above).
 
 ## Troubleshoot
@@ -90,7 +92,7 @@ daemon. Plan rotation before expiry; monitor `NotAfter` (the `openssl x509
 | ------- | ----------- |
 | Startup error: `control.tls configured but this build lacks the 'tls' feature` | Rebuild/deploy with `--features tls` (or a preset), or remove `[control.tls]` to serve plain HTTP. |
 | Startup error reading/parsing the cert or key | Path wrong, wrong permissions for the process user, or not PEM. Check the leaf-first chain order and that the key is PKCS#8/PKCS#1/SEC1 PEM. |
-| Startup error: certificate/key mismatch (rustls) | The `key` does not correspond to the `cert` leaf — reissue or repair the pair. |
+| Startup error: certificate/key mismatch (rustls) | The `key_file` does not correspond to the `cert_file` leaf — reissue or repair the pair. |
 | Client `connection reset` / handshake failure | The client is speaking plain HTTP to the TLS port (use `https://`), or an ancient TLS-1.0/1.1-only client (TLS 1.2+ only). |
 | Credentials still in cleartext | `[control.tls]` absent, or a plain-HTTP reverse proxy in front terminates TLS and re-origins over HTTP — terminate TLS here or secure the proxy hop. |
 
