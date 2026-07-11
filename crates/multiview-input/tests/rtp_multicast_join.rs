@@ -16,7 +16,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use multiview_input::st2110::transport::RtpReceiver;
+use multiview_input::st2110::transport::{MulticastInterface, RtpReceiver};
 
 fn any_v4() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
@@ -48,4 +48,27 @@ async fn join_multicast_v6_joins_an_ipv6_group_on_the_default_interface() {
     // The IPv6 SAP group, site-local scope.
     rx.join_multicast_v6(Ipv6Addr::new(0xff05, 0, 0, 0, 0, 0, 2, 0x7ffe), 0)
         .expect("explicit v6 join on interface 0 (default)");
+}
+
+#[tokio::test]
+async fn join_multicast_threads_the_interface_index_to_the_v6_join() {
+    // F6: IPv6 multicast is interface-scoped; the interface index must be
+    // SUPPLIED to the join, not hardcoded to 0. Proven by threading a bogus
+    // index through and observing the OS reject it — if the index were ignored
+    // (old hardcoded 0), the join would spuriously succeed.
+    let group = IpAddr::V6(Ipv6Addr::new(0xff3e, 0, 0, 0, 0, 0, 0, 1));
+
+    // Unspecified interface (OS default) still joins on this multicast-capable
+    // devcontainer, exactly like the old default.
+    let rx = RtpReceiver::bind(any_v6()).await.unwrap();
+    rx.join_multicast(group, MulticastInterface::Unspecified)
+        .expect("unspecified interface joins on the OS default");
+
+    // A bogus interface index reaches the OS and fails the join.
+    let rx2 = RtpReceiver::bind(any_v6()).await.unwrap();
+    assert!(
+        rx2.join_multicast(group, MulticastInterface::Index(0xFFFF_FFF0))
+            .is_err(),
+        "a bogus interface index must reach the OS and fail (the index is plumbed, not hardcoded 0)"
+    );
 }
