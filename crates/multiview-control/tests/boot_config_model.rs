@@ -2907,8 +2907,9 @@ async fn settle_initial(poll: &mut ManualPoll, state: &AppState) {
 /// Force `path`'s modification time to `mtime`, leaving its inode and length
 /// untouched (opens the existing file without truncating, then `set_modified`).
 /// Lets a test REMOVE the filesystem's mtime granularity as a variable and pin
-/// exactly which fingerprint axis (`config_watch.rs` uses len+mtime+inode)
-/// distinguishes an edit from the already-applied content.
+/// exactly which fingerprint axis distinguishes an edit from the already-applied
+/// content — `config_watch.rs` fingerprints len+mtime+inode PLUS a hash of the
+/// file's bytes, so with mtime (and inode) pinned only the bytes differ.
 fn force_mtime(path: &Path, mtime: std::time::SystemTime) {
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -2925,13 +2926,12 @@ fn force_mtime(path: &Path, mtime: std::time::SystemTime) {
 ///
 /// The rename gives the path a BRAND-NEW inode — the temp is created while the
 /// old file is still linked, so its inode can never be the still-linked one —
-/// so the `len + mtime + inode` fingerprint always differs from the
-/// previously-applied one. An in-place `std::fs::write` truncate instead reuses
-/// the SAME inode and, for a same-length rewrite within the filesystem's mtime
-/// granularity, produces an IDENTICAL fingerprint the watcher misses (~293/300
-/// same-length in-place rewrites alias on this tmpfs). Deterministic on any
-/// POSIX filesystem; tests that rely on the watcher DETECTING an edit must use
-/// this, never an in-place same-length write.
+/// so the fingerprint always differs from the previously-applied one regardless
+/// of mtime granularity. This is the realistic editor-save model, so the
+/// external-edit tests use it. A same-length in-place rewrite (same inode) is
+/// NOW detected too — the watcher fingerprints the file's bytes, not just its
+/// stat — and that path has its own coverage in
+/// [`an_in_place_same_length_edit_after_promote_still_applies`].
 fn external_edit(path: &Path, content: &str) {
     let dir = path.parent().expect("the boot path has a parent directory");
     let tmp = tempfile::NamedTempFile::new_in(dir).expect("create a temp for the atomic edit");
@@ -3004,21 +3004,18 @@ async fn manual_poll_drives_an_external_edit_apply_deterministically() {
 }
 
 /// Regression (task #7): the post-promote external-edit apply must NOT depend
-/// on the filesystem's mtime granularity. The watcher detects a change by a
-/// `len + mtime + inode` fingerprint and short-circuits without reading content
-/// when it matches the already-applied one (`config_watch.rs`). A same-length
-/// in-place `std::fs::write` rewrite (same inode, same length) landing within
-/// one mtime tick of the promote's own adopted write yields an IDENTICAL
-/// fingerprint (measured ~293/300 same-length in-place rewrites alias on this
-/// tmpfs), so the edit is silently missed and `applied_count` stays 0 — the
-/// original flake.
+/// on the filesystem's mtime granularity. The watcher fingerprints the boot
+/// file and short-circuits without re-applying when the fingerprint matches the
+/// already-applied one (`config_watch.rs`).
 ///
 /// This test REMOVES mtime as a variable — it forces the edit's mtime equal to
-/// the adopted file's — so ONLY the inode can distinguish the edit, and proves
-/// it still hot-applies. A real external edit (an atomic temp+rename via
-/// [`external_edit`]) lands on a FRESH inode, distinct from the still-linked
-/// adopted one by construction, so the fingerprint always differs. An in-place
-/// rewrite here aliases and fails deterministically.
+/// the adopted file's — and drives an ATOMIC temp+rename edit (via
+/// [`external_edit`]), which lands on a FRESH inode distinct from the
+/// still-linked adopted one by construction, so the fingerprint always differs
+/// and the edit hot-applies. The harder same-length IN-PLACE case (every stat
+/// axis aliases; only the bytes differ) is covered by
+/// [`an_in_place_same_length_edit_after_promote_still_applies`], which the
+/// watcher now catches because the fingerprint folds a hash of the bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn external_edit_after_promote_applies_regardless_of_mtime_granularity() {
     let mut r = rig(BOOT_DOC);

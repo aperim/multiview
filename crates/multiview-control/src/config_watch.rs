@@ -447,6 +447,28 @@ fn content_hash(text: &str) -> u64 {
     hasher.finish()
 }
 
+/// A stable in-process hash of the watched file's raw bytes, folded into the
+/// [`Fingerprint`] so change detection does not depend on filesystem `stat`
+/// granularity. Not an adversarial boundary (whoever writes the config file
+/// already controls it), so `DefaultHasher` is ample; hashing BYTES (not a
+/// `&str`) keeps a non-UTF-8 file detectable as a change — the settled
+/// `read_to_string` in [`watch_loop`] does the UTF-8 gate.
+fn fingerprint_content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Folded into a [`Fingerprint`] when the watched path exists (its `stat`
+/// succeeded) but its bytes cannot be read this poll — a permissions problem,
+/// or a delete racing the stat. It gates nothing (a real file that happens to
+/// hash to it is harmless); it merely keeps a transient unreadable blip from
+/// aliasing unchanged content, so two such polls settle to the `read_to_string`
+/// reject in [`watch_loop`] ("the file cannot be read") rather than the
+/// already-applied short-circuit.
+const CONTENT_UNREADABLE: u64 = u64::MAX;
+
 /// Spawn the config-file watcher over `path` on the control-plane tokio
 /// runtime. `baseline` is the document the run booted with (the currently
 /// RUNNING state); `state` is the router's `AppState` (the one set of stores,
@@ -495,19 +517,33 @@ impl Drop for ActiveGuard {
     }
 }
 
-/// A cheap content-change fingerprint of the watched path: length + mtime +
-/// inode. Re-`stat`ing the PATH (never a held fd) makes a write-temp +
-/// `rename(2)` land as a normal change (new inode).
+/// A content-change fingerprint of the watched path: length + mtime + inode +
+/// a hash of the file's bytes. The byte hash makes detection
+/// filesystem-independent — a same-length in-place rewrite (identical
+/// len/mtime/inode, e.g. a shell `>` redirect or a non-atomic editor landing
+/// within the filesystem's mtime granularity) still produces a distinct
+/// fingerprint, so the already-applied short-circuit in [`watch_loop`] cannot
+/// silently drop it. Re-`stat`ing + re-reading the PATH (never a held fd) also
+/// makes a write-temp + `rename(2)` land as a change (new inode); a rename that
+/// does not alter the bytes then adopts without re-applying (the
+/// `last_observed == text` arm).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     len: u64,
     modified: Option<std::time::SystemTime>,
     inode: u64,
+    content: u64,
 }
 
 /// Probe the path's fingerprint; [`None`] when the file is (transiently)
-/// missing. `tokio::fs` so the `stat(2)` rides the blocking pool, never the
-/// control-plane reactor (review m6).
+/// missing (its `stat` fails). `tokio::fs` so the `stat(2)` and the byte read
+/// ride the blocking pool, never the control-plane reactor (review m6).
+///
+/// The fingerprint folds a hash of the file's bytes so a same-length in-place
+/// rewrite that aliases len+mtime+inode is still seen as a change. The config
+/// file is small and this runs once per ~1–2 s poll, so the extra read is
+/// negligible; it reads the RAW bytes — a non-UTF-8 file still fingerprints and
+/// settles to the `read_to_string` reject in [`watch_loop`].
 async fn probe(path: &Path) -> Option<Fingerprint> {
     let meta = tokio::fs::metadata(path).await.ok()?;
     #[cfg(unix)]
@@ -517,10 +553,19 @@ async fn probe(path: &Path) -> Option<Fingerprint> {
     };
     #[cfg(not(unix))]
     let inode = 0_u64;
+    // The file exists (stat succeeded); fold a hash of its bytes. If it cannot
+    // be read right now (permissions, or a delete racing the stat) fold the
+    // unreadable sentinel, so two such polls settle to the reject path instead
+    // of aliasing the already-applied content.
+    let content = match tokio::fs::read(path).await {
+        Ok(bytes) => fingerprint_content_hash(&bytes),
+        Err(_) => CONTENT_UNREADABLE,
+    };
     Some(Fingerprint {
         len: meta.len(),
         modified: meta.modified().ok(),
         inode,
+        content,
     })
 }
 
