@@ -1,6 +1,6 @@
 # ADR-T013 — The shared RTP-audio → AudioStore program-clock rebase seam
 
-**Status:** Proposed (2026-06-10)
+**Status:** Accepted (2026-07-11) — the rebase seam (`RtpAudioRebaser` → `AudioStore::publish_at`) now has its second concrete consumer landed: the AES67 / ST 2110-30 PCM receive path (ADR-0033 §3) rebases through this one contract exactly as the WebRTC Opus path does, so both share wrap/anchor/gap-placement semantics rather than diverging.
 **Area:** streaming/timing (T) — audio ingest timing
 **Drivers:** more than one RTP-audio ingest is landing (WebRTC Opus under IN-6, AES67 / ST 2110-30
 PCM under AES67-1, and any future RTP-audio source); without one pinned rebase contract each would
