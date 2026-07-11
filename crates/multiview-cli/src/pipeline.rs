@@ -13465,4 +13465,49 @@ segment_ms = 1000
              cells (ADR-0030 §3), not the first-found cell {first:?}"
         );
     }
+
+    #[test]
+    fn pipeline_build_registry_owns_the_shared_store_sized_to_the_supremum() {
+        // The single-program build mints ONE SourceRegistry that OWNS each source's
+        // shared TileStore: the `stores` map (sampled by the compositor drive) and
+        // the ingest plan hold Arc CLONES of the registry's store, and the registry
+        // records the decode target = the per-axis supremum across the source's
+        // cells. Two cells binding `cam1` therefore share ONE registry entry / ONE
+        // store, sized to the supremum — the decode-once seam at the pipeline level.
+        let config = two_cells_one_source_config();
+        let pipeline = Pipeline::build(&config).expect("pipeline builds");
+        let key = multiview_engine::SourceKey::from_canonical("cam1");
+
+        // Exactly one registry entry for the one source, regardless of how many
+        // cells bind it.
+        assert_eq!(
+            pipeline.source_registry.active_len(),
+            1,
+            "one source => one registry entry, even when two cells bind it"
+        );
+
+        // The decode target the registry records is the per-axis supremum — the
+        // same value `cell_pixel_size` derives for the ingest plan's tile geometry.
+        let expect = cell_pixel_size(&pipeline.layout, "cam1").expect("cam1 is bound");
+        assert_eq!(
+            pipeline.source_registry.requested_supremum(&key),
+            Some(multiview_engine::RequestedSize {
+                width: expect.0,
+                height: expect.1,
+            }),
+            "the registry decodes at the per-axis supremum across cam1's cells"
+        );
+
+        // The `stores` map holds the registry's OWN store Arc (not an independent
+        // TileStore) — the registry is the single owner, the map a lock-free reader.
+        let mapped = pipeline.stores.get("cam1").expect("cam1 has a store");
+        let owned = pipeline
+            .source_registry
+            .store(&key)
+            .expect("the registry owns cam1's store");
+        assert!(
+            std::sync::Arc::ptr_eq(mapped, &owned),
+            "the stores map must hold the registry's store Arc (decode-once ownership)"
+        );
+    }
 }
