@@ -15014,6 +15014,57 @@ a=mediaclk:direct=0\r\n";
     }
 
     #[test]
+    fn pipeline_build_rejects_two_aes67_outputs_that_collide_on_ssrc() {
+        // The SSRC-collision guard is wired into `build_outputs`, not merely
+        // callable: a FULL `Pipeline::build` of a config with the pinned colliding
+        // pair on one multicast group fails closed. (Kills the mutant that drops the
+        // `ensure_no_aes67_ssrc_collision` call from `build_outputs`.)
+        let doc = r##"schema_version = 1
+[canvas]
+width = 640
+height = 480
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[cells]]
+id = "only"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[outputs]]
+kind = "aes67"
+id = "bzhq"
+label = "bzhq"
+multicast = "[ff3e::1]:5004"
+[[outputs]]
+kind = "aes67"
+id = "fnmw"
+label = "fnmw"
+multicast = "[ff3e::1]:5004"
+"##;
+        let config = multiview_config::MultiviewConfig::load_from_toml(doc).expect("config parses");
+        // `Pipeline` is not `Debug`, so `.err().expect(...)` (not `expect_err`).
+        let err = Pipeline::build(&config)
+            .err()
+            .expect("colliding aes67 outputs fail the build");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("bzhq") && msg.contains("fnmw"),
+            "the build rejection names both colliding outputs: {msg}"
+        );
+    }
+
+    #[test]
     fn aes67_ssrc_is_stable_nonzero_and_folds_in_the_multicast_binding() {
         let g1: std::net::SocketAddr = "[ff3e::1]:5004".parse().unwrap();
         let g1_alt_port: std::net::SocketAddr = "[ff3e::1]:5006".parse().unwrap();
