@@ -15,8 +15,12 @@
     clippy::float_cmp
 )]
 
+use std::time::Duration;
+
 use multiview_audio::{AudioBlock, AudioFormat, ChannelLayout};
-use multiview_output::aes67::{Aes67Sender, Aes67SenderHandle, PcmDepth, RTP_FIXED_HEADER_LEN};
+use multiview_output::aes67::{
+    Aes67ConfigError, Aes67Sender, Aes67SenderHandle, PcmDepth, RTP_FIXED_HEADER_LEN,
+};
 
 // The decoder half lives in the sibling input crate (a dev-dependency); the
 // round-trip pins this encoder byte-identical to it.
@@ -37,6 +41,44 @@ fn ramp_block() -> (Vec<f32>, AudioBlock) {
         .collect();
     let block = AudioBlock::from_interleaved(stereo(), samples.clone()).unwrap();
     (samples, block)
+}
+
+#[test]
+fn packet_duration_derives_the_send_cadence_from_the_media_clock() {
+    // P2-F1: the send cadence MUST be the media clock — ptime = frames_per_packet
+    // / sample_rate — not an arbitrary interval. The RTP timestamp advances by
+    // frames_per_packet per packet, so a send timer unrelated to (sample_rate,
+    // frames_per_packet) makes wall-clock diverge from the advertised clock and
+    // the receiver buffer drifts. The sender therefore knows its sample_rate and
+    // derives the cadence itself.
+    let one_ms = Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48_000, 48, 4_800).expect("48@48k");
+    assert_eq!(
+        one_ms.packet_duration(),
+        Duration::from_micros(1_000),
+        "48 frames @ 48 kHz = 1 ms"
+    );
+    let two_ms = Aes67Sender::new(2, PcmDepth::L16, 96, 1, 48_000, 96, 4_800).expect("96@48k");
+    assert_eq!(
+        two_ms.packet_duration(),
+        Duration::from_micros(2_000),
+        "96 frames @ 48 kHz = 2 ms"
+    );
+    let half_ms = Aes67Sender::new(2, PcmDepth::L16, 96, 1, 96_000, 48, 4_800).expect("48@96k");
+    assert_eq!(
+        half_ms.packet_duration(),
+        Duration::from_micros(500),
+        "48 frames @ 96 kHz = 0.5 ms"
+    );
+    // A zero / out-of-range sample rate is rejected fail-closed, never used to
+    // derive a nonsensical (or division-by-zero) cadence.
+    assert!(matches!(
+        Aes67Sender::new(2, PcmDepth::L16, 96, 1, 0, 48, 4_800),
+        Err(Aes67ConfigError::SampleRate { .. })
+    ));
+    assert!(matches!(
+        Aes67Sender::new(2, PcmDepth::L16, 96, 1, 1_000_000, 48, 4_800),
+        Err(Aes67ConfigError::SampleRate { .. })
+    ));
 }
 
 #[test]
