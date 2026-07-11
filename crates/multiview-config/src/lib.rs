@@ -51,6 +51,7 @@ pub mod sync_group;
 pub mod tally;
 pub mod timer;
 pub mod timing;
+pub mod tls;
 pub mod wall;
 pub mod webrtc;
 
@@ -101,6 +102,7 @@ pub use timer::{
     TimerDirection, TimerError, TimerFormat, TimerOnTarget, TimerReadout, TimerState, TimerTarget,
 };
 pub use timing::{TimingConfig, MAX_LINK_OFFSET_MS, MAX_PTP_UTC_OFFSET_S};
+pub use tls::TlsConfig;
 pub use wall::{HeadConfig, WallBezel, WallConfig};
 pub use webrtc::{DurationString, IceServerConfig, IceServerKindConfig, WebrtcConfig};
 
@@ -198,6 +200,16 @@ pub struct ControlConfig {
     /// [`MultiviewConfig::validate`].
     #[serde(default)]
     pub limits: crate::limits::ManagementLimits,
+    /// Control-plane TLS termination (TLS-0, [ADR-W029](../../docs/decisions/ADR-W029.md)):
+    /// when present, the served management plane terminates HTTPS (rustls) on
+    /// [`listen`](ControlConfig::listen) instead of plain HTTP; absent ⇒ plain
+    /// HTTP (the default build pulls no native TLS dependency). `mode = "static"`
+    /// carries operator-managed cert/key PEM paths. Validated for shape by
+    /// [`MultiviewConfig::validate`]; the file contents are loaded (and a build
+    /// without the control plane's `tls` feature rejects a configured section) at
+    /// serve time by `multiview-control`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<crate::tls::TlsConfig>,
 }
 
 /// Process-wide system settings.
@@ -826,6 +838,13 @@ impl MultiviewConfig {
             // concurrency cap or a zero token-bucket burst/refill would turn the
             // DoS floor into a self-inflicted outage, so reject it at config load.
             control.limits.validate()?;
+            // Control-plane TLS termination (TLS-0, ADR-W029): reject an empty
+            // cert/key path at config load rather than at first bind. File
+            // existence/parse is checked at serve time (a config may be authored
+            // off the deployment host).
+            if let Some(tls) = &control.tls {
+                tls.validate()?;
+            }
         }
         Ok(())
     }
