@@ -135,7 +135,9 @@ mod producer {
     fn producer_skips_malformed_payload_without_faulting() {
         let format = Aes3Format::new(2, SampleDepth::L24).expect("stereo L24");
         let packetizer = Aes67Packetizer::new(2, SampleDepth::L24).expect("stereo L24");
-        let good = packetizer.encode(&[0.1_f32, 0.2]).expect("one stereo group");
+        let good = packetizer
+            .encode(&[0.1_f32, 0.2])
+            .expect("one stereo group");
 
         // A 5-byte payload is not a whole number of 6-byte stereo-L24 groups.
         let source = ScriptedSource::new(vec![

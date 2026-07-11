@@ -40,9 +40,9 @@ pub mod v40;
 #[cfg(feature = "st2110")]
 pub mod transport;
 
-pub use audio::{pcm_to_f32, Aes67AudioFrame};
 #[cfg(feature = "st2110")]
 pub use audio::Aes67AudioProducer;
+pub use audio::{pcm_to_f32, Aes67AudioFrame};
 pub use packetize::{Aes67Error, Aes67Packetizer};
 pub use rtp::{RtpError, RtpHeader, RtpPacket};
 pub use sdp::{AudioSdpSession, SdpError, TsRefclk};

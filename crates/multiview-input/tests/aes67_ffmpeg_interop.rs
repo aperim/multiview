@@ -102,10 +102,7 @@ async fn aes67_producer_decodes_ffmpeg_l24_rtp() {
     );
 
     // Our producer decodes ffmpeg's real AES67 L24 into non-silent audio.
-    let mut producer = Aes67AudioProducer::new(
-        Box::new(Collected { packets }),
-        format,
-    );
+    let mut producer = Aes67AudioProducer::new(Box::new(Collected { packets }), format);
     let mut total_frames = 0usize;
     let mut peak = 0.0_f32;
     while let Some(frame) = producer.next_audio().expect("decode never faults") {
@@ -114,7 +111,10 @@ async fn aes67_producer_decodes_ffmpeg_l24_rtp() {
             peak = peak.max(s.abs());
         }
     }
-    assert!(total_frames > 0, "decoded at least one audio frame from ffmpeg");
+    assert!(
+        total_frames > 0,
+        "decoded at least one audio frame from ffmpeg"
+    );
     assert!(
         peak > 0.05,
         "a 1 kHz sine decodes as non-silent audio (peak {peak} — a mis-parse would read ~silence)"

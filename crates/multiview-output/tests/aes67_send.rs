@@ -47,14 +47,21 @@ fn sender_payload_roundtrips_through_the_v30_decoder() {
 
     let packet = sender.next_packet();
     let rtp = RtpPacket::parse(&packet).expect("a valid RTP packet");
-    assert!(!rtp.header.marker, "continuous stream: marker=0 (ADR-0033 §1)");
+    assert!(
+        !rtp.header.marker,
+        "continuous stream: marker=0 (ADR-0033 §1)"
+    );
     assert_eq!(rtp.header.payload_type, 97, "dynamic payload type carried");
 
     let format = Aes3Format::new(2, SampleDepth::L24).expect("stereo L24");
     let payload = V30Payload::parse(rtp.payload, format).expect("whole sample groups");
     let decoded = pcm_to_f32(&payload);
 
-    assert_eq!(decoded.len(), samples.len(), "one decoded f32 per encoded sample");
+    assert_eq!(
+        decoded.len(),
+        samples.len(),
+        "one decoded f32 per encoded sample"
+    );
     for (want, got) in samples.iter().zip(&decoded) {
         assert!(
             (want - got).abs() < 1.0e-4,
@@ -90,7 +97,7 @@ fn sender_emits_continuous_marker0_with_advancing_seq_and_ts() {
         if let Some(ts) = prev_ts {
             assert_eq!(
                 rtp.header.timestamp,
-                ts.wrapping_add(FRAMES_PER_PACKET as u32),
+                ts.wrapping_add(u32::try_from(FRAMES_PER_PACKET).unwrap()),
                 "timestamp advances by sample-groups (+48), never by bytes"
             );
         }

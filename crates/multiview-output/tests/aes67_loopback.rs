@@ -43,6 +43,7 @@ fn program_samples() -> Vec<f32> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn aes67_send_loopback_roundtrips_over_a_real_udp_socket() {
+    const PACKETS: usize = 8;
     let loopback = Ipv6Addr::LOCALHOST;
 
     // The receiver: a plain UDP socket on an ephemeral [::1] port.
@@ -58,11 +59,12 @@ async fn aes67_send_loopback_roundtrips_over_a_real_udp_socket() {
 
     // A program-audio sender pre-loaded with several packets of real audio.
     let samples = program_samples();
-    let block =
-        AudioBlock::from_interleaved(AudioFormat::new(48_000, ChannelLayout::Stereo), samples.clone())
-            .unwrap();
-    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x0BADF00D, FRAMES_PER_PACKET, 4_800);
-    const PACKETS: usize = 8;
+    let block = AudioBlock::from_interleaved(
+        AudioFormat::new(48_000, ChannelLayout::Stereo),
+        samples.clone(),
+    )
+    .unwrap();
+    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x0BAD_F00D, FRAMES_PER_PACKET, 4_800);
     for _ in 0..PACKETS {
         sender.push(&block);
     }
@@ -71,7 +73,11 @@ async fn aes67_send_loopback_roundtrips_over_a_real_udp_socket() {
     // after receiving every packet (deterministic — no timing-based counting).
     let serve = tokio::spawn(async move {
         let _ = tx
-            .serve(&mut sender, Duration::from_micros(200), std::future::pending::<()>())
+            .serve(
+                &mut sender,
+                Duration::from_micros(200),
+                std::future::pending::<()>(),
+            )
             .await;
     });
 
@@ -83,7 +89,10 @@ async fn aes67_send_loopback_roundtrips_over_a_real_udp_socket() {
         let datagram = &buf[..n];
 
         let rtp = RtpPacket::parse(datagram).expect("a conformant RTP packet");
-        assert!(!rtp.header.marker, "continuous stream: marker=0 on the wire");
+        assert!(
+            !rtp.header.marker,
+            "continuous stream: marker=0 on the wire"
+        );
         assert_eq!(rtp.header.payload_type, 97);
         if let Some(seq) = prev_seq {
             assert_eq!(
