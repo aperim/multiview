@@ -151,3 +151,66 @@ impl Aes67Sender {
         self.frames_per_packet
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use multiview_audio::{AudioBlock, AudioFormat, ChannelLayout};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn mono_block() -> AudioBlock {
+        let fmt = AudioFormat::new(48_000, ChannelLayout::Mono);
+        AudioBlock::from_interleaved(fmt, vec![0.1_f32; 48]).expect("mono block")
+    }
+
+    /// F3: while the shared FIFO lock is held, a concurrent handle `push` (the
+    /// engine bake side) must NOT block on it — it sheds the block and returns
+    /// (inv #10: the engine can never be back-pressured by the send loop). A
+    /// blocking lock would wait for the guard and never signal within the
+    /// deadline.
+    #[test]
+    fn handle_push_never_blocks_on_a_held_fifo() {
+        let sender = Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480);
+        let handle = sender.handle();
+        // Hold the shared FIFO lock on this thread (same module → private field).
+        let fifo = Arc::clone(&sender.fifo);
+        let guard = fifo.lock().expect("uncontended lock");
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            handle.push(&mono_block());
+            let _ = tx.send(());
+        });
+        let received = rx.recv_timeout(Duration::from_secs(2));
+        drop(guard);
+        let _ = worker.join();
+        received.expect("contended handle.push must not block on the shared FIFO (inv #10)");
+    }
+
+    /// F3: while the shared FIFO lock is held, a concurrent serve `next_packet`
+    /// (the send task) must NOT block — it silence-fills and returns a full
+    /// packet (inv #1: one valid packet per tick, whatever the FIFO state). A
+    /// blocking lock would wait for the guard.
+    #[test]
+    fn next_packet_never_blocks_on_a_held_fifo() {
+        let mut sender = Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480);
+        let fifo = Arc::clone(&sender.fifo);
+        let guard = fifo.lock().expect("uncontended lock");
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(sender.next_packet());
+        });
+        let received = rx.recv_timeout(Duration::from_secs(2));
+        drop(guard);
+        let _ = worker.join();
+        let packet =
+            received.expect("contended next_packet must not block on the shared FIFO (inv #1)");
+        assert_eq!(
+            packet.len(),
+            RTP_FIXED_HEADER_LEN + 48 * 2,
+            "a full mono-L16 silence packet (12-byte header + 96-byte payload)"
+        );
+    }
+}

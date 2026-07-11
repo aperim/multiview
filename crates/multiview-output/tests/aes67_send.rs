@@ -16,7 +16,7 @@
 )]
 
 use multiview_audio::{AudioBlock, AudioFormat, ChannelLayout};
-use multiview_output::aes67::{Aes67Sender, PcmDepth, RTP_FIXED_HEADER_LEN};
+use multiview_output::aes67::{Aes67Sender, Aes67SenderHandle, PcmDepth, RTP_FIXED_HEADER_LEN};
 
 // The decoder half lives in the sibling input crate (a dev-dependency); the
 // round-trip pins this encoder byte-identical to it.
@@ -66,6 +66,30 @@ fn sender_payload_roundtrips_through_the_v30_decoder() {
         assert!(
             (want - got).abs() < 1.0e-4,
             "L24 encode round-trips through the decoder: want {want}, got {got}",
+        );
+    }
+}
+
+#[test]
+fn handle_push_feeds_the_serve_side() {
+    // F3: the engine-bake producer HANDLE and the serve loop share one FIFO via
+    // an Arc, so a block pushed on the handle is drained by the serve side — the
+    // two halves run on independent clocks with no `&mut` contention.
+    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FRAMES_PER_PACKET, 4_800);
+    let handle: Aes67SenderHandle = sender.handle();
+    let (samples, block) = ramp_block();
+    handle.push(&block);
+
+    let packet = sender.next_packet();
+    let rtp = RtpPacket::parse(&packet).expect("a valid RTP packet");
+    let format = Aes3Format::new(2, SampleDepth::L24).expect("stereo L24");
+    let payload = V30Payload::parse(rtp.payload, format).expect("whole sample groups");
+    let decoded = pcm_to_f32(&payload);
+    assert_eq!(decoded.len(), samples.len(), "the serve side drained the handle's push");
+    for (want, got) in samples.iter().zip(&decoded) {
+        assert!(
+            (want - got).abs() < 1.0e-4,
+            "handle push feeds the serve drain through the shared FIFO: want {want}, got {got}",
         );
     }
 }
