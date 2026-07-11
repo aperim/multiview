@@ -402,7 +402,8 @@ mod tests {
     /// deadline.
     #[test]
     fn handle_push_never_blocks_on_a_held_fifo() {
-        let sender = Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480).expect("valid aes67 config");
+        let sender =
+            Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480).expect("valid aes67 config");
         let handle = sender.handle();
         // Hold the shared FIFO lock on this thread (same module → private field).
         let fifo = Arc::clone(&sender.fifo);
@@ -424,7 +425,8 @@ mod tests {
     /// blocking lock would wait for the guard.
     #[test]
     fn next_packet_never_blocks_on_a_held_fifo() {
-        let mut sender = Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480).expect("valid aes67 config");
+        let mut sender =
+            Aes67Sender::new(1, PcmDepth::L16, 96, 1, 48, 480).expect("valid aes67 config");
         let fifo = Arc::clone(&sender.fifo);
         let guard = fifo.lock().expect("uncontended lock");
         let (tx, rx) = mpsc::channel();

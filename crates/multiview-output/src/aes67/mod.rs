@@ -36,6 +36,6 @@ pub mod transport;
 
 pub use packet::{build_rtp_header, encode_pcm, PcmDepth, RTP_FIXED_HEADER_LEN, RTP_VERSION};
 pub use sender::{
-    Aes67ConfigError, Aes67Sender, Aes67SenderHandle, DEFAULT_SEND_CAPACITY_FRAMES, MAX_CAPACITY_FRAMES,
-    MAX_CHANNELS, MAX_FRAMES_PER_PACKET, MAX_PACKET_PAYLOAD_BYTES,
+    Aes67ConfigError, Aes67Sender, Aes67SenderHandle, DEFAULT_SEND_CAPACITY_FRAMES,
+    MAX_CAPACITY_FRAMES, MAX_CHANNELS, MAX_FRAMES_PER_PACKET, MAX_PACKET_PAYLOAD_BYTES,
 };

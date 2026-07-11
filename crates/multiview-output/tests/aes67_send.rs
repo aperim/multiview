@@ -41,9 +41,8 @@ fn ramp_block() -> (Vec<f32>, AudioBlock) {
 
 #[test]
 fn sender_payload_roundtrips_through_the_v30_decoder() {
-    let mut sender =
-        Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FRAMES_PER_PACKET, 4_800)
-            .expect("valid aes67 config");
+    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FRAMES_PER_PACKET, 4_800)
+        .expect("valid aes67 config");
     let (samples, block) = ramp_block();
     sender.handle().push(&block);
 
@@ -77,9 +76,8 @@ fn handle_push_feeds_the_serve_side() {
     // F3: the engine-bake producer HANDLE and the serve loop share one FIFO via
     // an Arc, so a block pushed on the handle is drained by the serve side — the
     // two halves run on independent clocks with no `&mut` contention.
-    let mut sender =
-        Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FRAMES_PER_PACKET, 4_800)
-            .expect("valid aes67 config");
+    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 97, 0x1234_5678, FRAMES_PER_PACKET, 4_800)
+        .expect("valid aes67 config");
     let handle: Aes67SenderHandle = sender.handle();
     let (samples, block) = ramp_block();
     handle.push(&block);
@@ -89,7 +87,11 @@ fn handle_push_feeds_the_serve_side() {
     let format = Aes3Format::new(2, SampleDepth::L24).expect("stereo L24");
     let payload = V30Payload::parse(rtp.payload, format).expect("whole sample groups");
     let decoded = pcm_to_f32(&payload);
-    assert_eq!(decoded.len(), samples.len(), "the serve side drained the handle's push");
+    assert_eq!(
+        decoded.len(),
+        samples.len(),
+        "the serve side drained the handle's push"
+    );
     for (want, got) in samples.iter().zip(&decoded) {
         assert!(
             (want - got).abs() < 1.0e-4,
