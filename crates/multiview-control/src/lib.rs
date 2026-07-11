@@ -310,6 +310,49 @@ pub fn router(state: AppState) -> Router {
     }
 }
 
+/// The default control-plane **header-read timeout** ([`ServeOptions`]): the
+/// maximum time the server waits to read a request's full header block before it
+/// drops the connection. Generous for any legitimate client (headers arrive in
+/// milliseconds) while bounding a slow-header ("slowloris") client that dribbles
+/// headers to pin a connection open. Mirrors the `[control.limits]
+/// header_read_timeout` config default.
+pub const DEFAULT_HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Serve-loop tuning for the control-plane HTTP servers ([`serve_with`] /
+/// [`serve_router_with`] and their TLS siblings).
+///
+/// Carries the **header-read timeout**: the SEC-14 request-concurrency + rate caps
+/// engage only *after* a request's headers are parsed, so they bound in-flight
+/// requests but **not** a half-open, slow-header connection that never completes its
+/// header block (slowloris). The header-read timeout closes that hole in-process
+/// ([ADR-W028](../../docs/decisions/ADR-W028.md) F-A). `None` leaves it unbounded
+/// (front the plane with a reverse proxy that enforces one instead).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ServeOptions {
+    /// Maximum time to read a request's full header block before the connection is
+    /// dropped. `None` = unbounded (no in-process slowloris guard).
+    pub header_read_timeout: Option<std::time::Duration>,
+}
+
+impl Default for ServeOptions {
+    fn default() -> Self {
+        Self {
+            header_read_timeout: Some(DEFAULT_HEADER_READ_TIMEOUT),
+        }
+    }
+}
+
+impl ServeOptions {
+    /// Set the header-read timeout (`None` disables it), chainable from
+    /// [`ServeOptions::default`].
+    #[must_use]
+    pub fn with_header_read_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.header_read_timeout = timeout;
+        self
+    }
+}
+
 /// Serve the control-plane [`router`] on an already-bound
 /// [`tokio::net::TcpListener`], shutting down gracefully when `shutdown` resolves.
 ///
@@ -332,6 +375,24 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     serve_router(listener, router(state), shutdown).await
+}
+
+/// Serve the control-plane [`router`] with explicit [`ServeOptions`] (the
+/// header-read timeout) — the [`serve`] variant that threads the SEC-14 slowloris
+/// guard from `[control.limits] header_read_timeout`.
+///
+/// # Errors
+/// Propagates any I/O error from the underlying accept loop.
+pub async fn serve_with<F>(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    options: ServeOptions,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_router_with(listener, router(state), options, shutdown).await
 }
 
 /// Serve an already-built [`axum::Router`] on an already-bound
@@ -373,6 +434,34 @@ where
     )
     .with_graceful_shutdown(shutdown)
     .await
+}
+
+/// Serve an already-built [`Router`] with explicit [`ServeOptions`], shutting down
+/// gracefully when `shutdown` resolves. [`serve_router`] is this with
+/// [`ServeOptions::default`].
+///
+/// The composition seam the CLI uses to thread the configured header-read timeout
+/// through the mounted app (control plane + per-output HLS routers). Same isolation
+/// contract as [`serve_router`] (invariant #10) and the same
+/// `into_make_service_with_connect_info` wiring (the SEC-14 per-IP guard).
+///
+/// # Errors
+/// Propagates any I/O error from the underlying accept loop.
+pub async fn serve_router_with<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    options: ServeOptions,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    // NOTE (#126 RED): the header-read timeout is not yet honoured — this delegates
+    // to the axum::serve path so the failing slowloris test compiles and fails on
+    // behaviour. GREEN replaces the body with the hand-rolled hyper serve loop that
+    // applies `options.header_read_timeout`.
+    let _ = &options;
+    serve_router(listener, app, shutdown).await
 }
 
 /// Loaded, ready-to-serve rustls TLS material for the control plane (TLS-0,
