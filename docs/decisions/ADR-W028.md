@@ -1,4 +1,4 @@
-# ADR-W028: Management-plane connection + rate caps (SEC-14 control-plane DoS floor)
+# ADR-W028: Management-plane request-concurrency + rate caps (SEC-14 control-plane DoS floor)
 
 - **Status:** Accepted
 - **Area:** Web/API stack · control-plane security (invariant #10 isolation)
@@ -11,12 +11,12 @@
 ## Context
 
 The management plane (`multiview-control`: axum REST + WebSocket + SSE) had **no
-connection or request-rate ceiling**. A single misbehaving client, a runaway script, or an
-unauthenticated brute-forcer hammering the auth path could saturate the control plane's
-Tokio workers and its SQLite/command-bus back-ends. This is a denial-of-service floor, not
-a perfect shield: the deployment target is a self-hosted appliance on a **trusted facility
-network**, so the threat model is a buggy/runaway client, credential brute-force, and a
-basic flood — not internet-scale DDoS.
+request-concurrency or request-rate ceiling**. A single misbehaving client, a runaway
+script, or an unauthenticated brute-forcer hammering the auth path could saturate the
+control plane's Tokio workers and its SQLite/command-bus back-ends. This is a
+denial-of-service floor, not a perfect shield: the deployment target is a self-hosted
+appliance on a **trusted facility network**, so the threat model is a buggy/runaway client,
+credential brute-force, and a basic flood — not internet-scale DDoS.
 
 The control plane is a **best-effort actor that must never back-pressure the engine**
 (invariant #10). Any cap we add therefore has to **shed** (reject) rather than **queue** —
@@ -28,8 +28,11 @@ Add three config-driven guards to the served router, all returning **RFC 9457
 `application/problem+json`** with a **`Retry-After`** header:
 
 1. **Concurrent-request cap → `503`.** A `tokio::sync::Semaphore`; each request
-   `try_acquire`s one permit held across the handler and released on response. Over the cap
-   the request is **shed** with `503` + `Retry-After` — never queued (invariant #10).
+   `try_acquire`s one permit held across the handler and released when the work completes
+   (the response body ends, or a claimed permit's detached WebSocket/SSE session closes).
+   Over the cap the request is **shed** with `503` + `Retry-After` — never queued
+   (invariant #10). This bounds in-flight requests and established connections, not
+   half-open slow-header connections (see Consequences).
 2. **Per-source-IP rate limit → `429`, pre-auth.** A token bucket keyed on the
    `ConnectInfo` peer IP, applied **outermost** so an abusive IP is shed before it consumes
    a concurrency permit. This is the brute-force guard on the auth path. If the peer IP is
@@ -64,9 +67,20 @@ they opt in; the binary installs the configured limits via `AppState::with_limit
 - A single client/IP/key can no longer wedge or monopolise the management plane; the auth
   path is brute-force-throttled. The caps are control-plane-only and **physically cannot
   back-pressure the engine** (they shed, never queue; hold no engine handle — invariant #10).
+- **Connection-level slow-header exhaustion (slowloris) is out of scope for this in-process
+  floor.** All three guards are axum middleware, so they engage only *after* hyper has parsed
+  a request's headers; a client that opens many TCP connections and dribbles partial headers
+  consumes sockets and hyper tasks without ever taking a concurrency permit. `axum::serve`
+  (0.8) does not expose hyper's `header_read_timeout`, so bounding the header-read phase means
+  hand-rolling the accept/serve/graceful-shutdown loop on `hyper_util`'s `conn::auto::Builder`
+  — tracked as a **follow-up**. On the appliance's trusted-network threat model this is
+  acceptable; deployments exposed to untrusted clients should front the plane with a reverse
+  proxy (nginx/HAProxy) enforcing a header/read timeout and a per-connection cap.
 - **Behind a reverse proxy**, the per-IP limit keys on the *proxy* IP (`ConnectInfo` is the
   direct peer). Trusting `X-Forwarded-For` is a limiter-bypass vector, so it is **not**
-  trusted by default; a trusted-proxy XFF option is a documented follow-up.
+  trusted by default; a trusted-proxy XFF option is a documented follow-up. The per-IP guard
+  also requires the router be served via `serve`/`serve_router` (which install `ConnectInfo`);
+  serving it through another make-service disables that guard (it fails open, and warns once).
 - **JWT / NMOS IS-10** requests are covered by the per-IP + concurrency caps but not the
   per-key limit (which targets the native API-key path, token shape `<key_id>.<secret>`).
 - No new dependency: the limiter is ~200 lines of well-understood algorithm, keeping the

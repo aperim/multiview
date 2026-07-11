@@ -1,11 +1,16 @@
-//! Management-plane connection + rate limits (SEC-14) — the control-plane `DoS`
-//! floor, as operator configuration.
+//! Management-plane request-concurrency + rate limits (SEC-14) — the control-plane
+//! `DoS` floor, as operator configuration.
 //!
 //! [`ManagementLimits`] is the `[control.limits]` config section: the
 //! concurrent-request cap and the per-IP (pre-auth) / per-API-key (post-auth)
 //! token-bucket rates the `multiview-control` middleware enforces. Absent ⇒ the
 //! secure defaults below (limits **on**). The runtime limiter lives in
 //! `multiview-control`; this crate only models + validates the knobs.
+//!
+//! These caps engage after a request's headers are parsed, so they bound in-flight
+//! requests and established connections — not half-open, slow-header connections
+//! (slowloris), which are out of scope for this in-process floor (front the plane
+//! with a reverse proxy for that; see [ADR-W028](../../../docs/decisions/ADR-W028.md)).
 
 use serde::{Deserialize, Serialize};
 
@@ -89,8 +94,8 @@ impl RateLimitConfig {
     }
 }
 
-/// The `[control.limits]` section: the management-plane connection + rate caps
-/// (SEC-14 control-plane `DoS` floor).
+/// The `[control.limits]` section: the management-plane request-concurrency + rate
+/// caps (SEC-14 control-plane `DoS` floor).
 ///
 /// Absent ⇒ the secure defaults (limits enabled). Every field defaults
 /// individually, so a partial section overrides only the knobs it names.
