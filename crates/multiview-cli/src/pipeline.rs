@@ -2034,6 +2034,23 @@ fn resolve_aes67_source(
             id: source.id.clone(),
             reason: format!("aes67 multicast `{group_str}` is not a valid group:port: {e}"),
         })?;
+    // The RX publishes into the canonical 48 kHz program-audio store and the
+    // shared ADR-T013 rebaser only rescales the RTP *timestamp* onto that index —
+    // it does NOT resample the PCM. A non-48 kHz wire clock would deliver a sample
+    // count per packet that disagrees with the rebased store cadence
+    // (overlaps/gaps/wrong pitch), so a non-48 kHz session is rejected fail-closed
+    // rather than silently mis-timed. (A resampling RX is a later slice.)
+    if session.clock_rate != AES67_STORE_RATE_HZ {
+        return Err(PipelineError::Ingest {
+            id: source.id.clone(),
+            reason: format!(
+                "aes67 session clock rate {} Hz is unsupported: only 48 kHz \
+                 ST 2110-30 sessions are supported (the RX publishes at the \
+                 canonical 48 kHz store rate and does not resample)",
+                session.clock_rate
+            ),
+        });
+    }
     Ok((session, group))
 }
 
