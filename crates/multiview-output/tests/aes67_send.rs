@@ -82,6 +82,57 @@ fn packet_duration_derives_the_send_cadence_from_the_media_clock() {
 }
 
 #[test]
+fn packet_deadlines_are_cumulative_and_never_drift_at_a_non_dividing_rate() {
+    // T1 (#153): the send loop must schedule each packet at an ABSOLUTE deadline
+    // derived from the cumulative packet index — packet n is due at
+    // start + n×frames_per_packet/sample_rate — NOT by repeating a single
+    // truncated `packet_duration`. At any rate `frames_per_packet` does not evenly
+    // divide, one truncated interval loses sub-nanosecond time PER packet and that
+    // error accumulates without bound over a 24/7 run, so the wire cadence drifts
+    // off the RTP media clock and the receiver buffer walks (inv #1/#3).
+    //
+    // 48 frames @ 44_100 Hz: 48e9 / 44_100 = 1_088_435.374… ns — a non-integer, so
+    // a repeated `packet_duration` (floor = 1_088_435 ns) drifts ~0.374 ns/packet.
+    let sender = Aes67Sender::new(2, PcmDepth::L16, 97, 1, 44_100, 48, 4_800).expect("48@44.1k");
+    let frames: u128 = 48;
+    let rate: u128 = 44_100;
+    let ns_per_s: u128 = 1_000_000_000;
+
+    // Packet 0 is due immediately (offset 0).
+    assert_eq!(
+        sender.packet_deadline_offset(0),
+        Duration::ZERO,
+        "the first packet is due at the send-loop start"
+    );
+
+    // The single truncated per-packet duration (what a repeated interval would use).
+    let truncated = sender.packet_duration().as_nanos();
+
+    // For growing n: the cumulative deadline is the EXACT floor (so its error stays
+    // < 1 ns of the ideal FOREVER), while the naive "n × truncated" repeated
+    // interval drifts away from it by an amount that GROWS with n.
+    let mut prev_drift: u128 = 0;
+    for &n in &[1_000u64, 1_000_000, 1_000_000_000] {
+        let exact = (u128::from(n) * frames * ns_per_s) / rate;
+        assert_eq!(
+            sender.packet_deadline_offset(n).as_nanos(),
+            exact,
+            "packet {n}'s cumulative deadline is the exact floor — no accumulated drift"
+        );
+        let naive = u128::from(n) * truncated;
+        // floor(n·R) ≥ n·floor(R), so this never underflows; it is the drift a
+        // repeated truncated interval accrues by packet n.
+        let drift = exact - naive;
+        assert!(
+            drift > prev_drift,
+            "repeated-truncation drift grows without bound (n={n}: exact={exact} \
+             naive={naive} drift={drift} ns) — the T1 defect the cumulative deadline fixes"
+        );
+        prev_drift = drift;
+    }
+}
+
+#[test]
 fn next_packet_into_reuses_the_buffer_with_no_per_packet_alloc() {
     // P2-F6 (rule 22): the continuous send path must not allocate per packet. The
     // reusable-buffer drain writes into one datagram buffer; after warm-up its
