@@ -115,3 +115,37 @@ async fn aes67_send_loopback_roundtrips_over_a_real_udp_socket() {
 
     serve.abort();
 }
+
+#[tokio::test]
+async fn udp_sender_threads_the_interface_index_to_v6_multicast_egress() {
+    // P2-F8: IPv6 multicast egress is interface-scoped (RFC 4291); the sender must
+    // select the egress interface (IPV6_MULTICAST_IF), not rely on the OS default,
+    // or a link/site-local AES67 flow cannot pick its interface. Proven exactly
+    // like the input F6/F9 — thread a BOGUS interface index through and observe the
+    // OS reject it; if the index were ignored (hardcoded 0), configuring egress
+    // would spuriously succeed.
+    use multiview_output::aes67::transport::MulticastInterface;
+
+    let loopback = Ipv6Addr::LOCALHOST;
+    let dest = SocketAddr::new(loopback.into(), 5004);
+
+    // Unspecified (OS default, index 0) configures cleanly on a v6 send socket.
+    let default_if = Aes67UdpSender::bind(SocketAddr::new(loopback.into(), 0), dest)
+        .await
+        .expect("bind tx")
+        .with_interface(MulticastInterface::Unspecified);
+    default_if
+        .configure_multicast_egress()
+        .expect("the unspecified egress interface configures on the OS default");
+
+    // A bogus interface index reaches the OS and fails the egress config.
+    let bogus = Aes67UdpSender::bind(SocketAddr::new(loopback.into(), 0), dest)
+        .await
+        .expect("bind tx")
+        .with_interface(MulticastInterface::Index(0xFFFF_FFF0));
+    assert!(
+        bogus.configure_multicast_egress().is_err(),
+        "a bogus egress interface index must reach the OS and fail (the index is \
+         plumbed to IPV6_MULTICAST_IF, not hardcoded 0) (P2-F8)"
+    );
+}
