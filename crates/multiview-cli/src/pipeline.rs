@@ -7602,33 +7602,45 @@ fn build_aes67_output(
 /// multicast `group:port` (#103).
 ///
 /// Uses **FNV-1a** (a small, fully-specified algorithm — mirroring the SAP
-/// [`stable_hash`](multiview_input::sap::stable_hash) approach, P2-F4) so the
-/// mapping is stable across toolchain versions, targets, and restarts: a receiver
-/// keyed on the SSRC keeps seeing one sender as the same stream across a rebuild.
-/// `DefaultHasher` (`SipHash`) is explicitly **not** a stable cross-version
-/// contract, so it must never back a wire identifier. The multicast group+port is
-/// folded in (not just the id) so two outputs that share an id but send to
-/// different destinations still get distinct SSRCs. Clamped away from `0` (an
-/// ambiguous-but-legal SSRC).
+/// [`stable_hash`](multiview_input::sap::stable_hash) approach, P2-F4) over a
+/// **stable byte encoding** of the address: the family tag + the raw IP octets +
+/// the big-endian port, NOT `SocketAddr`'s `Display` string (whose formatting —
+/// especially IPv6 zero-compression — is not a stable cross-version/-target byte
+/// form). So the mapping is stable across toolchain versions, targets, and
+/// restarts: a receiver keyed on the SSRC keeps seeing one sender as the same
+/// stream across a rebuild. `DefaultHasher` (`SipHash`) is explicitly **not** a
+/// stable cross-version contract, so it must never back a wire identifier. The
+/// multicast group+port is folded in (not just the id) so two outputs that share
+/// an id but send to different destinations still get distinct SSRCs. Clamped away
+/// from `0` (an ambiguous-but-legal SSRC).
 #[cfg(feature = "aes67")]
 fn aes67_ssrc_for(id: &str, dest: std::net::SocketAddr) -> u32 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = FNV_OFFSET;
-    for &byte in id.as_bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    // A separator so ("ab", "c…") and ("a", "bc…") cannot alias to one digest.
-    hash ^= u64::from(b'@');
-    hash = hash.wrapping_mul(FNV_PRIME);
-    for &byte in dest.to_string().as_bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
+    // id, then a separator so ("ab", …) and ("a", "b…") cannot alias to one digest.
+    let mut hash = fnv1a_absorb(FNV_OFFSET, id.as_bytes());
+    hash = fnv1a_absorb(hash, b"@");
+    // Address family tag + raw IP octets (the stable wire bytes) + big-endian port.
+    hash = match dest.ip() {
+        std::net::IpAddr::V4(v4) => fnv1a_absorb(fnv1a_absorb(hash, &[4]), &v4.octets()),
+        std::net::IpAddr::V6(v6) => fnv1a_absorb(fnv1a_absorb(hash, &[6]), &v6.octets()),
+    };
+    hash = fnv1a_absorb(hash, &dest.port().to_be_bytes());
     // Fold the 64-bit digest into 32 bits, then force non-zero.
     let folded = (hash ^ (hash >> 32)) & u64::from(u32::MAX);
     u32::try_from(folded).unwrap_or(1).max(1)
+}
+
+/// One FNV-1a absorb pass: XOR-then-multiply each byte into `hash` (the offset
+/// basis / running digest is supplied by the caller). Split out so the SSRC fold
+/// composes id + address-family + octets + port without repeating the loop.
+#[cfg(feature = "aes67")]
+fn fnv1a_absorb(mut hash: u64, bytes: &[u8]) -> u64 {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 /// Build one live NDI output sink (OUT-4b / NDI-L2): enforce the
