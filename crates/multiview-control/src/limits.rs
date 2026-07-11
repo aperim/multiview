@@ -214,12 +214,8 @@ impl<S: BuildHasher> RateLimiter<S> {
                 // a concurrent admit on the same cell can never be lost (the exact
                 // accounting a lock would give, without the lock).
                 let new_tat = base.saturating_add(self.increment_ns);
-                match cell.compare_exchange_weak(
-                    tat,
-                    new_tat,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
+                match cell.compare_exchange_weak(tat, new_tat, Ordering::Relaxed, Ordering::Relaxed)
+                {
                     Ok(_) => return Decision::Allowed,
                     // Another thread advanced this cell; re-read and retry.
                     Err(observed) => tat = observed,
@@ -1021,7 +1017,12 @@ mod middleware_tests {
         // First request: hold the response object (never drain its still-open body).
         let first = app
             .clone()
-            .oneshot(Request::builder().uri("/stream").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
@@ -1029,7 +1030,12 @@ mod middleware_tests {
         // A second request while the first body is still open: no permit → `503`.
         let second = app
             .clone()
-            .oneshot(Request::builder().uri("/stream").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -1045,7 +1051,12 @@ mod middleware_tests {
         // A fresh request now finds the freed permit.
         let third = app
             .clone()
-            .oneshot(Request::builder().uri("/stream").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(third.status(), StatusCode::OK);
@@ -1088,7 +1099,12 @@ mod middleware_tests {
         // First request: the handler claims the permit into a live detached task.
         let first = app
             .clone()
-            .oneshot(Request::builder().uri("/upgrade").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/upgrade")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
@@ -1097,7 +1113,12 @@ mod middleware_tests {
         // proving the claim outlives the response (the bug released it at return → 200).
         let second = app
             .clone()
-            .oneshot(Request::builder().uri("/upgrade").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/upgrade")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(

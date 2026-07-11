@@ -1419,7 +1419,11 @@ fn current_engine_snapshot(state: &AppState) -> (EngineStateSnapshot, u64) {
 /// blocks blocks only this client's task; the engine is never awaited.
 ///
 /// [`Role::Viewer`]: crate::auth::Role::Viewer
-pub async fn ws_handler(
+// `pub(crate)`, not `pub`: this handler is registered on the router within this
+// crate (`lib.rs`) and is never referenced across a crate boundary, so it need
+// not — and must not — widen the visibility of its internal `ConcurrencyPermitClaim`
+// extractor (a `pub(crate)` permit newtype) into the public API (private-interfaces).
+pub(crate) async fn ws_handler(
     // The auth gate is the FIRST extractor, so authentication is decided before
     // axum's `WebSocketUpgrade` extractor runs — an unauthenticated request is a
     // `401`/`403` `problem+json`, never pre-empted by the upgrade extractor's
