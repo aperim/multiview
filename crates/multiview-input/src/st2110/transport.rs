@@ -44,9 +44,9 @@
 //! [streaming-gotchas §5]: ../../../docs/research/streaming-gotchas.md
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
 
 use multiview_core::color::ColorInfo;
 use multiview_core::frame::FrameMeta;
@@ -158,26 +158,25 @@ impl RtpReceiver {
     /// by the gated live test.
     #[must_use]
     pub fn channel_bridge(mut self, capacity: usize) -> (ChannelPacketSource, ReceiveLoop) {
-        let (tx, source) = ChannelPacketSource::bounded(capacity);
+        let (sink, source) = ChannelPacketSource::bounded(capacity);
         let task = async move {
             loop {
+                // Stop as soon as the sync reader is gone — nothing to feed.
+                if sink.is_closed() {
+                    return;
+                }
                 let unit = match self.recv_rtp().await {
                     Ok(packet) => St2110Packet::from_rtp(&packet),
                     // A socket/parse error ends the loop; the supervisor
-                    // reconnects. The sender drops, signalling clean EOS to the
+                    // reconnects. Dropping the sink signals clean EOS to the
                     // sync side.
                     Err(_) => return,
                 };
-                // Drop-oldest on a full channel: never block the receive loop.
-                if tx.try_send(unit).is_err() {
-                    // Full or closed. If closed, the reader is gone — stop.
-                    if tx.is_closed() {
-                        return;
-                    }
-                    // Full: the bounded channel is at capacity; this newest unit
-                    // is dropped to preserve the bound (drop-oldest is realized
-                    // by the reader consuming the front; we never grow).
-                }
+                // Genuine drop-oldest on a full ring (ADR-0033 §7): the push
+                // never blocks and never grows — the freshest media is retained
+                // and a stalled reader can never back-pressure the wire
+                // (invariant #10).
+                sink.push(unit);
             }
         };
         (source, Box::pin(task))
@@ -407,46 +406,131 @@ impl core::fmt::Debug for DualPathPacketSource {
     }
 }
 
+/// Shared bounded-ring state behind the [`PacketSink`] producer half and the
+/// [`ChannelPacketSource`] consumer half.
+///
+/// A plain [`VecDeque`](std::collections::VecDeque) guarded by a `Mutex` held
+/// only for the O(1) push/pop — never across a socket call or an `.await` — so
+/// the *property* it provides is genuine bounded **drop-oldest**: a full ring
+/// sheds its oldest unit instead of growing, and neither half ever blocks the
+/// other (invariants #1 / #5 / #10). Mirrors the display-audio sink's
+/// `AudioFifo`.
+#[derive(Debug)]
+struct PacketRing {
+    queue: std::collections::VecDeque<St2110Packet>,
+    capacity: usize,
+    dropped: u64,
+    /// Set when the consuming [`ChannelPacketSource`] is dropped, so the
+    /// producing receive task learns the reader is gone and can stop.
+    consumer_gone: bool,
+}
+
+/// The producer half of the receive bridge, handed to the async receive task.
+///
+/// [`push`](PacketSink::push) is a bounded, genuine **drop-oldest** enqueue:
+/// on a full ring the *oldest* queued unit is evicted so the freshest media is
+/// retained (ADR-0033 §7). It never blocks and never grows, so a stalled reader
+/// can never back-pressure the receive task or the wire (invariant #10).
+/// Cloneable so the receive task can hold it while the sync source drains the
+/// other half.
+#[derive(Debug, Clone)]
+pub struct PacketSink {
+    ring: Arc<Mutex<PacketRing>>,
+}
+
+impl PacketSink {
+    /// Enqueue one unit, evicting the **oldest** queued unit first when the ring
+    /// is already at capacity (genuine drop-oldest — ADR-0033 §7). Never blocks;
+    /// the receive task is never back-pressured by a slow reader (invariant #10).
+    pub fn push(&self, unit: St2110Packet) {
+        let Ok(mut ring) = self.ring.lock() else {
+            // A poisoned lock means a holder panicked; drop the unit rather than
+            // propagate (the data plane holds last-good, never crashes).
+            return;
+        };
+        // RED scaffold (ADR-0033 §7 defect, replaced in the GREEN commit): a full
+        // ring drops the just-arrived NEWEST unit instead of the oldest.
+        if ring.queue.len() >= ring.capacity {
+            ring.dropped = ring.dropped.saturating_add(1);
+            return;
+        }
+        ring.queue.push_back(unit);
+    }
+
+    /// Whether the consuming [`ChannelPacketSource`] has been dropped (the reader
+    /// is gone, so the receive task should stop).
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.ring.lock().map_or(true, |ring| ring.consumer_gone)
+    }
+}
+
 /// A bounded, drop-oldest packet source fed by an async receive task.
 ///
 /// This is the seam the live (NIC-bound) [`RtpReceiver`] / [`DualPathReceiver`]
-/// path crosses into the sync [`St2110Producer`]: the async receive loop sends
-/// units down a **bounded** channel; this source `try_recv`s them. A stalled
-/// reader can never back-pressure the sender — the receive task drops the oldest
-/// queued unit when the channel is full (invariant #10). It never blocks the
-/// data plane: an empty channel yields `Ok(None)` (the producer re-polls next
-/// tick), and a closed sender (the receive task ended) yields clean
-/// end-of-stream.
+/// path crosses into the sync [`St2110Producer`]: the async receive loop pushes
+/// units into a **bounded ring** via a [`PacketSink`]; this source drains the
+/// front. A stalled reader can never back-pressure the sender — the sink drops
+/// the *oldest* queued unit when the ring is full (invariant #10). It never
+/// blocks the data plane: an empty ring yields `Ok(None)` (the producer re-polls
+/// next tick), and a dropped sink (the receive task ended) simply drains to
+/// empty and then yields `Ok(None)` (clean end-of-stream).
 #[derive(Debug)]
 pub struct ChannelPacketSource {
-    rx: mpsc::Receiver<St2110Packet>,
+    ring: Arc<Mutex<PacketRing>>,
 }
 
 impl ChannelPacketSource {
-    /// Build a bounded channel of `capacity` units, returning the sender (for the
-    /// async receive task) and the sync [`PacketSource`] half.
+    /// Build a bounded ring of `capacity` units, returning the [`PacketSink`]
+    /// producer half (for the async receive task) and the sync [`PacketSource`]
+    /// consumer half.
     ///
-    /// The receive task should `try_send` and, on a full channel, drop-oldest
-    /// (drain one then re-send) so a slow producer never stalls the receiver —
-    /// the channel is bounded and never grows (invariant #10 / #5).
+    /// The receive task calls [`PacketSink::push`], which on a full ring drops
+    /// the **oldest** unit so a slow reader never stalls the receiver — the ring
+    /// is bounded and never grows (invariant #10 / #5).
     #[must_use]
-    pub fn bounded(capacity: usize) -> (mpsc::Sender<St2110Packet>, Self) {
-        let (tx, rx) = mpsc::channel(capacity.max(1));
-        (tx, Self { rx })
+    pub fn bounded(capacity: usize) -> (PacketSink, Self) {
+        let ring = Arc::new(Mutex::new(PacketRing {
+            queue: std::collections::VecDeque::new(),
+            capacity: capacity.max(1),
+            dropped: 0,
+            consumer_gone: false,
+        }));
+        (
+            PacketSink {
+                ring: Arc::clone(&ring),
+            },
+            Self { ring },
+        )
+    }
+
+    /// The number of units dropped to drop-oldest overflow since construction
+    /// (telemetry / test observability).
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.ring.lock().map_or(0, |ring| ring.dropped)
+    }
+}
+
+impl Drop for ChannelPacketSource {
+    fn drop(&mut self) {
+        if let Ok(mut ring) = self.ring.lock() {
+            ring.consumer_gone = true;
+        }
     }
 }
 
 impl PacketSource for ChannelPacketSource {
     fn poll_packet(&mut self) -> Result<Option<St2110Packet>> {
-        match self.rx.try_recv() {
-            Ok(unit) => Ok(Some(unit)),
-            // Empty (nothing ready this tick — hold, never block, invariant #1)
-            // and Disconnected (the receive task ended — clean end-of-stream)
-            // both surface to the non-blocking producer as "no frame now".
-            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
-                Ok(None)
-            }
-        }
+        // Pop the oldest buffered unit. An empty ring (nothing ready this tick —
+        // hold, never block, invariant #1) and a dropped sink (the receive task
+        // ended — clean end-of-stream) both surface to the non-blocking producer
+        // as "no frame now".
+        Ok(self
+            .ring
+            .lock()
+            .ok()
+            .and_then(|mut ring| ring.queue.pop_front()))
     }
 }
 

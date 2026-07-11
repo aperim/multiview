@@ -218,13 +218,12 @@ fn dual_path_source_discards_the_duplicate_copy() {
 fn channel_bridge_is_bounded_and_drives_the_producer() {
     use multiview_input::st2110::transport::ChannelPacketSource;
 
-    // The bounded-channel bridge: the async receive task (here, a synchronous
-    // `try_send`) feeds units; the sync source `try_recv`s them. This is the seam
-    // the live NIC path crosses, exercised without a socket.
-    let (tx, source) = ChannelPacketSource::bounded(8);
+    // The bounded-ring bridge: the async receive task (here, a synchronous
+    // `push`) feeds units; the sync source drains them. This is the seam the
+    // live NIC path crosses, exercised without a socket.
+    let (sink, source) = ChannelPacketSource::bounded(8);
     for pkt in complete_frame(9000, 100) {
-        tx.try_send(pkt)
-            .expect("bounded channel has room for one frame");
+        sink.push(pkt);
     }
     let mut producer = St2110Producer::new(Box::new(source), geometry());
     let frame = producer
@@ -233,15 +232,24 @@ fn channel_bridge_is_bounded_and_drives_the_producer() {
         .expect("the bridged packets close one frame");
     assert_eq!(frame.pixels.len(), RASTER_BYTES);
 
-    // The channel is BOUNDED (invariant #10): once full, a further `try_send`
-    // fails fast rather than growing — a stalled reader can never back-pressure
-    // the receive task into unbounded memory.
-    let (tx2, _src2) = ChannelPacketSource::bounded(2);
-    assert!(tx2.try_send(line_packet(false, 1, 1, 0, 0)).is_ok());
-    assert!(tx2.try_send(line_packet(false, 1, 2, 1, 0)).is_ok());
+    // The ring is BOUNDED (invariant #10): pushing past capacity never grows —
+    // it sheds exactly one unit and records the drop, so a stalled reader can
+    // never back-pressure the receive task into unbounded memory. (The drop
+    // *policy* — oldest, not newest — is pinned by `st2110_channel_bridge.rs`.)
+    let (sink2, mut src2) = ChannelPacketSource::bounded(2);
+    sink2.push(line_packet(false, 1, 1, 0, 0));
+    sink2.push(line_packet(false, 1, 2, 1, 0));
+    sink2.push(line_packet(false, 1, 3, 2, 0));
+    assert_eq!(
+        src2.dropped(),
+        1,
+        "a full bounded ring sheds exactly one unit, never grows"
+    );
+    assert!(src2.poll_packet().expect("poll never faults").is_some());
+    assert!(src2.poll_packet().expect("poll never faults").is_some());
     assert!(
-        tx2.try_send(line_packet(false, 1, 3, 2, 0)).is_err(),
-        "a full bounded channel rejects the overflow instead of growing"
+        src2.poll_packet().expect("poll never faults").is_none(),
+        "only capacity-many units survive the bound"
     );
 }
 
