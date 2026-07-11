@@ -238,11 +238,31 @@ mod tests {
     }
 
     #[test]
-    fn default_build_omits_ndi_attribution_and_is_lgpl_clean() {
+    fn resolved_capabilities_report_the_compiled_build_profile() {
         let caps = resolve_system_capabilities(None);
-        assert!(caps.ndi_attribution.is_none());
+
+        // `effective_license` is the codec-linking BUILD-PROFILE licence (AGENTS.md §G /
+        // ADR-0012): linking x264/x265 via `gpl-codecs` makes the whole build GPL; the
+        // default FFmpeg-LGPL link is LGPL-clean. Gate the expectation on the profile THIS
+        // test binary is compiled with, so the compliance-sensitive combos are actually
+        // asserted here rather than silently skipped because CI only builds default
+        // features. (The exhaustive per-combo mapping is unit-tested in `multiview-control`
+        // via `BuildInfo::resolve(bool, bool, …)`; this asserts the compile-time cfg bridge
+        // selects the matching profile.)
+        #[cfg(feature = "gpl-codecs")]
+        assert_eq!(caps.build.effective_license, EffectiveLicense::Gpl);
+        #[cfg(not(feature = "gpl-codecs"))]
         assert_eq!(caps.build.effective_license, EffectiveLicense::LgplClean);
+
+        // No `nonfree` Cargo feature exists, so every shippable profile is redistributable.
         assert!(caps.build.redistributable);
+
+        // NDI attribution is mandatory iff the proprietary NDI SDK seam is linked (`ndi`),
+        // and is orthogonal to the codec licence.
+        #[cfg(feature = "ndi")]
+        assert!(caps.ndi_attribution.is_some());
+        #[cfg(not(feature = "ndi"))]
+        assert!(caps.ndi_attribution.is_none());
     }
 
     #[test]
