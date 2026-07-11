@@ -43,7 +43,7 @@
 //! [`IngestPump`]: crate::source::IngestPump
 //! [streaming-gotchas §5]: ../../../docs/research/streaming-gotchas.md
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use tokio::net::UdpSocket;
@@ -101,14 +101,40 @@ impl RtpReceiver {
     /// # Errors
     ///
     /// [`Error::Ingest`] if the membership cannot be joined.
-    pub fn join_multicast_v4(
-        &self,
-        group: std::net::Ipv4Addr,
-        interface: std::net::Ipv4Addr,
-    ) -> Result<()> {
+    pub fn join_multicast_v4(&self, group: Ipv4Addr, interface: Ipv4Addr) -> Result<()> {
         self.socket
             .join_multicast_v4(group, interface)
             .map_err(|e| Error::Ingest(format!("st2110 join {group}: {e}")))
+    }
+
+    /// Join an IPv6 multicast `group` on the interface with OS index `interface`
+    /// (`0` = the default multicast interface). The IPv6-first counterpart of
+    /// [`join_multicast_v4`](Self::join_multicast_v4) (ADR-0042).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Ingest`] if the membership cannot be joined.
+    pub fn join_multicast_v6(&self, group: Ipv6Addr, interface: u32) -> Result<()> {
+        self.socket
+            .join_multicast_v6(&group, interface)
+            .map_err(|e| Error::Ingest(format!("st2110 join {group}: {e}")))
+    }
+
+    /// Join a multicast `group` of either family on the default interface,
+    /// dispatching on the address family so the pipeline wiring makes one
+    /// family-agnostic `rx.join_multicast(group)` call regardless of an SDP
+    /// `c=IN IP4` / `c=IN IP6` line (ADR-0042 IPv6-first). IPv4 joins via
+    /// `INADDR_ANY`; IPv6 via interface index `0`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Ingest`] if the membership cannot be joined (e.g. the group's
+    /// family does not match the bound socket's family).
+    pub fn join_multicast(&self, group: IpAddr) -> Result<()> {
+        match group {
+            IpAddr::V4(v4) => self.join_multicast_v4(v4, Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(v6) => self.join_multicast_v6(v6, 0),
+        }
     }
 
     /// Receive one datagram and return the number of payload bytes read into the
