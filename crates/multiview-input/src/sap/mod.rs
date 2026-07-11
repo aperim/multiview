@@ -44,9 +44,11 @@
 
 pub mod groups;
 pub mod packet;
+pub mod session;
 
 pub use groups::{announce_group_for, receive_group_set, MediaGroup, SapGroup, SAP_PORT, SAP_TTL};
 pub use packet::{SapMessageType, SapPacket};
+pub use session::{DiscoveredSession, ObserveOutcome, SapSessionTable, SessionKey};
 
 /// Errors raised by the RFC 2974 SAP **packet codec**.
 ///

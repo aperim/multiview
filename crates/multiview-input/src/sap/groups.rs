@@ -22,7 +22,7 @@ pub const SAP_PORT: u16 = 9875;
 /// carried by the group **address**, not by this TTL.
 pub const SAP_TTL: u32 = 255;
 
-/// IPv4 **global**-scope SAP group (IANA SAPv1; the session range is
+/// IPv4 **global**-scope SAP group (IANA `SAPv1`; the session range is
 /// `224.2.128.0–224.2.255.255`). RFC 2974 §3.
 pub const SAP_V4_GLOBAL: Ipv4Addr = Ipv4Addr::new(224, 2, 127, 254);
 
@@ -91,7 +91,7 @@ impl SapGroup {
 /// The four IPv4 SAP groups (global, org-local, local, link-local) — of which
 /// `239.255.255.255` is the AES67 / Dante de-facto group — plus the IPv6
 /// site-local SAP group. Joining only the RFC global group silently misses every
-/// AES67 / Dante session (brief §4). The obsolete SAPv0 group `224.2.127.255` is
+/// AES67 / Dante session (brief §4). The obsolete `SAPv0` group `224.2.127.255` is
 /// deliberately **not** included.
 #[must_use]
 pub fn receive_group_set() -> Vec<IpAddr> {
@@ -125,7 +125,7 @@ fn sap_group_v4_for(media: Ipv4Addr) -> Ipv4Addr {
     let [a, b, c, _] = media.octets();
     if a == 239 && b == 255 {
         SAP_V4_LOCAL
-    } else if a == 239 && b >= 192 && b <= 195 {
+    } else if a == 239 && (192..=195).contains(&b) {
         // Organization-local scope 239.192.0.0/14 (second octet 192..=195).
         SAP_V4_ORG_LOCAL
     } else if a == 224 && b == 0 && c == 0 {
