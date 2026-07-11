@@ -760,6 +760,10 @@ impl FrameProducer for St2110Producer {
     /// (panel F1). Budget spent with no frame closed yields `Ok(None)`; the pump
     /// re-polls next tick.
     ///
+    /// The bound is on packet **count**, not wall-clock time: it assumes each
+    /// `poll_packet` + depacketize step is itself bounded, which the fixed
+    /// ST 2110-20 depacketize is (its work is bounded by the datagram size).
+    ///
     /// [`MAX_PACKETS_PER_POLL`]: St2110Producer::MAX_PACKETS_PER_POLL
     fn next_frame(&mut self) -> Result<Option<ProducedFrame>> {
         for _ in 0..Self::MAX_PACKETS_PER_POLL {
