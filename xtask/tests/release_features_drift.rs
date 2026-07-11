@@ -45,15 +45,29 @@ fn release_feature_specs_cover_every_shipped_combo() {
                 source.path
             )
         });
-        derived.extend(extract_shipped_specs(source.kind, &text));
+        let specs = extract_shipped_specs(source.kind, &text);
+        // Per-source non-vacuity (PR #255 re-review finding): a single global
+        // `!derived.is_empty()` check lets ONE source whose parser silently
+        // returns zero combos (its syntax drifted) pass, because the other
+        // sources keep `derived` non-empty — that source would then be
+        // silently unguarded. Assert each source independently yields at least
+        // one combo, so a broken extractor fails CI instead of rotting.
+        assert!(
+            !specs.is_empty(),
+            "shipping source `{}` yielded no feature combos — its extractor is \
+             broken or the file format changed; fix it in \
+             xtask/src/release_features.rs",
+            source.path
+        );
+        derived.extend(specs);
     }
 
-    // Sanity: the parsers must actually have found shipped combos — an empty
-    // `derived` would make the coverage check vacuously pass.
+    // Backstop: if SHIPPING_SOURCES itself were emptied, the per-source loop
+    // above never runs and the coverage check would vacuously pass.
     assert!(
         !derived.is_empty(),
-        "no shipped feature combos were parsed from the canonical sources — the \
-         extractors are broken or the source format changed"
+        "no shipped feature combos were parsed from the canonical sources — \
+         SHIPPING_SOURCES is empty or every extractor is broken"
     );
 
     let uncovered = uncovered_specs(&derived, RELEASE_FEATURE_SPECS);
