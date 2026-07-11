@@ -21,7 +21,7 @@
 
 mod support;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -2904,6 +2904,19 @@ async fn settle_initial(poll: &mut ManualPoll, state: &AppState) {
     );
 }
 
+/// Force `path`'s modification time to `mtime`, leaving its inode and length
+/// untouched (opens the existing file without truncating, then `set_modified`).
+/// Lets a test REMOVE the filesystem's mtime granularity as a variable and pin
+/// exactly which fingerprint axis (`config_watch.rs` uses len+mtime+inode)
+/// distinguishes an edit from the already-applied content.
+fn force_mtime(path: &Path, mtime: std::time::SystemTime) {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open the boot file to set its mtime");
+    file.set_modified(mtime).expect("set the boot file mtime");
+}
+
 /// DETERMINISTIC equivalent of `revert_after_a_file_watch_apply_returns_to_loaded`'s
 /// apply gate: an external boot-file edit hot-applies through the watcher, driven
 /// by manual ticks with ZERO wall-clock waits. Proves the manual-poll seam
@@ -2964,6 +2977,84 @@ async fn manual_poll_drives_an_external_edit_apply_deterministically() {
         "the edit rides the live machinery (UpsertSource), got {drained:?}"
     );
 
+    watch.stop();
+}
+
+/// Regression (task #7): the post-promote external-edit apply must NOT depend
+/// on the filesystem's mtime granularity. The watcher detects a change by a
+/// `len + mtime + inode` fingerprint and short-circuits without reading content
+/// when it matches the already-applied one (`config_watch.rs`). A same-length
+/// in-place `std::fs::write` rewrite (same inode, same length) landing within
+/// one mtime tick of the promote's own adopted write yields an IDENTICAL
+/// fingerprint (measured ~293/300 same-length in-place rewrites alias on this
+/// tmpfs), so the edit is silently missed and `applied_count` stays 0 — the
+/// original flake.
+///
+/// This test REMOVES mtime as a variable — it forces the edit's mtime equal to
+/// the adopted file's — so ONLY the inode can distinguish the edit, and proves
+/// it still hot-applies. A real external edit (an atomic temp+rename via
+/// [`external_edit`]) lands on a FRESH inode, distinct from the still-linked
+/// adopted one by construction, so the fingerprint always differs. An in-place
+/// rewrite here aliases and fails deterministically.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_edit_after_promote_applies_regardless_of_mtime_granularity() {
+    let mut r = rig(BOOT_DOC);
+    let (options, mut poll) = WatchOptions::default()
+        .with_poll_interval(TEST_POLL)
+        .with_manual_poll();
+    let watch = spawn_watch(
+        r.boot_path.clone(),
+        r.config.clone(),
+        r.state.clone(),
+        options,
+    );
+    settle_initial(&mut poll, &r.state).await;
+
+    // Promote: the watcher adopts (not applies) its own write.
+    recolor_in_a(&r, "#c0c0c0").await;
+    let _ = r.commands.try_drain();
+    let resp = send(
+        &r.router,
+        post_idem("/api/v1/config/promote", OPERATOR_TOKEN, None),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    drive_polls(&mut poll, 4).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        0,
+        "the promote itself must not count as a file-watch apply"
+    );
+
+    // The fingerprint the watcher now holds as `applied` (the promote-adopted
+    // boot file).
+    let adopted_mtime = std::fs::metadata(&r.boot_path)
+        .expect("stat the adopted boot file")
+        .modified()
+        .expect("adopted boot file mtime");
+
+    // A genuine external edit: a same-width colour swap, in place (same inode,
+    // same length) — the original flaky write path.
+    let promoted = std::fs::read_to_string(&r.boot_path).expect("read the promoted file");
+    let edited = promoted.replace("#c0c0c0", "#101418");
+    std::fs::write(&r.boot_path, &edited).expect("external edit");
+    // Remove mtime as a discriminator — force the worst case the coarse fs
+    // granularity produces by accident, so ONLY the inode can tell the edit
+    // apart from the adopted content.
+    force_mtime(&r.boot_path, adopted_mtime);
+
+    drive_polls(&mut poll, 2).await;
+    assert_eq!(
+        r.state.config_watch.snapshot().applied_count,
+        1,
+        "a real external edit after a promote must hot-apply even when its \
+         fingerprint mtime matches the adopted write (task #7)"
+    );
+    assert_eq!(
+        stored_color(&r.state).as_deref(),
+        Some("#101418"),
+        "the store mirrors the applied external edit"
+    );
     watch.stop();
 }
 
