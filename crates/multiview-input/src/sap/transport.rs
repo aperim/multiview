@@ -170,23 +170,31 @@ impl SapListener {
         Ok(())
     }
 
-    /// Fold one already-received datagram (`bytes`) into the table **iff** the
-    /// rate limiter admits it at `now`; returns whether it entered the expensive
-    /// parse+fold path.
+    /// Fold one already-received datagram (`bytes`) into the table; returns whether
+    /// it entered the expensive fold path (parsed **and** rate-admitted).
     ///
-    /// The rate check runs **before** the O(n) RCU clone + publish, so a
-    /// spoofed-origin flood is dropped here (after only the cheap `recv`) rather
-    /// than forcing that expensive work per datagram and starving the shared
-    /// control-plane runtime (panel F4, inv #10). An admitted datagram that is
-    /// malformed or rejected by the parser is skipped, never faulted (rule 26:
-    /// bad inputs are the purpose).
+    /// The datagram is **parsed first** — a cheap, bounded structural check
+    /// (version / length / non-zero hash, plus a size-capped `C=1` inflate): a
+    /// malformed datagram is rejected here **without** spending rate budget, so a
+    /// malformed flood cannot drain the shared fixed-window bucket and starve
+    /// legitimate SAP (panel S3). The rate limiter then gates only the **expensive**
+    /// O(n) RCU clone + publish, dropping a valid-but-flooding announce cheaply
+    /// rather than forcing that work per datagram and starving the shared
+    /// control-plane runtime (panel F4, inv #10). A malformed datagram is skipped,
+    /// never faulted (rule 26: bad inputs are the purpose).
     fn fold_datagram(&self, bytes: &[u8], now: Duration, limiter: &mut SapRateLimiter) -> bool {
+        // Parse BEFORE the rate gate: a malformed datagram fails here (cheap,
+        // bounded) and consumes no budget, so a malformed flood can't starve legit
+        // announces out of the shared bucket (panel S3).
+        let Ok(pkt) = SapPacket::parse(bytes) else {
+            return false;
+        };
+        // Only a structurally-valid announcement spends budget; the limiter bounds
+        // the expensive O(n) RCU fold, not the cheap parse (panel F4, inv #10).
         if !limiter.allow(now) {
             return false;
         }
-        if let Ok(pkt) = SapPacket::parse(bytes) {
-            self.table.observe(&pkt, now);
-        }
+        self.table.observe(&pkt, now);
         true
     }
 
