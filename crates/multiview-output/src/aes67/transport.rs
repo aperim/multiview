@@ -29,11 +29,52 @@ use crate::error::{Error, Result};
 
 use super::sender::Aes67Sender;
 
+/// Which network interface to send IPv6 multicast on (`IPV6_MULTICAST_IF`).
+///
+/// IPv6 multicast is **interface-scoped** (RFC 4291 scope-id): the OS index `0`
+/// ("unspecified" — let the kernel pick) is not portable and commonly fails for
+/// **link-local** (`ff02::/16`) / **site-local** (`ff05::/16`) AES67 groups, which
+/// must name a concrete interface. A deployment supplies the intended interface
+/// (from config or the SDP scope), so TX egress is not silently pinned to index 0
+/// (panel F8). IPv4 egress uses the multicast TTL.
+///
+/// This mirrors `multiview_input::st2110::transport::MulticastInterface`; the input
+/// and output crates are intentionally decoupled (neither depends on the other),
+/// so the small type is defined in each rather than shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum MulticastInterface {
+    /// Let the OS pick the default multicast interface (IPv6 index `0`).
+    /// Portable for a global-scope group on a single-homed host; NOT reliable for
+    /// link/site-local groups or a multi-homed host.
+    #[default]
+    Unspecified,
+    /// A specific IPv6 interface by its OS index / scope-id (resolved from an
+    /// interface name or supplied by config). Required for link/site-local groups
+    /// and to pin egress on a multi-homed host.
+    Index(u32),
+}
+
+impl MulticastInterface {
+    /// The IPv6 interface index this selection passes to `IPV6_MULTICAST_IF`: `0`
+    /// for [`Unspecified`](Self::Unspecified), else the explicit index.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        match self {
+            MulticastInterface::Unspecified => 0,
+            MulticastInterface::Index(index) => index,
+        }
+    }
+}
+
 /// A bound UDP send socket for one AES67 / ST 2110-30 flow.
 #[derive(Debug)]
 pub struct Aes67UdpSender {
     socket: UdpSocket,
     dest: SocketAddr,
+    /// The IPv6 multicast egress interface (panel F8); unspecified (OS default)
+    /// unless set via [`with_interface`](Self::with_interface).
+    interface: MulticastInterface,
 }
 
 impl Aes67UdpSender {
@@ -47,13 +88,58 @@ impl Aes67UdpSender {
         let socket = UdpSocket::bind(local)
             .await
             .map_err(|e| Error::Output(format!("aes67 bind {local}: {e}")))?;
-        Ok(Self { socket, dest })
+        Ok(Self {
+            socket,
+            dest,
+            interface: MulticastInterface::Unspecified,
+        })
     }
 
     /// The destination this sender targets.
     #[must_use]
     pub const fn dest(&self) -> SocketAddr {
         self.dest
+    }
+
+    /// Set the IPv6 multicast **egress** interface for a real deployment (default
+    /// [`MulticastInterface::Unspecified`] → the OS default). Applied by
+    /// [`configure_multicast_egress`](Self::configure_multicast_egress).
+    #[must_use]
+    pub fn with_interface(mut self, interface: MulticastInterface) -> Self {
+        self.interface = interface;
+        self
+    }
+
+    /// Select the IPv6 multicast egress interface (`IPV6_MULTICAST_IF`) and set
+    /// hop-limit 255 (`IPV6_MULTICAST_HOPS`; ADR-0033 §5 / ADR-0041 §7) on the send
+    /// socket. Call once before serving on a scoped-multicast IPv6 dest; family-
+    /// wise a no-op on a v4 socket (whose multicast TTL is set via
+    /// [`set_multicast_ttl_v4`](Self::set_multicast_ttl_v4)).
+    ///
+    /// The egress interface index comes from config or the SDP scope and is wired
+    /// by the pipeline (#103); until then it defaults to the OS default rather than
+    /// a hardcoded `0`. **Live validation on a real IPv6 multicast network is
+    /// hardware-gated** (rule 26).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Output`] if the local address cannot be read or the OS rejects the
+    /// egress interface / hop-limit (e.g. a nonexistent interface index).
+    pub fn configure_multicast_egress(&self) -> Result<()> {
+        let local = self
+            .socket
+            .local_addr()
+            .map_err(|e| Error::Output(format!("aes67 local_addr: {e}")))?;
+        if local.is_ipv6() {
+            let sock = socket2::SockRef::from(&self.socket);
+            sock.set_multicast_if_v6(self.interface.index())
+                .map_err(|e| Error::Output(format!("aes67 set multicast egress if v6: {e}")))?;
+            // AES67 / ST 2110-30 use hop-limit 255 (scope is carried by the group
+            // address, not the hop-limit).
+            sock.set_multicast_hops_v6(255)
+                .map_err(|e| Error::Output(format!("aes67 set multicast hops v6: {e}")))?;
+        }
+        Ok(())
     }
 
     /// Set the IPv4 multicast TTL for a real multicast deployment (ADR-0033 §5 /

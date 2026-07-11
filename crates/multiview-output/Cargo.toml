@@ -39,6 +39,14 @@ tokio = { workspace = true, features = ["fs", "io-util"] }
 # unauthenticated HLS delivery surface (`hls::http`).
 tokio-util = { workspace = true }
 
+# IPv6 multicast egress interface + hop-limit selection (IPV6_MULTICAST_IF /
+# IPV6_MULTICAST_HOPS) for the AES67 UDP send loop — tokio's UdpSocket does not
+# expose these setsockopts, so we reach them through a `SockRef` over the bound
+# socket (panel F8). Pulled in ONLY by the `aes67` feature (the send transport);
+# `MIT OR Apache-2.0`, already in the workspace lock (a tokio transitive), no FFI
+# here — the crate stays `unsafe_code = forbid`.
+socket2 = { version = "0.6", optional = true }
+
 # The HLS delivery origin (`hls::http`, ADR-0032 §6): an axum router serving
 # playlists/segments/init with the documented header contract (Content-Type per
 # extension, Cache-Control tiers, Origin-reflecting CORS, Accept-Ranges/206).
@@ -154,7 +162,7 @@ multiview-input = { workspace = true }
 # round-trip against `multiview-input`'s decoder as a dev-dep). No native deps,
 # no FFI, no SDK, no GPL escalation — the crate stays `forbid(unsafe_code)` and
 # the default build stays LGPL-clean and native-dep-free.
-"aes67" = ["tokio/net", "tokio/time", "tokio/macros", "tokio/rt"]
+"aes67" = ["tokio/net", "tokio/time", "tokio/macros", "tokio/rt", "dep:socket2"]
 # Wires the real encode-once-mux-many output (FileSink / SegmentSink) onto
 # multiview-ffmpeg's safe Encoder/Muxer wrappers. Pulls multiview-ffmpeg with its own
 # `ffmpeg` feature; never escalates to GPL (LGPL software codecs only).

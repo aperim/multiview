@@ -3426,6 +3426,7 @@ dependencies = [
  "multiview-telemetry",
  "proptest",
  "rustix",
+ "socket2 0.6.4",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
