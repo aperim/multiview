@@ -373,3 +373,203 @@ where
     .with_graceful_shutdown(shutdown)
     .await
 }
+
+/// Loaded, ready-to-serve rustls TLS material for the control plane (TLS-0,
+/// [ADR-W029](../../docs/decisions/ADR-W029.md)).
+///
+/// An opaque wrapper over the `axum-server` rustls configuration so callers
+/// (`multiview-cli`) hold it across the bind→serve seam without naming
+/// `axum-server`. Built by [`load_tls_material`] and consumed by [`serve_tls`] /
+/// [`serve_router_tls`].
+#[cfg(feature = "tls")]
+#[derive(Clone)]
+pub struct RustlsMaterial(axum_server::tls_rustls::RustlsConfig);
+
+/// Failure loading operator TLS material for [`serve_tls`] (TLS-0, ADR-W029).
+///
+/// Surfaced at **startup** (a bad certificate aborts the run with a clear
+/// message) rather than as a panic on the serve path (safety §3).
+#[cfg(feature = "tls")]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TlsSetupError {
+    /// Reading or PEM-parsing the certificate chain file failed.
+    #[error("reading/parsing the TLS certificate {path:?}: {source}")]
+    Certificate {
+        /// The certificate path that failed.
+        path: std::path::PathBuf,
+        /// The underlying PEM/IO error.
+        source: rustls_pki_types::pem::Error,
+    },
+    /// The certificate file contained no PEM certificates.
+    #[error("the TLS certificate file {0:?} contained no certificates")]
+    NoCertificates(std::path::PathBuf),
+    /// Reading or PEM-parsing the private-key file failed (including no key
+    /// present).
+    #[error("reading/parsing the TLS private key {path:?}: {source}")]
+    PrivateKey {
+        /// The private-key path that failed.
+        path: std::path::PathBuf,
+        /// The underlying PEM/IO error.
+        source: rustls_pki_types::pem::Error,
+    },
+    /// rustls rejected the certificate + key (e.g. the key does not match the
+    /// leaf certificate, or the chain is malformed).
+    #[error("building the rustls server configuration: {0}")]
+    Rustls(#[from] rustls::Error),
+    /// The configured `mode` is not one this build can serve (e.g. a future ACME
+    /// mode fed to a static-certificate-only build). Fail-closed forward-compat —
+    /// a `[control.tls]` config always parses in a newer schema, so an older
+    /// binary rejects a mode it does not implement rather than misbehaving.
+    #[error(
+        "the configured control.tls mode is not supported by this build (TLS-0 serves \
+             `mode = \"static\"` only)"
+    )]
+    UnsupportedMode,
+}
+
+/// Load the operator's [`TlsConfig`](multiview_config::TlsConfig) into
+/// ready-to-serve [`RustlsMaterial`] (TLS-0, ADR-W029).
+///
+/// Reads the PEM certificate chain (leaf first) + private key and builds a rustls
+/// [`ServerConfig`](rustls::ServerConfig) with an **explicit `aws-lc-rs` crypto
+/// provider** — never the process-default provider, which panics when both
+/// `ring` and `aws-lc-rs` are linked into one binary (a `full` build). This is
+/// the exact idiom the cast driver uses (`devices/cast/net.rs`).
+///
+/// Deliberately a **separate, synchronous step from serving**: the binary calls
+/// it at startup and fails loudly on a missing/garbage certificate, rather than
+/// discovering the fault inside the spawned server task.
+///
+/// # Errors
+/// [`TlsSetupError`] if a PEM file cannot be read/parsed, contains no
+/// certificate / no private key, or the cert+key is rejected by rustls.
+#[cfg(feature = "tls")]
+pub fn load_tls_material(
+    tls: &multiview_config::TlsConfig,
+) -> Result<RustlsMaterial, TlsSetupError> {
+    use rustls_pki_types::pem::PemObject;
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+
+    // `TlsConfig` is `#[non_exhaustive]` cross-crate; TLS-0 has only `static`. A
+    // future `mode` (e.g. ACME) fed to this build is rejected, never panicked.
+    // Rebind the `cert_file`/`key_file` paths to short locals for the loader body.
+    let multiview_config::TlsConfig::Static {
+        cert_file: cert,
+        key_file: key,
+    } = tls
+    else {
+        return Err(TlsSetupError::UnsupportedMode);
+    };
+
+    // Certificate chain (leaf first, then intermediates).
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
+        .map_err(|source| TlsSetupError::Certificate {
+            path: cert.clone(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| TlsSetupError::Certificate {
+            path: cert.clone(),
+            source,
+        })?;
+    if certs.is_empty() {
+        return Err(TlsSetupError::NoCertificates(cert.clone()));
+    }
+
+    // Private key (PKCS#8 / PKCS#1 / SEC1). `from_pem_file` errors if none found.
+    let key_der =
+        PrivateKeyDer::from_pem_file(key).map_err(|source| TlsSetupError::PrivateKey {
+            path: key.clone(),
+            source,
+        })?;
+
+    // Build the ServerConfig with an EXPLICIT aws-lc-rs provider (never the
+    // process default — see the function doc). Propagate any rustls error
+    // (`#[from]`), never panic on the control-plane path (safety §3).
+    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(certs, key_der)?;
+
+    Ok(RustlsMaterial(
+        axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(config)),
+    ))
+}
+
+/// The graceful-drain ceiling for [`serve_router_tls`]: after shutdown is
+/// signalled, in-flight connections get up to this long to finish before they are
+/// force-closed. Normal teardown (the engine's broadcast close ends the WS/SSE
+/// sessions) completes well within it; this only bounds a genuinely stuck TLS
+/// client so a restart cannot hang forever.
+#[cfg(feature = "tls")]
+const TLS_GRACEFUL_SHUTDOWN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Serve an already-built [`axum::Router`] over **TLS** on an already-bound
+/// [`tokio::net::TcpListener`], terminating rustls with `material` and shutting
+/// down gracefully when `shutdown` resolves (TLS-0, ADR-W029).
+///
+/// The TLS sibling of [`serve_router`]: identical isolation contract (invariant
+/// #10) and — critically — the **same
+/// `into_make_service_with_connect_info::<SocketAddr>`** wiring, so the SEC-14
+/// pre-auth per-IP rate limit ([`crate::limits`]) keeps its peer-IP key under
+/// HTTPS exactly as over plain HTTP. Losing that make-service would silently
+/// disable the per-IP guard under TLS. `axum-server` drives the accept + TLS
+/// handshake; a background task bridges the caller's `shutdown` future to the
+/// [`axum_server::Handle`] graceful drain.
+///
+/// # Errors
+/// Propagates any I/O error from the `axum-server` accept/serve loop (including a
+/// failure to adopt the listener).
+#[cfg(feature = "tls")]
+pub async fn serve_router_tls<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    material: RustlsMaterial,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    // `axum-server` accepts a std listener (it re-registers with tokio). A tokio
+    // listener converts without rebinding — `into_std` yields the same bound,
+    // non-blocking socket axum-server expects, so the dual-stack `[::]` bind the
+    // caller chose is preserved.
+    let std_listener = listener.into_std()?;
+
+    // Bridge the caller's `shutdown` future to axum-server's graceful drain:
+    // when it resolves, stop accepting and drain in-flight connections within the
+    // grace ceiling, mirroring `serve_router`'s `with_graceful_shutdown`.
+    let handle = axum_server::Handle::new();
+    let drain = handle.clone();
+    tokio::spawn(async move {
+        shutdown.await;
+        drain.graceful_shutdown(Some(TLS_GRACEFUL_SHUTDOWN));
+    });
+
+    axum_server::from_tcp_rustls(std_listener, material.0)?
+        .handle(handle)
+        // The SEC-14 connect-info wiring — MUST match `serve_router` so the
+        // per-IP guard keeps keying on the peer `SocketAddr` under TLS.
+        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .await
+}
+
+/// Serve the control-plane [`router`] over **TLS** on an already-bound listener
+/// (TLS-0, ADR-W029): the TLS sibling of [`serve`].
+///
+/// # Errors
+/// Propagates any I/O error from the `axum-server` accept/serve loop.
+#[cfg(feature = "tls")]
+pub async fn serve_tls<F>(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    material: RustlsMaterial,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_router_tls(listener, router(state), material, shutdown).await
+}

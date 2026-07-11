@@ -298,6 +298,14 @@ cuda = ["multiview-hal/cuda"]
 # build can serve the full management UI: `run --features web,overlay`.
 web = ["multiview-control/embed-web"]
 
+# Control-plane TLS termination (TLS-0, ADR-W029): serve the management plane
+# (API + docs + web UI) over HTTPS with an operator-managed cert/key when the
+# config carries `[control.tls]`. Forwards `multiview-control/tls` (axum-server +
+# rustls, aws-lc-rs — already in the lock via the cast/reqwest backends). OFF by
+# default (no native TLS dep in the baseline build); included in the shipped
+# umbrella presets below so the deploy images can terminate HTTPS without a proxy.
+tls = ["multiview-control/tls"]
+
 # mDNS/DNS-SD managed-device discovery (DEV-A5 / ADR-M008 §6 / ADR-0041): install
 # the real `mdns-sd`-backed browser so `POST /api/v1/discovery/devices/scan`
 # browses the LAN for Cast / NDI / (configured) zowietek-control services. The
@@ -499,6 +507,9 @@ gpl-codecs = [
 # NVIDIA: CUDA decode/encode + CUDA compositor fast path + FFmpeg demux/mux,
 # wgpu baseline compositor. (cuda + ffmpeg + wgpu.)
 nvidia = [
+    # Control-plane HTTPS (TLS-0, ADR-W029): the shipped image can terminate TLS
+    # on the management listener with an operator cert (`[control.tls]`).
+    "tls",
     # The cli's OWN `ffmpeg` feature — gates the run/pipeline path itself; without
     # it `multiview run` has no ingest/encode pipeline at all (GPU-6b: the presets
     # forwarded the dependency crates' ffmpeg but not the cli's, so a `--features
@@ -559,6 +570,9 @@ nvidia = [
 # Apple Silicon / Intel macOS: VideoToolbox codecs + Metal compositor + FFmpeg.
 # (videotoolbox + metal + ffmpeg.)
 apple = [
+    # Control-plane HTTPS (TLS-0, ADR-W029): the shipped image can terminate TLS
+    # on the management listener with an operator cert (`[control.tls]`).
+    "tls",
     "ffmpeg",
     # Native overlay / caption burn-in (see the `nvidia` preset note). GPU-free,
     # LGPL-clean pure-Rust text engine; without it the shipped Apple deploy image
@@ -584,6 +598,9 @@ apple = [
 # Linux VAAPI/QSV: VAAPI + QuickSync codecs + wgpu compositor + FFmpeg.
 # (vaapi + qsv + ffmpeg + wgpu.)
 linux-vaapi = [
+    # Control-plane HTTPS (TLS-0, ADR-W029): the shipped image can terminate TLS
+    # on the management listener with an operator cert (`[control.tls]`).
+    "tls",
     "ffmpeg",
     # Native overlay / caption burn-in (see the `nvidia` preset note). GPU-free,
     # LGPL-clean pure-Rust text engine; without it the shipped VAAPI deploy image
@@ -650,6 +667,9 @@ full = [
     # named explicitly so the everything-non-GPL build keeps it on a refactor.
     # LGPL-clean (librist BSD-2-Clause).
     "rist",
+    # Control-plane HTTPS (TLS-0, ADR-W029): comes transitively via `nvidia` +
+    # `linux-vaapi`; named explicitly so `full` keeps it on a preset refactor.
+    "tls",
 ]
 
 [lints]

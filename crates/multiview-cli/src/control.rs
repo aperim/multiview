@@ -380,7 +380,34 @@ where
             multiview_output::hls::http::hls_router(mount.dir),
         );
     }
-    let handle = tokio::spawn(multiview_control::serve_router(listener, app, shutdown));
+    // TLS-0 (ADR-W029): serve over rustls when `[control.tls]` is configured, else
+    // plain HTTP. The TLS material is loaded HERE (startup), so a missing/garbage
+    // certificate aborts `multiview run` loudly rather than failing inside the
+    // spawned server task; a `[control.tls]` config in a build WITHOUT the `tls`
+    // feature is a hard startup error — never a silent plain-HTTP downgrade.
+    let handle = match config
+        .control
+        .as_ref()
+        .and_then(|control| control.tls.as_ref())
+    {
+        None => tokio::spawn(multiview_control::serve_router(listener, app, shutdown)),
+        #[cfg(feature = "tls")]
+        Some(tls) => {
+            let material = multiview_control::load_tls_material(tls)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            tokio::spawn(multiview_control::serve_router_tls(
+                listener, app, material, shutdown,
+            ))
+        }
+        #[cfg(not(feature = "tls"))]
+        Some(_tls) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "control.tls is configured but this `multiview` build lacks the `tls` feature; \
+                 rebuild with --features tls (or a preset), or remove [control.tls]",
+            ));
+        }
+    };
     Ok((addr, handle, state))
 }
 

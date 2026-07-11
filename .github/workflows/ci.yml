@@ -226,6 +226,23 @@ jobs:
             feature: is07-mqtt
           - crate: multiview-control
             feature: nmos
+          # multiview-control + multiview-cli off-by-default `tls` feature (TLS-0,
+          # ADR-W029): static-certificate rustls termination on the control
+          # listener. The default `lint`/`test` jobs build NEITHER the
+          # `serve_router_tls`/`load_tls_material` path NOR the `tls_serve` e2e
+          # (it is `required-features = ["tls"]`), so without these legs the TLS
+          # code would ship CI-untested. Pure Rust at the CI level — rustls +
+          # aws-lc-rs is a CPU C build (cc + cmake, already built on this bare
+          # runner by the `multiview-webrtc`/`native` leg below), no hardware/NIC.
+          # The `multiview-control` leg's `cargo test --features tls` runs the
+          # `tls_serve` end-to-end (rcgen self-signed → real reqwest HTTPS →
+          # per-IP 200-then-429), pinning the SEC-14 ConnectInfo preservation
+          # under TLS (ADR-W028). The `multiview-cli` leg gates the serve-vs-
+          # serve_tls selection + the feature-off `[control.tls]` rejection path.
+          - crate: multiview-control
+            feature: tls
+          - crate: multiview-cli
+            feature: tls
           # multiview-hal off-by-default features
           - crate: multiview-hal
             feature: i915-pmu
