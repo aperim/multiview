@@ -46,11 +46,15 @@ pub mod announce;
 pub mod groups;
 pub mod packet;
 pub mod session;
+#[cfg(feature = "st2110")]
+pub mod transport;
 
 pub use announce::{announcement, deletion, stable_hash, AnnounceSchedule, MIN_ANNOUNCE_INTERVAL};
 pub use groups::{announce_group_for, receive_group_set, MediaGroup, SapGroup, SAP_PORT, SAP_TTL};
 pub use packet::{SapMessageType, SapPacket};
 pub use session::{DiscoveredSession, ObserveOutcome, SapSessionTable, SessionKey};
+#[cfg(feature = "st2110")]
+pub use transport::{AnnouncedSession, SapAnnouncer, SapListener};
 
 /// Errors raised by the RFC 2974 SAP **packet codec**.
 ///
