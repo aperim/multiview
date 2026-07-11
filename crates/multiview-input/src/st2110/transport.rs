@@ -675,6 +675,18 @@ pub struct St2110Producer {
 }
 
 impl St2110Producer {
+    /// The maximum number of source packets a single [`next_frame`](FrameProducer::next_frame)
+    /// call pulls before yielding `Ok(None)`.
+    ///
+    /// A sample must be **bounded work**: a malformed-packet flood must never
+    /// make one poll loop until the source drains, which would delay the output
+    /// clock (invariant #1). After this many pulled units without a closed
+    /// frame the call returns `Ok(None)` and the pump re-polls next tick, so a
+    /// flood is drained at up to this rate per tick rather than all at once.
+    /// Sized well above any real per-tick packet count (a raster is a handful of
+    /// SRD units per frame, one frame per tick).
+    pub const MAX_PACKETS_PER_POLL: usize = 64;
+
     /// Build a producer over an application-supplied [`PacketSource`],
     /// reassembling into `geometry`.
     #[must_use]
@@ -735,12 +747,26 @@ impl core::fmt::Debug for St2110Producer {
 }
 
 impl FrameProducer for St2110Producer {
+    /// Pull source packets until a complete raster emerges, the source signals
+    /// clean end-of-stream, or the per-poll budget is spent. Each pull is
+    /// non-blocking; an empty pull ends this call (the pump re-polls on the next
+    /// tick) rather than spinning.
+    ///
+    /// **Bounded work (inv #1):** at most [`MAX_PACKETS_PER_POLL`] units are
+    /// pulled per call. A malformed-packet flood — units that depacketize but
+    /// never close a frame — is drained at that rate per tick rather than all at
+    /// once, so one call (whether it runs on the output-sample side or a shared
+    /// ingest thread) can never do unbounded work and delay the output clock
+    /// (panel F1). Budget spent with no frame closed yields `Ok(None)`; the pump
+    /// re-polls next tick.
+    ///
+    /// The bound is on packet **count**, not wall-clock time: it assumes each
+    /// `poll_packet` + depacketize step is itself bounded, which the fixed
+    /// ST 2110-20 depacketize is (its work is bounded by the datagram size).
+    ///
+    /// [`MAX_PACKETS_PER_POLL`]: St2110Producer::MAX_PACKETS_PER_POLL
     fn next_frame(&mut self) -> Result<Option<ProducedFrame>> {
-        // Pull from the source until a complete raster emerges or the source
-        // signals clean end-of-stream. Each pull is non-blocking; an empty pull
-        // ends this call (the pump re-polls on the next tick) rather than
-        // spinning.
-        loop {
+        for _ in 0..Self::MAX_PACKETS_PER_POLL {
             let Some(packet) = self.source.poll_packet()? else {
                 return Ok(None);
             };
@@ -748,6 +774,10 @@ impl FrameProducer for St2110Producer {
                 return Ok(Some(frame));
             }
         }
+        // Budget spent on units that never closed a frame this tick: yield and
+        // re-poll next tick so a malformed flood can never make one sample
+        // unbounded work (inv #1).
+        Ok(None)
     }
 
     fn timebase(&self) -> Rational {

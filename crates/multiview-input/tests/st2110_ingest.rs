@@ -397,6 +397,246 @@ fn paced_st2110_32bit_wrap_crossing_soak() {
     );
 }
 
+/// A [`PacketSource`] that yields `remaining` malformed units — each a counted
+/// poll — then drains to `None`, so a test can prove [`St2110Producer::next_frame`]
+/// never drains an unbounded flood in one call (F1 / inv #1).
+struct FloodSource {
+    polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    remaining: usize,
+}
+
+impl PacketSource for FloodSource {
+    fn poll_packet(&mut self) -> Result<Option<St2110Packet>, multiview_input::Error> {
+        self.polls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        self.remaining -= 1;
+        // A 1-byte payload cannot even hold the 2-byte extended-sequence word, so
+        // `V20Payload::parse` fails and the producer drops the unit without ever
+        // closing a frame — the malformed-flood shape that drove the unbounded loop.
+        Ok(Some(St2110Packet {
+            marker: false,
+            timestamp: 0,
+            sequence: 1,
+            ssrc: 0,
+            payload_type: 96,
+            payload: vec![0u8; 1],
+        }))
+    }
+}
+
+/// A malformed-packet flood must not make one `next_frame()` call loop until the
+/// source empties (a single sample doing unbounded work would delay the output
+/// clock — panel F1, inv #1). One tick over the flood produces no frame AND pulls
+/// EXACTLY the per-poll budget (64) before yielding `Ok(None)`; the unbounded loop
+/// this guards against would instead pull all 5001 units of a 5000-packet flood.
+#[test]
+fn next_frame_is_bounded_work_under_a_malformed_flood() {
+    use std::sync::atomic::Ordering;
+
+    // A flood far larger than the per-poll budget: a correct sample drains only a
+    // budget's worth per tick, the old unbounded loop drained all 5000 (F1 / inv #1).
+    const FLOOD: usize = 5_000;
+
+    let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source = FloodSource {
+        polls: std::sync::Arc::clone(&polls),
+        remaining: FLOOD,
+    };
+    let mut producer = St2110Producer::new(Box::new(source), geometry());
+
+    // One tick over a malformed flood: no frame is assembled, and the call must
+    // NOT drain the whole flood — a sample is bounded work so it can never delay
+    // the output clock (inv #1). The pump re-polls next tick; malformed datagrams
+    // are drained at the budget rate, not all at once.
+    let out = producer
+        .next_frame()
+        .expect("a malformed flood is dropped, never faulted");
+    assert!(out.is_none(), "no frame closes in the flood this tick");
+    let polled = polls.load(Ordering::Relaxed);
+    // Pin the budget at 64 (the AES67 F1 analogue): a deliberate change is a
+    // reviewable event that must update this test too (rule 19), and the
+    // exact-count assertion below reads against a named contract.
+    assert_eq!(
+        St2110Producer::MAX_PACKETS_PER_POLL,
+        64,
+        "next_frame's per-poll budget is pinned at 64",
+    );
+    // EXACT bound (mutation-killing): every flooded unit depacketizes-then-drops
+    // (none closes a frame), so a correct loop spends its FULL budget and then
+    // yields `Ok(None)` — it pulls exactly 64, no more. The old `<= 1000` ceiling
+    // let a regression to any budget <= 1000 (or a mutant that widened the loop
+    // bound) pass silently; `== budget` fails on it.
+    assert_eq!(
+        polled,
+        St2110Producer::MAX_PACKETS_PER_POLL,
+        "next_frame must pull exactly its 64-packet budget then yield under a \
+         {FLOOD}-unit malformed flood (inv #1), not {polled}",
+    );
+}
+
+/// A scripted [`PacketSource`] that COUNTS every poll, so a test can assert the
+/// exact number of units a `next_frame` call pulled. Yields the queued packets in
+/// order, then `None`.
+struct CountingSource {
+    packets: std::collections::VecDeque<St2110Packet>,
+    polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl CountingSource {
+    fn new(
+        packets: Vec<St2110Packet>,
+        polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        Self {
+            packets: packets.into(),
+            polls,
+        }
+    }
+}
+
+impl PacketSource for CountingSource {
+    fn poll_packet(&mut self) -> Result<Option<St2110Packet>, multiview_input::Error> {
+        self.polls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(self.packets.pop_front())
+    }
+}
+
+/// Build the `height` line packets of one complete frame at `timestamp` (the last
+/// marker-flagged), line `L` filled with the distinct byte `0x10 + L` so a
+/// reassembled raster can be checked for dropped/duplicated payload. The
+/// height-parameterized companion to [`complete_frame`], for a raster that spans
+/// the per-poll budget.
+fn complete_frame_of_height(height: u16, timestamp: u32, first_seq: u16) -> Vec<St2110Packet> {
+    (0..height)
+        .map(|line| {
+            let marker = line == height - 1;
+            let seq = first_seq.wrapping_add(line);
+            let fill = 0x10u8.wrapping_add(u8::try_from(line).expect("line fits u8"));
+            line_packet(marker, timestamp, seq, line, fill)
+        })
+        .collect()
+}
+
+/// Positive control (F1): the per-poll budget must not break normal operation. A
+/// complete, well-formed frame still assembles into exactly one produced frame,
+/// pulling only its own handful of line packets — far inside the budget. Guards
+/// against an over-aggressive bound (a zero budget would starve every valid input).
+#[test]
+fn next_frame_completes_a_valid_frame_within_budget() {
+    use std::sync::atomic::Ordering;
+
+    let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source = CountingSource::new(complete_frame(9000, 100), std::sync::Arc::clone(&polls));
+    let mut producer = St2110Producer::new(Box::new(source), geometry());
+
+    let frame = producer
+        .next_frame()
+        .expect("a valid frame pulls without faulting")
+        .expect("the marker packet closes exactly one frame within budget");
+    assert_eq!(
+        frame.pixels.len(),
+        RASTER_BYTES,
+        "the produced frame carries the full reassembled raster, intact under budgeting",
+    );
+    assert_eq!(
+        frame.raw_pts,
+        Some(9000),
+        "the RTP timestamp survives budgeting unchanged",
+    );
+
+    let polled = polls.load(Ordering::Relaxed);
+    assert!(
+        polled <= St2110Producer::MAX_PACKETS_PER_POLL,
+        "a valid frame completes within the per-poll budget (budgeting must not \
+         break normal operation): polled {polled}",
+    );
+    let frame_lines = usize::try_from(H).expect("H fits usize");
+    assert_eq!(
+        polled, frame_lines,
+        "exactly the frame's {frame_lines} line packets are pulled — the marker \
+         closes it with no over-polling",
+    );
+}
+
+/// Boundary-split (F1 / inv #1): a frame whose completing (marker) unit is the
+/// 65th packet straddles the 64-poll budget. The first 64 line packets are pulled
+/// by one `next_frame` call that yields `Ok(None)` (budget spent, no close); the
+/// 65th — the marker — is pulled by the NEXT call, which returns the COMPLETE
+/// raster. Proves the in-progress assembler state is PRESERVED across the
+/// budget-exhaustion yield (not reset), with no line dropped or duplicated.
+#[test]
+fn next_frame_preserves_partial_state_across_the_budget_yield() {
+    use std::sync::atomic::Ordering;
+
+    // A raster exactly one line taller than the budget: its 65 SRD units (marker
+    // on the last) span the 64-poll boundary.
+    const TALL_H: u16 = 65;
+    let geometry = RasterGeometry::new(W, u32::from(TALL_H), BYTES_PER_LINE)
+        .expect("a 65-line toy raster is valid");
+    let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source = CountingSource::new(
+        complete_frame_of_height(TALL_H, 9000, 100),
+        std::sync::Arc::clone(&polls),
+    );
+    let mut producer = St2110Producer::new(Box::new(source), geometry);
+
+    // Call 1: the first 64 lines fill the whole budget and none is the marker, so
+    // the call yields `Ok(None)` after EXACTLY 64 pulls — the partial frame (lines
+    // 0..=63) stays held in the assembler.
+    let first = producer
+        .next_frame()
+        .expect("call 1 pulls without faulting");
+    assert!(
+        first.is_none(),
+        "no marker in the first 64 units, so the budget-spent call yields Ok(None)",
+    );
+    assert_eq!(
+        polls.load(Ordering::Relaxed),
+        St2110Producer::MAX_PACKETS_PER_POLL,
+        "call 1 spends exactly the 64-packet budget before yielding",
+    );
+
+    // Call 2: pulls just the 65th unit (the marker), which closes the frame using
+    // the preserved lines 0..=63 plus line 64 — the COMPLETE 65-line raster.
+    let frame = producer
+        .next_frame()
+        .expect("call 2 pulls without faulting")
+        .expect("the 65th unit (marker) closes the frame");
+    assert_eq!(
+        polls.load(Ordering::Relaxed),
+        St2110Producer::MAX_PACKETS_PER_POLL + 1,
+        "call 2 pulls exactly ONE more unit — partial state was preserved, not re-fetched",
+    );
+
+    // The reassembled raster is intact: every line landed at its own row (keyed by
+    // the SRD line number), none dropped or duplicated across the yield.
+    let expected: Vec<u8> = (0..TALL_H)
+        .flat_map(|line| {
+            let fill = 0x10u8.wrapping_add(u8::try_from(line).expect("line fits u8"));
+            std::iter::repeat_n(fill, BYTES_PER_LINE)
+        })
+        .collect();
+    assert_eq!(
+        frame.pixels.len(),
+        usize::from(TALL_H) * BYTES_PER_LINE,
+        "the closed raster spans all 65 lines",
+    );
+    assert_eq!(
+        frame.pixels, expected,
+        "each line's payload is at its own row — nothing dropped or duplicated \
+         across the budget-yield",
+    );
+    assert_eq!(
+        frame.raw_pts,
+        Some(9000),
+        "the frame's RTP timestamp is carried through the split",
+    );
+}
+
 /// Live ST 2110 UDP receive path — **gated, requires a real ST 2110 network +
 /// PTP-disciplined NIC**.
 ///
