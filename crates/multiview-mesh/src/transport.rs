@@ -93,8 +93,10 @@ pub(crate) fn reassemble_txt<'a>(
 /// future payload growth, and makes that failure observable at the source.
 ///
 /// # Errors
-/// [`MeshError::AnnounceTooLarge`] if `wire` would split into more than
-/// `MAX_CHUNKS` chunks.
+/// * [`MeshError::AnnounceTooLarge`] if `wire` would split into more than
+///   `MAX_CHUNKS` chunks.
+/// * [`MeshError::AnnounceNotText`] if a chunk is not valid UTF-8 (so it cannot
+///   ride an mDNS TXT string property) — refused, never silently dropped.
 #[cfg(any(feature = "mdns", test))]
 pub(crate) fn chunk_txt(wire: &[u8]) -> Result<Vec<(String, String)>, MeshError> {
     let chunks: Vec<&[u8]> = wire.chunks(CHUNK_BYTES).collect();
@@ -107,13 +109,16 @@ pub(crate) fn chunk_txt(wire: &[u8]) -> Result<Vec<(String, String)>, MeshError>
     let mut props: Vec<(String, String)> = Vec::with_capacity(chunks.len() + 1);
     props.push((CHUNK_COUNT_KEY.to_owned(), chunks.len().to_string()));
     for (index, chunk) in chunks.iter().enumerate() {
-        // The chunk is ASCII JSON bytes, so `from_utf8` cannot fail here; the
-        // guardrails forbid `unwrap`, so an (impossible) non-UTF8 chunk is skipped
-        // rather than panicking. The `c` count still reflects every chunk, matching
-        // the receive-side reassembly.
-        if let Ok(text) = std::str::from_utf8(chunk) {
-            props.push((format!("p{index}"), text.to_owned()));
-        }
+        // A chunk must be valid UTF-8 to ride an mDNS TXT string property. Today's
+        // announce is pure-ASCII JSON so this never fails, but the contract is
+        // TOTAL: a non-UTF-8 chunk is refused with a typed error, never skipped.
+        // Skipping it would push only `chunks.len() - 1` `p` properties under a
+        // `c` count of `chunks.len()`, and every peer's `reassemble_txt` would then
+        // miss `p{index}` and silently drop the whole announce (the exact failure
+        // this guard prevents).
+        let text = std::str::from_utf8(chunk)
+            .map_err(|_| MeshError::AnnounceNotText { chunk_index: index })?;
+        props.push((format!("p{index}"), text.to_owned()));
     }
     Ok(props)
 }
@@ -135,6 +140,9 @@ pub trait MeshTransport {
     ///   `MAX_CHUNKS` TXT chunks (larger than the receive-side bound accepts) —
     ///   refused at the source so the over-cap announce is observable, never
     ///   silently dropped by every peer.
+    /// * [`MeshError::AnnounceNotText`] if a chunk of `wire` is not valid UTF-8
+    ///   (so it cannot ride a TXT string value) — refused at the source rather
+    ///   than emitted with a missing chunk that every peer would silently drop.
     /// * [`MeshError::Transport`] if the transport could not publish (e.g. the
     ///   socket is down). Best-effort — the caller logs + retries on the next tick.
     fn announce(&self, wire: &[u8]) -> Result<(), MeshError>;

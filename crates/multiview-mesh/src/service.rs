@@ -27,12 +27,17 @@
 //!
 //! The signed payload (JSON, all-ASCII) can exceed a single 255-byte mDNS TXT
 //! string, so it is split into byte-chunks across numbered properties
-//! (`c` = chunk count, `p0`, `p1`, …) and reassembled on receipt. JSON of the
-//! payload is pure ASCII (hex/integer arrays + field names), so byte-chunking
-//! never splits a multi-byte char. The publish side refuses to emit more than
-//! `MAX_CHUNKS` chunks — a payload that large would be silently dropped by every
-//! peer's receive-side reassembly bound, so the announce fails it observably with
-//! a typed [`MeshError::AnnounceTooLarge`] instead.
+//! (`c` = chunk count, `p0`, `p1`, …) and reassembled on receipt. The publish
+//! side (`chunk_txt`) enforces a TOTAL contract before it emits anything: it
+//! refuses more than `MAX_CHUNKS` chunks with a typed
+//! [`MeshError::AnnounceTooLarge`], and refuses any chunk that is not valid UTF-8
+//! with [`MeshError::AnnounceNotText`] rather than skip it. Either fault would
+//! otherwise emit an announce every peer's receive-side reassembly bound silently
+//! drops (an over-cap `c`, or a `c` count larger than the `p{index}` properties
+//! present), so it is failed observably at the source. Today's payload is
+//! pure-ASCII JSON (integer/hex arrays, kebab-case enums, RFC3339 instants — no
+//! free-form string field), so neither fault fires in practice; the guards are
+//! defence in depth against future payload growth.
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -108,9 +113,10 @@ impl MdnsService {
 
 impl MeshTransport for MdnsService {
     fn announce(&self, wire: &[u8]) -> Result<(), MeshError> {
-        // Refuse (with a typed error the announce loop logs) a payload that would
-        // exceed the receive-side chunk cap, rather than emit an announce every
-        // peer would silently drop — see `chunk_txt`.
+        // Encode the wire into the numbered TXT properties, refusing (with a typed
+        // error the announce loop logs) any payload `chunk_txt` cannot emit — an
+        // over-cap chunk count, or a chunk that is not valid UTF-8 — rather than
+        // emit an announce every peer's receive-side bound would silently drop.
         let props = chunk_txt(wire)?;
         let info = ServiceInfo::new(
             SERVICE_TYPE,
