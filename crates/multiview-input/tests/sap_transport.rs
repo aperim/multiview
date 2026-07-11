@@ -247,3 +247,33 @@ async fn purge_runs_on_its_own_timer_even_when_no_datagrams_arrive() {
          datagram ever received (P2-F3)"
     );
 }
+
+#[tokio::test]
+async fn announcer_threads_the_interface_index_to_v6_multicast_egress() {
+    // P2-F9: IPv6 multicast egress is interface-scoped (RFC 4291): a scoped /
+    // link-local announce dest needs an explicit egress interface (IPV6_MULTICAST_IF),
+    // not the OS default. Proven exactly like the F6 RX join — thread a BOGUS
+    // interface index through and observe the OS reject it; if the index were
+    // ignored (hardcoded 0), configuring egress would spuriously succeed.
+    use multiview_input::st2110::transport::MulticastInterface;
+
+    // Unspecified (OS default, index 0) configures cleanly on a v6 socket.
+    let default = SapAnnouncer::bind(loopback6(0))
+        .await
+        .unwrap()
+        .with_interface(MulticastInterface::Unspecified);
+    default
+        .configure_multicast_egress()
+        .expect("the unspecified egress interface configures on the OS default");
+
+    // A bogus interface index reaches the OS and fails the egress config.
+    let bogus = SapAnnouncer::bind(loopback6(0))
+        .await
+        .unwrap()
+        .with_interface(MulticastInterface::Index(0xFFFF_FFF0));
+    assert!(
+        bogus.configure_multicast_egress().is_err(),
+        "a bogus egress interface index must reach the OS and fail (the index is \
+         plumbed to IPV6_MULTICAST_IF, not hardcoded 0) (P2-F9)"
+    );
+}
