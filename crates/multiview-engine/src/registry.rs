@@ -7,8 +7,10 @@
 //! **source identity → (one ingest/decode actor + one shared [`TileStore`])**: the
 //! first consumer to reference a canonical [`SourceKey`] spins the decode; every
 //! later consumer of the same key shares an [`Arc`] clone of the same store. The
-//! decode targets the **supremum** requested resolution across all consumers
-//! (ADR-0030 §3) — each consumer scales at composite.
+//! decode is sized at the **first** acquire's requested resolution; a later, larger
+//! acquire grows the recorded per-axis **supremum** *metadata* (ADR-0030 §3) but
+//! does **not** resize a live store. Callers that need the supremum acquire it up
+//! front (MP-2's `Pipeline::build` does); each consumer scales at composite.
 //!
 //! ## Isolation (inv #1 / inv #10)
 //!
@@ -45,8 +47,10 @@ use multiview_framestore::TileStore;
 
 /// A requested decode resolution, in pixels.
 ///
-/// The registry records the per-axis **supremum** of all consumers' requests so
-/// the shared decode is sized to satisfy the largest (ADR-0030 §3).
+/// The registry records the per-axis **supremum** of all consumers' requests as
+/// *metadata* (ADR-0030 §3). The live decode is sized at the **first** acquire (see
+/// [`SourceRegistry::acquire`]); the supremum tracks the largest request but does
+/// **not** resize a live store.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RequestedSize {
     /// Requested width in pixels.
@@ -241,12 +245,15 @@ impl<T> SourceRegistry<T> {
     /// Acquire a ref-counted handle to the source identified by `key`, decoding
     /// once and sharing thereafter.
     ///
-    /// On the **first** reference to `key` the `factory` runs (given the initial
-    /// supremum `requested` size) to create the shared store + decode actor. Every
-    /// later reference to the same key skips the factory, bumps the refcount, grows
-    /// the recorded supremum to the per-axis max, and returns an [`Arc`] clone of
-    /// the same store. `factory` runs under the registry lock and MUST be
-    /// non-blocking (spawn-and-return) and MUST NOT re-enter the registry.
+    /// On the **first** reference to `key` the `factory` runs (given the `requested`
+    /// size) to create the shared store + decode actor — this **fixes the decode
+    /// size**. Every later reference to the same key skips the factory, bumps the
+    /// refcount, grows the recorded supremum *metadata* to the per-axis max, and
+    /// returns an [`Arc`] clone of the same store. Growing the supremum does **not**
+    /// resize the live store/decode: the metadata tracks the max requested (for a
+    /// future decode-ownership hoist), and callers that need the supremum acquire it
+    /// up front. `factory` runs under the registry lock and MUST be non-blocking
+    /// (spawn-and-return) and MUST NOT re-enter the registry.
     ///
     /// # Errors
     ///
@@ -367,7 +374,10 @@ impl<T> SourceRegistry<T> {
     }
 
     /// The per-axis supremum requested size recorded for `key`, or [`None`] if no
-    /// such source is registered. The shared decode targets this size (ADR-0030 §3).
+    /// such source is registered. This is *metadata*: the per-axis max of all
+    /// requests, **not** necessarily the live decode size — the decode is sized at
+    /// the first [`acquire`](SourceRegistry::acquire), and a later, larger acquire
+    /// grows this supremum without resizing the store (ADR-0030 §3).
     #[must_use]
     pub fn requested_supremum(&self, key: &SourceKey) -> Option<RequestedSize> {
         lock(&self.entries).get(key).map(|entry| entry.supremum)
@@ -566,7 +576,7 @@ mod tests {
     use super::{RequestedSize, SourceActor, SourceInit, SourceKey, SourceRegistry};
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use multiview_framestore::{NoSignalPolicy, TileStore, TileThresholds};
@@ -763,5 +773,70 @@ mod tests {
 
         gate.store(false, Ordering::Release); // let the detached straggler exit
         let _ = joiner.join();
+    }
+
+    #[test]
+    fn later_larger_acquire_grows_supremum_metadata_but_not_decode_size() {
+        // F2 characterization (rule 27): the store/decode is sized at the FIRST
+        // acquire; a later, larger acquire grows the recorded supremum METADATA but
+        // does NOT re-run the factory or resize the live store. (MP-2's
+        // `Pipeline::build` acquires the full per-axis supremum up front, so this
+        // fixed-size behaviour is correct in real usage — this test pins the
+        // contract the module/`acquire`/ADR-0030 §3 docs now state.)
+        let reg = SourceRegistry::<u64>::new();
+        let key = SourceKey::from_canonical("rtsp://cam-fixed-size");
+        let factory_sizes: Arc<Mutex<Vec<RequestedSize>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let first = {
+            let sizes = factory_sizes.clone();
+            move |req: RequestedSize| {
+                sizes.lock().expect("poisoned").push(req);
+                Ok::<_, Infallible>(SourceInit::new(
+                    store("cam-fixed"),
+                    TestActor {
+                        completed: Arc::new(AtomicUsize::new(0)),
+                        gate: None,
+                    },
+                ))
+            }
+        };
+        let h1 = reg.acquire(key.clone(), size(640, 360), first).unwrap();
+
+        // A later, BIGGER acquire must NOT re-run the factory (decode-once) and must
+        // not resize the store — it only grows the supremum metadata.
+        let h2 = reg
+            .acquire(
+                key.clone(),
+                size(1920, 1080),
+                |_r| -> Result<SourceInit<u64>, Infallible> {
+                    panic!(
+                        "a later acquire must NOT re-run the factory \
+                         (decode size is fixed at first acquire)"
+                    )
+                },
+            )
+            .unwrap();
+
+        // The recorded supremum METADATA grew to the larger per-axis request...
+        assert_eq!(
+            reg.requested_supremum(&key),
+            Some(size(1920, 1080)),
+            "the recorded supremum metadata grows to the per-axis max"
+        );
+        // ...but the factory ran exactly ONCE, with the FIRST (smaller) size: the
+        // live decode is sized at first acquire, not resized by the larger acquire.
+        assert_eq!(
+            *factory_sizes.lock().expect("poisoned"),
+            vec![size(640, 360)],
+            "the decode is sized at the first acquire only; the larger acquire does not resize it"
+        );
+        // Both references share the ONE store — never rebuilt at the larger size.
+        assert!(
+            Arc::ptr_eq(h1.store(), h2.store()),
+            "the store is shared, never rebuilt at the larger supremum"
+        );
+
+        drop((h1, h2));
+        reg.shutdown();
     }
 }
