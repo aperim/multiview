@@ -1891,15 +1891,19 @@ mod tests {
 
         // Pre-acquire key B; timing its handle drop (a release of a DIFFERENT key).
         let hb = reg
-            .acquire(SourceKey::from_canonical("rtsp://key-b"), size(1, 1), |_r| {
-                Ok::<_, Infallible>(SourceInit::new(
-                    store("b"),
-                    TestActor {
-                        completed: Arc::new(AtomicUsize::new(0)),
-                        gate: None,
-                    },
-                ))
-            })
+            .acquire(
+                SourceKey::from_canonical("rtsp://key-b"),
+                size(1, 1),
+                |_r| {
+                    Ok::<_, Infallible>(SourceInit::new(
+                        store("b"),
+                        TestActor {
+                            completed: Arc::new(AtomicUsize::new(0)),
+                            gate: None,
+                        },
+                    ))
+                },
+            )
             .unwrap();
 
         // First-acquire of key A whose factory blocks until we release it.
