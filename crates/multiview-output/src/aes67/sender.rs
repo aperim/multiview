@@ -66,6 +66,11 @@ pub const MIN_SAMPLE_RATE_HZ: u32 = 8_000;
 /// used to derive a nonsensical send cadence.
 pub const MAX_SAMPLE_RATE_HZ: u32 = 192_000;
 
+/// The maximum RTP payload type an [`Aes67Sender`] accepts: the field is 7 bits
+/// (RFC 3550), so a value above this would be truncated with `& 0x7f` and diverge
+/// from the advertised SDP. AES67 uses dynamic types in `96..=127`.
+pub const MAX_RTP_PAYLOAD_TYPE: u8 = 127;
+
 /// Why an [`Aes67Sender`] could not be constructed from the requested
 /// configuration (panel F5): a bound was exceeded, so construction fails closed
 /// rather than clamping, over-allocating, or emitting an oversized packet.
@@ -92,6 +97,16 @@ pub enum Aes67ConfigError {
         min: u32,
         /// The enforced maximum ([`MAX_SAMPLE_RATE_HZ`]).
         max: u32,
+    },
+    /// The RTP payload type was above [`MAX_RTP_PAYLOAD_TYPE`] (the 7-bit field
+    /// maximum). A larger value would be silently truncated with `& 0x7f` and the
+    /// transmitted PT would diverge from the advertised SDP, so it is rejected.
+    #[error("aes67 sender payload type {got} exceeds the 7-bit maximum {max}")]
+    PayloadType {
+        /// The requested payload type.
+        got: u8,
+        /// The enforced maximum ([`MAX_RTP_PAYLOAD_TYPE`]).
+        max: u8,
     },
     /// `frames_per_packet` (the ptime in sample groups) was `0` or above
     /// [`MAX_FRAMES_PER_PACKET`].
@@ -256,6 +271,12 @@ impl Aes67Sender {
                 got: sample_rate,
                 min: MIN_SAMPLE_RATE_HZ,
                 max: MAX_SAMPLE_RATE_HZ,
+            });
+        }
+        if payload_type > MAX_RTP_PAYLOAD_TYPE {
+            return Err(Aes67ConfigError::PayloadType {
+                got: payload_type,
+                max: MAX_RTP_PAYLOAD_TYPE,
             });
         }
         if !(1..=MAX_FRAMES_PER_PACKET).contains(&frames_per_packet) {

@@ -51,6 +51,11 @@ pub const RTP_FIXED_HEADER_LEN: usize = 12;
 /// ADR-0033 §1, invariant #1), a dynamic `payload_type`, and big-endian
 /// `sequence` / `timestamp` / `ssrc`. Array-pattern destructuring keeps it free
 /// of slice indexing.
+///
+/// The payload type occupies 7 bits; [`Aes67Sender`](super::sender::Aes67Sender)
+/// validates it to `0..=127` at construction (panel F7), so the `& 0x7f` below is
+/// defensive-in-depth for any direct caller and never silently reshapes a
+/// sender's already-validated type.
 #[must_use]
 pub fn build_rtp_header(
     payload_type: u8,
