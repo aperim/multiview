@@ -14,7 +14,7 @@
 
 use multiview_config::{ControlConfig, TlsConfig};
 
-/// A `[control.tls]` table with `mode = "static"` + cert_file/key_file
+/// A `[control.tls]` table with `mode = "static"` + `cert_file`/`key_file`
 /// deserializes to the `Static` variant with both paths, carried on
 /// `ControlConfig::tls`.
 #[test]
@@ -63,8 +63,8 @@ fn unknown_mode_fails_to_parse() {
     );
 }
 
-/// `static` mode requires BOTH a cert_file and a key_file: a missing field fails
-/// to parse (no all-optional silent-empty config).
+/// `static` mode requires BOTH a `cert_file` and a `key_file`: a missing field
+/// fails to parse (no all-optional silent-empty config).
 #[test]
 fn static_mode_requires_cert_and_key() {
     let no_key: Result<TlsConfig, _> =
@@ -81,8 +81,8 @@ fn static_mode_requires_cert_and_key() {
     );
 }
 
-/// An empty cert_file path is rejected by validation (fail-closed at config load
-/// — an empty path would never load a certificate).
+/// An empty `cert_file` path is rejected by validation (fail-closed at config
+/// load — an empty path would never load a certificate).
 #[test]
 fn empty_cert_path_fails_validation() {
     let tls = TlsConfig::Static {
@@ -95,7 +95,7 @@ fn empty_cert_path_fails_validation() {
     );
 }
 
-/// An empty key_file path is rejected by validation (fail-closed at config load).
+/// An empty `key_file` path is rejected by validation (fail-closed at config load).
 #[test]
 fn empty_key_path_fails_validation() {
     let tls = TlsConfig::Static {
