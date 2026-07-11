@@ -420,8 +420,12 @@ impl PlacementCoordinator {
 
     /// Observe the newest load snapshot and **return** the controller's proposal
     /// **without** executing it, recording the decision in the counters. This is
-    /// the pure-decision half (used by tests asserting the anti-storm bound, and
-    /// internally by the coordinator's control-tick path).
+    /// the pure-decision half: it is called once per control tick by the CLI's
+    /// placement loop (`multiview-cli`, at the `LoadPoller` cadence) and by tests
+    /// asserting the anti-storm bound. Acting on the proposal is the caller's job —
+    /// today that loop publishes a `Shed` event and records a `Migrate`/`Split`,
+    /// but executing the migration (the make-before-break crosspoint cutover) is
+    /// not yet wired into the live loop.
     pub fn observe_only(&mut self) -> PlacementProposal {
         let loads = self.snapshot.load();
         let proposal = self.controller.observe(loads.as_slice());

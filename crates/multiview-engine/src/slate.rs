@@ -17,9 +17,10 @@
 //!   ADR-0030 §4), so a non-layout program honours the **same** `on_loss` choice.
 //!
 //! The 1 kHz **tone** companion to `Bars` is selected here (`output_slate_audio`
-//! returns `SlateAudio::Tone1k` for `Bars`); it is emitted by the run-side
-//! audio path once that path carries audio (it is *not* fabricated by the video
-//! slate). The other policies select `SlateAudio::Silence`.
+//! returns `SlateAudio::Tone1k` for `Bars`; the other policies select
+//! `SlateAudio::Silence`). This expresses the *policy* only: the tone is baked by
+//! `multiview-output` (only when the program carries audio) and is never
+//! fabricated by the video slate where no audio flows.
 
 use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
 #[cfg(feature = "ffmpeg")]
