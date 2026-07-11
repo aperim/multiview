@@ -23,21 +23,24 @@
 //! * [`announce`] — the pure announce schedule (±1/3 jitter, ≥30 s floor) and
 //!   the announcement / deletion packet builders.
 //! * [`transport`] *(feature `st2110`)* — the supervised tokio `UdpSocket`
-//!   listener + independent-timer announcer + bounded drop-oldest receive ring.
+//!   listener that folds each datagram into the wait-free session table, plus
+//!   the independent-timer announcer.
 //!
 //! ## Isolation (invariants #1 / #10)
 //!
 //! SAP lives strictly on the control/discovery plane: the listener, the
 //! announce timer, and the session table are **off the output-clock data
 //! plane** and are physically incapable of back-pressuring the engine. The
-//! receive ring is bounded drop-oldest; the engine never awaits any of this.
+//! session table is the bounded, drop-oldest structure (no unbounded queue
+//! anywhere); the engine never awaits any of this.
 //!
 //! ## Security (ADR-0041 §8, brief §9)
 //!
 //! SAP is unauthenticated and trivially spoofable. Discovered sessions are
 //! **untrusted candidates** requiring explicit operator confirm-to-bind — never
-//! auto-ingested. The table is hard-capped + rate-limited, encrypted (`E=1`)
-//! and compressed (`C=1`) packets are rejected, and inbound deletions (`T=1`)
+//! auto-ingested. The table is hard-capped (a global capacity **and** a
+//! per-origin cap so one source cannot monopolise it), encrypted (`E=1`) and
+//! compressed (`C=1`) packets are rejected, and inbound deletions (`T=1`)
 //! against a tracked entry are ignored (a hijack vector).
 //!
 //! [ADR-0041]: ../../../docs/decisions/ADR-0041.md
