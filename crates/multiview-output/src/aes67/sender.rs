@@ -371,6 +371,14 @@ impl Aes67Sender {
         packet
     }
 
+    /// Drain the next continuous RTP packet into a caller-owned, **reused** buffer
+    /// (rule 22: no per-packet allocation on the continuous send path). Identical
+    /// bytes to [`next_packet`](Self::next_packet), written into `out` so the send
+    /// loop transmits from one buffer that is warmed once and reused forever.
+    pub fn next_packet_into(&mut self, out: &mut Vec<u8>) {
+        *out = self.next_packet();
+    }
+
     /// Current FIFO fill in frames (per channel). `0` on the rare lock
     /// contention; telemetry, never blocks the serve loop.
     #[must_use]

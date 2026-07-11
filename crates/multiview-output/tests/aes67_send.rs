@@ -82,6 +82,39 @@ fn packet_duration_derives_the_send_cadence_from_the_media_clock() {
 }
 
 #[test]
+fn next_packet_into_reuses_the_buffer_with_no_per_packet_alloc() {
+    // P2-F6 (rule 22): the continuous send path must not allocate per packet. The
+    // reusable-buffer drain writes into one datagram buffer; after warm-up its
+    // backing allocation (pointer + capacity) never changes across packets, so no
+    // Vec is allocated per tick on the data plane.
+    let mut sender = Aes67Sender::new(2, PcmDepth::L24, 96, 1, 48_000, 48, 4_800).expect("valid");
+    let mut buf = Vec::new();
+
+    // Warm-up: the first call sizes the buffer once.
+    sender.next_packet_into(&mut buf);
+    let warm_ptr = buf.as_ptr();
+    let warm_cap = buf.capacity();
+    let warm_len = buf.len();
+    assert!(warm_len > 0, "a full packet is written into the buffer");
+
+    // Every subsequent packet reuses the SAME allocation — no realloc, no growth.
+    for _ in 0..1_000 {
+        sender.next_packet_into(&mut buf);
+        assert_eq!(buf.len(), warm_len, "each packet is the same full size");
+        assert_eq!(
+            buf.as_ptr(),
+            warm_ptr,
+            "the datagram buffer is reused — no per-packet reallocation (rule 22)"
+        );
+        assert_eq!(
+            buf.capacity(),
+            warm_cap,
+            "capacity is stable — the buffer never grows/reallocates"
+        );
+    }
+}
+
+#[test]
 fn rejects_a_payload_type_outside_the_7bit_rtp_range() {
     // P2-F7: the RTP payload type is a 7-bit field (0..=127). A value >127 was
     // silently truncated with `& 0x7f`, so the transmitted PT diverged from the
