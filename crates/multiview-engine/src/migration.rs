@@ -3,13 +3,13 @@
 //!
 //! [`crate::placement::PlacementController`] is the pure brain: it *observes* a
 //! wait-free [`DeviceLoad`] snapshot and *proposes* a
-//! [`PlacementProposal`](crate::PlacementProposal) (`Hold`/`Shed`/`Migrate`/`Split`).
+//! [`PlacementProposal`] (`Hold`/`Shed`/`Migrate`/`Split`).
 //! This module is the **execution** half GPU-5c wires: it reads those proposals
 //! on a slow control tick (never the output clock) and *executes* an accepted
 //! migration/split as the five-phase make-before-break lifecycle ADR-R010 pins —
 //! VALIDATE → SPIN-UP → WARM (keepalive) → SWAP (the RT-12 `output ← program`
 //! crosspoint) → DRAIN+STOP — and records the outcome in the
-//! [`PlacementCounters`](multiview_telemetry::PlacementCounters).
+//! [`PlacementCounters`].
 //!
 //! ## The RT-12 crosspoint ([`OutputCrosspoint`])
 //!
@@ -341,7 +341,7 @@ pub async fn drain_stop<P: Pacer + Send + 'static>(
 /// [`OutputCrosspoint`] for an accepted migration, and records every decision in
 /// the [`PlacementCounters`].
 ///
-/// One [`PlacementCoordinator::tick`] is one slow **control** tick (1–4 Hz, the
+/// One [`PlacementCoordinator`] tick is one slow **control** tick (1–4 Hz, the
 /// `LoadPoller` cadence), driven on the CLI's control thread — **never** the
 /// output clock. It is structurally incapable of stalling the engine: it
 /// observes a wait-free snapshot and either holds, drives the existing
@@ -421,7 +421,7 @@ impl PlacementCoordinator {
     /// Observe the newest load snapshot and **return** the controller's proposal
     /// **without** executing it, recording the decision in the counters. This is
     /// the pure-decision half (used by tests asserting the anti-storm bound, and
-    /// internally by [`Self::tick`]).
+    /// internally by the coordinator's control-tick path).
     pub fn observe_only(&mut self) -> PlacementProposal {
         let loads = self.snapshot.load();
         let proposal = self.controller.observe(loads.as_slice());

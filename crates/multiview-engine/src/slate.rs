@@ -11,15 +11,15 @@
 //!   ([`crate::CompositorDrive`]) composites for a down cell, scaled-at-composite
 //!   into the cell (RT-6). Each distinct slate is built **once** and reused per
 //!   tick (invariant #1 — no per-tick slate allocation on the output clock).
-//! * [`output_slate_kind`] / [`output_slate_audio`] map the policy onto the
+//! * `output_slate_kind` / `output_slate_audio` map the policy onto the
 //!   **passthrough / transcode** program's pre-baked
-//!   [`multiview_output::slate::SlateKind`] / [`SlateAudio`] (the GP-4 slate of
+//!   `multiview_output::slate::SlateKind` / `SlateAudio` (the GP-4 slate of
 //!   ADR-0030 §4), so a non-layout program honours the **same** `on_loss` choice.
 //!
-//! The 1 kHz **tone** companion to `Bars` is selected here ([`output_slate_audio`]
-//! returns [`SlateAudio::Tone1k`] for `Bars`); it is emitted by the run-side
+//! The 1 kHz **tone** companion to `Bars` is selected here (`output_slate_audio`
+//! returns `SlateAudio::Tone1k` for `Bars`); it is emitted by the run-side
 //! audio path once that path carries audio (it is *not* fabricated by the video
-//! slate). The other policies select [`SlateAudio::Silence`].
+//! slate). The other policies select `SlateAudio::Silence`.
 
 use multiview_compositor::pipeline::{CanvasColor, Nv12Image};
 #[cfg(feature = "ffmpeg")]
