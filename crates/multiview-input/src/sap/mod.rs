@@ -42,8 +42,10 @@
 //!
 //! [ADR-0041]: ../../../docs/decisions/ADR-0041.md
 
+pub mod groups;
 pub mod packet;
 
+pub use groups::{announce_group_for, receive_group_set, MediaGroup, SapGroup, SAP_PORT, SAP_TTL};
 pub use packet::{SapMessageType, SapPacket};
 
 /// Errors raised by the RFC 2974 SAP **packet codec**.
