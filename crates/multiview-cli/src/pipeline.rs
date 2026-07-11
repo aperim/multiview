@@ -1987,18 +1987,6 @@ struct Aes67RxPlan {
     store: Arc<multiview_audio::store::AudioStore>,
 }
 
-/// Resolve an AES67 source's SDP session + multicast `group:port` binding (#103).
-///
-/// The SDP (RFC 4566/8866) carries the PCM format, RTP clock, and payload type;
-/// the multicast binding comes from the config `multicast` override (the SDP
-/// parser ignores the `c=` connection line by design — the transport binding is a
-/// config concern, `multiview-input`'s `st2110::sdp` module contract). A
-/// missing/malformed SDP or a missing/invalid override is a typed refusal at build
-/// time (never a silent skip — the fail-closed contract).
-///
-/// # Errors
-/// [`PipelineError::Ingest`] when the source is not AES67, the SDP does not parse,
-/// the `multicast` override is absent, or it is not a valid `group:port`.
 /// Reject a layout cell bound to an audio-only AES67 source (#103).
 ///
 /// An AES67 / ST 2110-30 source decodes no pixels — it has no `TileStore` — so a
@@ -2034,6 +2022,18 @@ fn ensure_no_cell_binds_an_aes67_source(config: &MultiviewConfig) -> Result<(), 
     Ok(())
 }
 
+/// Resolve an AES67 source's SDP session + multicast `group:port` binding (#103).
+///
+/// The SDP (RFC 4566/8866) carries the PCM format, RTP clock, and payload type;
+/// the multicast binding comes from the config `multicast` override (the SDP
+/// parser ignores the `c=` connection line by design — the transport binding is a
+/// config concern, `multiview-input`'s `st2110::sdp` module contract). A
+/// missing/malformed SDP or a missing/invalid override is a typed refusal at build
+/// time (never a silent skip — the fail-closed contract).
+///
+/// # Errors
+/// [`PipelineError::Ingest`] when the source is not AES67, the SDP does not parse,
+/// the `multicast` override is absent, or it is not a valid `group:port`.
 #[cfg(feature = "aes67")]
 fn resolve_aes67_source(
     source: &Source,
