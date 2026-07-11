@@ -27,4 +27,19 @@ pub enum MeshError {
     /// a mesh failure never stalls anything).
     #[error("mdns transport error: {0}")]
     Transport(String),
+
+    /// The encoded announce payload would split into more than the mesh's
+    /// `MAX_CHUNKS` mDNS TXT chunk cap — larger than the receive-side reassembly
+    /// bound accepts. The publish side refuses to emit it, returning this typed
+    /// error (which the announce loop logs) rather than announce a payload every
+    /// peer would silently drop, leaving this node invisible on the mesh
+    /// (invariant #10 — best-effort + observable, never a panic). Defence in
+    /// depth: today's payload shape keeps a legitimate announce far under the cap.
+    #[error("announce payload too large: {chunks} chunks exceeds the {max}-chunk mDNS TXT cap")]
+    AnnounceTooLarge {
+        /// The number of chunks the encoded payload would split into.
+        chunks: usize,
+        /// The maximum chunk count the mesh accepts.
+        max: usize,
+    },
 }

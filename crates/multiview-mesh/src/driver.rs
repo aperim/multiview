@@ -26,6 +26,7 @@
 
 use std::time::Duration;
 
+use crate::error::MeshError;
 use crate::peer::PeerObservation;
 use crate::state::MeshState;
 use crate::transport::MeshTransport;
@@ -57,7 +58,26 @@ pub fn announce_browse_step<T: MeshTransport + ?Sized>(
 ) -> usize {
     // 1. Announce (best-effort).
     if let Err(err) = transport.announce(announce_wire) {
-        tracing::debug!(%err, "mesh announce failed this round (best-effort, never off air)");
+        match &err {
+            // An over-cap payload recurs every round and silently removes this node
+            // from peer discovery — a real fault, logged loud (not a transient
+            // blip), so it is observable rather than silent.
+            MeshError::AnnounceTooLarge { .. } => {
+                tracing::warn!(
+                    %err,
+                    "mesh announce refused: payload exceeds the TXT chunk cap — this node \
+                     is not discoverable until the announce shrinks"
+                );
+            }
+            // A transient transport failure is genuinely best-effort: log quietly
+            // and retry on the next round (never off air).
+            _ => {
+                tracing::debug!(
+                    %err,
+                    "mesh announce failed this round (best-effort, never off air)"
+                );
+            }
+        }
     }
 
     // 2. Browse + fold untrusted observations.

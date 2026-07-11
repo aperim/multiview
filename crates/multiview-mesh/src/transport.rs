@@ -78,6 +78,46 @@ pub(crate) fn reassemble_txt<'a>(
     Some(wire)
 }
 
+/// Split the announce `wire` into the numbered mDNS TXT properties
+/// (`c` = chunk count, then `p0`…`pN`), refusing a payload that would exceed the
+/// `MAX_CHUNKS` cap.
+///
+/// The publish-side mirror of [`reassemble_txt`], with a deliberate asymmetry:
+/// the receive side caps an *untrusted* inbound count and silently ignores
+/// anything over the bound (returning `None`), but the publish side is encoding
+/// *our own* payload, so an over-cap announce is a real, log-worthy fault — it
+/// returns a typed [`MeshError::AnnounceTooLarge`] the caller logs, rather than
+/// emitting an announce that every peer's receive-side guard would silently drop
+/// (which would make this node invisible on the mesh). Today's payload shape keeps
+/// a legitimate announce far under the cap; the guard is defence in depth against
+/// future payload growth, and makes that failure observable at the source.
+///
+/// # Errors
+/// [`MeshError::AnnounceTooLarge`] if `wire` would split into more than
+/// `MAX_CHUNKS` chunks.
+#[cfg(any(feature = "mdns", test))]
+pub(crate) fn chunk_txt(wire: &[u8]) -> Result<Vec<(String, String)>, MeshError> {
+    let chunks: Vec<&[u8]> = wire.chunks(CHUNK_BYTES).collect();
+    if chunks.len() > MAX_CHUNKS {
+        return Err(MeshError::AnnounceTooLarge {
+            chunks: chunks.len(),
+            max: MAX_CHUNKS,
+        });
+    }
+    let mut props: Vec<(String, String)> = Vec::with_capacity(chunks.len() + 1);
+    props.push((CHUNK_COUNT_KEY.to_owned(), chunks.len().to_string()));
+    for (index, chunk) in chunks.iter().enumerate() {
+        // The chunk is ASCII JSON bytes, so `from_utf8` cannot fail here; the
+        // guardrails forbid `unwrap`, so an (impossible) non-UTF8 chunk is skipped
+        // rather than panicking. The `c` count still reflects every chunk, matching
+        // the receive-side reassembly.
+        if let Ok(text) = std::str::from_utf8(chunk) {
+            props.push((format!("p{index}"), text.to_owned()));
+        }
+    }
+    Ok(props)
+}
+
 /// The transport seam: publish this machine's announcement, and report observed
 /// peer announcements. Implemented by the live mDNS-sd service ([`crate::service`],
 /// `mdns` feature) and by an in-memory fake in tests.
@@ -91,8 +131,12 @@ pub trait MeshTransport {
     /// record.
     ///
     /// # Errors
-    /// [`MeshError::Transport`] if the transport could not publish (e.g. the
-    /// socket is down). Best-effort — the caller logs + retries on the next tick.
+    /// * [`MeshError::AnnounceTooLarge`] if `wire` would split into more than
+    ///   `MAX_CHUNKS` TXT chunks (larger than the receive-side bound accepts) —
+    ///   refused at the source so the over-cap announce is observable, never
+    ///   silently dropped by every peer.
+    /// * [`MeshError::Transport`] if the transport could not publish (e.g. the
+    ///   socket is down). Best-effort — the caller logs + retries on the next tick.
     fn announce(&self, wire: &[u8]) -> Result<(), MeshError>;
 
     /// Drain the announcements observed since the last poll (non-blocking). An
