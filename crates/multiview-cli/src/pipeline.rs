@@ -1487,6 +1487,35 @@ enum RunnableOutput {
         /// The advertised NDI source name (for the run report).
         name: String,
     },
+    /// An AES67 / ST 2110-30 raw-PCM audio output (#103, ADR-0033/T013): a
+    /// **mux-free** sink that multicasts the mixed program audio as L16/L24 RTP.
+    /// It consumes NO coded packets — the packet fan-out `rx` is used purely as
+    /// the end-of-program pulse (like the NDI / display heads) — because the
+    /// program audio arrives out-of-band via the paired
+    /// [`Aes67SenderHandle`](multiview_output::aes67::Aes67SenderHandle) the bake
+    /// consumer pushes each post-loudnorm block into. The serve side
+    /// ([`Aes67Sender`](multiview_output::aes67::Aes67Sender)) drains that shared
+    /// drop-oldest FIFO on its OWN media-clock timer and sends UDP; a slow/absent
+    /// network drops at the FIFO and can never back-pressure the bake consumer, let
+    /// alone the engine (invariants #1 + #10). Only under `aes67`.
+    #[cfg(feature = "aes67")]
+    Aes67 {
+        /// The output's stable config id (ADR-0060 `output` resource scope).
+        id: String,
+        /// The serve-side sender: drains the shared FIFO the bake consumer's
+        /// [`Aes67SenderHandle`](multiview_output::aes67::Aes67SenderHandle) feeds
+        /// and frames each packet-time of PCM into a continuous RTP packet.
+        sender: multiview_output::aes67::Aes67Sender,
+        /// The local bind address (an ephemeral port on the group's-family
+        /// wildcard) the sender egresses from.
+        local: std::net::SocketAddr,
+        /// The multicast `group:port` destination the RTP is sent to.
+        dest: std::net::SocketAddr,
+        /// The multicast egress interface (default: OS-chosen).
+        interface: multiview_output::aes67::transport::MulticastInterface,
+        /// A short label + the output id (for the run report + logs).
+        label: String,
+    },
 }
 
 impl RunnableOutput {
@@ -1500,6 +1529,8 @@ impl RunnableOutput {
             Self::WebRtc { id, .. } => id,
             #[cfg(feature = "ndi-bindings")]
             Self::Ndi { id, .. } => id,
+            #[cfg(feature = "aes67")]
+            Self::Aes67 { id, .. } => id,
         }
     }
 }
@@ -1706,6 +1737,15 @@ pub struct Pipeline {
     encode_cfg: EncodeConfig,
     /// The runnable outputs declared in the config.
     outputs: Vec<RunnableOutput>,
+    /// The bake-consumer push handles for the configured AES67 outputs (#103),
+    /// paired with the serve-side `Aes67Sender` inside each `RunnableOutput::Aes67`.
+    /// `drive_streaming` hands these to the bake consumer, which pushes every
+    /// post-loudnorm program block into each (drop-oldest) — exactly like it feeds
+    /// the display heads. A slow/absent AES67 network drops at the FIFO and can
+    /// never back-pressure the consumer or the engine (invariants #1 + #10). Empty
+    /// when no AES67 output is configured. Only under `aes67`.
+    #[cfg(feature = "aes67")]
+    aes67_send_handles: Vec<multiview_output::aes67::Aes67SenderHandle>,
     /// The configured DRM/KMS display heads (DEV-B1 / ADR-0044, feature
     /// `display-kms`): **raw-frame** sinks fed the pre-encode NV12 canvas
     /// through wait-free mailboxes — never part of the packet fan-out. Taken
@@ -2409,6 +2449,8 @@ impl Pipeline {
             display_plans: built.display,
             #[cfg(feature = "ndi-bindings")]
             ndi_publishers: built.ndi_publishers,
+            #[cfg(feature = "aes67")]
+            aes67_send_handles: built.aes67_handles,
             #[cfg(feature = "overlay")]
             subtitles: None,
             #[cfg(feature = "overlay")]
@@ -3313,6 +3355,14 @@ impl Pipeline {
         #[cfg(feature = "ndi-bindings")]
         let ndi_publishers = std::mem::take(&mut self.ndi_publishers);
 
+        // #103: take the AES67 output push handles for the bake consumer. It pushes
+        // each post-loudnorm program block into every handle (drop-oldest), exactly
+        // like it feeds the display heads; the paired serve-side `Aes67Sender` rides
+        // inside each `RunnableOutput::Aes67` sink runner (spawned by the egress
+        // below). Empty when no AES67 output is configured. Only under `aes67`.
+        #[cfg(feature = "aes67")]
+        let aes67_send_handles = std::mem::take(&mut self.aes67_send_handles);
+
         // Spawn the per-sink fan-out threads + the single bake consumer thread
         // BEFORE the engine loop, so a frame produced this tick is baked +
         // encoded WHILE the engine keeps ticking (streaming, not batch — ADR-0025).
@@ -3331,6 +3381,8 @@ impl Pipeline {
             loudness_publisher,
             display_audio,
             self.program_audio_preview.clone(),
+            #[cfg(feature = "aes67")]
+            aes67_send_handles,
         );
 
         // Build the single program now (post-prime, ADR-0030 MP-0): the run path
@@ -4166,6 +4218,9 @@ impl StreamEgress {
         loudness_publisher: Option<EnginePublisher<EngineStateSnapshot, Event>>,
         display_audio: DisplayAudioFeed,
         program_audio_preview: Option<crate::preview::ProgramAudioSlot>,
+        #[cfg(feature = "aes67")] aes67_send_handles: Vec<
+            multiview_output::aes67::Aes67SenderHandle,
+        >,
     ) -> (Self, SyncSender<StreamItem>) {
         let in_flight = Arc::new(AtomicI64::new(0));
         let peak_occupancy = Arc::new(AtomicUsize::new(0));
@@ -4227,6 +4282,8 @@ impl StreamEgress {
                     loudness_publisher,
                     display_audio,
                     program_audio_preview,
+                    #[cfg(feature = "aes67")]
+                    aes67_send_handles,
                     &consumer_in_flight,
                 )
             })
@@ -4500,6 +4557,7 @@ fn consumer_main(
     loudness_publisher: Option<EnginePublisher<EngineStateSnapshot, Event>>,
     mut display_audio: DisplayAudioFeed,
     program_audio_preview: Option<crate::preview::ProgramAudioSlot>,
+    #[cfg(feature = "aes67")] aes67_send_handles: Vec<multiview_output::aes67::Aes67SenderHandle>,
     in_flight: &AtomicI64,
 ) -> Result<(), PipelineError> {
     let mut baker = StreamBaker::new(ctx)?;
@@ -4579,6 +4637,19 @@ fn consumer_main(
             // (invariants #1 + #10).
             for publisher in &display_audio.publishers {
                 publisher.push_audio(&block);
+            }
+            // #103: feed the SAME post-loudnorm program block to every AES67
+            // output's send FIFO (drop-oldest, `&self`) — exactly like the display
+            // heads. The serve-side `Aes67Sender` drains it on its own media-clock
+            // timer; a stalled network drops at the FIFO and can never
+            // back-pressure this consumer, let alone the engine (invariants #1 +
+            // #10). When a run has no program audio the bus is absent and this
+            // branch never runs, so the FIFO stays empty and the serve loop emits
+            // silence (`Aes67Sender::next_packet_into` silence-fills an underrun) —
+            // no dedicated bus is needed here.
+            #[cfg(feature = "aes67")]
+            for handle in &aes67_send_handles {
+                handle.push(&block);
             }
             // ADR-P006 audio: tap the SAME post-loudnorm program block into the
             // WHEP egress preview slot (when wired), so the live WHEP provider can
@@ -4694,6 +4765,11 @@ fn send_bounded(tx: &SyncSender<EncodedPacket>, packet: EncodedPacket) -> bool {
 /// peer is unreachable, by contrast, never fails the run: it is reported and
 /// dropped so the program's local outputs still complete (invariants #1/#10 — a
 /// dead remote consumer must not back-pressure or fail the program).
+#[allow(clippy::too_many_lines)]
+// reason: a flat dispatch `match` over every runnable output kind (file / HLS /
+// push / WebRTC / NDI / AES67), each arm a short delegation to that kind's runner;
+// its value is reading the whole per-kind mapping in one place. Splitting it would
+// scatter the dispatch without reducing complexity.
 fn run_one_output(
     output: RunnableOutput,
     rx: Receiver<EncodedPacket>,
@@ -4815,7 +4891,114 @@ fn run_one_output(
             cadence,
             name,
         } => Ok(run_ndi_output(&mut sink, &reader, rx, cadence, &name)),
+        // AES67 is a raw-PCM audio consumer (program AudioBlock → L16/L24 RTP), NOT
+        // a packet sink: it ignores the coded-packet fan-out and instead drains the
+        // program audio the bake consumer pushes into its send FIFO. The packet
+        // `rx` is used purely as the shared end-of-program pulse (it closes at
+        // end-of-program), which resolves the serve loop's stop future (inv
+        // #1/#10). Under `aes67`.
+        #[cfg(feature = "aes67")]
+        RunnableOutput::Aes67 {
+            id: _,
+            sender,
+            local,
+            dest,
+            interface,
+            label,
+        } => Ok(run_aes67_output(sender, local, dest, interface, rx, &label)),
     }
+}
+
+/// Drive an AES67 / ST 2110-30 raw-PCM output (#103, ADR-0033/T013): multicast the
+/// mixed program audio as a continuous L16/L24 RTP stream until end-of-program.
+///
+/// **Mux-free** — it consumes NO coded packets. The program audio arrives via the
+/// [`Aes67SenderHandle`](multiview_output::aes67::Aes67SenderHandle) the bake
+/// consumer pushes each post-loudnorm block into; this runner drains the paired
+/// serve-side [`Aes67Sender`](multiview_output::aes67::Aes67Sender)'s FIFO on its
+/// OWN media-clock timer ([`Aes67UdpSender::serve`](multiview_output::aes67::transport::Aes67UdpSender::serve))
+/// and sends UDP. The `eop` packet receiver is used purely as the end-of-program
+/// pulse (one item per emitted tick, closing at end-of-program), which resolves the
+/// serve loop's stop future.
+///
+/// The socket + its send loop are async, so this runs them on a small
+/// **current-thread** Tokio runtime on the sink thread (the peer of
+/// [`run_ndi_output`]). **Infallible** by design (returns a [`SinkRunOutcome`],
+/// never an error): an AES67 output whose socket cannot bind or whose send faults
+/// must NOT fail the program — the file/HLS/push outputs keep producing (invariants
+/// #1/#10). The serve loop silence-fills any FIFO underrun, so the multicast never
+/// gaps even when this run carries no program audio.
+///
+/// The `eop` receiver is always fully drained (on a blocking task, off the async
+/// reactor) so the encode-once fan-out can never wedge on this sink.
+#[cfg(feature = "aes67")]
+fn run_aes67_output(
+    mut sender: multiview_output::aes67::Aes67Sender,
+    local: std::net::SocketAddr,
+    dest: std::net::SocketAddr,
+    interface: multiview_output::aes67::transport::MulticastInterface,
+    eop: Receiver<EncodedPacket>,
+    label: &str,
+) -> SinkRunOutcome {
+    use multiview_output::aes67::transport::Aes67UdpSender;
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::warn!(output = label, error = %e, "aes67 output runtime build failed; skipping");
+            // Drain the end-of-program pulses so the fan-out never wedges.
+            let frames = eop.into_iter().count();
+            return SinkRunOutcome {
+                line: format!("{label}: aes67 runtime unavailable"),
+                playlist: None,
+                frames,
+            };
+        }
+    };
+    runtime.block_on(async move {
+        let udp = match Aes67UdpSender::bind(local, dest).await {
+            Ok(u) => u.with_interface(interface),
+            Err(e) => {
+                tracing::warn!(output = label, error = %e, dest = %dest, "aes67 bind failed; skipping");
+                // Drain the pulses off the reactor so the fan-out never wedges.
+                let frames = tokio::task::spawn_blocking(move || eop.into_iter().count())
+                    .await
+                    .unwrap_or(0);
+                return SinkRunOutcome {
+                    line: format!("{label}: aes67 bind failed"),
+                    playlist: None,
+                    frames,
+                };
+            }
+        };
+        tracing::info!(output = label, dest = %dest, "aes67 output sending");
+        // The end-of-program pulses are a std mpsc — drain them on a blocking task
+        // (off the async reactor) so a `recv` never blocks it; the task ends (and
+        // yields the pulse count) when the channel closes at end-of-program.
+        let mut eop_task = tokio::task::spawn_blocking(move || eop.into_iter().count());
+        // Serve on the media-clock timer (its own absolute-deadline cadence +
+        // multicast egress config) with a never-resolving stop, so it runs until
+        // end-of-program cancels it OR it faults. `select!` stops it on whichever
+        // comes first, capturing the pulse count for the report.
+        let frames = tokio::select! {
+            joined = &mut eop_task => joined.unwrap_or(0),
+            result = udp.serve(&mut sender, std::future::pending::<()>()) => {
+                if let Err(e) = result {
+                    tracing::warn!(output = label, error = %e, "aes67 serve faulted; stopping output");
+                }
+                // Wait for end-of-program to fully drain the fan-out (never wedge).
+                (&mut eop_task).await.unwrap_or(0)
+            }
+        };
+        SinkRunOutcome {
+            line: format!("{label}: {frames} tick(s) multicast to {dest}"),
+            playlist: None,
+            frames,
+        }
+    })
 }
 
 /// Drive a WebRTC program output (`webrtc` / `whip_push`) over its fan-out channel
@@ -6523,6 +6706,15 @@ struct BuiltOutputs {
     /// (invariants #1 + #10). Built only under `ndi-bindings`.
     #[cfg(feature = "ndi-bindings")]
     ndi_publishers: Vec<multiview_output::display::FramePublisher<NdiCanvasFrame>>,
+    /// The bake-consumer-side **push handles** of each AES67 output's send FIFO
+    /// (#103), paired with the serve-side `Aes67Sender` inside its
+    /// `RunnableOutput::Aes67`. The bake consumer pushes each post-loudnorm program
+    /// block into every handle (drop-oldest, `&self`), exactly like it feeds the
+    /// display heads — a stalled network drops at the FIFO and can never
+    /// back-pressure the consumer or the engine (invariants #1 + #10). Built only
+    /// under `aes67`.
+    #[cfg(feature = "aes67")]
+    aes67_handles: Vec<multiview_output::aes67::Aes67SenderHandle>,
 }
 
 /// One configured display head (feature `display-kms`): everything
@@ -7002,6 +7194,10 @@ fn build_push_output(
 /// RTP/RTSP protocol stack) and is honestly skipped with a log line rather than
 /// pretended-runnable — a config mixing an unsupported output with a supported
 /// one still produces that supported output.
+#[allow(clippy::too_many_lines)]
+// reason: a flat build loop matching every configured output kind (display / HLS /
+// push / RIST / WebRTC / RTSP / NDI / AES67) to its runnable, each arm a short
+// build/skip; the value is reading the whole per-kind assembly in one place.
 fn build_outputs(
     outputs: &[Output],
     epoch: &multiview_output::SharedEpoch,
@@ -7041,6 +7237,8 @@ fn build_outputs(
     let mut display_plans = Vec::new();
     #[cfg(feature = "ndi-bindings")]
     let mut ndi_publishers = Vec::new();
+    #[cfg(feature = "aes67")]
+    let mut aes67_handles = Vec::new();
     for output in outputs {
         match output {
             Output::Display { .. } => {
@@ -7130,6 +7328,19 @@ fn build_outputs(
                     &mut ndi_publishers,
                 );
             }
+            // AES67 / ST 2110-30 raw-PCM audio output (#103, ADR-0033/T013): a
+            // mux-free multicast sink of the mixed program audio. The serve-side
+            // `Aes67Sender` is built here (sync); its push handle is threaded to
+            // the bake consumer, and the async multicast socket is bound later in
+            // `run_aes67_output`. Under `aes67` only; a non-`aes67` build rejected
+            // any aes67 output up front (the gate above), so the fall-through below
+            // is defensive.
+            #[cfg(feature = "aes67")]
+            Output::Aes67 { .. } => {
+                let (runnable_out, handle) = build_aes67_output(output)?;
+                runnable.push(runnable_out);
+                aes67_handles.push(handle);
+            }
             // `Output` is `#[non_exhaustive]`; an unrecognized future kind is
             // skipped rather than silently mishandled.
             _ => {
@@ -7148,7 +7359,145 @@ fn build_outputs(
         display: display_plans,
         #[cfg(feature = "ndi-bindings")]
         ndi_publishers,
+        #[cfg(feature = "aes67")]
+        aes67_handles,
     })
+}
+
+/// AES67 TX channel count (#103): FIXED at 2 — the program bus is stereo, and the
+/// bake consumer pushes that stereo block into the sender, whose channel count MUST
+/// match or the push is silently dropped. Multi-channel / discrete-track AES67 is a
+/// later slice.
+#[cfg(feature = "aes67")]
+const AES67_TX_CHANNELS: usize = 2;
+
+/// AES67 TX dynamic RTP payload type (#103): 97, a common dynamic PT for L24 audio
+/// (the receiver reads the format from the SDP, not the PT; any 96..=127 works).
+#[cfg(feature = "aes67")]
+const AES67_TX_PAYLOAD_TYPE: u8 = 97;
+
+/// AES67 TX send-FIFO depth in frames (#103): 4800 frames = 100 ms @ 48 kHz — a
+/// bounded drop-oldest buffer between the bake consumer (push) and the serve timer
+/// (drain), so a stalled network sheds oldest rather than growing memory (inv #5).
+#[cfg(feature = "aes67")]
+const AES67_TX_CAPACITY_FRAMES: usize = 4_800;
+
+/// AES67 TX default frames-per-packet (#103): 48 = 1 ms @ 48 kHz (Class-A ptime),
+/// the fallback when the `ptime_ms * rate / 1000` widening ever saturates (it never
+/// does for a validated ptime).
+#[cfg(feature = "aes67")]
+const AES67_DEFAULT_FRAMES_PER_PACKET: usize = 48;
+
+/// Build the [`RunnableOutput::Aes67`] for an `Output::Aes67` (#103,
+/// ADR-0033/T013): the serve-side [`Aes67Sender`](multiview_output::aes67::Aes67Sender)
+/// framed from the output's depth/ptime + the fixed 48 kHz **stereo** program bus,
+/// paired with the bake-consumer push
+/// [`Aes67SenderHandle`](multiview_output::aes67::Aes67SenderHandle) the program
+/// audio is fed into. Mux-free (no encode stage) — it multicasts the mixed program
+/// to a `group:port`.
+///
+/// The sender is created here (sync, always-compiled) so its handle can be threaded
+/// to the bake consumer; the async multicast socket is bound later, in
+/// [`run_aes67_output`] (a current-thread runtime on the sink thread). `channels` is
+/// FIXED at 2 to match the stereo program-bus block the consumer pushes —
+/// [`Aes67SenderHandle::push`](multiview_output::aes67::Aes67SenderHandle::push)
+/// silently drops a block whose channel count differs, so the two must agree.
+///
+/// # Errors
+/// [`PipelineError::Output`] when the `multicast` group:port is malformed, the PCM
+/// depth is unsupported, or the sender parameters are out of range
+/// (`Aes67ConfigError`).
+#[cfg(feature = "aes67")]
+fn build_aes67_output(
+    output: &Output,
+) -> Result<(RunnableOutput, multiview_output::aes67::Aes67SenderHandle), PipelineError> {
+    use multiview_output::aes67::{Aes67Sender, PcmDepth};
+
+    let Output::Aes67 {
+        multicast,
+        depth,
+        ptime_ms,
+        ..
+    } = output
+    else {
+        return Err(PipelineError::Output {
+            kind: "aes67",
+            reason: "build_aes67_output called on a non-aes67 output".to_owned(),
+        });
+    };
+    let id = output.id();
+    // The multicast destination `group:port` (a required schema field).
+    let dest = multicast
+        .parse::<std::net::SocketAddr>()
+        .map_err(|e| PipelineError::Output {
+            kind: "aes67",
+            reason: format!(
+                "aes67 output `{id}` multicast `{multicast}` is not a valid group:port: {e}"
+            ),
+        })?;
+    // Egress from an ephemeral port on the group's-family wildcard.
+    let local: std::net::SocketAddr = if dest.is_ipv6() {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    };
+    // L24 (Class-A interop default) unless the config says L16; a future/unknown
+    // depth is a typed refusal (never silently mishandled).
+    let pcm_depth = if depth.eq_ignore_ascii_case("l16") {
+        PcmDepth::L16
+    } else if depth.eq_ignore_ascii_case("l24") {
+        PcmDepth::L24
+    } else {
+        return Err(PipelineError::Output {
+            kind: "aes67",
+            reason: format!(
+                "aes67 output `{id}` has unsupported PCM depth `{depth}` (expected L16 or L24)"
+            ),
+        });
+    };
+    // frames_per_packet = ptime_ms * rate / 1000 (Class-A ptime = 1 ms → 48 frames
+    // @ 48 kHz). Computed in u64 to stay exact, clamped ≥ 1.
+    let frames_per_packet =
+        usize::try_from(u64::from(*ptime_ms).saturating_mul(u64::from(AES67_STORE_RATE_HZ)) / 1000)
+            .unwrap_or(AES67_DEFAULT_FRAMES_PER_PACKET)
+            .max(1);
+    let sender = Aes67Sender::new(
+        AES67_TX_CHANNELS,
+        pcm_depth,
+        AES67_TX_PAYLOAD_TYPE,
+        aes67_ssrc_for(&id),
+        AES67_STORE_RATE_HZ,
+        frames_per_packet,
+        AES67_TX_CAPACITY_FRAMES,
+    )
+    .map_err(|e| PipelineError::Output {
+        kind: "aes67",
+        reason: format!("aes67 output `{id}` sender config invalid: {e}"),
+    })?;
+    let handle = sender.handle();
+    let runnable = RunnableOutput::Aes67 {
+        id: id.clone(),
+        sender,
+        local,
+        dest,
+        interface: multiview_output::aes67::transport::MulticastInterface::Unspecified,
+        label: format!("aes67 {id}"),
+    };
+    Ok((runnable, handle))
+}
+
+/// A stable, non-zero RTP SSRC for an AES67 output, derived from its id (#103): a
+/// deterministic `DefaultHasher` fold (`SipHash` with fixed keys) so the same output
+/// always advertises the same SSRC across runs, and distinct outputs get distinct
+/// streams. Clamped away from `0` (an ambiguous-but-legal SSRC).
+#[cfg(feature = "aes67")]
+fn aes67_ssrc_for(id: &str) -> u32 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    u32::try_from(hasher.finish() & u64::from(u32::MAX))
+        .unwrap_or(1)
+        .max(1)
 }
 
 /// Build one live NDI output sink (OUT-4b / NDI-L2): enforce the
@@ -7313,6 +7662,10 @@ fn maybe_prepend_program_ts(mut runnable: Vec<RunnableOutput>, live: bool) -> Ve
         // anchors no `program.ts`.
         #[cfg(feature = "ndi-bindings")]
         RunnableOutput::Ndi { .. } => None,
+        // The AES67 sink is a raw-PCM multicast consumer, not a packet/disk muxer —
+        // it anchors no `program.ts`.
+        #[cfg(feature = "aes67")]
+        RunnableOutput::Aes67 { .. } => None,
     });
     if let Some(path) = file_path {
         runnable.insert(
@@ -14152,5 +14505,220 @@ segment_ms = 1000
         // The aes67 source remains audio-only: an AudioStore, no video store.
         assert!(pipeline.audio_stores.contains_key("aes67-in"));
         assert!(!pipeline.stores.contains_key("aes67-in"));
+    }
+}
+
+#[cfg(all(test, feature = "aes67"))]
+mod aes67_tx_and_helpers {
+    //! #103 TX + pure-helper coverage (no socket): `build_aes67_output` maps an
+    //! `Output::Aes67` to a mux-free `RunnableOutput::Aes67` + a bake-consumer push
+    //! handle (rejecting a bad depth / malformed multicast); `Pipeline::build`
+    //! threads that handle onto the pipeline; and the RX bridging helpers
+    //! (`resolve_aes67_source`, `interleave_to_stereo`, `aes67_audio_block`) behave
+    //! correctly. The socket-bound RX/TX loops are hardware/network-gated.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    const AES67_SDP: &str = "v=0\r\n\
+o=- 1 1 IN IP6 2001:db8::1\r\n\
+s=Multiview AES67\r\n\
+c=IN IP6 ff3e::1\r\n\
+t=0 0\r\n\
+m=audio 5004 RTP/AVP 98\r\n\
+a=rtpmap:98 L24/48000/2\r\n\
+a=ptime:1\r\n\
+a=ts-refclk:ptp=IEEE1588-2008:AA-BB-CC-DD-EE-FF-00-11:0\r\n\
+a=mediaclk:direct=0\r\n";
+
+    /// An `Output::Aes67` value (via serde, bypassing config validation so the
+    /// malformed cases reach `build_aes67_output`).
+    fn aes67_output_value(multicast: &str, depth: &str) -> Output {
+        serde_json::from_value(serde_json::json!({
+            "kind": "aes67",
+            "label": "aes-out",
+            "multicast": multicast,
+            "depth": depth,
+        }))
+        .expect("aes67 output parses")
+    }
+
+    /// A `SourceKind::Aes67` source value, optionally carrying the multicast override.
+    fn aes67_source_value(multicast: Option<&str>) -> Source {
+        let mut v = serde_json::json!({
+            "id": "aes-in",
+            "kind": "aes67",
+            "sdp": AES67_SDP,
+        });
+        if let Some(m) = multicast {
+            v["multicast"] = serde_json::Value::String(m.to_owned());
+        }
+        serde_json::from_value(v).expect("aes67 source parses")
+    }
+
+    #[test]
+    fn build_aes67_output_makes_a_mux_free_runnable_and_a_push_handle() {
+        let output = aes67_output_value("[ff3e::1]:5004", "L24");
+        let (runnable, _handle) = build_aes67_output(&output).expect("valid aes67 output builds");
+        let RunnableOutput::Aes67 {
+            dest, local, id, ..
+        } = runnable
+        else {
+            panic!("expected a RunnableOutput::Aes67");
+        };
+        assert_eq!(
+            dest,
+            "[ff3e::1]:5004".parse().unwrap(),
+            "dest is the configured multicast group:port"
+        );
+        assert!(local.is_ipv6(), "an ipv6 group egresses from an ipv6 wildcard");
+        assert!(
+            local.ip().is_unspecified(),
+            "egress binds the family wildcard"
+        );
+        assert_eq!(local.port(), 0, "egress uses an ephemeral local port");
+        assert_eq!(id, "aes-out", "the id derives from the label when unset");
+    }
+
+    #[test]
+    fn build_aes67_output_rejects_an_unknown_pcm_depth() {
+        let output = aes67_output_value("[ff3e::1]:5004", "L99");
+        assert!(
+            build_aes67_output(&output).is_err(),
+            "an unknown PCM depth is a typed refusal (not a silent default)"
+        );
+    }
+
+    #[test]
+    fn build_aes67_output_rejects_a_malformed_multicast() {
+        let output = aes67_output_value("not-a-socket-addr", "L24");
+        assert!(
+            build_aes67_output(&output).is_err(),
+            "a malformed multicast group:port is a typed refusal"
+        );
+    }
+
+    #[test]
+    fn aes67_ssrc_is_deterministic_nonzero_and_distinct() {
+        assert_ne!(aes67_ssrc_for("out-a"), 0, "ssrc is never the ambiguous 0");
+        assert_eq!(
+            aes67_ssrc_for("out-a"),
+            aes67_ssrc_for("out-a"),
+            "the same id always advertises the same ssrc"
+        );
+        assert_ne!(
+            aes67_ssrc_for("out-a"),
+            aes67_ssrc_for("out-b"),
+            "distinct outputs get distinct streams"
+        );
+    }
+
+    #[test]
+    fn pipeline_build_threads_the_aes67_send_handle_onto_the_pipeline() {
+        // A video source + cell (so the layout solves) plus an AES67 audio output:
+        // the output's serve-side sender rides `outputs`, its push handle is threaded
+        // onto the pipeline for the bake consumer to feed.
+        let doc = r##"schema_version = 1
+[canvas]
+width = 640
+height = 480
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[cells]]
+id = "only"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[outputs]]
+kind = "aes67"
+label = "aes-out"
+multicast = "[ff3e::1]:5004"
+"##;
+        let config = multiview_config::MultiviewConfig::load_from_toml(doc).expect("config parses");
+        let pipeline = Pipeline::build(&config).expect("pipeline builds with an aes67 output");
+        assert_eq!(
+            pipeline.aes67_send_handles.len(),
+            1,
+            "the aes67 output's bake-consumer push handle is threaded onto the pipeline"
+        );
+        assert!(
+            pipeline
+                .outputs
+                .iter()
+                .any(|o| matches!(o, RunnableOutput::Aes67 { .. })),
+            "the aes67 output is a mux-free runnable sink"
+        );
+    }
+
+    #[test]
+    fn resolve_aes67_source_reads_the_sdp_and_requires_a_multicast_override() {
+        // Valid: the SDP parses (format/clock/payload) and the multicast override
+        // gives the transport binding (the SDP c= line is deliberately not used).
+        let src = aes67_source_value(Some("[ff3e::1]:5004"));
+        let (session, group) = resolve_aes67_source(&src).expect("valid aes67 source resolves");
+        assert_eq!(session.clock_rate, 48_000);
+        assert_eq!(session.payload_type, 98);
+        assert_eq!(session.format.channels, 2);
+        assert_eq!(group, "[ff3e::1]:5004".parse().unwrap());
+
+        // A missing multicast override is a typed refusal (not derived from the SDP).
+        assert!(
+            resolve_aes67_source(&aes67_source_value(None)).is_err(),
+            "a missing multicast override is rejected (the SDP c= line is not used)"
+        );
+        // A malformed override is rejected.
+        assert!(
+            resolve_aes67_source(&aes67_source_value(Some("nope"))).is_err(),
+            "a malformed multicast override is rejected"
+        );
+    }
+
+    #[test]
+    fn interleave_to_stereo_maps_mono_stereo_and_multichannel() {
+        // Stereo passes through unchanged.
+        assert_eq!(
+            interleave_to_stereo(&[0.1, 0.2, 0.3, 0.4], 2),
+            vec![0.1, 0.2, 0.3, 0.4]
+        );
+        // Mono duplicates each sample to both L and R.
+        assert_eq!(interleave_to_stereo(&[0.5, 0.6], 1), vec![0.5, 0.5, 0.6, 0.6]);
+        // >2 channels keep the first two channels per frame (f0: 1,2 ; f1: 5,6).
+        assert_eq!(
+            interleave_to_stereo(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 4),
+            vec![1.0, 2.0, 5.0, 6.0]
+        );
+        // Zero channels clamps to mono — never divides by zero.
+        assert_eq!(interleave_to_stereo(&[0.9], 0), vec![0.9, 0.9]);
+    }
+
+    #[test]
+    fn aes67_audio_block_builds_a_48k_stereo_block() {
+        use multiview_input::st2110::v30::{Aes3Format, SampleDepth};
+        let frame = multiview_input::st2110::Aes67AudioFrame {
+            raw_timestamp: 0,
+            ssrc: 42,
+            discontinuity: false,
+            format: Aes3Format {
+                channels: 2,
+                depth: SampleDepth::L24,
+            },
+            samples: vec![0.1, -0.1, 0.2, -0.2], // 2 stereo frames
+        };
+        let block = aes67_audio_block(&frame).expect("builds a canonical block");
+        assert_eq!(block.frame_count(), 2, "two stereo frames");
+        assert_eq!(block.format().channel_count(), 2, "canonical stereo");
+        assert_eq!(block.format().sample_rate(), 48_000, "canonical 48 kHz");
+        assert_eq!(block.interleaved(), &[0.1, -0.1, 0.2, -0.2]);
     }
 }
