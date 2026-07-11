@@ -646,6 +646,28 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check
 
+  # ── release-artifact feature guard (ADR-G008) ───────────────────────────────
+  # Assert that NO shipped feature set of the `multiview` binary enables the
+  # `multiview-control/_test-seams` cargo feature (it arms the config-file-writing
+  # config-watch interpose test seam). `cargo deny` cannot express this (it bans
+  # crates, not enabled features) and there is no reliable "release build" cfg, so
+  # the guard resolves each shipped preset with `cargo tree` and fails if the seam
+  # feature appears. Cheap: `cargo tree` only RESOLVES the graph — no compile, no
+  # native deps, no GPU. The same script gates the release + docker workflows.
+  release-feature-guard:
+    name: release feature guard (no _test-seams)
+    runs-on: ubuntu-latest
+    # Toolchain install dominates; the `cargo tree` resolves are seconds. 15min
+    # covers a cold toolchain fetch while capping a wedged runner.
+    timeout-minutes: 15
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: no shipped preset enables multiview-control/_test-seams
+        run: ./scripts/check-no-test-seams.sh
+
   # ── always-run light jobs ────────────────────────────────────────────────
   # These run on EVERY push and PR — including docs-only PRs that skip the heavy
   # matrix above — so a prose-docs PR still gets a real green signal (and stays

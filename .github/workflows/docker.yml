@@ -30,9 +30,29 @@ permissions:
   contents: read
 
 jobs:
+  # ── release-artifact feature guard (ADR-G008) ───────────────────────────────
+  # Fail BEFORE building/pushing any image if a shipped feature set would enable
+  # `multiview-control/_test-seams` (the config-file-writing config-watch test
+  # seam). `cargo tree` only RESOLVES the feature graph on the runner — no Docker
+  # build, no native deps — and gates every image build below via `needs`.
+  guard:
+    name: release feature guard (no _test-seams)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: no shipped preset enables multiview-control/_test-seams
+        run: ./scripts/check-no-test-seams.sh
+
   # ── per (variant, arch) build → push by digest ──────────────────────────────
   build:
     name: build (${{ matrix.variant }}/${{ matrix.arch }})
+    # Gate every image build on the feature guard (ADR-G008): a shipped image must
+    # never carry the config-watch test seam.
+    needs: guard
     # Heaviest leg in the repo: a full multi-stage Docker build (cargo release
     # build of the whole workspace inside the image) + push by digest, on native
     # amd64/arm64 runners. A cold build cache + arm64 native runner can run long;

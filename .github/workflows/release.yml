@@ -21,8 +21,28 @@ permissions:
   contents: read
 
 jobs:
+  # Release-artifact feature guard (ADR-G008): fail the release BEFORE building
+  # any artifact if a shipped feature set would enable
+  # `multiview-control/_test-seams` (the config-file-writing config-watch test
+  # seam). `cargo tree` only RESOLVES the feature graph — no native deps — so this
+  # needs no FFmpeg/codec install and gates every target below via `needs`.
+  guard:
+    name: release feature guard (no _test-seams)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7 # v6.0.3
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable # matches ci.yml + rust-toolchain.toml (channel = stable)
+      - name: no shipped preset enables multiview-control/_test-seams
+        run: ./scripts/check-no-test-seams.sh
+
   build:
     name: build ${{ matrix.target }}
+    # Gate every artifact build on the feature guard (ADR-G008): a shipped binary
+    # must never carry the config-watch test seam.
+    needs: guard
     # Per-target release build: FFmpeg install (apt PPA / brew) + a `--release
     # --locked` cargo build, plus (macOS) codesign + notarytool --wait, which can
     # block on Apple's notarization service. 60min covers a cold cache + a slow
