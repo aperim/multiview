@@ -38,6 +38,7 @@ pub mod error;
 pub mod failover;
 pub mod grid;
 pub mod layout_doc;
+pub mod limits;
 pub mod media;
 pub mod origin;
 pub mod placement;
@@ -190,6 +191,13 @@ pub struct ControlConfig {
     /// `scheme://host` origin by [`MultiviewConfig::validate`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_origins: Vec<String>,
+    /// Management-plane connection + rate limits (SEC-14 control-plane DoS
+    /// floor): the concurrent-request cap plus the per-IP (pre-auth) and
+    /// per-API-key (post-auth) token-bucket rates the control plane enforces.
+    /// Absent ⇒ the secure defaults (limits enabled); validated by
+    /// [`MultiviewConfig::validate`].
+    #[serde(default)]
+    pub limits: crate::limits::ManagementLimits,
 }
 
 /// Process-wide system settings.
@@ -814,6 +822,10 @@ impl MultiviewConfig {
                     ))
                 })?;
             }
+            // The management-plane connection + rate limits (SEC-14): a zero
+            // concurrency cap or a zero token-bucket burst/refill would turn the
+            // DoS floor into a self-inflicted outage, so reject it at config load.
+            control.limits.validate()?;
         }
         Ok(())
     }
