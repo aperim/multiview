@@ -1,5 +1,5 @@
-//! Tests for the gated WebRTC **ingest media seam** (feature `webrtc`): the
-//! connection-state lifecycle, the H.264 RTP depacketize -> access-unit seam
+//! Tests for the gated WebRTC **ingest media seam** (feature `webrtc`): the H.264
+//! RTP depacketize -> access-unit seam
 //! (keyframe-gated, FU-A reassembly, STAP-A, bounded), the pure Opus RTP
 //! depacketizer (RFC 7587), the payload-type [`RtpRouter`], and the
 //! [`WebRtcProducer`]: an honest **compressed media-event** producer driven by
@@ -22,10 +22,9 @@ use multiview_input::normalize::WrapBits;
 use multiview_input::webrtc::opus::{OpusDepacketizer, AUDIO_CLOCK_RATE, MAX_OPUS_PACKET_BYTES};
 use multiview_input::webrtc::route::{MediaEvent, MediaUnit, RtpRouter};
 use multiview_input::webrtc::transport::{
-    H264Depacketizer, MediaEngine, RtpFrame, SessionState, WebRtcProducer, WebRtcSession,
-    VIDEO_CLOCK_RATE,
+    H264Depacketizer, MediaEngine, RtpFrame, WebRtcProducer, VIDEO_CLOCK_RATE,
 };
-use multiview_input::webrtc::{Codec, NegotiatedSession, SessionDescription};
+use multiview_input::webrtc::{Codec, MediaKind, NegotiatedMedia, NegotiatedSession, SdpDirection};
 
 /// A scripted media engine: yields a fixed list of injected RTP frames in order,
 /// then signals clean end-of-stream. No sockets, no crypto — exactly the seam the
@@ -53,20 +52,47 @@ const VIDEO_PT: u8 = 98;
 /// The audio payload type the test offers negotiate (Opus).
 const AUDIO_PT: u8 = 111;
 
-/// Negotiate the standard test session: H.264 video on PT 98 + Opus audio on
-/// PT 111, both offered `sendonly` (so we answer `recvonly` — a WHIP publish).
+/// The standard test session as the router/producer seam receives it: H.264 video
+/// on PT 98 + Opus audio on PT 111, both `recvonly` (a WHIP publish answers the
+/// publisher's `sendonly` offer `recvonly`).
 fn negotiated_av() -> NegotiatedSession {
-    let offer = "v=0\r\n\
-                 m=video 9 UDP/TLS/RTP/SAVPF 98\r\n\
-                 a=rtpmap:98 H264/90000\r\n\
-                 a=sendonly\r\n\
-                 m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
-                 a=rtpmap:111 opus/48000/2\r\n\
-                 a=sendonly\r\n";
-    SessionDescription::parse(offer)
-        .expect("offer parses")
-        .negotiate_answer(&[Codec::H264], &[Codec::OPUS])
-        .expect("offer negotiates")
+    NegotiatedSession {
+        sections: vec![
+            NegotiatedMedia {
+                kind: MediaKind::Video,
+                payload_type: VIDEO_PT,
+                codec: Codec::H264,
+                direction: SdpDirection::RecvOnly,
+            },
+            NegotiatedMedia {
+                kind: MediaKind::Audio,
+                payload_type: AUDIO_PT,
+                codec: Codec::OPUS,
+                direction: SdpDirection::RecvOnly,
+            },
+        ],
+    }
+}
+
+/// The `audio = false` ingest variant: the audio m-line is answered `inactive`
+/// (ADR-T014 §5), so its section must not route.
+fn negotiated_inactive_audio() -> NegotiatedSession {
+    NegotiatedSession {
+        sections: vec![
+            NegotiatedMedia {
+                kind: MediaKind::Video,
+                payload_type: VIDEO_PT,
+                codec: Codec::H264,
+                direction: SdpDirection::RecvOnly,
+            },
+            NegotiatedMedia {
+                kind: MediaKind::Audio,
+                payload_type: AUDIO_PT,
+                codec: Codec::OPUS,
+                direction: SdpDirection::Inactive,
+            },
+        ],
+    }
 }
 
 /// Build an H.264 single-NAL RTP frame (one NAL unit per packet, no fragmentation).
@@ -119,46 +145,6 @@ fn expect_audio(event: &MediaEvent) -> &MediaUnit {
         MediaEvent::AudioFrame(unit) => unit,
         other => panic!("expected an audio frame, got {other:?}"),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Session lifecycle
-// ---------------------------------------------------------------------------
-
-#[test]
-fn session_state_lifecycle_is_validated() {
-    let mut st = SessionState::Created;
-    assert_eq!(st, SessionState::Created);
-    // Created -> Connecting -> Connected is the happy path.
-    st = st.advance(SessionState::Connecting).expect("connecting");
-    st = st.advance(SessionState::Connected).expect("connected");
-    assert_eq!(st, SessionState::Connected);
-    // Connected -> Closed terminates cleanly.
-    st = st.advance(SessionState::Closed).expect("closed");
-    assert!(st.is_terminal());
-
-    // An illegal jump (Created straight to Connected) is rejected, not panicked.
-    assert!(SessionState::Created
-        .advance(SessionState::Connected)
-        .is_err());
-    // A terminal state never transitions again.
-    assert!(SessionState::Closed
-        .advance(SessionState::Connecting)
-        .is_err());
-    // Any non-terminal state may fail.
-    assert!(SessionState::Connecting
-        .advance(SessionState::Failed)
-        .is_ok());
-}
-
-#[test]
-fn session_start_runs_state_machine_to_connected() {
-    let mut session = WebRtcSession::new(negotiated_av());
-    assert_eq!(session.state(), SessionState::Created);
-    session.connect().expect("connect drives to connected");
-    assert_eq!(session.state(), SessionState::Connected);
-    session.close().expect("close");
-    assert_eq!(session.state(), SessionState::Closed);
 }
 
 // ---------------------------------------------------------------------------
@@ -526,17 +512,7 @@ fn router_keeps_per_stream_gap_detection_independent() {
 fn router_does_not_bind_an_inactive_media_section() {
     // `audio = false` ingest answers the audio m-line inactive (ADR-T014 §5):
     // an inactive section must not route — its PT counts as unknown.
-    let offer = "v=0\r\n\
-                 m=video 9 UDP/TLS/RTP/SAVPF 98\r\n\
-                 a=rtpmap:98 H264/90000\r\n\
-                 a=sendonly\r\n\
-                 m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
-                 a=rtpmap:111 opus/48000/2\r\n\
-                 a=inactive\r\n";
-    let negotiated = SessionDescription::parse(offer)
-        .expect("offer parses")
-        .negotiate_answer(&[Codec::H264], &[Codec::OPUS])
-        .expect("offer negotiates");
+    let negotiated = negotiated_inactive_audio();
     let mut router = RtpRouter::new(&negotiated);
     assert!(router.route(&single_nal(1, 0, true, IDR_NAL)).is_some());
     assert!(
@@ -674,7 +650,7 @@ fn producer_counts_and_drops_unknown_payload_types() {
 /// socket from inside this crate's test. This test is therefore `#[ignore]`d and
 /// only runs when an operator points it at a real peer via
 /// `MULTIVIEW_WEBRTC_PEER`. Absent that, it skips honestly (it never asserts a
-/// fake pass) — the injected-engine tests above carry the depacketize/lifecycle
+/// fake pass) — the injected-engine tests above carry the depacketize/routing
 /// correctness load.
 #[test]
 #[ignore = "needs a real WebRTC peer + application-layer ICE/DTLS/SRTP engine (set MULTIVIEW_WEBRTC_PEER)"]

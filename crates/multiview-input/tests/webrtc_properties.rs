@@ -19,22 +19,28 @@
 use multiview_input::webrtc::opus::{OpusDepacketizer, MAX_OPUS_PACKET_BYTES};
 use multiview_input::webrtc::route::RtpRouter;
 use multiview_input::webrtc::transport::{H264Depacketizer, RtpFrame};
-use multiview_input::webrtc::{Codec, NegotiatedSession, SessionDescription};
+use multiview_input::webrtc::{Codec, MediaKind, NegotiatedMedia, NegotiatedSession, SdpDirection};
 use proptest::prelude::*;
 
-/// Negotiate the standard test session (H.264 video PT 98, Opus audio PT 111).
+/// The standard test session (H.264 video PT 98, Opus audio PT 111), as the
+/// router/producer seam receives it (both sections `recvonly`).
 fn negotiated_av() -> NegotiatedSession {
-    let offer = "v=0\r\n\
-                 m=video 9 UDP/TLS/RTP/SAVPF 98\r\n\
-                 a=rtpmap:98 H264/90000\r\n\
-                 a=sendonly\r\n\
-                 m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
-                 a=rtpmap:111 opus/48000/2\r\n\
-                 a=sendonly\r\n";
-    SessionDescription::parse(offer)
-        .expect("offer parses")
-        .negotiate_answer(&[Codec::H264], &[Codec::OPUS])
-        .expect("offer negotiates")
+    NegotiatedSession {
+        sections: vec![
+            NegotiatedMedia {
+                kind: MediaKind::Video,
+                payload_type: 98,
+                codec: Codec::H264,
+                direction: SdpDirection::RecvOnly,
+            },
+            NegotiatedMedia {
+                kind: MediaKind::Audio,
+                payload_type: 111,
+                codec: Codec::OPUS,
+                direction: SdpDirection::RecvOnly,
+            },
+        ],
+    }
 }
 
 /// An arbitrary decrypted RTP packet: any PT, sequence, timestamp, marker, and
