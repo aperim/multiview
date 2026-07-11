@@ -19,21 +19,27 @@
 //! per tick and never across a blocking operation. Consequently a wedged or absent
 //! source can never stall a sibling consumer's sample path.
 //!
-//! ## Teardown off the hot path (safety rule §4)
+//! ## Teardown off the hot path (safety rule §4 / inv #10)
 //!
 //! When the **last** reference to a source is released the entry is removed and its
 //! decode actor is handed to a dedicated **reaper thread** via a wait-free,
-//! non-blocking channel send. The blocking stop-and-join of the decode thread runs
-//! **on the reaper**, never in the releasing consumer's `Drop` — so an `Arc`-drop
-//! that returns a pooled buffer never runs a blocking join inside a Tokio async
-//! destructor. The one blocking join lives in the explicit [`SourceRegistry::shutdown`],
-//! called from a synchronous teardown context.
+//! non-blocking channel send. The reaper runs each blocking stop-and-join on its
+//! **own detachable helper thread**, so even a decode-thread join that wedges
+//! forever never blocks the reaper's consume loop nor grows the teardown queue
+//! unboundedly behind it (inv #10) — a sustained stream of healthy last-releases
+//! keeps [`pending_teardowns`](SourceRegistry::pending_teardowns) bounded. The
+//! releasing consumer's `Drop` only sends, so an `Arc`-drop that returns a pooled
+//! buffer never runs a blocking join inside a Tokio async destructor. The explicit
+//! [`SourceRegistry::shutdown`] (synchronous teardown context) **bounded-grace-joins**
+//! the in-flight teardowns then **detaches** any stragglers rather than blocking
+//! forever on a wedged join.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use multiview_framestore::TileStore;
 
@@ -98,18 +104,20 @@ impl SourceKey {
 /// A running ingest/decode actor owned by a [`SourceRegistry`] entry.
 ///
 /// Its [`shutdown`](SourceActor::shutdown) — the stop-and-join of the decode
-/// thread — is **blocking** and runs **exclusively on the registry's reaper
-/// thread**, never on a program's hot path and never inside a Tokio async
-/// destructor (safety rule §4 / inv #10). A last-release `Drop` only hands the
-/// boxed actor to the reaper via a wait-free channel send; the reaper performs the
-/// join off every hot path.
+/// thread — is **blocking** and runs **exclusively on a detachable helper thread
+/// the reaper spawns for it**, never on a program's hot path and never inside a
+/// Tokio async destructor (safety rule §4 / inv #10). A last-release `Drop` only
+/// hands the boxed actor to the reaper via a wait-free channel send; the reaper
+/// spawns a helper thread that performs the join off every hot path, so a wedged
+/// join never blocks the reaper's consume loop.
 ///
-/// Implementors' own `Drop` (reached only if the registry is torn down while this
-/// actor is still queued — i.e. the reaper is already gone) MUST be non-blocking:
-/// signal-and-detach, never a join, for the same reason.
+/// Implementors' own `Drop` (reached only if the helper thread cannot be spawned,
+/// or the registry is torn down while this actor is still queued — i.e. the reaper
+/// is already gone) MUST be non-blocking: signal-and-detach, never a join, for the
+/// same reason.
 pub trait SourceActor: Send + 'static {
     /// Stop the actor and block until its decode thread has fully stopped. Called
-    /// exactly once, only on the reaper thread.
+    /// exactly once, on a detachable helper thread the reaper spawns for it.
     fn shutdown(self: Box<Self>);
 }
 
@@ -194,8 +202,8 @@ pub struct SourceRegistry<T> {
     reaper_tx: Sender<Reap>,
     reaper_join: Mutex<Option<JoinHandle<()>>>,
     /// Count of source teardowns currently in flight (a blocking decode-thread
-    /// join). Shared with the reaper (and, once teardowns run off-loop, with each
-    /// teardown helper thread) so the isolation guarantee is observable via
+    /// join on a detachable helper thread). Shared with the reaper and each teardown
+    /// helper thread so the isolation guarantee is observable via
     /// [`SourceRegistry::pending_teardowns`]. An [`Arc`] so a detached straggler
     /// thread can still decrement it after the registry itself is gone.
     pending_teardowns: Arc<AtomicUsize>,
@@ -380,11 +388,14 @@ impl<T> SourceRegistry<T> {
             .map(|entry| Arc::clone(&entry.store))
     }
 
-    /// Drain and stop the reaper, joining every pending decode teardown.
+    /// Drain and stop the reaper, bounded-grace-joining every in-flight decode
+    /// teardown then **detaching** any straggler rather than blocking forever.
     ///
     /// Call from a **synchronous** teardown context **after** all handles have been
-    /// released — never from a Tokio async destructor (it blocks on the slowest
-    /// decode-thread join). Idempotent.
+    /// released — never from a Tokio async destructor. Bounded: the reaper waits up
+    /// to [`TEARDOWN_GRACE`] for the in-flight teardown helper threads to finish,
+    /// then detaches whichever are still wedged (a stuck decode-thread join never
+    /// hangs shutdown). Idempotent.
     pub fn shutdown(&self) {
         // Reaper may already have exited if the registry was torn down; a failed
         // send just means there is nothing left to drain (rule 37: intentional
@@ -442,30 +453,101 @@ impl<T> Drop for SourceRegistry<T> {
     }
 }
 
-/// The reaper thread body: stop-and-join each actor off every hot path, and on
-/// [`Reap::Stop`] drain any already-queued teardowns before exiting so an explicit
-/// [`SourceRegistry::shutdown`] joins **all** pending decodes.
+/// Total time the explicit [`SourceRegistry::shutdown`] waits for in-flight
+/// teardowns to finish before **detaching** any straggler (a wedged decode-thread
+/// join) rather than blocking forever. Generous enough for a healthy join to
+/// complete on a contended host; bounded so a stuck join never hangs shutdown.
+const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// Poll cadence while grace-joining in-flight teardown helper threads.
+const TEARDOWN_POLL: Duration = Duration::from_millis(1);
+
+/// The reaper thread body. Each [`Reap::Actor`] teardown (the blocking
+/// stop-and-join of a decode thread) runs on its **own detachable helper thread**,
+/// so a teardown wedged forever never blocks the reaper's consume loop nor grows
+/// the teardown queue unboundedly behind it (inv #10). On [`Reap::Stop`] the reaper
+/// drains any already-queued teardowns onto their own helper threads, then
+/// [`grace_join`]s the in-flight set and detaches stragglers — so an explicit
+/// [`SourceRegistry::shutdown`] joins healthy teardowns within [`TEARDOWN_GRACE`]
+/// without ever blocking on a wedged one.
 fn reaper_loop(rx: &Receiver<Reap>, pending: &Arc<AtomicUsize>) {
+    let mut in_flight: Vec<JoinHandle<()>> = Vec::new();
     while let Ok(msg) = rx.recv() {
+        // Sweep finished helpers so the set tracks only genuinely-in-flight
+        // teardowns. A finished handle is dropped (detached) — its thread has
+        // already exited, so there is nothing to join and nothing leaks.
+        in_flight.retain(|h| !h.is_finished());
         match msg {
-            Reap::Actor(actor) => {
-                pending.fetch_add(1, Ordering::Relaxed);
-                actor.shutdown();
-                pending.fetch_sub(1, Ordering::Relaxed);
-            }
+            Reap::Actor(actor) => spawn_teardown(actor, pending, &mut in_flight),
             Reap::Stop => {
+                // Drain queued teardowns onto helper threads (never inline — a
+                // wedged one must not block the drain), then bounded-grace-join.
                 while let Ok(Reap::Actor(actor)) = rx.try_recv() {
-                    pending.fetch_add(1, Ordering::Relaxed);
-                    actor.shutdown();
-                    pending.fetch_sub(1, Ordering::Relaxed);
+                    spawn_teardown(actor, pending, &mut in_flight);
                 }
+                grace_join(&mut in_flight);
                 return;
             }
         }
     }
-    // `recv` returned `Err`: every sender was dropped (the registry is gone). Any
-    // actor still owned by a live handle keeps the decode alive until that handle
-    // drops; nothing to reap here.
+    // `recv` returned `Err`: every sender was dropped (the registry is gone). Detach
+    // any in-flight teardowns (their helper threads own their actors and run to
+    // completion); never block here — nothing is waiting on the reaper now.
+}
+
+/// Spawn a single source teardown (`actor.shutdown()` — the blocking decode-thread
+/// join) onto its **own detachable helper thread**, so a wedged shutdown never
+/// blocks the reaper's consume loop (inv #10). Bumps `pending` (the observable)
+/// before spawning; the helper thread clears it on completion. The handle is
+/// tracked in `in_flight` for the shutdown-path grace-join.
+///
+/// If the helper thread cannot be spawned (thread/resource exhaustion — never in
+/// practice), [`std::thread::Builder::spawn`] drops the closure and with it the
+/// boxed actor, so the actor's contractually **non-blocking** `Drop`
+/// (signal-and-detach) runs instead of a blocking inline join — the reaper still
+/// never blocks. The optimistic `pending` bump is then recovered.
+fn spawn_teardown(
+    actor: Box<dyn SourceActor>,
+    pending: &Arc<AtomicUsize>,
+    in_flight: &mut Vec<JoinHandle<()>>,
+) {
+    pending.fetch_add(1, Ordering::Relaxed);
+    let pending_for_thread = Arc::clone(pending);
+    let spawned = std::thread::Builder::new()
+        .name("mv-source-teardown".to_owned())
+        .spawn(move || {
+            actor.shutdown();
+            pending_for_thread.fetch_sub(1, Ordering::Relaxed);
+        });
+    match spawned {
+        Ok(handle) => in_flight.push(handle),
+        Err(_) => {
+            // Recover the optimistic bump; `spawn` already dropped `actor` (running
+            // its non-blocking Drop) when it dropped the closure on failure.
+            pending.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Wait up to [`TEARDOWN_GRACE`] for the in-flight teardown helper threads to
+/// finish, then **detach** any straggler (drop its handle) rather than blocking
+/// forever on a wedged decode-thread join. Called only from the reaper's `Stop`
+/// path (the explicit, synchronous [`SourceRegistry::shutdown`]).
+fn grace_join(in_flight: &mut Vec<JoinHandle<()>>) {
+    let deadline = Instant::now() + TEARDOWN_GRACE;
+    loop {
+        in_flight.retain(|h| !h.is_finished());
+        if in_flight.is_empty() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // Detach stragglers: dropping the handles leaves the wedged teardown
+            // threads running (they own their actors) — shutdown never blocks.
+            in_flight.clear();
+            return;
+        }
+        std::thread::sleep(TEARDOWN_POLL);
+    }
 }
 
 /// Lock a mutex, recovering the guard if a previous holder panicked. The registry
@@ -547,6 +629,8 @@ mod tests {
         // must never grow an unbounded teardown backlog behind it. A reaper that
         // joins inline FAILS this: the wedged join blocks the consume loop, so no
         // healthy teardown behind it ever runs.
+        const HEALTHY: usize = 1000;
+        const PENDING_BOUND: usize = 256;
         let reg = SourceRegistry::<u64>::new();
 
         // A wedged teardown: its `shutdown` spins on the gate until the test clears it.
@@ -578,8 +662,6 @@ mod tests {
 
         // A SUSTAINED stream of healthy last-releases (distinct keys → each a
         // last-release handed to the reaper). Sample `pending_teardowns()` as we go.
-        const HEALTHY: usize = 1000;
-        const PENDING_BOUND: usize = 256;
         let healthy_done = Arc::new(AtomicUsize::new(0));
         let mut max_pending = 0;
         for i in 0..HEALTHY {
