@@ -7619,12 +7619,14 @@ fn build_aes67_output(
 /// stream across a rebuild. `DefaultHasher` (`SipHash`) is explicitly **not** a
 /// stable cross-version contract, so it must never back a wire identifier. The
 /// multicast group+port is folded in (not just the id) so distinct outputs get
-/// distinct SSRCs **with overwhelming probability** (a 32-bit RTP SSRC space). The
-/// 32-bit fold does NOT by itself *guarantee* uniqueness; that hard guarantee is
-/// enforced fail-closed at build time by [`ensure_no_aes67_ssrc_collision`] for
-/// senders sharing one multicast group (the only case a receiver cannot demux),
-/// and RTP's standard SSRC collision resolution (RFC 3550 §8) covers any residual.
-/// Clamped away from `0` (an ambiguous-but-legal SSRC).
+/// distinct SSRCs **with overwhelming probability** (a 32-bit RTP SSRC space) — the
+/// deterministic fold does NOT by itself *guarantee* uniqueness. The one HARD
+/// guarantee is build-time and fail-closed ([`ensure_no_aes67_ssrc_collision`]): no
+/// two AES67 outputs **configured in this build** that share a multicast
+/// `group:port` may fold to the same SSRC. It does NOT detect or resolve a
+/// collision with an EXTERNAL / third-party sender on that group — there is no
+/// runtime RTCP SSRC collision detection or reselection here. Clamped away from `0`
+/// (an ambiguous-but-legal SSRC).
 #[cfg(feature = "aes67")]
 fn aes67_ssrc_for(id: &str, dest: std::net::SocketAddr) -> u32 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
