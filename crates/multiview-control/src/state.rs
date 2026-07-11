@@ -1102,14 +1102,33 @@ impl AppState {
         self
     }
 
-    /// Install the management-plane connection + rate limits (SEC-14 control-plane
-    /// `DoS` floor) from operator config. The binary calls this with
+    /// Install the management-plane request-concurrency + rate limits (SEC-14
+    /// control-plane `DoS` floor) from operator config. The binary calls this with
     /// `control.limits` (secure defaults); the bare constructor leaves the inert
     /// disabled set, so tests and embedders stay unlimited unless they opt in. The
     /// runtime limiters are built here, so callers never name the internal type.
+    ///
+    /// This is the PUBLIC runtime API, so — unlike the CLI config path, which
+    /// validates at load — an embedder can hand us an unvalidated
+    /// [`ManagementLimits`](multiview_config::limits::ManagementLimits). An invalid
+    /// one is dangerous: a zero concurrency cap installs a permanently-closed
+    /// semaphore (every request `503`) and an oversized cap would be silently clamped
+    /// to a different effective value. So validate here and, on failure, fall back to
+    /// the secure defaults (limits ON) with a warning — fail **SAFE**, never panic
+    /// (rule 17) — rather than honour a broken cap.
     #[must_use]
     pub fn with_limits(mut self, limits: &multiview_config::limits::ManagementLimits) -> Self {
-        self.limiters = Arc::new(Limiters::from_config(limits));
+        let installed = match limits.validate() {
+            Ok(()) => limits.clone(),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "control.limits failed validation; installing the secure defaults instead"
+                );
+                multiview_config::limits::ManagementLimits::default()
+            }
+        };
+        self.limiters = Arc::new(Limiters::from_config(&installed));
         self
     }
 
