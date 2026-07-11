@@ -621,6 +621,17 @@ const TEARDOWN_GRACE: Duration = Duration::from_secs(2);
 /// Poll cadence while grace-joining the teardown workers on shutdown.
 const TEARDOWN_POLL: Duration = Duration::from_millis(1);
 
+/// Bounded number of attempts to spawn each teardown-pool worker before giving up. A worker
+/// thread spawn can fail *transiently* (EAGAIN) under thread/memory pressure on a contended
+/// host — the product's target environment; retrying absorbs the transient so construction
+/// **guarantees** `TEARDOWN_WORKERS` live workers in practice (RP2, inv #10 liveness).
+const TEARDOWN_SPAWN_ATTEMPTS: usize = 64;
+
+/// Backoff between teardown-worker spawn retries — lets a transient thread/memory-pressure
+/// spike clear. Bounded total wait: `TEARDOWN_SPAWN_ATTEMPTS * TEARDOWN_SPAWN_BACKOFF`, a
+/// one-time construction cost only paid under real resource exhaustion.
+const TEARDOWN_SPAWN_BACKOFF: Duration = Duration::from_millis(5);
+
 /// RAII guard for exactly **one** reserved [`SourceRegistry::pending_teardowns`] slot: its
 /// `Drop` decrements the observable once. Created only by a **successful** [`reserve_slot`]
 /// (via [`Teardown::reserve`]), so the increment/decrement pair is balanced **by
@@ -745,18 +756,57 @@ fn spawn_teardown_worker(
         .spawn(move || teardown_worker(&rx))
 }
 
-/// Build the fixed pool of `TEARDOWN_WORKERS` teardown-worker threads.
+/// Build the fixed pool of `TEARDOWN_WORKERS` teardown-worker threads, **fail-closed**: each
+/// worker is spawned with a bounded retry ([`spawn_teardown_worker_with_retry`]) so a transient
+/// EAGAIN on a contended host is absorbed and the pool GUARANTEES `TEARDOWN_WORKERS` live
+/// workers in practice (RP2, inv #10 liveness — the "a sibling keeps draining while one is
+/// wedged" guarantee needs K). A *persistent* spawn failure is surfaced LOUDLY
+/// (`tracing::error!`) and the pool proceeds degraded — an explicit, observable degrade, never
+/// a silent short pool.
 fn build_teardown_pool<S>(spawn: &S, rx: &Arc<Mutex<Receiver<Teardown>>>) -> Vec<JoinHandle<()>>
 where
     S: Fn(usize, &Arc<Mutex<Receiver<Teardown>>>) -> std::io::Result<JoinHandle<()>>,
 {
     let mut workers = Vec::with_capacity(TEARDOWN_WORKERS);
     for i in 0..TEARDOWN_WORKERS {
-        if let Ok(handle) = spawn(i, rx) {
-            workers.push(handle);
+        match spawn_teardown_worker_with_retry(spawn, i, rx) {
+            Ok(handle) => workers.push(handle),
+            Err(error) => tracing::error!(
+                worker = i,
+                attempts = TEARDOWN_SPAWN_ATTEMPTS,
+                %error,
+                "teardown worker could not be spawned after retries; teardown pool running \
+                 degraded (< TEARDOWN_WORKERS) — inv #10 liveness weakened, surfaced not silent"
+            ),
         }
     }
     workers
+}
+
+/// Spawn one teardown worker, retrying a transient failure up to [`TEARDOWN_SPAWN_ATTEMPTS`]
+/// times with [`TEARDOWN_SPAWN_BACKOFF`] between tries. Returns the join handle, or the final
+/// error when every attempt failed (a persistent, not transient, exhaustion).
+fn spawn_teardown_worker_with_retry<S>(
+    spawn: &S,
+    i: usize,
+    rx: &Arc<Mutex<Receiver<Teardown>>>,
+) -> std::io::Result<JoinHandle<()>>
+where
+    S: Fn(usize, &Arc<Mutex<Receiver<Teardown>>>) -> std::io::Result<JoinHandle<()>>,
+{
+    let mut last_error = None;
+    for attempt in 0..TEARDOWN_SPAWN_ATTEMPTS {
+        match spawn(i, rx) {
+            Ok(handle) => return Ok(handle),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < TEARDOWN_SPAWN_ATTEMPTS {
+                    std::thread::sleep(TEARDOWN_SPAWN_BACKOFF);
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("teardown worker spawn failed")))
 }
 
 /// Wait up to [`TEARDOWN_GRACE`] for the teardown workers to finish, then **detach**
