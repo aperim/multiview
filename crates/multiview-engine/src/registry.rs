@@ -38,12 +38,24 @@
 //! queued **plus** in-flight — can never exceed `TEARDOWN_QUEUE_DEPTH +
 //! TEARDOWN_WORKERS`. This replaces an unbounded queue *and* unbounded threads with a
 //! fixed pool (inv #10). When the queue is full (every worker busy or wedged) the
-//! release **sheds**: it drops the actor, whose `Drop` non-blockingly signals the
-//! decode to terminate and detaches (the shed contract on [`SourceActor`]). A
-//! releasing `Drop` therefore never runs a blocking join inside a Tokio async
-//! destructor. The explicit [`SourceRegistry::shutdown`] (synchronous teardown
-//! context) disconnects the queue, **bounded-grace-joins** the workers for
-//! [`TEARDOWN_GRACE`], then **detaches** any still wedged rather than blocking forever.
+//! release **sheds**: it drops the boxed actor instead of enqueuing it — a wait-free,
+//! thread-free bound, never a blocking join inside a Tokio async destructor. The
+//! explicit [`SourceRegistry::shutdown`] (synchronous teardown context) disconnects the
+//! queue, **bounded-grace-joins** the workers for [`TEARDOWN_GRACE`], then **detaches**
+//! any still wedged rather than blocking forever.
+//!
+//! ## Scope today: the shed path is dormant until decode ownership is hoisted
+//!
+//! The bounded pool above is the complete, tested isolation fix, and it holds for *any*
+//! number of actors. But in MP-2 **no real decode actor is enqueued yet**: production
+//! (`Pipeline::build`) uses [`acquire_store`](SourceRegistry::acquire_store), whose entry
+//! carries **no** [`SourceActor`] (`actor: None`) — decode stop/join still lives in the
+//! run's external `StopRegistry`. So a last-release offers nothing to the pool and the
+//! shed path never runs in production; only tests inject actors (via
+//! [`acquire`](SourceRegistry::acquire)) to exercise the bound. When decode ownership is
+//! hoisted into the registry (a later milestone), the real actor's teardown must make a
+//! shed non-blockingly **signal decode termination** — the forward contract on
+//! [`SourceActor`], whose dedicated test lands with that hoist.
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -126,17 +138,21 @@ impl SourceKey {
 ///   path and never inside a Tokio async destructor. A last-release `Drop` only
 ///   *offers* the boxed actor to the pool via a non-blocking, bounded `try_send`.
 /// * **Shed / fallback** — when the bounded teardown queue is full (every worker is
-///   busy or wedged) the actor is **dropped instead of shut down**. An implementor's
-///   own `Drop` therefore MUST (a) be **non-blocking** (never a join — for the same
-///   async-destructor reason) **and** (b) still **signal the decode to terminate**
-///   (set the stop flag / close the command channel the decode loop observes), so the
-///   decode genuinely winds down on its own rather than leaking a live thread. It is
-///   "signal-and-detach", not merely "detach": no graceful join is awaited, but the
-///   decode still stops. This is what makes shedding a *bounded* fallback rather than
-///   a thread leak. (In MP-2 no real actor is wired yet — decode ownership is hoisted
-///   into the registry in a later milestone — so this contract binds that future
-///   implementor; the store-only [`acquire_store`](SourceRegistry::acquire_store) path
-///   carries no actor.)
+///   busy or wedged) the actor is **dropped instead of shut down**, keeping the teardown
+///   resource bounded (inv #10). For that shed to bound *decode* — not merely this
+///   struct — a real implementor's teardown MUST (a) be **non-blocking** (never a join —
+///   for the same async-destructor reason) **and** (b) still **signal the decode to
+///   terminate** (set the stop flag / close the command channel the decode loop
+///   observes), so the decode winds down on its own rather than leaking a live thread.
+///   That is "signal-and-detach", not merely "detach".
+///
+///   Point (b) is a **forward contract, not present behavior.** `SourceActor` cannot
+///   express a `Drop` bound, and in MP-2 no real actor is wired yet: decode ownership is
+///   hoisted into the registry in a later milestone; production's store-only
+///   [`acquire_store`](SourceRegistry::acquire_store) path carries no actor, and the only
+///   implementors today are test doubles. When the real decode actor lands it carries the
+///   signal — made **structural** (a shed/stop method), with its own RED test — at that
+///   hoist. The bounded pool itself needs none of this: it is complete and tested now.
 ///
 /// `shutdown(self: Box<Self>)` consumes the actor, so its own `Drop` runs *after*
 /// `shutdown` returns; an idempotent stop-signal — safe to run from both `shutdown`
@@ -464,8 +480,8 @@ impl<T> SourceRegistry<T> {
     pub fn shutdown(&self) {
         // Take + drop the queue sender: once every sender (this one and any transient
         // `release` clone) is gone, `recv` returns `Err` and idle workers exit. Any
-        // actors still buffered drop with the channel → their non-blocking Drop
-        // (signal-and-detach) terminates decode.
+        // actors still buffered drop with the channel (non-blocking); a real actor's drop
+        // also signals decode termination per the SourceActor shed contract.
         drop(lock(&self.teardown_tx).take());
         let workers = std::mem::take(&mut *lock(&self.teardown_workers));
         grace_join(workers);
@@ -501,10 +517,12 @@ impl<T> SourceRegistry<T> {
     /// Offer a decode actor to the bounded teardown pool with a non-blocking
     /// `try_send`. On success a worker runs the blocking `shutdown()` off every hot
     /// path. When the queue is full (every worker busy or wedged) or the pool is gone,
-    /// the actor is **shed**: dropping the [`Teardown`] runs the actor's contractually
-    /// non-blocking `Drop` (signal the decode to terminate + detach) and decrements the
-    /// observable — a wait-free, thread-free shed that keeps the teardown resource
-    /// bounded (inv #10). Never blocks; safe on any thread.
+    /// the actor is **shed**: dropping the [`Teardown`] drops the boxed actor and
+    /// decrements the observable — a wait-free, thread-free shed that keeps the teardown
+    /// resource bounded (inv #10). Per the [`SourceActor`] shed contract a real actor's
+    /// drop non-blockingly signals decode termination; today only test doubles are ever
+    /// enqueued (production uses `acquire_store`, `actor: None`). Never blocks; safe on
+    /// any thread.
     fn offer_teardown(&self, actor: Box<dyn SourceActor>) {
         let teardown = Teardown::new(actor, &self.pending_teardowns);
         let sender = lock(&self.teardown_tx).clone();
@@ -515,9 +533,10 @@ impl<T> SourceRegistry<T> {
             },
             None => teardown,
         };
-        // Shed path: dropping the Teardown runs the actor's signal-and-detach Drop and
-        // the observable decrement (rule 37: a full queue / gone pool is the intended
-        // shed signal, not an error to propagate).
+        // Shed path: dropping the Teardown drops the boxed actor and decrements the
+        // observable (rule 37: a full queue / gone pool is the intended shed signal, not
+        // an error to propagate). A real actor's drop signals decode termination per the
+        // SourceActor shed contract; today the enqueued actors are test doubles.
         drop(shed);
     }
 }
@@ -529,7 +548,8 @@ impl<T> Drop for SourceRegistry<T> {
         // handles drop with the struct — no join). A registry `Drop` may run in an
         // async destructor, so we never join here; the explicit `shutdown()` is the
         // graceful, bounded-grace-joining path. Any actors still buffered drop with the
-        // channel → their non-blocking Drop (signal-and-detach) terminates decode.
+        // channel (non-blocking); a real actor's drop also signals decode termination per
+        // the SourceActor shed contract.
         drop(lock(&self.teardown_tx).take());
     }
 }
@@ -595,10 +615,10 @@ impl Teardown {
 impl Drop for Teardown {
     fn drop(&mut self) {
         // Shed / buffer-drop path: if `run` never took the actor it is still here.
-        // Dropping it runs the actor's contractually NON-BLOCKING `Drop` (signal the
-        // decode to terminate + detach — never a join), so shedding still terminates
-        // decode. Then decrement the observable exactly once — panic-safe: this runs
-        // even if `run`'s `shutdown()` unwound.
+        // Dropping it is NON-BLOCKING (never a join); per the SourceActor shed contract a
+        // real actor's own drop also signals decode termination (a forward contract — no
+        // real actor exists yet). Then decrement the observable exactly once — panic-safe:
+        // this runs even if `run`'s `shutdown()` unwound.
         drop(self.actor.take());
         self.pending.fetch_sub(1, Ordering::Relaxed);
     }
