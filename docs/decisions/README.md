@@ -73,6 +73,7 @@ The **production-switcher layer** — M/E (mix/effects) stages with program/prev
 - [ADR-E007](ADR-E007.md) — Resource-adaptive degradation & admission control without breaking output
 - [ADR-E008](ADR-E008.md) — Cost-model-driven planner with a capability+cost registry
 - [ADR-E009](ADR-E009.md) — Per-tier efficiency budgets enforced by perf-regression CI
+- [ADR-E010](ADR-E010.md) — Wire the failure-learning ledger into the placement scorer + engine slow tick *(Proposed)*
 - [ADR-0017](ADR-0017.md) — GPU/CPU utilisation monitoring + affinity-aware least-loaded multi-GPU work placement *(Proposed)*
 - [ADR-0018](ADR-0018.md) — Adaptive affinity-first GPU work-placement with deliberate split + closed-loop re-placement *(Proposed)*
 - [ADR-0022](ADR-0022.md) — Real-time software compositor: parallelize + LUT the per-pixel colour pipeline; content-aware smoothness gate *(Accepted)*
