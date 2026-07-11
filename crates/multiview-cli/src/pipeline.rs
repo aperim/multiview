@@ -7487,6 +7487,17 @@ fn build_aes67_output(
             ),
         });
     };
+    // A zero packet time is nonsensical (and the `.max(1)` below would silently
+    // coerce it to a 1-frame ~0.02 ms packet flood). Reject it fail-closed instead.
+    // (`ptime_ms * 48000 / 1000` is exactly `ptime_ms * 48` for any u32, so a
+    // NON-zero ptime never truncates; an oversized one is caught by
+    // `Aes67Sender::new`'s frames-per-packet bound below.)
+    if *ptime_ms == 0 {
+        return Err(PipelineError::Output {
+            kind: "aes67",
+            reason: format!("aes67 output `{id}` has a zero packet time (`ptime_ms` must be >= 1)"),
+        });
+    }
     // frames_per_packet = ptime_ms * rate / 1000 (Class-A ptime = 1 ms → 48 frames
     // @ 48 kHz). Computed in u64 to stay exact, clamped ≥ 1.
     let frames_per_packet =
