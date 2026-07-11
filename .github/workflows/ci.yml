@@ -559,6 +559,37 @@ jobs:
           --features webrtc
           --all-targets
           -- -D warnings
+      - name: clippy multiview-cli --features ffmpeg,aes67
+        # AES67 / SMPTE ST 2110-30 raw-PCM audio wiring (#96 / #103). The CLI RX
+        # (`drive_aes67_rx`) + TX (`build_aes67_output` / `run_aes67_output`) sit
+        # behind `#[cfg(feature = "aes67")]` NESTED in `#[cfg(feature = "ffmpeg")]`
+        # in `pipeline.rs`, so — exactly like the webrtc-native steps above — the
+        # libav-free `feature-clippy` matrix physically cannot build them
+        # (ffmpeg-sys-next's build.rs needs libav) and a clippy break in that
+        # wiring would reach main CI-green. This leg closes that false-green gap,
+        # reusing the SAME pinned FFmpeg env already set up above. --locked (rule
+        # 33), -D warnings mirrors the default `lint` gate, --all-targets also
+        # lints the aes67 test binaries.
+        run: >
+          cargo clippy
+          --locked
+          -p multiview-cli
+          --features ffmpeg,aes67
+          --all-targets
+          -- -D warnings
+      - name: test multiview-cli --features ffmpeg,aes67 (aes67 lib tests)
+        # Runs the aes67 cli lib unit tests (RX resolve/plan, TX build, ssrc,
+        # audio-block framing, and the audio-store-not-video-tile RED guardrail) on
+        # the real ffmpeg-linked build — these `#[cfg(feature = "aes67")]` tests
+        # never execute on the libav-free matrix, so without this step they are
+        # never run in CI. `--lib aes67` filters to the lib target's aes67-named
+        # tests; --locked enforces the committed Cargo.lock (rule 33).
+        run: >
+          cargo test
+          --locked
+          -p multiview-cli
+          --features ffmpeg,aes67
+          --lib aes67
 
   # ── AsyncAPI 3.0 spec validation (SUR-6b follow-on, folded into IN-7) ────────
   # Validates docs/api/asyncapi.json against the AsyncAPI 3.0 JSON Schema using
