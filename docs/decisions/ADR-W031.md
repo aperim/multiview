@@ -91,8 +91,14 @@ a partial floor, rule 6).
    its whole life (without this the guard dropped at the upgrade handshake — the point at
    which `serve_connection` returns, *not* the WebSocket's end — so sequential upgrades
    bypassed the per-IP cap); and (b) is **shutdown-aware** — once the shutdown `watch`
-   flips, its reads return EOF and its writes error, with the watch waker registered so a
-   parked read/write wakes the instant shutdown fires, not only on the next byte. An
+   flips, its reads return EOF and its writes error, with the read and write halves each
+   holding an **independent** shutdown waiter (a `watch` receiver clone), so a parked read
+   *and* a parked write each wake the instant shutdown fires regardless of which half was
+   polled last — robust by construction even if the stream were `io::split`, not reliant
+   on a single shared waker slot (which stays correct only because nothing splits the
+   stream). `poll_shutdown` (write-half close) deliberately does not consult a waiter: it
+   *is* the drain action for the write half and delegates to the inner transport, which
+   completes promptly rather than parking on the peer. An
    upgraded WebSocket is a detached task the `JoinSet` does not track, so serve() does
    **not** synchronously await it; instead it drains **cooperatively-and-promptly**:
    `run_ws_session` selects on `socket.recv()`, which returns end-of-stream on the
@@ -150,7 +156,10 @@ loop.
   timeout-free session (RED held it ~5 s); plain + TLS slowloris are dropped at the
   header-read deadline; a live upgraded WebSocket keeps its per-IP population slot and
   drains when serve() shuts down (RED: the guard dropped at the HTTP/1 upgrade, freeing
-  the slot, and the detached socket outlived serve()); an over-cap connection is dropped
+  the slot, and the detached socket outlived serve()); the transport's read and write
+  halves each wake independently on the shutdown flip (RED: a single shared shutdown waker
+  dropped the parked reader's wakeup when the writer was polled last); an over-cap
+  connection is dropped
   promptly at
   accept; an in-flight connection is aborted at the drain ceiling. `ConnectionAdmission`
   unit tests cover the global cap, per-IP cap, drop-frees-both, evict-at-zero, and
