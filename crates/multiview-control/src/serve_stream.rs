@@ -170,3 +170,131 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for TrackedStream<S> {
         Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)] // test-only: `expect` on a `watch::send` whose receivers are provably alive (rule 20)
+
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use tokio::sync::watch;
+
+    use super::TrackedStream;
+
+    /// A waker that records whether it was woken, so a synchronous test can assert that a
+    /// *parked* direction's waker actually fired on the shutdown flip.
+    struct FlagWaker(AtomicBool);
+
+    impl Wake for FlagWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// An inner transport that always parks (`Pending`) and never registers a waker of
+    /// its own — so the only shutdown wakeup a test can observe is the one
+    /// [`TrackedStream`] registers through its own shutdown waiter(s).
+    struct PendingIo;
+
+    impl AsyncRead for PendingIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for PendingIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// inv#10 drain robustness: the read and write halves must observe shutdown through
+    /// **independent** waker slots. Park the read half (waker R), then poll the write half
+    /// last (waker W): a single shared shutdown future would leave only W registered, so
+    /// the flip would never wake the parked reader — a lost wakeup that leaves the read
+    /// half blocked past shutdown (a connection outliving `serve`, the exact class of bug
+    /// the F1 upgrade-drain fix closes). Both directions must wake, regardless of which
+    /// was polled last.
+    #[test]
+    fn read_and_write_wake_independently_on_shutdown() {
+        let (tx, rx) = watch::channel(false);
+        let mut stream = TrackedStream::new(PendingIo, None, rx);
+
+        let read_flag = Arc::new(FlagWaker(AtomicBool::new(false)));
+        let write_flag = Arc::new(FlagWaker(AtomicBool::new(false)));
+        let waker_r = Waker::from(read_flag.clone());
+        let waker_w = Waker::from(write_flag.clone());
+        let mut cx_r = Context::from_waker(&waker_r);
+        let mut cx_w = Context::from_waker(&waker_w);
+
+        // Park the read half first (registers R), then poll the write half last
+        // (registers W). No shutdown yet, so both must be Pending.
+        let mut buf = [0u8; 8];
+        let mut rb = ReadBuf::new(&mut buf);
+        assert!(
+            Pin::new(&mut stream)
+                .poll_read(&mut cx_r, &mut rb)
+                .is_pending(),
+            "read must park before shutdown"
+        );
+        assert!(
+            Pin::new(&mut stream)
+                .poll_write(&mut cx_w, b"x")
+                .is_pending(),
+            "write must park before shutdown"
+        );
+
+        // Flip shutdown. A single shared waker slot keeps only W (polled last); per-
+        // direction waiters keep both R and W.
+        tx.send(true).expect("receivers are held inside the stream");
+
+        assert!(
+            read_flag.0.load(Ordering::SeqCst),
+            "parked read half was not woken on shutdown (shared-waker lost wakeup)"
+        );
+        assert!(
+            write_flag.0.load(Ordering::SeqCst),
+            "parked write half was not woken on shutdown"
+        );
+
+        // Per-direction drain semantics: read now yields EOF, write now errors.
+        let mut buf2 = [0u8; 8];
+        let mut rb2 = ReadBuf::new(&mut buf2);
+        let read_res = Pin::new(&mut stream).poll_read(&mut cx_r, &mut rb2);
+        assert!(
+            matches!(read_res, Poll::Ready(Ok(()))),
+            "shutdown read must be Ready(Ok) EOF, got {read_res:?}"
+        );
+        assert_eq!(rb2.filled().len(), 0, "shutdown read must be a 0-byte EOF");
+
+        let write_res = Pin::new(&mut stream).poll_write(&mut cx_w, b"x");
+        assert!(
+            matches!(write_res, Poll::Ready(Err(ref e)) if e.kind() == io::ErrorKind::BrokenPipe),
+            "shutdown write must be a BrokenPipe error, got {write_res:?}"
+        );
+    }
+}
