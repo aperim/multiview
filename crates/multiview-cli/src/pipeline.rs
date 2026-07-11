@@ -13580,3 +13580,215 @@ segment_ms = 1000
         );
     }
 }
+
+#[cfg(all(test, feature = "aes67"))]
+mod aes67_wiring_guardrails {
+    //! #103: an AES67 audio source is AUDIO-ONLY. It must contribute an
+    //! [`AudioStore`](multiview_audio::store::AudioStore) (routed onto the program
+    //! bus like any source's audio) but NEVER a video [`TileStore`], never a
+    //! [`SourceRegistry`] entry, and never a layout tile. These guardrails protect
+    //! the just-merged MP-2 decode-once / tile / per-axis-supremum seam (ADR-0030
+    //! §3): the video path must stay byte-identical for the non-AES67 sources of a
+    //! mixed config — the aes67 branch is a pure skip-the-video-path addition.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    /// A minimal valid AES67 Class-A L24 stereo SDP (RFC 4566/8866), IPv6-first
+    /// (`c=IN IP6`) — the same fixture shape `multiview-input`'s SDP parser
+    /// round-trips. CR/LF line endings are real bytes (the parser accepts them).
+    const AES67_SDP: &str = "v=0\r\n\
+o=- 1 1 IN IP6 2001:db8::1\r\n\
+s=Multiview AES67\r\n\
+c=IN IP6 ff3e::1\r\n\
+t=0 0\r\n\
+m=audio 5004 RTP/AVP 98\r\n\
+a=rtpmap:98 L24/48000/2\r\n\
+a=ptime:1\r\n\
+a=ts-refclk:ptp=IEEE1588-2008:AA-BB-CC-DD-EE-FF-00-11:0\r\n\
+a=mediaclk:direct=0\r\n";
+
+    /// A config with ONE video source (`cam1`, bars) bound to the single cell and
+    /// ONE audio-only AES67 source (`aes67-in`) bound to no cell. The SDP is
+    /// injected as a TOML literal (`'''…'''`) string so its newlines survive.
+    fn video_plus_aes67_config() -> multiview_config::MultiviewConfig {
+        let doc = format!(
+            r##"schema_version = 1
+[canvas]
+width = 640
+height = 480
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr"]
+rows = ["1fr"]
+areas = ["a"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[sources]]
+id = "aes67-in"
+kind = "aes67"
+multicast = "[ff3e::1]:5004"
+sdp = '''
+{AES67_SDP}'''
+[[cells]]
+id = "only"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[outputs]]
+kind = "hls"
+path = "/tmp/aes67-guardrail.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##
+        );
+        multiview_config::MultiviewConfig::load_from_toml(&doc).expect("test config parses")
+    }
+
+    #[test]
+    fn aes67_source_makes_an_audio_store_but_no_video_tile_or_registry_entry() {
+        let config = video_plus_aes67_config();
+        let pipeline = Pipeline::build(&config).expect("pipeline builds with an aes67 source");
+
+        // AUDIO-ONLY: the aes67 source joins the program-audio path (an AudioStore
+        // keyed by its id, which the bus routes when this run carries audio) ...
+        assert!(
+            pipeline.audio_stores.contains_key("aes67-in"),
+            "an aes67 source must contribute an AudioStore (program-bus routed)"
+        );
+        // ... but contributes NO video TileStore (it decodes no pixels).
+        assert!(
+            !pipeline.stores.contains_key("aes67-in"),
+            "an aes67 source must NOT create a video TileStore (audio-only)"
+        );
+
+        // ... and NO SourceRegistry entry — the MP-2 decode-once video seam never
+        // sees it, so the registry still holds exactly the ONE video source.
+        let aes67_key = multiview_engine::SourceKey::from_canonical("aes67-in");
+        assert!(
+            pipeline.source_registry.store(&aes67_key).is_none(),
+            "an aes67 source must never take a video decode registry entry"
+        );
+        assert_eq!(
+            pipeline.source_registry.active_len(),
+            1,
+            "only the one video source takes a registry entry (aes67 excluded)"
+        );
+
+        // ... and NO layout tile (it is bound to no cell — audio has no geometry).
+        assert!(
+            cell_pixel_size(&pipeline.layout, "aes67-in").is_none(),
+            "an aes67 source is bound to no cell → no layout tile"
+        );
+
+        // The video source is UNAFFECTED: it keeps its TileStore + registry entry
+        // (the video path is byte-identical to a config without the aes67 source).
+        assert!(
+            pipeline.stores.contains_key("cam1"),
+            "the video source keeps its TileStore (video path byte-identical)"
+        );
+        let cam_key = multiview_engine::SourceKey::from_canonical("cam1");
+        assert!(
+            pipeline.source_registry.store(&cam_key).is_some(),
+            "the video source keeps its registry entry"
+        );
+    }
+
+    /// A 2x2 grid where `cam1` is bound by two DIFFERENT-sized cells (area `a` =
+    /// 400x480, area `d` = 800x240 on 1200x720 → per-axis supremum 800x480), PLUS
+    /// an audio-only aes67 source — proving the aes67 branch never disturbs the
+    /// MP-2 decode-once/supremum video seam.
+    fn two_cells_plus_aes67_config() -> multiview_config::MultiviewConfig {
+        let doc = format!(
+            r##"schema_version = 1
+[canvas]
+width = 1200
+height = 720
+fps = "25/1"
+pixel_format = "nv12"
+background = "#101014"
+[canvas.color]
+profile = "sdr-bt709-limited"
+[layout]
+kind = "grid"
+columns = ["1fr", "2fr"]
+rows = ["2fr", "1fr"]
+areas = ["a b", "c d"]
+[[sources]]
+id = "cam1"
+kind = "bars"
+[[sources]]
+id = "aes67-in"
+kind = "aes67"
+multicast = "[ff3e::1]:5004"
+sdp = '''
+{AES67_SDP}'''
+[[cells]]
+id = "small"
+area = "a"
+[cells.source]
+input_id = "cam1"
+[[cells]]
+id = "wide"
+area = "d"
+[cells.source]
+input_id = "cam1"
+[[outputs]]
+kind = "hls"
+path = "/tmp/aes67-mixed.m3u8"
+codec = "mpeg2video"
+segment_ms = 1000
+"##
+        );
+        multiview_config::MultiviewConfig::load_from_toml(&doc).expect("test config parses")
+    }
+
+    #[test]
+    fn mixed_config_still_decode_once_shares_the_video() {
+        let config = two_cells_plus_aes67_config();
+        let pipeline = Pipeline::build(&config).expect("pipeline builds (mixed aes67 + video)");
+        let cam_key = multiview_engine::SourceKey::from_canonical("cam1");
+
+        // ONE registry entry for the ONE video source, regardless of how many
+        // cells bind it — and the audio-only aes67 source adds none.
+        assert_eq!(
+            pipeline.source_registry.active_len(),
+            1,
+            "two cells binding one video source (+ an aes67 source) => ONE entry"
+        );
+
+        // The decode target the registry records is the per-axis supremum across
+        // cam1's two binding cells — unchanged by the aes67 source's presence.
+        let expect = cell_pixel_size(&pipeline.layout, "cam1").expect("cam1 is bound");
+        assert_eq!(
+            pipeline.source_registry.requested_supremum(&cam_key),
+            Some(multiview_engine::RequestedSize {
+                width: expect.0,
+                height: expect.1,
+            }),
+            "the registry still decodes cam1 at the per-axis supremum (MP-2 intact)"
+        );
+
+        // The `stores` map still holds the registry's OWN store Arc (decode-once
+        // ownership) — the aes67 branch did not fork it.
+        let mapped = pipeline.stores.get("cam1").expect("cam1 has a store");
+        let owned = pipeline
+            .source_registry
+            .store(&cam_key)
+            .expect("the registry owns cam1's store");
+        assert!(
+            std::sync::Arc::ptr_eq(mapped, &owned),
+            "the stores map still holds the registry's store Arc (MP-2 decode-once)"
+        );
+
+        // The aes67 source remains audio-only: an AudioStore, no video store.
+        assert!(pipeline.audio_stores.contains_key("aes67-in"));
+        assert!(!pipeline.stores.contains_key("aes67-in"));
+    }
+}
