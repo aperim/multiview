@@ -23,7 +23,7 @@
 
 use std::net::IpAddr;
 use std::num::NonZeroU16;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -106,6 +106,17 @@ pub enum ObserveOutcome {
 #[derive(Debug)]
 pub struct SapSessionTable {
     sessions: ArcSwap<Vec<DiscoveredSession>>,
+    /// Serializes **writers** ([`observe`](Self::observe) / [`purge`](Self::purge))
+    /// so their load → clone → mutate → store is atomic against each other.
+    /// `ArcSwap` publishes atomically but does not make the whole read-modify-write
+    /// atomic, so without this two concurrent writers (a dual-stack v4 + v6
+    /// listener sharing one table via `with_table`; the purge tick) could each
+    /// clone the same snapshot and the second store would clobber the first,
+    /// losing a session (P2-F2). **Readers never take this lock** — they stay
+    /// wait-free on `sessions`, and every writer is control/discovery-plane (never
+    /// the engine data plane), so serializing them cannot pace or back-pressure
+    /// the engine (inv #1/#10).
+    write: Mutex<()>,
     capacity: usize,
     per_origin_cap: usize,
 }
@@ -123,6 +134,7 @@ impl SapSessionTable {
     pub fn with_limits(capacity: usize, per_origin_cap: usize) -> Self {
         Self {
             sessions: ArcSwap::from_pointee(Vec::new()),
+            write: Mutex::new(()),
             capacity: capacity.max(1),
             per_origin_cap: per_origin_cap.max(1),
         }
@@ -144,6 +156,12 @@ impl SapSessionTable {
             msg_id_hash: packet.msg_id_hash,
             origin: packet.origin,
         };
+        // Serialize this read-modify-write against concurrent writers (P2-F2): the
+        // `load` → `clone` → `store` below is only atomic as a whole under this
+        // lock. A poisoned lock (a writer panicked mid-mutate) still yields the
+        // guard — the published snapshot is always consistent, so recovering is
+        // correct and keeps the table live.
+        let _write = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         let current = self.sessions.load();
         let mut next: Vec<DiscoveredSession> = current.as_ref().clone();
 
@@ -193,6 +211,9 @@ impl SapSessionTable {
     /// [`PURGE_FLOOR`] applies when the period is short or unknown). A no-op with
     /// no allocation when nothing has expired.
     pub fn purge(&self, now: Duration) {
+        // Serialize against `observe` on the same write lock (P2-F2) so a purge
+        // and an insert cannot each clone the same snapshot and clobber the other.
+        let _write = self.write.lock().unwrap_or_else(PoisonError::into_inner);
         let current = self.sessions.load();
         if !current.iter().any(|s| is_expired(s, now)) {
             return;
