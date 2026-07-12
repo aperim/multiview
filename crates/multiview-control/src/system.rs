@@ -244,8 +244,7 @@ impl NdiAttribution {
 /// per-device deep-probe `caps` status is the #180-B slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-// RED: no `rename_all` yet — variants serialize as `PascalCase`; the green
-// commit adds `#[serde(rename_all = "snake_case")]`.
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ProbeStatus {
     /// The probe was not attempted (a layer that was never reached).
@@ -276,10 +275,10 @@ pub struct DeviceCapability {
     /// slot), the placement + cross-probe correlation key.
     pub id: String,
     /// The device's PCI bus id in canonical form, where the probe knows it.
-    // RED: no `skip_serializing_if` yet — green omits it when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pci_bus_id: Option<String>,
     /// Total VRAM in bytes, where the vendor exposes it.
-    // RED: no `skip_serializing_if` yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub vram_total_bytes: Option<u64>,
 }
 
@@ -296,14 +295,14 @@ pub struct CgroupLimits {
     pub probe: ProbeStatus,
     /// `cpu.max` quota in microseconds; `None` = unlimited or unprobed (see
     /// [`Self::probe`]).
-    // RED: no `skip_serializing_if` yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_max_quota_us: Option<u64>,
     /// `cpu.max` period in microseconds; present iff a real quota is.
-    // RED: no `skip_serializing_if` yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_max_period_us: Option<u64>,
     /// `memory.max` in bytes; `None` = unlimited or unprobed (see
     /// [`Self::probe`]).
-    // RED: no `skip_serializing_if` yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_max_bytes: Option<u64>,
 }
 
@@ -316,13 +315,13 @@ pub struct HostInfo {
     /// The target architecture (`x86_64`, `aarch64`, …).
     pub arch: String,
     /// Logical CPU count, where known.
-    // RED: no `skip_serializing_if` yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_cores: Option<u32>,
     /// Scheduler-available parallelism, where known.
-    // RED: no `skip_serializing_if` yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub available_parallelism: Option<u32>,
     /// Total physical RAM in bytes, where known.
-    // RED: no `skip_serializing_if` yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_ram_bytes: Option<u64>,
     /// This process's cgroup-v2 CPU / memory limits.
     pub cgroup: CgroupLimits,
@@ -332,7 +331,7 @@ pub struct HostInfo {
     /// The host's thermal-zone names. `None` = the sysfs thermal tree was **not
     /// probed** (absent / non-Linux); `Some([])` = probed, **none present** —
     /// never conflating absence with a probe failure.
-    // RED: no `skip_serializing_if` yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub thermal_sensors: Option<Vec<String>>,
 }
 

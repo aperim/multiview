@@ -235,6 +235,12 @@ const ASYNCAPI_JSON: &str = include_str!("../../../docs/api/asyncapi.json");
         crate::system::BuildInfo,
         crate::system::EffectiveLicense,
         crate::system::NdiAttribution,
+        // #180-A host + per-device static telemetry (ADR-M014 §2).
+        crate::system::DeviceCapability,
+        crate::system::HostInfo,
+        crate::system::CgroupLimits,
+        crate::system::DetectionInfo,
+        crate::system::ProbeStatus,
         crate::repository::Layout,
         crate::repository::LayoutInput,
         crate::resource_store::Resource,

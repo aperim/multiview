@@ -3261,6 +3261,7 @@ dependencies = [
  "multiview-i915pmu",
  "nvml-wrapper",
  "proptest",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
 ]
