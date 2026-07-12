@@ -371,16 +371,13 @@ pub struct SystemCapabilities {
     /// *known-vs-unknown* claim, never *current-vs-stale*. **Always serialized**
     /// (a required schema field): the §1 rule-27 provenance guarantee depends on
     /// it being present on every response, even the absent-fallback.
-    // RED: this `skip_serializing_if` is WRONG — `observed_at` must ALWAYS
-    // serialize (it is the provenance anchor). The green commit removes it.
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub observed_at: String,
     /// Per detected accelerator — the static identity + VRAM slice (#180-A).
     /// Empty on a host with no accelerator (the honest absent-fallback).
-    // RED: no `skip_serializing_if` yet — empty should be omitted (additive).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<DeviceCapability>,
     /// The host machine block (#180-A); `None` only if the probe was not run.
-    // RED: no `skip_serializing_if` yet — `None` should be omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub host: Option<HostInfo>,
     /// Host-global capability-detection status per layer (#180-A).
     pub detection: DetectionInfo,
