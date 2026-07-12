@@ -97,15 +97,20 @@ a partial floor, rule 6).
    polled last — robust by construction even if the stream were `io::split`, not reliant
    on a single shared waker slot (which stays correct only because nothing splits the
    stream). `poll_shutdown` (write-half close) deliberately does not consult a waiter: it
-   *is* the drain action for the write half and delegates to the inner transport, which
-   completes promptly rather than parking on the peer. An
+   *is* the drain action for the write half, and it delegates to the inner transport's
+   `poll_shutdown`, which per the `AsyncWrite` contract MAY return `Pending` (TLS
+   `close_notify` backpressure, or a peer that has stopped reading) — a waiter cannot help,
+   since finishing that flush / half-close is exactly what it would wait on. That is safe
+   because **the drain path never awaits a parking `poll_shutdown`**: an
    upgraded WebSocket is a detached task the `JoinSet` does not track, so serve() does
    **not** synchronously await it; instead it drains **cooperatively-and-promptly**:
    `run_ws_session` selects on `socket.recv()`, which returns end-of-stream on the
    shutdown-aware EOF, so the session ends and releases its slot + concurrency permit. So
    serve() synchronously drains + aborts every **tracked** (non-upgraded) connection at
-   the ceiling, while an upgraded WebSocket drains cooperatively and is **not**
-   synchronously awaited — the guarantee is prompt-cooperative, not a synchronous join.
+   the ceiling — so a `poll_shutdown` that parks (e.g. on `close_notify` backpressure) is
+   aborted + dropped there, never outliving serve() — while an upgraded WebSocket drains
+   cooperatively and is **not** synchronously awaited — the guarantee is prompt-cooperative,
+   not a synchronous join.
    This relies on the invariant that **every upgrade handler is cooperative +
    shutdown-aware** (it reads its socket and ends on end-of-stream); a future
    non-cooperative upgrade handler would be a reviewable defect.

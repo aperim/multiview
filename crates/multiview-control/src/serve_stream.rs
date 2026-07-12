@@ -195,9 +195,16 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for TrackedStream<S> {
         // Closing the write half is *itself* the drain action for that half, so it
         // deliberately does NOT consult a shutdown waiter: short-circuiting it (an error)
         // would defeat its purpose — at drain we *want* the FIN / TLS close_notify to go
-        // out. It delegates to the inner transport, whose `poll_shutdown` completes
-        // promptly (it flushes and half-closes; it does not park waiting on the peer), so
-        // no shutdown waiter is needed to unpark it.
+        // out. It delegates to the inner transport's `poll_shutdown`, which per the
+        // `AsyncWrite` contract MAY return `Pending` (TLS `close_notify` backpressure, or a
+        // peer that has stopped reading); a waiter cannot help, since finishing that flush /
+        // half-close is exactly what we would be waiting on. That is safe because the drain
+        // path never *awaits* a parking `poll_shutdown`: the upgraded WebSocket drains by
+        // read-EOF → break → drop (the socket closes on `Drop`, not via a graceful
+        // `poll_shutdown`; see `run_ws_session`), and every tracked (non-upgraded)
+        // connection is `JoinSet`-tracked and aborted + dropped at the drain ceiling
+        // (R2-F1/F3, #201). A `Pending` here is thus bounded by the drain machinery, not by
+        // an escape in this fn.
         let this = self.get_mut();
         Pin::new(&mut this.inner).poll_shutdown(cx)
     }
