@@ -2076,6 +2076,19 @@ async fn run_ws_session(
         let step = tokio::select! {
             _ = reauth_tick.tick() => None,
             step = session.recv_event() => Some(step),
+            // Observe the client socket so a client-initiated close OR a
+            // serve-shutdown-driven transport EOF (the shutdown-aware `TrackedStream`
+            // returns EOF at drain; SEC-14 #126 R2 F1) ends this otherwise write-only
+            // firehose session promptly, releasing its connection slot + concurrency
+            // permit. Without this an idle session (no deltas to write) never notices
+            // the socket closing until it next writes — which, for a silent engine, is
+            // never. `recv()` is cancel-safe; a client frame carries no state for this
+            // read-only transport, so it is dropped and the engine is never touched
+            // (invariant #10).
+            incoming = socket.recv() => match incoming {
+                None | Some(Ok(Message::Close(_)) | Err(_)) => break,
+                Some(Ok(_)) => continue,
+            },
         };
         match session.reauthorize() {
             ReauthOutcome::Unchanged => {}

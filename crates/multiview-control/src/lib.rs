@@ -70,6 +70,11 @@ pub mod router;
 pub mod routes;
 pub mod routing;
 pub mod salvo_store;
+/// The shutdown-aware, guard-owning transport wrapper the hand-rolled serve loop wraps
+/// each accepted connection in (SEC-14 #126 R2): it carries the accept-level admission
+/// guard across an HTTP/1 upgrade (so a live WebSocket keeps its population-cap slot)
+/// and drains the connection when serve shuts down.
+mod serve_stream;
 pub mod state;
 pub mod support_bundle;
 pub mod support_store;
@@ -99,6 +104,8 @@ pub mod sqlite;
 
 use axum::routing::{get, post};
 use axum::Router;
+
+use serve_stream::TrackedStream;
 
 pub use account_audit::{
     AccountAuditEntry, AccountAuditKind, AccountAuditPage, AccountAuditRepository,
@@ -310,6 +317,140 @@ pub fn router(state: AppState) -> Router {
     }
 }
 
+/// The default control-plane **header-read timeout** ([`ServeOptions`]): the
+/// maximum time the server waits to read a request's full header block before it
+/// drops the connection. Generous for any legitimate client (headers arrive in
+/// milliseconds) while bounding a slow-header ("slowloris") client that dribbles
+/// headers to pin a connection open. Mirrors the `[control.limits]
+/// header_read_timeout` config default.
+pub const DEFAULT_HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The default accept-level **global connection cap** ([`ServeOptions`]): the maximum
+/// number of connections the serve loop holds open across all peers, enforced at
+/// accept before any request headers parse. Mirrors the `[control.limits]
+/// max_connections` config default.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
+
+/// The default accept-level **per-source-IP connection cap** ([`ServeOptions`]): the
+/// maximum number of connections one peer IP may hold, so a single source cannot
+/// monopolise [`DEFAULT_MAX_CONNECTIONS`]. Mirrors the `[control.limits]
+/// max_connections_per_ip` config default.
+pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 256;
+
+/// The default graceful-drain ceiling ([`ServeOptions`]): after shutdown is signalled,
+/// in-flight connections get up to this long to finish before the remaining ones are
+/// **aborted**. Normal teardown (the engine's broadcast close ends the WS/SSE sessions)
+/// completes well within it — this only bounds a genuinely stuck client so a restart
+/// cannot hang forever (safety §3).
+pub const DEFAULT_GRACEFUL_SHUTDOWN_CEILING: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
+/// Serve-loop tuning for the control-plane HTTP servers ([`serve_with`] /
+/// [`serve_router_with`] and their TLS siblings).
+///
+/// The control plane is served **HTTP/1-only** (SEC-14 #126 R2 /
+/// [ADR-W031](../../docs/decisions/ADR-W031.md)): hyper's HTTP/2 server has no
+/// header-read timeout, so an HTTP/2 connection could pin a slot forever — serving
+/// HTTP/1-only bounds every slow-header connection by the deadlines below, and the h2
+/// preface (a complete but invalid HTTP/1 request line) is rejected immediately by the
+/// parser rather than negotiated into a timeout-free h2 session. This struct carries:
+///
+/// * the **header-read timeout** — the request-concurrency + rate caps engage only
+///   *after* a request's headers are parsed, so they bound in-flight requests but not
+///   a half-open, slow-header connection (slowloris); the header-read timeout closes
+///   that hole. `None` = unbounded (front the plane with a reverse proxy instead).
+/// * the **TLS handshake timeout** — the header-read timeout is post-handshake, so it
+///   cannot catch a client that completes TCP then stalls mid-handshake; this bounds
+///   the handshake so a stalled connection recycles its population-cap slot. `None` =
+///   unbounded.
+/// * the accept-level **connection population caps** — `max_connections` (global) and
+///   `max_connections_per_ip`, enforced *at accept* before any header parse (the
+///   population bound the request-level caps miss). `None` = no in-process cap.
+/// * the **graceful-shutdown ceiling** — how long tracked (non-upgraded) connections get
+///   to drain before they are aborted, so no tracked task outlives `serve`; an upgraded
+///   WebSocket is detached and instead drains cooperatively via the shutdown-aware
+///   transport (F3, ADR-W031 §4).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ServeOptions {
+    /// Maximum time to read a request's full header block before the connection is
+    /// dropped. `None` = unbounded (no in-process slowloris guard).
+    pub header_read_timeout: Option<std::time::Duration>,
+    /// Maximum time to complete the TLS handshake before the connection is dropped
+    /// (TLS serve paths only). `None` = unbounded.
+    pub tls_handshake_timeout: Option<std::time::Duration>,
+    /// Accept-level global connection cap across all peers. `None` = no in-process cap.
+    pub max_connections: Option<usize>,
+    /// Accept-level per-source-IP connection cap. `None` = no in-process per-IP cap.
+    /// Ignored when `max_connections` is `None`.
+    pub max_connections_per_ip: Option<usize>,
+    /// How long in-flight connections get to drain at shutdown before they are aborted.
+    pub graceful_shutdown_ceiling: std::time::Duration,
+}
+
+impl Default for ServeOptions {
+    fn default() -> Self {
+        Self {
+            header_read_timeout: Some(DEFAULT_HEADER_READ_TIMEOUT),
+            tls_handshake_timeout: Some(DEFAULT_HEADER_READ_TIMEOUT),
+            max_connections: Some(DEFAULT_MAX_CONNECTIONS),
+            max_connections_per_ip: Some(DEFAULT_MAX_CONNECTIONS_PER_IP),
+            graceful_shutdown_ceiling: DEFAULT_GRACEFUL_SHUTDOWN_CEILING,
+        }
+    }
+}
+
+impl ServeOptions {
+    /// Set the header-read timeout (`None` disables it), chainable from
+    /// [`ServeOptions::default`].
+    #[must_use]
+    pub fn with_header_read_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.header_read_timeout = timeout;
+        self
+    }
+
+    /// Set the TLS handshake timeout (`None` disables it), chainable.
+    #[must_use]
+    pub fn with_tls_handshake_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.tls_handshake_timeout = timeout;
+        self
+    }
+
+    /// Set the accept-level global connection cap (`None` disables it), chainable.
+    #[must_use]
+    pub fn with_max_connections(mut self, max_connections: Option<usize>) -> Self {
+        self.max_connections = max_connections;
+        self
+    }
+
+    /// Set the accept-level per-source-IP connection cap (`None` disables it),
+    /// chainable.
+    #[must_use]
+    pub fn with_max_connections_per_ip(mut self, max_connections_per_ip: Option<usize>) -> Self {
+        self.max_connections_per_ip = max_connections_per_ip;
+        self
+    }
+
+    /// Set the graceful-shutdown drain ceiling, chainable.
+    #[must_use]
+    pub fn with_graceful_shutdown_ceiling(mut self, ceiling: std::time::Duration) -> Self {
+        self.graceful_shutdown_ceiling = ceiling;
+        self
+    }
+
+    /// Build the accept-level [`ConnectionAdmission`] gate from these options, or
+    /// `None` when no global cap is configured. The per-IP cap defaults to the global
+    /// cap when unset (so a lone `max_connections` still bounds a single source).
+    fn admission(&self) -> Option<std::sync::Arc<crate::limits::ConnectionAdmission>> {
+        self.max_connections.map(|max_connections| {
+            crate::limits::ConnectionAdmission::new(
+                max_connections,
+                self.max_connections_per_ip.unwrap_or(max_connections),
+            )
+        })
+    }
+}
+
 /// Serve the control-plane [`router`] on an already-bound
 /// [`tokio::net::TcpListener`], shutting down gracefully when `shutdown` resolves.
 ///
@@ -322,7 +463,7 @@ pub fn router(state: AppState) -> Router {
 /// non-blocking command bus, so no client it serves can back-pressure the engine.
 ///
 /// # Errors
-/// Propagates any I/O error from the underlying [`axum::serve`] accept loop.
+/// Propagates any I/O error from the underlying accept loop.
 pub async fn serve<F>(
     listener: tokio::net::TcpListener,
     state: AppState,
@@ -332,6 +473,24 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     serve_router(listener, router(state), shutdown).await
+}
+
+/// Serve the control-plane [`router`] with explicit [`ServeOptions`] (the
+/// header-read timeout) — the [`serve`] variant that threads the SEC-14 slowloris
+/// guard from `[control.limits] header_read_timeout`.
+///
+/// # Errors
+/// Propagates any I/O error from the underlying accept loop.
+pub async fn serve_with<F>(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    options: ServeOptions,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_router_with(listener, router(state), options, shutdown).await
 }
 
 /// Serve an already-built [`axum::Router`] on an already-bound
@@ -346,15 +505,13 @@ where
 /// contract as [`serve`] applies: anything mounted must be best-effort and
 /// physically incapable of back-pressuring the engine (invariant #10).
 ///
-/// This helper installs each connection's peer `SocketAddr` as a `ConnectInfo`
-/// request extension (`into_make_service_with_connect_info`), which the SEC-14
-/// pre-auth per-IP rate limit ([`crate::limits`]) REQUIRES to key on the source IP.
-/// Serving [`router`] through a different make-service loses that extension and
-/// silently disables the per-IP guard (it fails open); route control-plane traffic
-/// through this helper (or [`serve`]) to keep it active.
+/// [`serve_router_with`] with the default [`ServeOptions`] — so it installs the
+/// [`DEFAULT_HEADER_READ_TIMEOUT`] slowloris guard and each connection's peer
+/// `SocketAddr` as a `ConnectInfo` extension (the SEC-14 per-IP key). Route
+/// control-plane traffic through this helper (or [`serve`]) to keep both active.
 ///
 /// # Errors
-/// Propagates any I/O error from the underlying [`axum::serve`] accept loop.
+/// Propagates any I/O error from the underlying accept loop.
 pub async fn serve_router<F>(
     listener: tokio::net::TcpListener,
     app: Router,
@@ -363,28 +520,234 @@ pub async fn serve_router<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    // `into_make_service_with_connect_info` records each connection's peer
-    // `SocketAddr` in request extensions so the SEC-14 per-IP rate limit can key
-    // on the source IP (the pre-auth brute-force guard). Handlers that ignore it
-    // are unaffected.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    serve_router_with(listener, app, ServeOptions::default(), shutdown).await
+}
+
+/// Build the shared **HTTP/1** connection builder from [`ServeOptions`].
+///
+/// The control plane is served HTTP/1-only (SEC-14 #126 R2 / ADR-W031): hyper's HTTP/2
+/// server has no header-read timeout, so an HTTP/2 connection could pin a slot forever.
+/// Serving on [`hyper::server::conn::http1::Builder`] subjects every **slow-header**
+/// connection to `options.header_read_timeout`; a connection that opens with the HTTP/2
+/// preface is a complete but invalid HTTP/1 request line, so the parser rejects it
+/// immediately (it never negotiates a timeout-free h2 session). The Tokio timer is
+/// installed unconditionally because `header_read_timeout` panics when armed without one.
+fn http1_builder(options: &ServeOptions) -> hyper::server::conn::http1::Builder {
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder.timer(hyper_util::rt::TokioTimer::new());
+    if let Some(timeout) = options.header_read_timeout {
+        builder.header_read_timeout(timeout);
+    }
+    builder
+}
+
+/// Serve one accepted connection to completion on the HTTP/1 `builder`, installing the
+/// peer `SocketAddr` as a `ConnectInfo` extension (the SEC-14 per-IP key) and upgrading
+/// `/api/v1/ws`. When `shutdown` signals, the connection begins a graceful shutdown and
+/// is then driven to completion; the drain loop aborts it if it outlives the ceiling (F3).
+///
+/// Generic over the transport IO so the plaintext (`TokioIo<TcpStream>`) and TLS
+/// (`TokioIo<TlsStream<…>>`) serve loops share one connection driver.
+async fn drive_connection<I>(
+    builder: hyper::server::conn::http1::Builder,
+    io: I,
+    app: Router,
+    peer_addr: std::net::SocketAddr,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    use axum::extract::ConnectInfo;
+    use tower::ServiceExt as _;
+
+    // Per-connection service: install the peer `SocketAddr` as a `ConnectInfo` extension
+    // (what `into_make_service_with_connect_info` does — the SEC-14 per-IP key) then
+    // dispatch to the shared router. `Router` is always ready, so `oneshot` is safe.
+    let service =
+        hyper::service::service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+            let mut request = request.map(axum::body::Body::new);
+            request.extensions_mut().insert(ConnectInfo(peer_addr));
+            app.clone().oneshot(request)
+        });
+
+    let connection = builder.serve_connection(io, service).with_upgrades();
+    let mut connection = std::pin::pin!(connection);
+
+    // Serve the connection, watching for the shutdown signal. `changed()` fires only on
+    // the real signal — a cloned receiver has already seen the initial `false`, only
+    // `true` is ever sent, and the sender outlives every connection task (the drain holds
+    // it) — so a spurious early shutdown is not possible; the `borrow_and_update` guard
+    // makes that explicit and keeps serving on any non-`true` value.
+    let mut draining = false;
+    loop {
+        tokio::select! {
+            result = connection.as_mut() => {
+                if let Err(error) = result {
+                    tracing::debug!(error = %error, "control-plane connection ended with error");
+                }
+                return;
+            }
+            changed = shutdown.changed(), if !draining => {
+                let shutdown_now = match changed {
+                    Ok(()) => *shutdown.borrow_and_update(),
+                    // The sender was dropped — serve() is tearing down.
+                    Err(_) => true,
+                };
+                if shutdown_now {
+                    // http1's `UpgradeableConnection` does not implement hyper-util's
+                    // `GracefulConnection`, so drive the graceful shutdown directly; the
+                    // loop then polls the connection to completion.
+                    connection.as_mut().graceful_shutdown();
+                    draining = true;
+                }
+            }
+        }
+    }
+}
+
+/// Drain the **tracked** (non-upgraded) connection tasks at shutdown: signal them to begin
+/// a graceful shutdown, then wait up to `ceiling`; any still running are **aborted** and
+/// reaped so no tracked task outlives `serve` (F3, safety §3). An upgraded WebSocket is a
+/// detached task the `JoinSet` does not track; it drains cooperatively via the
+/// shutdown-aware transport (ADR-W031 §4), not by a join here.
+async fn drain_connections(
+    connections: &mut tokio::task::JoinSet<()>,
+    shutdown: &tokio::sync::watch::Sender<bool>,
+    ceiling: std::time::Duration,
+) {
+    // Signal every connection task to begin its graceful shutdown.
+    let _ = shutdown.send(true);
+    tokio::select! {
+        () = async { while connections.join_next().await.is_some() {} } => {}
+        () = tokio::time::sleep(ceiling) => {
+            tracing::debug!(
+                "control-plane graceful-shutdown ceiling reached; aborting remaining connections"
+            );
+            connections.abort_all();
+            // Reap the aborted tasks so none outlives serve().
+            while connections.join_next().await.is_some() {}
+        }
+    }
+}
+
+/// Serve an already-built [`Router`] with explicit [`ServeOptions`], shutting down
+/// gracefully when `shutdown` resolves. [`serve_router`] is this with
+/// [`ServeOptions::default`].
+///
+/// The composition seam the CLI uses to thread the configured [`ServeOptions`] through
+/// the mounted app (control plane + per-output HLS routers).
+///
+/// `axum::serve` builds the hyper connection `Builder` internally and exposes no
+/// header-read timeout, and its `auto` builder negotiates HTTP/2 — which has no
+/// header-read timeout at all. So this drives the accept loop directly on
+/// [`hyper::server::conn::http1::Builder`], **HTTP/1-only**, so every connection is
+/// bounded by `options.header_read_timeout` (SEC-14 #126 R2 / ADR-W031). Each accepted
+/// connection is first admitted through the accept-level [`ConnectionAdmission`]
+/// population cap (`options.max_connections` / `max_connections_per_ip`) — over-cap
+/// connections are dropped at accept, before any header parse — then served with
+/// `serve_connection(..).with_upgrades()` (so `/api/v1/ws` still upgrades) with the peer
+/// `SocketAddr` installed as a `ConnectInfo` request extension exactly as
+/// `into_make_service_with_connect_info` would (the SEC-14 pre-auth per-IP rate limit
+/// keys on it). Non-upgraded connections are tracked in a
+/// [`JoinSet`](tokio::task::JoinSet) and aborted after
+/// `options.graceful_shutdown_ceiling`, so no tracked task outlives this function; an
+/// upgraded WebSocket is a detached task that instead drains cooperatively via the
+/// shutdown-aware transport (ADR-W031 §4), not synchronously joined here.
+///
+/// Same isolation contract as [`serve_router`] (invariant #10): the loop only serves
+/// HTTP and never awaits the engine, so no client it accepts can back-pressure the data
+/// plane.
+///
+/// # Errors
+/// Propagates any I/O error from the underlying accept loop.
+pub async fn serve_router_with<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    options: ServeOptions,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    use hyper_util::rt::TokioIo;
+
+    let builder = http1_builder(&options);
+    let admission = options.admission();
+    let (shutdown_signal, shutdown_watch) = tokio::sync::watch::channel(false);
+    let mut connections = tokio::task::JoinSet::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, peer_addr) = match accepted {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        // A transient accept error (e.g. EMFILE under load) must not tear
+                        // down the control plane; log and keep serving, with a brief
+                        // backoff so a persistent error does not busy-spin.
+                        tracing::debug!(%error, "control-plane accept error; retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                // Accept-level admission (SEC-14 #126 R2 F2): drop an over-cap connection
+                // here, before any request headers parse — the population bound the
+                // request-level caps miss. `None` admission ⇒ no cap configured.
+                let guard = if let Some(admission) = admission.as_ref() {
+                    let Some(guard) = admission.try_admit(peer_addr.ip()) else {
+                        tracing::debug!(
+                            peer = %peer_addr,
+                            "control-plane connection refused at accept (population cap)"
+                        );
+                        continue;
+                    };
+                    Some(guard)
+                } else {
+                    None
+                };
+                let builder = builder.clone();
+                let app = app.clone();
+                let conn_shutdown = shutdown_watch.clone();
+                connections.spawn(async move {
+                    // Wrap the accepted stream so the admission `guard` rides the whole
+                    // connection — including into an upgraded WebSocket, since hyper moves
+                    // the IO into its `Upgraded` — and releases only when the socket finally
+                    // closes (so a live WS keeps occupying its population-cap slot); and so
+                    // the serve-shutdown signal reaches even the detached upgraded socket
+                    // through the transport (SEC-14 #126 R2 F1).
+                    let io = TokioIo::new(TrackedStream::new(stream, guard, conn_shutdown.clone()));
+                    drive_connection(builder, io, app, peer_addr, conn_shutdown).await;
+                });
+            }
+            () = &mut shutdown => {
+                // Stop accepting; drain the in-flight connections below.
+                drop(listener);
+                break;
+            }
+        }
+    }
+
+    drain_connections(
+        &mut connections,
+        &shutdown_signal,
+        options.graceful_shutdown_ceiling,
     )
-    .with_graceful_shutdown(shutdown)
-    .await
+    .await;
+    Ok(())
 }
 
 /// Loaded, ready-to-serve rustls TLS material for the control plane (TLS-0,
 /// [ADR-W029](../../docs/decisions/ADR-W029.md)).
 ///
-/// An opaque wrapper over the `axum-server` rustls configuration so callers
-/// (`multiview-cli`) hold it across the bind→serve seam without naming
-/// `axum-server`. Built by [`load_tls_material`] and consumed by [`serve_tls`] /
-/// [`serve_router_tls`].
+/// An opaque wrapper over the shared [`rustls::ServerConfig`] — ALPN pinned to
+/// `http/1.1` (the control plane is served HTTP/1-only; SEC-14 #126 R2 / ADR-W031) — so
+/// callers (`multiview-cli`) hold it across the bind→serve seam without naming `rustls`.
+/// Built by [`load_tls_material`] and consumed by [`serve_tls`] / [`serve_router_tls`],
+/// which wrap it in a [`tokio_rustls::TlsAcceptor`].
 #[cfg(feature = "tls")]
 #[derive(Clone)]
-pub struct RustlsMaterial(axum_server::tls_rustls::RustlsConfig);
+pub struct RustlsMaterial(std::sync::Arc<rustls::ServerConfig>);
 
 /// Failure loading operator TLS material for [`serve_tls`] (TLS-0, ADR-W029).
 ///
@@ -489,40 +852,30 @@ pub fn load_tls_material(
     // process default — see the function doc). Propagate any rustls error
     // (`#[from]`), never panic on the control-plane path (safety §3).
     let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let config = rustls::ServerConfig::builder_with_provider(provider)
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .with_no_client_auth()
         .with_single_cert(certs, key_der)?;
 
-    Ok(RustlsMaterial(
-        axum_server::tls_rustls::RustlsConfig::from_config(std::sync::Arc::new(config)),
-    ))
-}
+    // ALPN: offer HTTP/1.1 ONLY. The control plane is served HTTP/1-only (SEC-14 #126 R2
+    // / ADR-W031) because hyper's HTTP/2 server has no header-read timeout, so an ALPN-
+    // respecting client negotiates h1. Belt-and-braces: even a client that ignores ALPN
+    // and sends the h2 preface post-handshake sends a complete but invalid HTTP/1 request
+    // line, which the HTTP/1-only serve loop rejects immediately (never a timeout-free h2
+    // session).
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
-/// The graceful-drain ceiling for [`serve_router_tls`]: after shutdown is
-/// signalled, in-flight connections get up to this long to finish before they are
-/// force-closed. Normal teardown (the engine's broadcast close ends the WS/SSE
-/// sessions) completes well within it; this only bounds a genuinely stuck TLS
-/// client so a restart cannot hang forever.
-#[cfg(feature = "tls")]
-const TLS_GRACEFUL_SHUTDOWN: std::time::Duration = std::time::Duration::from_secs(10);
+    Ok(RustlsMaterial(std::sync::Arc::new(config)))
+}
 
 /// Serve an already-built [`axum::Router`] over **TLS** on an already-bound
 /// [`tokio::net::TcpListener`], terminating rustls with `material` and shutting
-/// down gracefully when `shutdown` resolves (TLS-0, ADR-W029).
-///
-/// The TLS sibling of [`serve_router`]: identical isolation contract (invariant
-/// #10) and — critically — the **same
-/// `into_make_service_with_connect_info::<SocketAddr>`** wiring, so the SEC-14
-/// pre-auth per-IP rate limit ([`crate::limits`]) keeps its peer-IP key under
-/// HTTPS exactly as over plain HTTP. Losing that make-service would silently
-/// disable the per-IP guard under TLS. `axum-server` drives the accept + TLS
-/// handshake; a background task bridges the caller's `shutdown` future to the
-/// [`axum_server::Handle`] graceful drain.
+/// down gracefully when `shutdown` resolves (TLS-0, ADR-W029) — the TLS sibling of
+/// [`serve_router`], with the default [`ServeOptions`] (a
+/// [`DEFAULT_HEADER_READ_TIMEOUT`] slowloris guard).
 ///
 /// # Errors
-/// Propagates any I/O error from the `axum-server` accept/serve loop (including a
-/// failure to adopt the listener).
+/// Propagates any I/O error from the underlying accept/serve loop.
 #[cfg(feature = "tls")]
 pub async fn serve_router_tls<F>(
     listener: tokio::net::TcpListener,
@@ -533,35 +886,141 @@ pub async fn serve_router_tls<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    // `axum-server` accepts a std listener (it re-registers with tokio). A tokio
-    // listener converts without rebinding — `into_std` yields the same bound,
-    // non-blocking socket axum-server expects, so the dual-stack `[::]` bind the
-    // caller chose is preserved.
-    let std_listener = listener.into_std()?;
+    serve_router_tls_with(listener, app, material, ServeOptions::default(), shutdown).await
+}
 
-    // Bridge the caller's `shutdown` future to axum-server's graceful drain:
-    // when it resolves, stop accepting and drain in-flight connections within the
-    // grace ceiling, mirroring `serve_router`'s `with_graceful_shutdown`.
-    let handle = axum_server::Handle::new();
-    let drain = handle.clone();
-    tokio::spawn(async move {
-        shutdown.await;
-        drain.graceful_shutdown(Some(TLS_GRACEFUL_SHUTDOWN));
-    });
+/// [`serve_router_tls`] with explicit [`ServeOptions`] — the TLS sibling of
+/// [`serve_router_with`].
+///
+/// Identical isolation contract (invariant #10) and the **same** `ConnectInfo`
+/// peer-`SocketAddr` wiring (via the shared [`drive_connection`]), so the SEC-14 pre-auth
+/// per-IP rate limit ([`crate::limits`]) keeps its peer-IP key under HTTPS exactly as over
+/// plain HTTP. This drives the accept loop directly: it wraps `material` in a
+/// [`tokio_rustls::TlsAcceptor`] and, for each accepted connection, admits it through the
+/// accept-level [`ConnectionAdmission`] population cap **before** the (costly) handshake,
+/// performs the TLS handshake bounded by `options.tls_handshake_timeout` (so a client that
+/// stalls mid-handshake recycles its cap slot rather than pinning it — the header-read
+/// timeout is post-handshake and cannot catch that), then serves it **HTTP/1-only** via
+/// [`drive_connection`] exactly like [`serve_router_with`]. The header-read timeout and the
+/// bounded [`JoinSet`](tokio::task::JoinSet) drain apply identically; ALPN is pinned to
+/// `http/1.1` in [`load_tls_material`] (SEC-14 #126 R2 / ADR-W031).
+///
+/// # Errors
+/// Propagates any I/O error from the underlying accept loop.
+#[cfg(feature = "tls")]
+pub async fn serve_router_tls_with<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    material: RustlsMaterial,
+    options: ServeOptions,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    use hyper_util::rt::TokioIo;
 
-    axum_server::from_tcp_rustls(std_listener, material.0)?
-        .handle(handle)
-        // The SEC-14 connect-info wiring — MUST match `serve_router` so the
-        // per-IP guard keeps keying on the peer `SocketAddr` under TLS.
-        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .await
+    let acceptor = tokio_rustls::TlsAcceptor::from(material.0);
+    let builder = http1_builder(&options);
+    let admission = options.admission();
+    let handshake_timeout = options.tls_handshake_timeout;
+    let (shutdown_signal, shutdown_watch) = tokio::sync::watch::channel(false);
+    let mut connections = tokio::task::JoinSet::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, peer_addr) = match accepted {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        tracing::debug!(%error, "control-plane TLS accept error; retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                // Accept-level admission (SEC-14 #126 R2 F2): drop an over-cap connection
+                // BEFORE the costly TLS handshake. `None` admission ⇒ no cap configured.
+                let guard = if let Some(admission) = admission.as_ref() {
+                    let Some(guard) = admission.try_admit(peer_addr.ip()) else {
+                        tracing::debug!(
+                            peer = %peer_addr,
+                            "control-plane TLS connection refused at accept (population cap)"
+                        );
+                        continue;
+                    };
+                    Some(guard)
+                } else {
+                    None
+                };
+                let acceptor = acceptor.clone();
+                let builder = builder.clone();
+                let app = app.clone();
+                let conn_shutdown = shutdown_watch.clone();
+                connections.spawn(async move {
+                    // `guard` is owned by this task, so it holds the admission slot across
+                    // the (costly) handshake; a handshake failure/timeout `return`s and
+                    // drops it, recycling the slot. On success it is handed to the
+                    // `TrackedStream` below so it rides the served connection — including
+                    // into an upgraded WebSocket — and releases only when the socket finally
+                    // closes (SEC-14 #126 R2 F1).
+                    let tls_stream = match handshake_timeout {
+                        Some(timeout) => {
+                            match tokio::time::timeout(timeout, acceptor.accept(stream)).await {
+                                Ok(Ok(tls_stream)) => tls_stream,
+                                Ok(Err(error)) => {
+                                    tracing::debug!(
+                                        peer = %peer_addr, error = %error,
+                                        "control-plane TLS handshake failed"
+                                    );
+                                    return;
+                                }
+                                Err(_) => {
+                                    tracing::debug!(
+                                        peer = %peer_addr,
+                                        "control-plane TLS handshake timed out"
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        None => match acceptor.accept(stream).await {
+                            Ok(tls_stream) => tls_stream,
+                            Err(error) => {
+                                tracing::debug!(
+                                    peer = %peer_addr, error = %error,
+                                    "control-plane TLS handshake failed"
+                                );
+                                return;
+                            }
+                        },
+                    };
+                    let io =
+                        TokioIo::new(TrackedStream::new(tls_stream, guard, conn_shutdown.clone()));
+                    drive_connection(builder, io, app, peer_addr, conn_shutdown).await;
+                });
+            }
+            () = &mut shutdown => {
+                drop(listener);
+                break;
+            }
+        }
+    }
+
+    drain_connections(
+        &mut connections,
+        &shutdown_signal,
+        options.graceful_shutdown_ceiling,
+    )
+    .await;
+    Ok(())
 }
 
 /// Serve the control-plane [`router`] over **TLS** on an already-bound listener
 /// (TLS-0, ADR-W029): the TLS sibling of [`serve`].
 ///
 /// # Errors
-/// Propagates any I/O error from the `axum-server` accept/serve loop.
+/// Propagates any I/O error from the underlying accept/serve loop.
 #[cfg(feature = "tls")]
 pub async fn serve_tls<F>(
     listener: tokio::net::TcpListener,

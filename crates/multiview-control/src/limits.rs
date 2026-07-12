@@ -60,8 +60,9 @@
 //! by `max(tat, now)`, so it never double-refills).
 
 use std::collections::hash_map::RandomState;
+use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -293,6 +294,134 @@ const _: () = assert!(
     multiview_config::limits::MAX_CONCURRENT_REQUESTS_CEILING == Semaphore::MAX_PERMITS,
     "config MAX_CONCURRENT_REQUESTS_CEILING must track tokio Semaphore::MAX_PERMITS"
 );
+
+/// Accept-level connection admission (SEC-14 #126 R2 / [ADR-W031]): the population
+/// bound the request-level caps miss.
+///
+/// The concurrency + rate caps ([`Limiters`]) engage only *after* a request's headers
+/// are parsed, so a flood of half-open, slow-header (or slow-TLS-handshake) connections
+/// pins sockets and tasks without ever taking a request permit. The serve loop consults
+/// this admission gate at **accept**, before any header parse, and drops an over-cap
+/// connection immediately. Two bounds compose:
+///
+/// * a **global** cap across all peers — one owned [`Semaphore`] permit per admitted
+///   connection; and
+/// * a **per-source-IP** cap so one source cannot monopolise the global budget
+///   (keyed on the peer IP, applied pre-auth).
+///
+/// Both are released the instant the connection's [`ConnectionGuard`] drops. The per-IP
+/// map is bounded by the number of **concurrent distinct** peers (never all-IPs-ever):
+/// an entry is **evicted** the moment its count reaches zero, so an attacker rotating
+/// source addresses cannot grow it without also holding that many concurrent
+/// connections (themselves bounded by the global cap).
+///
+/// [ADR-W031]: ../../../docs/decisions/ADR-W031.md
+pub(crate) struct ConnectionAdmission {
+    /// The global cap across all peers: one owned permit per admitted connection.
+    global: Arc<Semaphore>,
+    /// Live connection counts per source IP, capped at `max_per_ip`. Bounded by the
+    /// concurrent distinct-IP count — an entry is removed at zero (never a zero-valued
+    /// key that would grow the map unbounded).
+    per_ip: Mutex<HashMap<IpAddr, usize>>,
+    /// The per-source-IP ceiling (at least 1).
+    max_per_ip: usize,
+}
+
+impl ConnectionAdmission {
+    /// Build an admission gate with a `max_connections` global cap and a
+    /// `max_connections_per_ip` per-source-IP cap.
+    ///
+    /// `max_connections` is clamped to `[1, Semaphore::MAX_PERMITS]` as belt-and-braces:
+    /// config validation already rejects `0` and `> MAX_CONCURRENT_REQUESTS_CEILING`
+    /// (fail-closed at load), so the clamp is unreachable for a validated config; it only
+    /// keeps [`Semaphore::new`] total for a test- or embedder-built value. `max_per_ip`
+    /// is clamped to at least 1.
+    pub(crate) fn new(max_connections: usize, max_connections_per_ip: usize) -> Arc<Self> {
+        let permits = max_connections.clamp(1, Semaphore::MAX_PERMITS);
+        Arc::new(Self {
+            global: Arc::new(Semaphore::new(permits)),
+            per_ip: Mutex::new(HashMap::new()),
+            max_per_ip: max_connections_per_ip.max(1),
+        })
+    }
+
+    /// Try to admit one connection from `ip`. On success returns a [`ConnectionGuard`]
+    /// that releases both the global permit and the per-IP slot on drop; returns [`None`]
+    /// when either cap is at its limit (the caller must then drop the connection at
+    /// accept).
+    ///
+    /// The global permit is acquired **first** (a `try_acquire_owned`, non-blocking); the
+    /// per-IP count is then checked **before** it is incremented, so a per-IP rejection
+    /// returns without touching the map (no stray entry) and drops the just-acquired
+    /// global permit. A poisoned per-IP lock is recovered, never propagated — a poisoned
+    /// lock must not wedge the accept loop.
+    pub(crate) fn try_admit(self: &Arc<Self>, ip: IpAddr) -> Option<ConnectionGuard> {
+        // Global cap first: an owned permit, released when the guard drops.
+        let permit = Arc::clone(&self.global).try_acquire_owned().ok()?;
+        // Per-IP cap under the map lock: check BEFORE inserting so a rejected attempt
+        // leaves no entry behind (bounded by concurrent distinct IPs).
+        {
+            let mut map = match self.per_ip.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let count = map.get(&ip).copied().unwrap_or(0);
+            if count >= self.max_per_ip {
+                // Per-IP full: drop the just-acquired global permit (return None) and
+                // leave the map untouched. `permit` releases as it goes out of scope.
+                return None;
+            }
+            map.insert(ip, count + 1);
+        }
+        Some(ConnectionGuard {
+            admission: Arc::clone(self),
+            ip,
+            _permit: permit,
+        })
+    }
+
+    /// Test-only: the number of distinct source IPs currently tracked (the per-IP map
+    /// size). Proves the evict-at-zero bound — a live guard adds exactly one entry and
+    /// its drop removes it.
+    #[cfg(test)]
+    pub(crate) fn tracked_ips(&self) -> usize {
+        match self.per_ip.lock() {
+            Ok(guard) => guard.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
+        }
+    }
+}
+
+/// RAII admission guard for one accepted connection: holds one global [`Semaphore`]
+/// permit and one per-IP slot for the connection's whole life. Drop releases the permit
+/// and decrements the per-IP count, **evicting** the entry when it reaches zero.
+pub(crate) struct ConnectionGuard {
+    /// The gate this guard was admitted through — decremented on drop.
+    admission: Arc<ConnectionAdmission>,
+    /// The source IP whose per-IP count this guard holds.
+    ip: IpAddr,
+    /// The global permit; released to the semaphore when this field drops.
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        let mut map = match self.admission.per_ip.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // Decrement this IP's count and evict the entry at zero so the map stays bounded
+        // by concurrent distinct IPs. `saturating_sub` guards the impossible (for a live
+        // guard) missing/zero entry rather than underflowing.
+        if let Some(count) = map.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                map.remove(&self.ip);
+            }
+        }
+        // The global `OwnedSemaphorePermit` (`_permit`) releases as it drops after this.
+    }
+}
 
 /// The runtime management-plane limiters (SEC-14), built once from
 /// [`ManagementLimits`] and shared behind an `Arc` by the middleware.
@@ -1263,5 +1392,206 @@ mod middleware_tests {
         disabled.enabled = false;
         let limiters = Limiters::from_config(&disabled);
         assert!(!limiters.is_enabled());
+    }
+}
+
+#[cfg(test)]
+mod connection_admission_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::net::{IpAddr, Ipv6Addr};
+
+    use super::ConnectionAdmission;
+
+    /// A distinct ULA test address per `n`.
+    fn ip(n: u16) -> IpAddr {
+        IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, n))
+    }
+
+    #[test]
+    fn global_cap_admits_up_to_the_limit_then_rejects() {
+        // Global cap 2, per-IP effectively unbounded: the third concurrent connection
+        // (even from a fresh IP) is refused at accept once the global cap is reached.
+        let admission = ConnectionAdmission::new(2, 100);
+        let g1 = admission.try_admit(ip(1)).expect("first admits");
+        let g2 = admission.try_admit(ip(2)).expect("second admits");
+        assert!(
+            admission.try_admit(ip(3)).is_none(),
+            "the global cap of 2 must refuse the third concurrent connection"
+        );
+        // Freeing one slot lets the next connection in.
+        drop(g1);
+        let _g3 = admission
+            .try_admit(ip(3))
+            .expect("a freed global slot admits the next connection");
+        drop(g2);
+    }
+
+    #[test]
+    fn per_ip_cap_admits_up_to_the_limit_then_rejects_that_ip() {
+        // Global cap generous, per-IP cap 2: a single IP is bounded at 2 while a
+        // different IP keeps its own independent allowance.
+        let admission = ConnectionAdmission::new(100, 2);
+        let _a1 = admission.try_admit(ip(1)).expect("ip1 #1 admits");
+        let _a2 = admission.try_admit(ip(1)).expect("ip1 #2 admits");
+        assert!(
+            admission.try_admit(ip(1)).is_none(),
+            "the per-IP cap of 2 must refuse a third connection from the same IP"
+        );
+        // A different source IP is unaffected by ip1 being at its per-IP cap.
+        let _b1 = admission
+            .try_admit(ip(2))
+            .expect("a different IP keeps its own per-IP allowance");
+    }
+
+    #[test]
+    fn dropping_a_guard_frees_the_global_slot() {
+        let admission = ConnectionAdmission::new(1, 100);
+        let g1 = admission.try_admit(ip(1)).expect("first admits");
+        assert!(
+            admission.try_admit(ip(2)).is_none(),
+            "global cap 1 is full while g1 is held"
+        );
+        drop(g1);
+        let _g2 = admission
+            .try_admit(ip(2))
+            .expect("dropping the guard frees the global slot");
+    }
+
+    #[test]
+    fn dropping_a_guard_frees_the_per_ip_slot() {
+        let admission = ConnectionAdmission::new(100, 1);
+        let g1 = admission.try_admit(ip(1)).expect("ip1 #1 admits");
+        assert!(
+            admission.try_admit(ip(1)).is_none(),
+            "per-IP cap 1 is full for ip1 while g1 is held"
+        );
+        drop(g1);
+        let _g2 = admission
+            .try_admit(ip(1))
+            .expect("dropping the guard frees the per-IP slot for that IP");
+    }
+
+    #[test]
+    fn a_rejected_per_ip_admission_leaves_no_stray_entry() {
+        // A per-IP rejection must not insert or bump a map entry — otherwise a flood
+        // of rejected attempts would grow the map. One live guard ⇒ exactly one tracked
+        // IP, and the count is not inflated by the rejected attempt (proved by the
+        // eviction test: the single live guard's Drop returns the map to empty).
+        let admission = ConnectionAdmission::new(100, 1);
+        let g1 = admission.try_admit(ip(1)).expect("ip1 #1 admits");
+        assert_eq!(
+            admission.tracked_ips(),
+            1,
+            "one live connection ⇒ one tracked IP"
+        );
+        assert!(
+            admission.try_admit(ip(1)).is_none(),
+            "ip1 is at its per-IP cap"
+        );
+        assert_eq!(
+            admission.tracked_ips(),
+            1,
+            "a rejected admission must not add a stray map entry"
+        );
+        drop(g1);
+        assert_eq!(
+            admission.tracked_ips(),
+            0,
+            "the only live guard's Drop must evict the entry (no leftover count from the reject)"
+        );
+    }
+
+    #[test]
+    fn a_per_ip_rejection_releases_its_already_acquired_global_permit() {
+        // The reject path is DISTINCT from guard-Drop: `try_admit` takes the global
+        // permit FIRST, then may fail the per-IP check and `return None`. That
+        // just-acquired permit must be released on the way out (the local permit's RAII
+        // drop) — otherwise a single attacker IP already at its per-IP cap would drain
+        // one global slot per *rejected* attempt and permanently degrade the global cap
+        // for every other source: a slow DoS on the security floor itself. Global cap 4,
+        // per-IP cap 1.
+        let admission = ConnectionAdmission::new(4, 1);
+        // The attacker's one legitimate connection takes its single per-IP slot (and one
+        // of the four global slots); hold it so every further attempt from this IP fails
+        // the per-IP check AFTER acquiring a global permit.
+        let _attacker = admission
+            .try_admit(ip(1))
+            .expect("the attacker's first connection admits");
+        // A flood of over-per-IP attempts. Each acquires a global permit then fails the
+        // per-IP check and must release it; a leak would exhaust the three remaining
+        // global slots after only three attempts, so ten guarantees exhaustion if the
+        // permit is leaked rather than released.
+        for _ in 0..10 {
+            assert!(
+                admission.try_admit(ip(1)).is_none(),
+                "an attempt over the per-IP cap must be rejected"
+            );
+        }
+        // The global cap is intact: only the attacker's one legitimate connection holds a
+        // slot, so a fresh source IP still admits. This assertion fails iff a rejected
+        // attempt leaked its already-acquired global permit.
+        let _fresh = admission
+            .try_admit(ip(2))
+            .expect("a fresh IP still admits — rejected attempts must not leak global slots");
+    }
+
+    #[test]
+    fn the_per_ip_entry_is_evicted_when_its_last_connection_closes() {
+        // The bounded-memory property (nit 1): the per-IP map is bounded by the number
+        // of *concurrent distinct* IPs, not all-IPs-ever — so an entry is removed the
+        // instant its count reaches zero, not merely decremented.
+        let admission = ConnectionAdmission::new(100, 5);
+        let g1 = admission.try_admit(ip(1)).expect("ip1 #1 admits");
+        let g2 = admission.try_admit(ip(1)).expect("ip1 #2 admits");
+        assert_eq!(admission.tracked_ips(), 1, "one distinct IP is tracked");
+        drop(g1);
+        assert_eq!(
+            admission.tracked_ips(),
+            1,
+            "one connection from ip1 is still live ⇒ the entry remains"
+        );
+        drop(g2);
+        assert_eq!(
+            admission.tracked_ips(),
+            0,
+            "the last connection from ip1 closing must EVICT its map entry (count==0), not leave a \
+             zero-valued key that grows the map unbounded"
+        );
+    }
+
+    #[test]
+    fn held_guards_never_exceed_either_cap() {
+        // Global cap 4, per-IP cap 2, two source IPs. Exactly 4 admissions succeed
+        // (2 per IP), and every further attempt — from either IP — is refused. Proves
+        // the two caps compose: neither the global nor a per-IP bound can be exceeded.
+        let admission = ConnectionAdmission::new(4, 2);
+        let mut held = Vec::new();
+        held.push(admission.try_admit(ip(1)).expect("ip1 #1"));
+        held.push(admission.try_admit(ip(1)).expect("ip1 #2"));
+        assert!(
+            admission.try_admit(ip(1)).is_none(),
+            "ip1 is at its per-IP cap of 2"
+        );
+        held.push(admission.try_admit(ip(2)).expect("ip2 #1"));
+        held.push(admission.try_admit(ip(2)).expect("ip2 #2"));
+        assert_eq!(
+            held.len(),
+            4,
+            "exactly the global cap of 4 connections are live"
+        );
+        assert!(
+            admission.try_admit(ip(2)).is_none(),
+            "ip2 is at its per-IP cap of 2 (and the global cap of 4 is full)"
+        );
+        assert!(
+            admission.try_admit(ip(3)).is_none(),
+            "a fresh IP is refused because the global cap of 4 is full"
+        );
+        assert_eq!(
+            admission.tracked_ips(),
+            2,
+            "exactly two distinct IPs are tracked"
+        );
     }
 }
