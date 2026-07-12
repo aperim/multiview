@@ -5,8 +5,9 @@
 - **Date:** 2026-07-11
 - **Source:** task #180 (the SA-1+ deep-probe half deferred from #9/#176 by [ADR-W030](ADR-W030.md));
   [management-capability-matrix](../research/management-capability-matrix.md) §3.4; [ADR-M007](ADR-M007.md)
-  (CapabilityReport gate); [ADR-0035](ADR-0035.md) (self-aware placement, SA-1+); read-only design pass
-  (agent session, 2026-07-11); operator direction (design-first, rule 3)
+  (CapabilityReport gate); [ADR-0017](ADR-0017.md) (`DeviceLoad` live-load model); [ADR-0035](ADR-0035.md)
+  (self-aware placement, SA-1+); read-only design pass (agent session, 2026-07-11); cross-vendor design
+  review (Codex, 2026-07-11); operator direction (design-first, rule 3)
 
 ## Context
 
@@ -19,29 +20,40 @@ omission **task #180**, "blocked by this" (W030 §"the default-vs-SA-1+ boundary
 feature-gated backend-crate code and **GPU-hardware validation** (rule 26). This ADR is the design
 record for #180.
 
-**The load-bearing reframe (verified read-only, 2026-07-11): #180 is mostly a *surfacing* task,
-not a from-scratch probe.** The expensive, hardware-validated *live* half already exists and is
-already trusted by the placement path:
+**The load-bearing reframe (verified read-only against `multiview-hal/src/load.rs`, 2026-07-11):
+the *live* half of the telemetry already exists and is trusted by the placement path — but only a
+*narrow static slice* of what #180 surfaces is already produced.** Being precise about that slice is
+the whole A/B split below; the earlier draft over-claimed it, so this records the verified fields.
 
-- [ADR-0017](ADR-0017.md)'s `DeviceLoad` (`multiview-hal/src/load.rs`) carries VRAM used/total,
-  per-engine encode/decode utilisation, and the NVENC concurrent-session count, read through the
-  **runtime-loaded NVML poller** (`nvml-wrapper`, feature-gated `cuda`/`vaapi`/`qsv`) on a ~1 s
-  **off-hot-path** tick (`multiview-cli/src/placement.rs`) and consumed by `select.rs` for
-  affinity-first placement — but it is **never surfaced on the API**.
+[ADR-0017](ADR-0017.md)'s `DeviceLoad` (`load.rs:220-250`), produced by the runtime-loaded NVML
+poller (`nvml-wrapper`, feature-gated `cuda`/`vaapi`/`qsv`) on a ~1 s **off-hot-path** tick and
+consumed by `select.rs`, carries **exactly** these fields:
 
-The genuinely-**new** work is therefore small and bounded: **(a)** the **static** L2 vendor caps
-that `EnvProbe` explicitly defers (`multiview-hal/src/probe.rs`: the "conservative baseline
-`DeviceCaps` the feature-gated backend crate later refines with true vendor caps queries") —
-device model, driver version, per-codec profiles/levels/bit-depth/B-frame support, engine
-topology; and **(b)** a **host** block (OS/arch/cores/RAM, cgroup limits, PSI/thermal-sensor
-*presence*).
+- **live gauges** (excluded from caps — §1): `gpu_busy_frac`, `vram_used_bytes`, `enc_util_frac`,
+  `dec_util_frac`, `nvenc_session_count` (the live *count*, not a ceiling), `compute_busy_frac`.
+- **static facts** (surfaceable): the `DeviceId` — `vendor`, `stable_id`, `pci_bus_id` — and
+  `vram_total_bytes`.
+
+That static slice — **device identity + total VRAM** — is the *only* part of the rich §3.4 surface
+already produced and hardware-validated today. Everything else §3.4 wants — device **model**, **driver
+version**, **engine topology** (NVENC/NVDEC counts), the NVENC **session-cap ceiling**, and **per-codec
+profiles/levels** — is **not** in `DeviceLoad` and needs a **new vendor query** (`nvEncGetEncodeCaps`,
+`nvmlSystemGetDriverVersion`, VAAPI/oneVPL/VT equivalents) that has **never been exercised**. (The
+device *name* is a partial exception: the sibling `NvmlLoadProbe::device_perf` read
+(`PerfSignals.name`, `load.rs:1029`) already calls `nvmlDeviceGetName` — but it is surfaced with the
+rest of the per-device vendor-caps block in §4, not with the `DeviceLoad` slice.)
+
+The genuinely-new **GPU-free** work is therefore bounded to: **(a)** a **host** block (OS/arch/cores/RAM,
+cgroup limits, PSI/thermal-sensor *presence*), pure `std`/`/proc`/`/sys`; and **(b)** plumbing the
+already-produced `DeviceLoad` static slice to the API. The deep vendor-caps queries are a separate,
+GPU-runner-gated slice.
 
 Binding constraints: invariant **#1** (output clock never blocked), invariant **#10** (the control
 plane must not couple to / back-pressure the engine — and control keeps **zero** dependency on
-`multiview-hal`, the #263 / W030 boundary), **rule 6** (no modelled-but-unfilled fields; a seam
-with only mock impls is a scaffold), **rule 26** (vendor queries validate on real GPU hardware),
-**rule 27** (no aspirational reporting), and the LGPL-clean licensing model
-([AGENTS.md §G](../../AGENTS.md) / [ADR-0012](ADR-0012.md)).
+`multiview-hal`, the #263 / W030 boundary), **rule 6** (no modelled-but-unfilled fields; a seam with
+only mock impls is a scaffold), **rule 26** (vendor queries validate on real GPU hardware), **rule 27**
+(no aspirational reporting; report provenance, never a stale-as-current lie), and the LGPL-clean
+licensing model ([AGENTS.md §G](../../AGENTS.md) / [ADR-0012](ADR-0012.md)).
 
 ## Decision
 
@@ -52,131 +64,182 @@ binary actually knows — never a serialized phantom type.
 
 The caps DTO carries **static / semi-static** fields **only**:
 
-- **static:** device vendor/stable-id/PCI-bus-id, `vram_total`, engine topology (NVDEC/NVENC
-  counts), device model, driver version, unified-memory flag, per-codec profiles/levels/bit-depth;
-  host OS/arch/CPU-cores/`available_parallelism`/`total_ram`, cgroup `cpu.max` / `memory.max`,
-  **PSI availability** (is `/proc/pressure` present) and **thermal-sensor presence**.
-- **semi-static:** the NVENC **session-cap ceiling** (a moving, host-wide, driver-derived number —
-  captured in the startup snapshot as the ceiling, never the live count).
+- **static:** device vendor / stable-id / PCI-bus-id, `vram_total`, engine topology, device model,
+  driver version, unified-memory flag, per-codec profiles/levels/bit-depth; host
+  OS/arch/CPU-cores/`available_parallelism`/`total_ram`, cgroup `cpu.max` / `memory.max`, **PSI
+  availability** and **thermal-sensor presence**.
+- **semi-static:** the NVENC **session-cap ceiling** (a host-wide, driver-derived number — captured
+  as the *ceiling*, never the live count).
 
-The **live** gauges — VRAM *free*, NVENC sessions *used/available*, engine *utilisation %*, host
-PSI *values*, thermal *readings* — **stay on the telemetry stream** (`Event::SystemMetrics`,
+The **live** gauges — VRAM *free*, NVENC sessions *used/available*, engine *utilisation %*, host PSI
+*values*, thermal *readings* — **stay on the telemetry stream** (`Event::SystemMetrics`,
 [ADR-0035](ADR-0035.md) / [ADR-RT004](ADR-RT004.md)) and are **excluded** from the caps DTO.
 
 *Why this is non-negotiable:* folding a live gauge into `/system/capabilities` forces either
-**per-request hardware probing** (a read that touches the engine/device — an invariant-#10
-violation) or a **snapshot that silently goes stale** (a rule-27 lie). The endpoint therefore
-stays exactly what W030 built: a **static startup snapshot** installed via
-`AppState::with_capabilities`, clone-on-read, **route unchanged, no engine channel**.
+**per-request hardware probing** (a read that touches the engine/device — an invariant-#10 violation)
+or a **snapshot that silently goes stale** (a rule-27 lie). The endpoint therefore stays exactly what
+W030 built: a **static startup snapshot** installed via `AppState::with_capabilities`, clone-on-read,
+route unchanged, no engine channel.
+
+**Provenance, not a stale-as-current lie (rule 27).** Some static facts *can* drift after startup (a
+cgroup limit re-written at runtime; the driver-derived session-cap ceiling). The snapshot therefore
+carries an **`observed_at`** timestamp, and the wire contract states every caps field is a **fact as
+observed at process startup** — a *known-vs-unknown* claim, never a *current-vs-stale* one. A consumer
+that needs the live value reads the telemetry stream.
+
+**The construction boundary is one-way (invariant #10 at *assembly*, not only at request-time).** The
+snapshot is assembled **once at startup, off the output-clock thread**, by taking a single
+non-blocking `LoadSource::poll()` pass (the object-safe seam the `multiview-cli` system-metrics task
+already uses, `load.rs:705`) plus the pure host probe — with an **immediate absent-fallback** (no
+accelerator / not yet probed → empty `devices` / `None`). It **borrows no engine lock or channel**,
+and engine start/output **never awaits** caps assembly. Caps reads a *copy* of what the probe
+produced; the engine never blocks on caps.
 
 ### 2. Schema — additive-only to `multiview_control::system` (primitives/enums, zero hal dep)
 
-Add to `SystemCapabilities` (all `#[serde(default, skip_serializing_if = …)]`, `#[non_exhaustive]`,
-`#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]`):
+Add to `SystemCapabilities` (all new fields `#[serde(default, skip_serializing_if = …)]`, the
+container `#[non_exhaustive]`, `#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]`). Fields
+are tagged **[A]** (#180-A) or **[B]** (#180-B) per §4:
 
-- `devices: Vec<DeviceCapability>` — per detected accelerator.
-- `host: Option<HostInfo>` — the machine block.
-- `detection: DetectionInfo` — `{ l1_ffmpeg, l2_vendor, l3_probe }` booleans: **which probe layers
-  actually ran**, so the client never renders a gauge for a layer that did not execute.
+- `observed_at: <rfc3339 string>` [A] — startup capture time (provenance, §1).
+- `devices: Vec<DeviceCapability>` [A] — per detected accelerator.
+- `host: Option<HostInfo>` [A] — the machine block.
+- `detection: DetectionInfo` [A] — host-global probe status per layer.
 
-New DTOs (every telemetry field `Option`/`Vec`, **"unknown is first-class, never a fabricated
-zero"**):
+New DTOs (every telemetry field `Option`/`Vec`, **"unknown is first-class, never a fabricated zero"**):
 
-- `DeviceCapability { vendor, id, pci_bus_id?, model?, driver_version?, unified_memory?,
-  vram_total_bytes?, engines: EngineTopology, nvenc_session_cap?, codecs: Vec<CodecCapability> }`
-  (`codecs` is added at **#180-B**, see §4 — not declared before a probe fills it).
+- `DeviceCapability { vendor [A], id [A], pci_bus_id? [A], vram_total_bytes? [A], model? [B],
+  driver_version? [B], unified_memory? [B], engines?: EngineTopology [B], nvenc_session_cap? [B],
+  codecs: Vec<CodecCapability> [B], caps: ProbeStatus [B] }` — the **[B]** fields, the `caps.rs` seam
+  that fills them, and its tests all land **atomically** in #180-B (§4); #180-A serializes a
+  `DeviceCapability` carrying only the **[A]** fields.
 - `CodecCapability { codec, stage /* decode|encode */, max_width?, max_height?,
-  profiles: Vec<String>, bit_depth?, bframes? }`.
-- `HostInfo { os, arch, cpu_cores?, available_parallelism?, total_ram_bytes?,
-  cgroup: CgroupLimits, psi_available: bool, thermal_sensors: Vec<String> }`.
+  profiles: Vec<String>, bit_depth?, bframes? }` [B].
+- `HostInfo { os, arch, cpu_cores?, available_parallelism?, total_ram_bytes?, cgroup: CgroupLimits,
+  psi: ProbeStatus, thermal_sensors: Option<Vec<String>> }` [A] — `psi` distinguishes present /
+  confirmed-absent / failed / not-attempted; `thermal_sensors` is `None` = *not probed* vs `Some([])`
+  = *probed, none present* (never conflating absence with probe-failure).
+- `DetectionInfo { l1_ffmpeg: ProbeStatus, l3_probe: ProbeStatus }` [A] — the **host-global** layers.
+  **L2 (per-device vendor caps) status is *not* global**: it rides each `DeviceCapability.caps` [B],
+  because L2 can *succeed* on GPU A, be *unsupported* on B, and *fail* on C.
+- `enum ProbeStatus { NotAttempted, Succeeded, Unsupported, Failed }` [A]
+  (`#[serde(rename_all = "snake_case")]`, `#[non_exhaustive]`) — **"ran" ≠ "succeeded"**: distinguishes
+  *not probed* from *probed-unsupported* from *probed-failed*.
 
 Control keeps **primitive/enum fields only — no `multiview-hal` types** (the #263 / W030 boundary).
-On the software/CI build `devices` is empty and `host` is filled, so the JSON is **byte-compatible**
-with today's W030 snapshot (backward-compatible extension). Requires `openapi.rs` `ToSchema`
-registration + `cargo xtask gen-openapi` (regenerates `docs/api/openapi.json`) + web schema
-regeneration (`web/src/api/system.ts`).
+The extension is **backward-compatible, not byte-identical**: every existing W030 field serializes
+**unchanged**, and the new fields are additive + optional/defaulted, so an old client that ignores
+unknown fields still parses the response. (It is **not** byte-identical — `host`, `detection`, and
+`observed_at` add keys even on a software build.) Requires `openapi.rs` `ToSchema` registration +
+`cargo xtask gen-openapi` (regenerates `docs/api/openapi.json`) + web schema regeneration
+(`web/src/api/system.ts`).
 
-### 3. HAL API — new, pure, feature-gated (`multiview-hal`)
+### 3. HAL API — new, pure + feature-gated (`multiview-hal`)
 
-- `caps.rs` — a serde-free `VendorCaps` value + a `VendorCapsProbe` **seam** (trait). Feature-gated
-  impls query the real vendor SDKs: `cuda` → NVENC `nvEncGetEncodeCaps` (+ NVML
-  `nvmlDeviceGetName` / `nvmlSystemGetDriverVersion`); `vaapi` → `vaQueryConfigProfiles` /
-  `vaQueryConfigEntrypoints` / `vaGetConfigAttributes`; `qsv` → oneVPL `MFXQueryImplsDescription`;
-  `videotoolbox` → `VTCopySupportedPropertyDictionary…` (coarse — macOS telemetry is limited,
-  per M007). Every field `Option` (unknown-first-class). Results **correlate to the existing
+- **`host.rs` [#180-A] — pure, GPU-free, CI-testable, no new dependency.** A `HostInfo` probe over
+  `std` (`os`/`arch`/`available_parallelism`) + `/proc` + `/sys` + cgroup v2 (`cpu.max`, `memory.max`)
+  + `/proc/pressure` presence. Adds **no** crate dependency.
+- **`caps.rs` [#180-B, entire] — the deep vendor-query seam.** A serde-free `VendorCaps` value + a
+  `VendorCapsProbe` trait **and its real feature-gated impls, introduced together**: `cuda` → NVENC
+  `nvEncGetEncodeCaps` (+ NVML `nvmlDeviceGetName` / `nvmlSystemGetDriverVersion`); `vaapi` →
+  `vaQueryConfigProfiles` / `vaQueryConfigEntrypoints` / `vaGetConfigAttributes`; `qsv` → oneVPL
+  `MFXQueryImplsDescription`; `videotoolbox` → `VTCopySupportedPropertyDictionary…` (coarse — macOS
+  telemetry is limited, per M007). Every field `Option`; results **correlate to the existing
   `DeviceLoad`/`DeviceId` by PCI-bus-id / stable-id — never the NVML index** ([ADR-M007](ADR-M007.md)).
-- `host.rs` — a `HostInfo` probe over `std` (`os`/`arch`/`available_parallelism`) + `/proc` +
-  `/sys` + cgroup v2 (`cpu.max`, `memory.max`) + `/proc/pressure` presence. **Pure, GPU-free,
-  CI-testable.**
-- `probe.rs` — the deferred L2 refinement point becomes the `VendorCapsProbe` call site (no
-  behaviour change to the L1 presence baseline `EnvProbe` already returns).
+  Per rule 6, the trait, its impls, its call site, **and all of its tests** are #180-B — a
+  `VendorCapsProbe` with only mock impls would be exactly the scaffold rule 6 forbids (the #36 class).
+- **`probe.rs` [#180-B]** — the L2 refinement hook `EnvProbe` defers becomes the `VendorCapsProbe`
+  call site (no behaviour change to the L1 presence baseline `EnvProbe` already returns).
 
 The **CLI** (`multiview-cli/src/system_capabilities.rs`) remains the hal→DTO **bridge** (it already
-owns the hal dependency): it assembles `devices[]` by correlating the deep probe with the existing
-`DeviceLoad` snapshot, and installs the result via `AppState::with_capabilities` — the same static
-one-shot as W030.
+owns the hal dependency). For **#180-A** it maps one off-hot-path `LoadSource::poll()` snapshot's
+static slice (§1) + the `host.rs` probe into the DTO and installs it via `AppState::with_capabilities`
+— the same static one-shot as W030. For **#180-B** it additionally correlates the `VendorCapsProbe`
+output by `DeviceId`.
 
 ### 4. The #180-A / #180-B decomposition (rule 6 + rule 26)
 
-- **#180-A — host block + surface the already-validated `DeviceLoad` statics** (`vram_total`,
-  engine topology, vendor/id, and model/driver where the NVML poller exposes them) + `detection{}`.
-  **GPU-free-completable:** the host reads are pure `std` / `/proc`; the device surfacing *re-uses
-  the [ADR-0017](ADR-0017.md) probe already GPU-validated in production* and is exercised in CI
-  against a `DeviceLoad` **fixture** — so #180-A needs **no new GPU validation** (rule 26 met by
-  reuse). Ships as the **full fanned chain** hal → control DTO → cli bridge → web, **together**,
-  post-#271 (rule 6: no partial merge).
-- **#180-B — the deep L2 vendor-query caps** (`codecs[]`: per-codec profiles/levels/bit-depth/
-  B-frames/max-res via NVENC / VAAPI / oneVPL / VideoToolbox). **Double-gated:** **rule 6** — a
-  `VendorCapsProbe` seam carrying **only mock impls** is a scaffold (the #36 modelled-but-not-wired
-  class), so #180-B must ship **with real vendor impls, never as a bare seam**; **rule 26** — those
-  vendor queries have **never been exercised**, so they need **GPU-runner validation** (runners
-  currently = 0). #180-B therefore **groups with #198 (HAL-1 FailureLedger IMPL, likewise
-  GPU-runner-blocked)** and is held until GPU runners exist. The `codecs` field is **added** to
-  `DeviceCapability` only when #180-B lands (additive, not declared-empty in #180-A — mirroring
-  W030's discipline of never declaring a field before a probe fills it).
+The line is drawn on one question: **does the field need a vendor query the live-load path does not
+already make?**
+
+- **#180-A — host block + surface the `DeviceLoad` static slice.** Precisely: per-device
+  `{ vendor, id (stable_id), pci_bus_id?, vram_total_bytes? }` (the **verified** `DeviceLoad`/`DeviceId`
+  static fields, `load.rs:220-250`); the `HostInfo` block; `observed_at`; `DetectionInfo` (L1/L3);
+  `ProbeStatus`. **GPU-free-completable:** the host reads are pure `std`/`/proc`; the device slice
+  re-uses the [ADR-0017](ADR-0017.md) NVML snapshot already GPU-validated in production and adds **no
+  new vendor query**, so it is exercised in CI against a `DeviceLoad`/`LoadSource` **fixture** — **no
+  new GPU validation** (rule 26 met by *reuse*, not by claim). There is **no `VendorCapsProbe` and no
+  mock-probe test** in #180-A. Ships as the **full fanned chain** hal (`host.rs`) → control DTO → cli
+  bridge → web, **together**, post-#271 (rule 6: no partial merge).
+- **#180-B — the deep vendor-query caps.** All the **[B]** fields of §2: device `model`,
+  `driver_version`, `unified_memory`, `engines` (NVENC/NVDEC topology), the `nvenc_session_cap`
+  ceiling, `codecs[]` (per-codec profiles/levels/bit-depth/B-frames/max-res), and per-device
+  `caps: ProbeStatus` — filled by `caps.rs`'s `VendorCapsProbe` (NVENC / VAAPI / oneVPL / VideoToolbox).
+  (`model` is the one field the sibling `device_perf` NVML read already fetches; it is surfaced here,
+  with its per-device cohort, so the whole vendor-caps block lands atomically with ≥1 real impl.)
+  **Double-gated:** **rule 6** — the seam ships **with real vendor impls, never as a bare/mock-only
+  seam**; **rule 26** — the vendor queries have **never been exercised**, so they need **GPU-runner
+  validation** (runners currently = 0). #180-B therefore **groups with #198 (HAL-1 FailureLedger IMPL,
+  likewise GPU-runner-blocked)** and is held until GPU runners exist.
 
 ### 5. Territory + build order
 
 | Lane | Files | Status |
 | ---- | ----- | ------ |
 | **LANE-GOV** | `docs/decisions/ADR-M014.md` (this) + README index | disjoint, **independently shippable now** (this PR) |
-| **LANE-ENG** (`multiview-hal`) | `caps.rs`, `host.rs`, `probe.rs` | disjoint from #271; `host.rs` + the seam authorable now, #180-B real impls gated on GPU runners |
+| **LANE-ENG-A** (`multiview-hal`) | `host.rs` (+ its tests) | **#180-A**; pure/GPU-free, authorable now, **no new dep**; ships in the #180-A chain post-#271 |
+| **LANE-ENG-B** (`multiview-hal`) | `caps.rs` (`VendorCaps` + `VendorCapsProbe` + real impls + **all its tests**), `probe.rs` call site | **#180-B**; **GPU-runner-blocked** (rule 26), grouped with #198 — not authorable to "done" now |
 | **LANE-API** (`multiview-control`) | `system.rs` (DTO extension), `openapi.rs`, `docs/api/openapi.json` | **#271-locked** (frees when #271 merges) |
-| **LANE-CLI** (`multiview-cli`) | `system_capabilities.rs` (bridge) | disjoint file, but compile-depends on the control DTO → sequences **after** LANE-API |
+| **LANE-CLI** (`multiview-cli`) | `system_capabilities.rs` (bridge) | disjoint file, compile-depends on the control DTO → sequences **after** LANE-API |
 | **LANE-WEB** | `CapabilitiesPage` (DevicesPanel/HostPanel), `web/src/api/system.ts` | after API (schema regen) |
 
-**rule 6:** #180-A lands as **one** fanned PR (hal → control → cli → web) post-#271; #180-B lands
-as a **second** fanned PR once GPU runners exist. No partial merge in either.
+**rule 6:** #180-A lands as **one** fanned PR (hal `host.rs` → control → cli → web) post-#271; #180-B
+lands as a **second** fanned PR (`caps.rs` + the **[B]** DTO fields + cli correlation + web) once GPU
+runners exist. No partial merge in either.
 
 ### 6. TDD plan (red-first, rule 18)
 
-- **hal:** mock `VendorCapsProbe` (present / absent / partial arms) — assert correlation-by-`DeviceId`
-  and unknown-first-class (all-`None` → honest empty, no fabricated zero); `HostInfo` fixture tests
-  (parse `/proc` + cgroup fixtures; missing files → `None`). Runs **GPU-free** → CI-green (rule 26).
-- **control:** additive-DTO serde round-trip + **backward-compat** (empty `devices` + absent `host`
-  serialize byte-identically to the W030 snapshot).
-- **cli:** bridge correlation with a mock `DeviceLoad` + mock `VendorCaps` → assembled `devices[]`;
-  assert no fabricated zero.
+**#180-A (GPU-free → CI-green):**
+
+- **hal:** `HostInfo` fixture tests (parse `/proc` + cgroup fixtures; missing files → `None`;
+  `psi` / `thermal_sensors` distinguish *not-probed* from *confirmed-absent*).
+- **cli:** bridge correlation with a **mock `LoadSource`** yielding a fixture `DeviceLoad` → assembled
+  `devices[]` static slice; assert no fabricated zero, and **empty poll → empty `devices`**
+  (absent-fallback, §1).
+- **control:** additive-DTO serde round-trip + **backward-compat** — assert every existing W030 field
+  serializes **unchanged** and the new fields are additive/optional (old-client-ignores-unknown
+  parses); **not** a byte-identity assertion.
 - **web:** DevicesPanel/HostPanel render + **empty-state** (no devices → honest "no accelerators
   detected", never an aspirational gauge); vitest.
 - **route:** `GET` returns the snapshot under the viewer/read gate (no engine touch).
+
+**#180-B (adds the GPU-runner-validated slice):**
+
+- **hal:** mock `VendorCapsProbe` (present / absent / partial / **unsupported / failed** arms) — assert
+  correlation-by-`DeviceId`, per-device `caps: ProbeStatus`, and unknown-first-class (all-`None` →
+  honest empty, no fabricated zero); then the **real** impl validated on a GPU runner (rule 26).
+- **cli/control/web:** the **[B]** fields plumbed + rendered, with the per-device `ProbeStatus`
+  surfaced.
 
 Each slice commits its failing test before implementation.
 
 ## Rationale
 
-- **Surfacing beats re-probing.** The costly, hardware-validated live probe (ADR-0017 `DeviceLoad`
-  via NVML) already exists and is already trusted by placement; #180 mostly plumbs it to the API and
-  adds the static vendor L2 + host block. Cheaper, lower-risk, and — for the live half — already
-  hardware-proven. One probe feeds both placement and the API (no second source of truth, per M007).
+- **Surfacing beats re-probing — for the slice that is actually already produced.** The costly live
+  probe (ADR-0017 `DeviceLoad` via NVML) is validated and trusted by placement; #180-A plumbs its
+  **static slice** (device identity + `vram_total`) to the API for free and adds a pure host block. The
+  deep vendor caps (model/driver/topology/codecs) are honestly **new** queries, so they carry a real
+  GPU-validation gate rather than a false "reuse" claim. One probe feeds both placement and the API (no
+  second source of truth, per M007).
 - **The static/live split is the only invariant-#10-safe design.** Static facts belong in a startup
-  snapshot; live gauges already have a bounded drop-oldest telemetry stream. Mixing them re-introduces
-  the exact coupling W030's snapshot design removed.
-- **Additive-only + all-`Option` + `detection{}` = rule-6/27 honesty.** The client is told which
-  layers ran; no field exists until a real probe fills it; an **empty-because-probed-absent**
-  collection (honest) is distinct from an **empty-because-unbuilt** placeholder (forbidden).
-- **The A/B split makes the GPU-runner gate real, not a whole-feature blocker.** #180-A delivers
-  useful telemetry GPU-free today's-CI-green; #180-B waits for runners alongside #198.
+  snapshot **with a provenance stamp**; live gauges already have a bounded drop-oldest telemetry
+  stream. Mixing them re-introduces the exact coupling W030's snapshot design removed.
+- **Additive-only + all-`Option` + per-layer/per-device `ProbeStatus` = rule-6/27 honesty.** No field
+  exists until a real probe fills it; the client is told, per host-layer and per device, whether a
+  probe was *not attempted*, *succeeded*, *unsupported*, or *failed* — an empty-because-confirmed-absent
+  is distinct from an empty-because-unprobed and from an empty-because-unbuilt (forbidden).
+- **The A/B split makes the GPU-runner gate real, not a whole-feature blocker.** #180-A delivers useful
+  telemetry GPU-free, CI-green; #180-B waits for runners alongside #198.
 
 ## Alternatives considered
 
@@ -184,26 +247,35 @@ Each slice commits its failing test before implementation.
 | ----------- | ---------------- |
 | Re-implement a fresh live probe for the API | Duplicates ADR-0017's validated `DeviceLoad`/NVML poller → two sources of truth (M007 forbids). |
 | Fold the live gauges (VRAM free, sessions used, util, PSI values) into the caps DTO | Forces per-request hardware probing (inv #10) or a silently-stale snapshot (rule 27); live telemetry already rides the drop-oldest stream (ADR-0035/RT004). |
-| Ship the `VendorCapsProbe` seam now with mock-only impls (defer real queries) | A seam with no real impl is a rule-6 scaffold (the #36 class); real vendor queries need GPU validation (rule 26). #180-B ships with impls or not at all. |
+| Claim model/driver/topology as "already-validated reuse" in #180-A | Only device identity + `vram_total` are in `DeviceLoad` (`load.rs:220-250`); the rest need a vendor query never exercised → a false rule-26 "reuse" claim. They are #180-B, GPU-gated. |
+| Ship the `VendorCapsProbe` seam now with mock-only impls (defer real queries) | A seam with no real impl is a rule-6 scaffold (the #36 class); real vendor queries need GPU validation (rule 26). The seam **and all its tests** are #180-B, shipped with impls or not at all. |
 | Put the new DTOs / deep-probe types in `multiview-hal` with `Serialize` | Couples hal to serde/wire and control→hal; breaks the serde-free planner layer and the #263/W030 zero-hal-dep control boundary. The CLI owns the hal→DTO map. |
-| Declare `codecs[]` / profile fields now, fill them in #180-B | Modelled-but-unfilled (rule 6); W030's discipline adds a field only when a probe fills it. `codecs[]` is additive at the #180-B land. |
+| Three global `detection` booleans | Cannot express per-device L2 status (succeed A / unsupported B / fail C) and conflate "ran" with "succeeded"; replaced by per-device `caps: ProbeStatus` + host-global L1/L3 `ProbeStatus`. |
+| Assert the extended JSON is byte-identical to the W030 snapshot | False once `host` / `detection` / `observed_at` are present; the correct contract is additive backward-compat (old clients ignore unknown fields). |
 | One monolithic #180 PR (A + B together) | B is GPU-runner-blocked (runners = 0); bundling parks A's GPU-free-shippable telemetry behind B indefinitely. |
 
 ## Consequences
 
-- **New surface:** hal `caps.rs` (`VendorCaps`, `VendorCapsProbe`) + `host.rs` (`HostInfo`);
-  additive `multiview_control::system` DTOs; OpenAPI + web schema regeneration. New schemas must be
-  registered or codegen drifts (the W030 lesson).
-- **Committed to maintaining the static/live boundary:** any future "add X to capabilities" must
-  classify X static-vs-live and route a live X to telemetry, never the caps DTO.
-- **Invariants #1/#10 preserved:** a static startup snapshot, no engine channel, control stays
-  hal-free by construction (the CLI owns the map). The engine is untouched.
-- **rule 26:** #180-A validates GPU-free (fixture/mock); #180-B carries a GPU-runner validation gate
-  (grouped with #198). CI stays green on the default/software build (empty `devices`, `host` filled).
-- **Licensing (LGPL-clean, deny-clean):** NVML via `nvml-wrapper` is **runtime-loaded** (no
-  link-time escalation); VAAPI (`libva`, MIT), oneVPL (MIT), and VideoToolbox (Apple system
-  framework) vendor queries are permissive/LGPL-clean; NVENC caps use the MIT `nv-codec-headers`
-  already in the default build (ADR-0012). No `gpl-codecs`, no NDI. `cargo deny` stays clean.
-- **Blocked by:** #271 (frees LANE-API for #180-A's control DTO) for #180-A; **GPU runners**
-  (with #198) for #180-B. This ADR flips **Proposed → Accepted** when the #180-A code lands (repo
-  #97 pattern).
+- **New surface:** hal `host.rs` (`HostInfo`, #180-A) and `caps.rs` (`VendorCaps`, `VendorCapsProbe`,
+  #180-B); additive `multiview_control::system` DTOs; OpenAPI + web schema regeneration. New schemas
+  must be registered or codegen drifts (the W030 lesson).
+- **Committed to maintaining the static/live boundary + provenance:** any future "add X to
+  capabilities" must classify X static-vs-live (route a live X to telemetry, never the caps DTO) and,
+  if X can drift, rely on `observed_at` rather than implying "current".
+- **Invariants #1/#10 preserved:** a static startup snapshot **assembled off the output-clock thread
+  from a non-blocking probe copy** (§1), no engine channel, control stays hal-free by construction (the
+  CLI owns the map). The engine is untouched.
+- **rule 26:** #180-A validates GPU-free (host fixtures + a mock `LoadSource`); #180-B carries a
+  GPU-runner validation gate (grouped with #198). CI stays green on the default/software build (empty
+  `devices`, `host` filled).
+- **Licensing (LGPL-clean, deny-clean).** #180-A's `host.rs` adds **no** dependency (pure
+  `std`/`/proc`/`/sys`). All #180-B vendor queries live in **off-by-default, feature-gated** code —
+  `cuda` (NVML/NVENC), `vaapi` (libva), `qsv` (oneVPL), `videotoolbox` (VT); the default `cargo check`
+  adds no native dep and stays pure-Rust/LGPL-clean. Where they land: NVML via `nvml-wrapper` is
+  **runtime-loaded** (libloading — no link-time escalation even under `cuda`); libva (MIT), oneVPL
+  (MIT), and VideoToolbox (Apple system framework) are permissive; NVENC caps use the MIT
+  `nv-codec-headers` already in the `nvidia` preset (ADR-0012). No `gpl-codecs`, no NDI. `cargo deny`
+  is re-run and reported **when #180-B actually adds/changes a dependency** (rule 35) — verified on the
+  real change, not asserted here.
+- **Blocked by:** #271 (frees LANE-API for the control DTO) for **#180-A**; **GPU runners** (with #198)
+  for **#180-B**. This ADR flips **Proposed → Accepted** when the #180-A code lands (repo #97 pattern).
