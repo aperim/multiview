@@ -113,60 +113,129 @@ pub fn probe() -> HostInfo {
 /// Read a file to a `String`, mapping any I/O error to `None` (absent /
 /// unreadable is a first-class *unknown*).
 fn read_to_string_opt(path: &Path) -> Option<String> {
-    let _ = path;
-    None // red skeleton — the green commit fills this
+    std::fs::read_to_string(path).ok()
 }
 
 /// Parse `MemTotal` (kB) from `/proc/meminfo` content into bytes.
 fn parse_meminfo_memtotal(content: &str) -> Option<u64> {
-    let _ = content;
-    None // red skeleton — the green commit fills this
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return kb.checked_mul(1024);
+        }
+    }
+    None
 }
 
 /// Count logical CPUs from `/proc/cpuinfo` content (`processor` lines).
 fn parse_cpuinfo_cores(content: &str) -> Option<u32> {
-    let _ = content;
-    None // red skeleton — the green commit fills this
+    let count = content
+        .lines()
+        .filter(|line| line.starts_with("processor"))
+        .count();
+    u32::try_from(count).ok().filter(|&n| n > 0)
 }
 
 /// Parse cgroup-v2 `cpu.max` content (`"<quota|max> <period>"`) into
 /// `Some((quota_us, period_us))` for a real limit, or `None` for `max`
-/// (unlimited).
+/// (unlimited) or malformed content.
 fn parse_cpu_max(content: &str) -> Option<(u64, u64)> {
-    let _ = content;
-    None // red skeleton — the green commit fills this
+    let mut fields = content.split_whitespace();
+    let quota = fields.next()?;
+    if quota == "max" {
+        return None; // no CPU bandwidth limit
+    }
+    let quota_us: u64 = quota.parse().ok()?;
+    let period_us: u64 = fields.next()?.parse().ok()?;
+    Some((quota_us, period_us))
 }
 
 /// Parse cgroup-v2 `memory.max` content into bytes, or `None` for `max`
-/// (unlimited).
+/// (unlimited) or malformed content.
 fn parse_memory_max(content: &str) -> Option<u64> {
-    let _ = content;
-    None // red skeleton — the green commit fills this
+    let token = content.split_whitespace().next()?;
+    if token == "max" {
+        return None; // no memory limit
+    }
+    token.parse().ok()
 }
 
 /// Extract this process's cgroup-v2 unified path (the `0::<path>` line) from
 /// `/proc/self/cgroup` content.
 fn parse_self_cgroup_v2_path(content: &str) -> Option<String> {
-    let _ = content;
-    None // red skeleton — the green commit fills this
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("0::").map(str::to_owned))
 }
 
 /// Resolve + read this process's cgroup-v2 `cpu.max` / `memory.max`.
+///
+/// A process with no `0::` unified line is not on cgroup-v2 (v1 or non-Linux):
+/// [`ProbeStatus::Unsupported`]. A v2 path whose limit files cannot be read at
+/// all is [`ProbeStatus::Failed`] — never a fabricated "unlimited".
 fn probe_cgroup(proc_root: &Path, cgroup_root: &Path) -> CgroupLimits {
-    let _ = (proc_root, cgroup_root);
-    CgroupLimits::default() // red skeleton — the green commit fills this
+    let Some(rel) = read_to_string_opt(&proc_root.join("self/cgroup"))
+        .as_deref()
+        .and_then(parse_self_cgroup_v2_path)
+    else {
+        return CgroupLimits {
+            probe: ProbeStatus::Unsupported,
+            ..CgroupLimits::default()
+        };
+    };
+    let dir = cgroup_root.join(rel.trim_start_matches('/'));
+    let cpu_content = read_to_string_opt(&dir.join("cpu.max"));
+    let memory_content = read_to_string_opt(&dir.join("memory.max"));
+    if cpu_content.is_none() && memory_content.is_none() {
+        // The v2 path existed but neither limit file was readable at it.
+        return CgroupLimits {
+            probe: ProbeStatus::Failed,
+            ..CgroupLimits::default()
+        };
+    }
+    let cpu = cpu_content.as_deref().and_then(parse_cpu_max);
+    CgroupLimits {
+        probe: ProbeStatus::Succeeded,
+        cpu_max_quota_us: cpu.map(|(quota, _)| quota),
+        cpu_max_period_us: cpu.map(|(_, period)| period),
+        memory_max_bytes: memory_content.as_deref().and_then(parse_memory_max),
+    }
 }
 
 /// Report whether Linux PSI is available (`/proc/pressure/cpu` presence).
+///
+/// PSI *values* are live gauges (telemetry); this reports only availability, so
+/// a present tree is [`ProbeStatus::Succeeded`] and an absent one is
+/// [`ProbeStatus::Unsupported`] (a kernel without `CONFIG_PSI`, or non-Linux).
 fn probe_psi(proc_root: &Path) -> ProbeStatus {
-    let _ = proc_root;
-    ProbeStatus::NotAttempted // red skeleton — the green commit fills this
+    if proc_root.join("pressure").join("cpu").exists() {
+        ProbeStatus::Succeeded
+    } else {
+        ProbeStatus::Unsupported
+    }
 }
 
 /// Enumerate the host's thermal-zone type names (`/sys/class/thermal`).
+///
+/// `None` = the sysfs thermal tree is absent (not probed / non-Linux);
+/// `Some([])` = probed, no zones present.
 fn probe_thermal(sys_root: &Path) -> Option<Vec<String>> {
-    let _ = sys_root;
-    None // red skeleton — the green commit fills this
+    let dir = sys_root.join("class").join("thermal");
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut sensors = Vec::new();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if name.starts_with("thermal_zone") {
+            if let Some(kind) = read_to_string_opt(&entry.path().join("type")) {
+                sensors.push(kind.trim().to_owned());
+            }
+        }
+    }
+    sensors.sort();
+    Some(sensors)
 }
 
 /// Assemble a [`HostInfo`] from the given filesystem roots (real in [`probe`],
