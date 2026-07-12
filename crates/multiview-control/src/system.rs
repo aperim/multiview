@@ -11,11 +11,17 @@
 //! with [`crate::AppState::with_capabilities`] (a static snapshot — invariant
 //! #10, never an engine channel).
 //!
-//! The rich per-device telemetry sketched in the capability matrix §3.4
-//! (per-codec profiles, NVENC session budget, VRAM, host PSI) is **not** modelled
-//! here: it needs feature-gated backend code and GPU-hardware validation and is
-//! the separate tracked lane (task #180). Only fields the default/software build
-//! honestly fills appear below (rule 6 / rule 27).
+//! [ADR-M014](../../../docs/decisions/ADR-M014.md) §2 extends this additively
+//! with the **#180-A** host + per-device *static* telemetry: [`HostInfo`]
+//! (OS/arch/CPU/RAM, cgroup-v2 limits, PSI/thermal *availability*), the
+//! per-device static identity slice ([`DeviceCapability`] — vendor / stable id /
+//! PCI bus id / total VRAM), the [`DetectionInfo`] per-layer probe status, and
+//! the [`SystemCapabilities::observed_at`] provenance stamp. Still deferred to
+//! **#180-B** (GPU-runner-gated): the deep vendor-caps fields (device model,
+//! driver version, engine topology, NVENC session ceiling, per-codec
+//! profiles) — added to [`DeviceCapability`] there, never modelled-empty here.
+//! Every field is one the running binary honestly fills; unknown is
+//! first-class, never a fabricated zero (rule 6 / rule 27).
 
 use serde::Serialize;
 
@@ -228,8 +234,127 @@ impl NdiAttribution {
     }
 }
 
-/// The `GET /api/v1/system/capabilities` response (ADR-W030): the honest
-/// default-build capability + licence surface.
+/// The outcome of one capability-probe layer or per-device probe — **"ran" ≠
+/// "succeeded"**.
+///
+/// Distinguishes *not attempted* from *succeeded* from *unsupported* (probed,
+/// confirmed absent) from *failed* (probed, errored), so an empty result is
+/// never mistaken for a probe that did not run (rule 27). #180-A fills the
+/// host-global [`DetectionInfo`] and host [`HostInfo::psi`] / cgroup status; the
+/// per-device deep-probe `caps` status is the #180-B slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+// RED: no `rename_all` yet — variants serialize as `PascalCase`; the green
+// commit adds `#[serde(rename_all = "snake_case")]`.
+#[non_exhaustive]
+pub enum ProbeStatus {
+    /// The probe was not attempted (a layer that was never reached).
+    #[default]
+    NotAttempted,
+    /// The probe ran and the capability is present.
+    Succeeded,
+    /// The probe ran; the capability is **confirmed absent** / unsupported here.
+    Unsupported,
+    /// The probe ran and failed (an I/O or query error).
+    Failed,
+}
+
+/// A detected accelerator's **static** capability slice.
+///
+/// #180-A surfaces only the verified `DeviceLoad`/`DeviceId` static fields
+/// (`multiview-hal` `load.rs`): vendor, stable id, PCI bus id, total VRAM. The
+/// deep vendor-caps fields — device model, driver version, engine topology,
+/// NVENC session ceiling, per-codec profiles — are the **#180-B** slice and are
+/// added here *with their real vendor-query impls* (GPU-runner-gated, rule 26),
+/// never modelled-empty now (rule 6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DeviceCapability {
+    /// The accelerator vendor label (`nvidia` / `intel` / `amd` / `apple`).
+    pub vendor: String,
+    /// The stable device id (the vendor's stable handle — an NVML UUID or PCI
+    /// slot), the placement + cross-probe correlation key.
+    pub id: String,
+    /// The device's PCI bus id in canonical form, where the probe knows it.
+    // RED: no `skip_serializing_if` yet — green omits it when unknown.
+    pub pci_bus_id: Option<String>,
+    /// Total VRAM in bytes, where the vendor exposes it.
+    // RED: no `skip_serializing_if` yet.
+    pub vram_total_bytes: Option<u64>,
+}
+
+/// cgroup-v2 resource limits for the process's leaf cgroup (`cpu.max` /
+/// `memory.max`).
+///
+/// [`Self::probe`] disambiguates *unlimited* (`Succeeded` + a `None` limit, the
+/// file read `max`) from *unprobed* (`Unsupported` / `Failed` /
+/// `NotAttempted`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CgroupLimits {
+    /// Whether the cgroup-v2 hierarchy was found and read for this process.
+    pub probe: ProbeStatus,
+    /// `cpu.max` quota in microseconds; `None` = unlimited or unprobed (see
+    /// [`Self::probe`]).
+    // RED: no `skip_serializing_if` yet.
+    pub cpu_max_quota_us: Option<u64>,
+    /// `cpu.max` period in microseconds; present iff a real quota is.
+    // RED: no `skip_serializing_if` yet.
+    pub cpu_max_period_us: Option<u64>,
+    /// `memory.max` in bytes; `None` = unlimited or unprobed (see
+    /// [`Self::probe`]).
+    // RED: no `skip_serializing_if` yet.
+    pub memory_max_bytes: Option<u64>,
+}
+
+/// The host machine's static capacity-relevant facts (#180-A).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct HostInfo {
+    /// The target OS (`linux`, `macos`, …).
+    pub os: String,
+    /// The target architecture (`x86_64`, `aarch64`, …).
+    pub arch: String,
+    /// Logical CPU count, where known.
+    // RED: no `skip_serializing_if` yet.
+    pub cpu_cores: Option<u32>,
+    /// Scheduler-available parallelism, where known.
+    // RED: no `skip_serializing_if` yet.
+    pub available_parallelism: Option<u32>,
+    /// Total physical RAM in bytes, where known.
+    // RED: no `skip_serializing_if` yet.
+    pub total_ram_bytes: Option<u64>,
+    /// This process's cgroup-v2 CPU / memory limits.
+    pub cgroup: CgroupLimits,
+    /// Whether Linux PSI is **available** (never a reading — PSI values are
+    /// live telemetry, excluded from this static snapshot; invariant #10).
+    pub psi: ProbeStatus,
+    /// The host's thermal-zone names. `None` = the sysfs thermal tree was **not
+    /// probed** (absent / non-Linux); `Some([])` = probed, **none present** —
+    /// never conflating absence with a probe failure.
+    // RED: no `skip_serializing_if` yet.
+    pub thermal_sensors: Option<Vec<String>>,
+}
+
+/// Host-global capability-detection status per layer (#180-A).
+///
+/// L2 (per-device vendor caps) is **not** global — it rides each
+/// [`DeviceCapability`] in the #180-B slice, because L2 can *succeed* on one GPU
+/// and *fail* on another. Only the host-global L1 (FFmpeg-backed codec probe)
+/// and L3 (environment/heuristic probe) layers are reported here.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DetectionInfo {
+    /// The L1 FFmpeg-backed codec-probe status.
+    pub l1_ffmpeg: ProbeStatus,
+    /// The L3 environment/heuristic probe status.
+    pub l3_probe: ProbeStatus,
+}
+
+/// The `GET /api/v1/system/capabilities` response (ADR-W030, extended
+/// additively by [ADR-M014](../../../docs/decisions/ADR-M014.md) §2): the honest
+/// default-build capability + licence surface, plus the #180-A host + per-device
+/// static telemetry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SystemCapabilities {
@@ -242,6 +367,24 @@ pub struct SystemCapabilities {
     /// The mandatory NDI attribution — present iff `ndi` is compiled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ndi_attribution: Option<NdiAttribution>,
+    /// The startup capture time (RFC 3339) — the **provenance anchor**
+    /// (ADR-M014 §1): every field is a fact *as observed at process startup*, a
+    /// *known-vs-unknown* claim, never *current-vs-stale*. **Always serialized**
+    /// (a required schema field): the §1 rule-27 provenance guarantee depends on
+    /// it being present on every response, even the absent-fallback.
+    // RED: this `skip_serializing_if` is WRONG — `observed_at` must ALWAYS
+    // serialize (it is the provenance anchor). The green commit removes it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub observed_at: String,
+    /// Per detected accelerator — the static identity + VRAM slice (#180-A).
+    /// Empty on a host with no accelerator (the honest absent-fallback).
+    // RED: no `skip_serializing_if` yet — empty should be omitted (additive).
+    pub devices: Vec<DeviceCapability>,
+    /// The host machine block (#180-A); `None` only if the probe was not run.
+    // RED: no `skip_serializing_if` yet — `None` should be omitted.
+    pub host: Option<HostInfo>,
+    /// Host-global capability-detection status per layer (#180-A).
+    pub detection: DetectionInfo,
 }
 
 impl Default for SystemCapabilities {
@@ -271,6 +414,139 @@ impl Default for SystemCapabilities {
             },
             build: BuildInfo::resolve(false, false, vec!["software".to_owned()]),
             ndi_attribution: None,
+            // The unwired default carries no real snapshot: an empty capture
+            // time, no devices, no host. The `multiview` binary always installs
+            // a real snapshot (a stamped `observed_at`, the probed host + device
+            // slice) via `with_capabilities` — this default only backs the
+            // never-run/test paths so the endpoint is always present + truthful.
+            observed_at: String::new(),
+            devices: Vec::new(),
+            host: None,
+            detection: DetectionInfo::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_host() -> HostInfo {
+        HostInfo {
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            cpu_cores: Some(8),
+            available_parallelism: Some(8),
+            total_ram_bytes: Some(16_000_000_000),
+            cgroup: CgroupLimits {
+                probe: ProbeStatus::Succeeded,
+                cpu_max_quota_us: Some(50_000),
+                cpu_max_period_us: Some(100_000),
+                memory_max_bytes: Some(4_000_000_000),
+            },
+            psi: ProbeStatus::Succeeded,
+            thermal_sensors: Some(vec!["x86_pkg_temp".to_owned()]),
+        }
+    }
+
+    #[test]
+    fn w030_fields_serialize_unchanged() {
+        // The extension is additive: the existing ADR-W030 keys + values are
+        // unchanged, never a rename/removal (backward-compat, not byte-identity).
+        let caps = SystemCapabilities::default();
+        let v = serde_json::to_value(&caps).unwrap();
+        assert!(v.get("backends").is_some());
+        assert!(v.get("compositor").is_some());
+        assert_eq!(v["build"]["effective_license"], "LGPL-clean");
+        assert_eq!(v["build"]["redistributable"], true);
+        // `ndi_attribution` keeps its skip-when-None behavior.
+        assert!(v.get("ndi_attribution").is_none());
+    }
+
+    #[test]
+    fn observed_at_is_always_serialized_even_when_empty() {
+        // The provenance anchor is never skipped (ADR-M014 §2): even the
+        // absent-fallback (empty capture time, no devices, no host) emits the
+        // `observed_at` key so a consumer can always read the snapshot's origin.
+        let caps = SystemCapabilities::default();
+        assert!(caps.observed_at.is_empty());
+        let v = serde_json::to_value(&caps).unwrap();
+        assert!(
+            v.get("observed_at").is_some(),
+            "observed_at must always serialize (the provenance anchor)"
+        );
+    }
+
+    #[test]
+    fn empty_devices_and_none_host_are_omitted() {
+        // devices/host are additive + optional: omitted when empty/absent so an
+        // old client that ignores unknown keys still parses the response.
+        let caps = SystemCapabilities::default();
+        let v = serde_json::to_value(&caps).unwrap();
+        assert!(v.get("devices").is_none(), "empty devices should be omitted");
+        assert!(v.get("host").is_none(), "None host should be omitted");
+    }
+
+    #[test]
+    fn populated_devices_host_and_detection_serialize() {
+        let caps = SystemCapabilities {
+            observed_at: "2026-07-12T00:00:00Z".to_owned(),
+            devices: vec![DeviceCapability {
+                vendor: "nvidia".to_owned(),
+                id: "GPU-1234".to_owned(),
+                pci_bus_id: Some("0000:03:00.0".to_owned()),
+                vram_total_bytes: Some(17_000_000_000),
+            }],
+            host: Some(sample_host()),
+            detection: DetectionInfo {
+                l1_ffmpeg: ProbeStatus::NotAttempted,
+                l3_probe: ProbeStatus::Succeeded,
+            },
+            ..SystemCapabilities::default()
+        };
+        let v = serde_json::to_value(&caps).unwrap();
+        assert_eq!(v["observed_at"], "2026-07-12T00:00:00Z");
+        assert_eq!(v["devices"][0]["vendor"], "nvidia");
+        assert_eq!(v["devices"][0]["id"], "GPU-1234");
+        assert_eq!(v["devices"][0]["pci_bus_id"], "0000:03:00.0");
+        assert_eq!(v["devices"][0]["vram_total_bytes"], 17_000_000_000_u64);
+        assert_eq!(v["host"]["os"], "linux");
+        assert_eq!(v["host"]["cgroup"]["cpu_max_quota_us"], 50_000);
+        // Per-layer probe status serializes snake_case.
+        assert_eq!(v["detection"]["l1_ffmpeg"], "not_attempted");
+        assert_eq!(v["detection"]["l3_probe"], "succeeded");
+    }
+
+    #[test]
+    fn device_capability_omits_unknown_optionals() {
+        // Unknown is first-class: a device with no PCI/VRAM omits those keys
+        // (never a fabricated zero).
+        let dev = DeviceCapability {
+            vendor: "amd".to_owned(),
+            id: "card0".to_owned(),
+            pci_bus_id: None,
+            vram_total_bytes: None,
+        };
+        let v = serde_json::to_value(&dev).unwrap();
+        assert_eq!(v["vendor"], "amd");
+        assert!(v.get("pci_bus_id").is_none());
+        assert!(v.get("vram_total_bytes").is_none());
+    }
+
+    #[test]
+    fn probe_status_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ProbeStatus::NotAttempted).unwrap(),
+            "not_attempted"
+        );
+        assert_eq!(
+            serde_json::to_value(ProbeStatus::Succeeded).unwrap(),
+            "succeeded"
+        );
+        assert_eq!(
+            serde_json::to_value(ProbeStatus::Unsupported).unwrap(),
+            "unsupported"
+        );
+        assert_eq!(serde_json::to_value(ProbeStatus::Failed).unwrap(), "failed");
     }
 }
