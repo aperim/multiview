@@ -87,21 +87,47 @@ carries an **`observed_at`** timestamp, and the wire contract states every caps 
 observed at process startup** — a *known-vs-unknown* claim, never a *current-vs-stale* one. A consumer
 that needs the live value reads the telemetry stream.
 
-**The construction boundary is one-way (invariant #10 at *assembly*, not only at request-time).** The
-snapshot is assembled **once at startup, off the output-clock thread**, by taking a single
-non-blocking `LoadSource::poll()` pass (the object-safe seam the `multiview-cli` system-metrics task
-already uses, `load.rs:705`) plus the pure host probe — with an **immediate absent-fallback** (no
-accelerator / not yet probed → empty `devices` / `None`). It **borrows no engine lock or channel**,
-and engine start/output **never awaits** caps assembly. Caps reads a *copy* of what the probe
-produced; the engine never blocks on caps.
+**The construction boundary is one-way (invariant #10 at *assembly*, not only at request-time).**
+This is a concrete *mechanism*, not just an asserted outcome:
+
+- ***Where* it is assembled — the control plane, never the data plane.** Caps assembly extends the
+  **same one-shot `AppState::with_capabilities` seam W030 already fills** (`multiview-cli/src/control.rs`
+  — installed there as "a one-shot snapshot, never an engine channel (invariant #10)"). That seam runs
+  on the **CLI control-plane bring-up (Tokio / control-IO plane)**, which by [ADR-0009](ADR-0009.md)'s
+  two-plane split is **not** the output-clock **data-plane OS thread**.
+- ***What* the load pass actually is — a bounded vendor query, not a "non-blocking" read.** The pass is
+  a single `LoadSource::poll()` — **a bounded vendor query** (an NVML/DRM `sample_all()` pass over the
+  visible devices, per-pass-bounded by `PollInterval` ≈ 4 Hz, via the very `default_load_source()` the
+  system-metrics task already selects; `load.rs:657`/`:705`, `system_metrics.rs`). It is **not** a
+  cached-snapshot read and **not** a per-request probe — a *bounded startup query*, run off the clock
+  thread, exactly once. (An NVML call is not "non-blocking"; it is *bounded* — the earlier draft's
+  wording is corrected here.) Add the pure `host.rs` probe, stamp `observed_at`, install the immutable
+  snapshot (clone-on-read).
+- ***The ordering that guarantees engine-start-independence.*** The engine's `OutputClock` runs on its
+  **own dedicated data-plane OS threads** and is **neither awaited by nor awaits** caps assembly. Caps
+  borrows **no engine lock, channel, or poller** — it polls its *own* `LoadSource` (the CLI's,
+  physically distinct from the engine's placement poller), so it is *structurally* incapable of coupling
+  to or back-pressuring the engine. The **absent-fallback** — no accelerator (or a pure-Rust build) →
+  `NullLoadPoller` → empty `poll()` → empty `devices` / `None` — is served cleanly as an *honest absent
+  state*, never a "not-yet-ready" placeholder.
+
+The **live** gauges stay on the **separate `Event::SystemMetrics` broadcast** the system-metrics task
+publishes (drop-oldest, inv #10) — never the caps snapshot.
 
 ### 2. Schema — additive-only to `multiview_control::system` (primitives/enums, zero hal dep)
 
-Add to `SystemCapabilities` (all new fields `#[serde(default, skip_serializing_if = …)]`, the
-container `#[non_exhaustive]`, `#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]`). Fields
-are tagged **[A]** (#180-A) or **[B]** (#180-B) per §4:
+Add to `SystemCapabilities` (the container `#[non_exhaustive]`,
+`#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]`). The optional / collection fields carry
+`#[serde(default, skip_serializing_if = …)]` so an old client that omits them still round-trips —
+**with one deliberate exception: `observed_at` is always serialized** (below). Fields are tagged
+**[A]** (#180-A) or **[B]** (#180-B) per §4:
 
-- `observed_at: <rfc3339 string>` [A] — startup capture time (provenance, §1).
+- `observed_at: <rfc3339 string>` [A] — startup capture time (provenance, §1). **Always serialized —
+  no `skip_serializing_if`** — so it is a **required** field in the OpenAPI schema. It is stamped on
+  *every* snapshot (even the absent-fallback carries a real capture time), and the §1 rule-27
+  provenance guarantee depends on it being present on **every** response; letting it be omitted would
+  make the anchor optional and re-open the stale-as-current gap. `devices` / `host` / `detection` stay
+  optional / defaulted.
 - `devices: Vec<DeviceCapability>` [A] — per detected accelerator.
 - `host: Option<HostInfo>` [A] — the machine block.
 - `detection: DetectionInfo` [A] — host-global probe status per layer.
@@ -205,10 +231,14 @@ runners exist. No partial merge in either.
   `psi` / `thermal_sensors` distinguish *not-probed* from *confirmed-absent*).
 - **cli:** bridge correlation with a **mock `LoadSource`** yielding a fixture `DeviceLoad` → assembled
   `devices[]` static slice; assert no fabricated zero, and **empty poll → empty `devices`**
-  (absent-fallback, §1).
+  (absent-fallback, §1). The bridge assembles from a **single injected `LoadSource::poll()` pass** (its
+  own source, not the engine's poller) + the `host.rs` probe + an `observed_at` stamp — the mock
+  exercises the one-shot, own-source construction boundary (§1) with no engine handle in scope.
 - **control:** additive-DTO serde round-trip + **backward-compat** — assert every existing W030 field
   serializes **unchanged** and the new fields are additive/optional (old-client-ignores-unknown
-  parses); **not** a byte-identity assertion.
+  parses); **not** a byte-identity assertion. Assert **`observed_at` is always present** — serialize a
+  snapshot with empty `devices` + `None` host and confirm the `observed_at` key is still emitted (the
+  provenance anchor is never skipped; §2).
 - **web:** DevicesPanel/HostPanel render + **empty-state** (no devices → honest "no accelerators
   detected", never an aspirational gauge); vitest.
 - **route:** `GET` returns the snapshot under the viewer/read gate (no engine touch).
@@ -252,6 +282,8 @@ Each slice commits its failing test before implementation.
 | Put the new DTOs / deep-probe types in `multiview-hal` with `Serialize` | Couples hal to serde/wire and control→hal; breaks the serde-free planner layer and the #263/W030 zero-hal-dep control boundary. The CLI owns the hal→DTO map. |
 | Three global `detection` booleans | Cannot express per-device L2 status (succeed A / unsupported B / fail C) and conflate "ran" with "succeeded"; replaced by per-device `caps: ProbeStatus` + host-global L1/L3 `ProbeStatus`. |
 | Assert the extended JSON is byte-identical to the W030 snapshot | False once `host` / `detection` / `observed_at` are present; the correct contract is additive backward-compat (old clients ignore unknown fields). |
+| Assert caps is built "off the output-clock thread" as an *outcome*, without naming the *mechanism* | Rules 16/27: an unmechanized safety claim is unverifiable and mis-implementable. §1 names the seam (control-plane `AppState::with_capabilities`, the ADR-0009 control-IO plane), the **bounded-vendor-query** nature of the single `LoadSource::poll()` pass (not a "non-blocking" read), and the own-source / no-engine-handle ordering that makes engine-independence structural. |
+| Let `observed_at` use `skip_serializing_if` like the other additive fields | Makes the OpenAPI field optional and lets a response omit the provenance stamp — re-opening the §1 stale-as-current gap. It is always stamped at startup, so it is **always** serialized (a required schema field); the others stay optional/defaulted. |
 | One monolithic #180 PR (A + B together) | B is GPU-runner-blocked (runners = 0); bundling parks A's GPU-free-shippable telemetry behind B indefinitely. |
 
 ## Consequences
@@ -262,9 +294,10 @@ Each slice commits its failing test before implementation.
 - **Committed to maintaining the static/live boundary + provenance:** any future "add X to
   capabilities" must classify X static-vs-live (route a live X to telemetry, never the caps DTO) and,
   if X can drift, rely on `observed_at` rather than implying "current".
-- **Invariants #1/#10 preserved:** a static startup snapshot **assembled off the output-clock thread
-  from a non-blocking probe copy** (§1), no engine channel, control stays hal-free by construction (the
-  CLI owns the map). The engine is untouched.
+- **Invariants #1/#10 preserved:** a static startup snapshot **assembled on the control plane (not the
+  output-clock data-plane thread) from a single bounded `LoadSource::poll()` pass over its own source**
+  (§1), no engine lock/channel/poller borrowed, control stays hal-free by construction (the CLI owns the
+  map). The engine is untouched.
 - **rule 26:** #180-A validates GPU-free (host fixtures + a mock `LoadSource`); #180-B carries a
   GPU-runner validation gate (grouped with #198). CI stays green on the default/software build (empty
   `devices`, `host` filled).
