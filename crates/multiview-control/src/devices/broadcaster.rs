@@ -50,6 +50,14 @@ use crate::state::EngineStateSnapshot;
 pub struct DeviceBroadcaster {
     engine: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
     registry: Arc<DeviceStatusRegistry>,
+    /// Test-only (`_test-seams`) rendezvous installed BETWEEN the registry write
+    /// and the event publish in [`publish_status`](Self::publish_status), so a
+    /// test can deterministically observe the intermediate state and prove the
+    /// state-then-event ordering the connect watermark relies on (ADR-RT009).
+    /// `None` in every normal build; the whole field is compiled out of shipped
+    /// builds (the `_test-seams` feature is release-guarded, #109).
+    #[cfg(feature = "_test-seams")]
+    publish_status_seam: Option<PublishStatusSeam>,
 }
 
 impl DeviceBroadcaster {
@@ -60,7 +68,25 @@ impl DeviceBroadcaster {
         engine: Arc<EnginePublisher<EngineStateSnapshot, Event>>,
         registry: Arc<DeviceStatusRegistry>,
     ) -> Self {
-        Self { engine, registry }
+        Self {
+            engine,
+            registry,
+            #[cfg(feature = "_test-seams")]
+            publish_status_seam: None,
+        }
+    }
+
+    /// Install a test-only rendezvous seam (`_test-seams`) that parks
+    /// [`publish_status`](Self::publish_status) BETWEEN the registry write and
+    /// the event publish, so a test observer can capture the broadcast watermark
+    /// and read the device snapshot in that exact window and prove the ordering
+    /// the connect watermark depends on (ADR-RT009). Compiled out of every
+    /// shipped build (#109 release-artifact guard).
+    #[cfg(feature = "_test-seams")]
+    #[must_use]
+    pub fn with_publish_status_seam(mut self, seam: PublishStatusSeam) -> Self {
+        self.publish_status_seam = Some(seam);
+        self
     }
 
     /// The shared status registry this broadcaster updates.
@@ -110,6 +136,15 @@ impl DeviceBroadcaster {
     #[allow(clippy::must_use_candidate)] // seq is informational; see `adopted`.
     pub fn publish_status(&self, status: DeviceStatus) -> u64 {
         self.registry.set_status(status.clone());
+        // Test-only (`_test-seams`) rendezvous: park here — after the registry
+        // write, before the event publish — so a test can prove the ordering the
+        // connect watermark relies on (ADR-RT009) is observed, not modelled. A
+        // strict no-op compiled out of every shipped build (#109); production
+        // ordering is unchanged.
+        #[cfg(feature = "_test-seams")]
+        if let Some(seam) = &self.publish_status_seam {
+            seam.seam_rendezvous();
+        }
         self.engine.publish_event(Event::DeviceStatus(status))
     }
 
@@ -219,6 +254,80 @@ impl DeviceBroadcaster {
             .publish_event(Event::CastSessionRemoved(CastSessionRemoved::new(
                 session_id,
             )))
+    }
+}
+
+/// A test-only (`_test-seams`) two-phase rendezvous the tests install on a
+/// [`DeviceBroadcaster`] via [`DeviceBroadcaster::with_publish_status_seam`] to
+/// park [`DeviceBroadcaster::publish_status`] at the point BETWEEN the registry
+/// write and the event publish.
+///
+/// It makes the state-then-event ordering the connect watermark relies on
+/// (ADR-RT009) *observable* deterministically: with the publisher parked at the
+/// seam, an observer thread captures the broadcast watermark
+/// (`EnginePublisher::events.sequence()`) and reads the device snapshot in that
+/// exact window. A hypothetical reorder — publishing the event BEFORE the
+/// registry write — is then caught: the observer would see the event's seq while
+/// the registry snapshot is still stale, the precise lost-delta the watermark
+/// must never allow. Compiled out of every shipped build (#109 release guard).
+///
+/// Two two-party [`Barrier`](std::sync::Barrier)s give the observer exclusive
+/// time while the publisher is blocked: both threads meet at `reached`, then the
+/// publisher blocks on `released` while the observer does its capture, then the
+/// observer releases it.
+#[cfg(feature = "_test-seams")]
+#[derive(Clone)]
+pub struct PublishStatusSeam {
+    inner: Arc<PublishStatusSeamInner>,
+}
+
+#[cfg(feature = "_test-seams")]
+struct PublishStatusSeamInner {
+    reached: std::sync::Barrier,
+    released: std::sync::Barrier,
+}
+
+#[cfg(feature = "_test-seams")]
+impl PublishStatusSeam {
+    /// A fresh seam. Install it with
+    /// [`DeviceBroadcaster::with_publish_status_seam`], then drive it from the
+    /// observer with [`wait_until_parked`](Self::wait_until_parked) then
+    /// [`release`](Self::release).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(PublishStatusSeamInner {
+                reached: std::sync::Barrier::new(2),
+                released: std::sync::Barrier::new(2),
+            }),
+        }
+    }
+
+    /// Publisher side: called inside `publish_status` between the registry write
+    /// and the event publish. Rendezvous with the observer, then block until it
+    /// releases.
+    fn seam_rendezvous(&self) {
+        self.inner.reached.wait();
+        self.inner.released.wait();
+    }
+
+    /// Observer side: block until the publisher is parked at the seam — the
+    /// registry write has happened and the event has NOT yet been published.
+    pub fn wait_until_parked(&self) {
+        self.inner.reached.wait();
+    }
+
+    /// Observer side: release the parked publisher so it proceeds to publish the
+    /// event.
+    pub fn release(&self) {
+        self.inner.released.wait();
+    }
+}
+
+#[cfg(feature = "_test-seams")]
+impl Default for PublishStatusSeam {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

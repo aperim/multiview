@@ -94,6 +94,20 @@ class, so the ordering argument never has to cover them. This mirrors the fence 
 used in this crate for the discovery-scan correlation window (`routes/discovery.rs`:
 `from_seq = state.engine.events.sequence()`).
 
+**Verification — the ordering is *exercised*, not just modelled.** The `device.status`
+fold-then-publish order is exercised end-to-end by
+`publish_status_state_then_event_never_loses_the_device_across_the_watermark`
+(`crates/multiview-control/tests/realtime_watermark.rs`): it drives the real
+`DeviceBroadcaster::publish_status`, the real `DeviceStatusRegistry`, and the real
+`SessionStream::devices_snapshot_frames` + watermark drop, made deterministic by a
+`_test-seams` rendezvous parked *between* the registry write and the event publish so a
+reorder (publish before the registry write) is caught — proven by a locally-applied reorder
+going RED, then reverting to GREEN. The other watermark tests prove the suppression
+*mechanics* but model the ordering (they hand-write the snapshot the drop relies on). The
+`tile.state` producer (the engine tick in `runtime.rs`) is compositor/engine-driven and not
+reachable from a control-crate test; a cli-level exercise of its state-then-event order is
+tracked as a follow-up.
+
 ## Rationale
 
 - **Correct sequence space.** The watermark is read from the counter that stamps

@@ -51,6 +51,10 @@ pub mod state_machine;
 pub mod zowietek;
 
 pub use broadcaster::DeviceBroadcaster;
+/// The test-only publish-status rendezvous seam (`_test-seams`), used by the
+/// realtime watermark tests to exercise the registry-then-event ordering.
+#[cfg(feature = "_test-seams")]
+pub use broadcaster::PublishStatusSeam;
 pub use discovery::{
     DiscoveredEndpoint, DiscoveredService, DiscoveryBrowser, DiscoveryDriverKind,
     DiscoveryInventory, NullBrowser, RawDiscoveredService, StaticBrowser,

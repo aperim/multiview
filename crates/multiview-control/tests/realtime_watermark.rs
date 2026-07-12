@@ -21,6 +21,7 @@
 
 use std::sync::Arc;
 
+use multiview_control::devices::{DeviceBroadcaster, DeviceStatusRegistry, PublishStatusSeam};
 use multiview_control::SessionStream;
 use multiview_engine::EnginePublisher;
 use multiview_events::{
@@ -329,4 +330,117 @@ async fn watermark_drops_a_tile_state_the_built_snapshot_reproduces() {
         delivered[0].envelope.payload,
         Event::AlertRaised(_)
     ));
+}
+
+/// FINDING (a) — the #230 residual, now EXERCISED rather than modelled. The
+/// tests above prove the watermark's *suppression mechanics*, but they MODEL the
+/// fold-then-publish ordering the safety argument rests on: e.g.
+/// [`watermark_drops_a_tile_state_the_built_snapshot_reproduces`] publishes only
+/// the event and then hand-writes the `blob` asserting the state is `LIVE`. A
+/// regression that reordered the real producer — publishing the event BEFORE
+/// writing the state/registry — would slip past them, yet it is exactly what
+/// breaks ADR-RT009: dropping a `seq <= watermark` delta is only safe because the
+/// producer folds state BEFORE publishing, so the connect snapshot already holds
+/// it.
+///
+/// This test EXERCISES the one real fold-then-publish path reachable inside
+/// `multiview-control`: [`DeviceBroadcaster::publish_status`], which writes the
+/// `DeviceStatusRegistry` (the device-snapshot source) THEN publishes the
+/// `device.status` event. It drives the REAL registry, the REAL publish, and the
+/// REAL `SessionStream::devices_snapshot_frames` + watermark drop — no modelled
+/// blob — and asserts the connect flow never loses the device across the
+/// watermark boundary.
+///
+/// It is DETERMINISTIC (not loop-and-hope, rule 18) via a `_test-seams`
+/// rendezvous installed BETWEEN the registry write and the event publish: with
+/// the publisher parked there, the observer captures the watermark and the device
+/// snapshot in that exact window. Under the shipped state-then-event order the
+/// registry already holds the device (the snapshot reproduces it) and the event
+/// is not yet visible (watermark below its seq, so the delta is delivered, not
+/// dropped) — the device is present. A reorder (event before the registry write)
+/// makes the observer capture the event's seq while the registry snapshot is
+/// still empty, so the `seq <= watermark` drop loses the device with no snapshot
+/// to heal from and this test FAILS. Proven by locally reordering
+/// `publish_status` (event before `set_status`) → RED, then reverting → GREEN.
+///
+/// The `tile.state` fold-then-publish (the engine tick, `runtime.rs`) is
+/// compositor/engine-driven and not reachable from a control-crate test; a
+/// cli-level exercise of it is tracked as a follow-up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publish_status_state_then_event_never_loses_the_device_across_the_watermark() {
+    let engine: Arc<Publisher> = Arc::new(EnginePublisher::new(64));
+    let registry = Arc::new(DeviceStatusRegistry::new());
+    let broadcaster = DeviceBroadcaster::new(Arc::clone(&engine), Arc::clone(&registry));
+
+    // Subscribe BEFORE the publish, exactly as the transports do: the racing
+    // device.status must be buffered in this subscription so it would replay as a
+    // delta absent the watermark.
+    let sub = engine.subscribe();
+
+    // The rendezvous parks publish_status between the registry write and the
+    // event publish.
+    let seam = PublishStatusSeam::new();
+    let publisher = broadcaster.clone().with_publish_status_seam(seam.clone());
+
+    // Drive the REAL fold-then-publish on its own thread; it parks at the seam.
+    let handle = std::thread::spawn(move || {
+        publisher.publish_status(DeviceStatus::new("cam-1", DeviceState::Online))
+    });
+
+    // Wait until the publisher is parked. Under the shipped order the registry
+    // write has happened and the event is NOT yet published.
+    seam.wait_until_parked();
+
+    // Capture the connect watermark THEN the snapshot, exactly as a connecting
+    // session does — reading the REAL registry, no modelled blob.
+    let watermark = engine.events.sequence();
+    let mut session = SessionStream::new(sub, "sess-fold", None).with_snapshot_watermark(watermark);
+    // Emit the connect frames the real handler emits: the `$hello`, then one
+    // device-status snapshot frame per tracked device (read from the registry).
+    let _hello = session.snapshot_frame(engine.state.sequence());
+    let device_snapshot = session.devices_snapshot_frames(&registry, engine.state.sequence());
+
+    // Release the publisher; it publishes the device.status event into the
+    // subscription and returns the event's engine seq.
+    seam.release();
+    let event_seq = handle.join().expect("the publish thread completes");
+
+    // Drain the single buffered delta (dropped by the watermark, or delivered).
+    let deltas = drain(&mut session, 1).await;
+
+    let in_snapshot = device_snapshot
+        .iter()
+        .any(|f| is_cam1_status(&f.envelope.payload));
+    let in_deltas = deltas.iter().any(|f| is_cam1_status(&f.envelope.payload));
+
+    // The lost-delta guard: the device must be reflected at LEAST once — in the
+    // connect snapshot or as a delivered delta — never lost. (A duplicate across
+    // both is the tolerable at-least-once residual, RT003; a LOSS is the #230
+    // defect the watermark must never cause.)
+    assert!(
+        in_snapshot || in_deltas,
+        "device.status for cam-1 must survive the connect watermark boundary \
+         (snapshot={in_snapshot}, delta={in_deltas}); a reorder publishing the \
+         event before the registry write loses it — the #230 defect"
+    );
+
+    // Pin the shipped state-then-event SHAPE so the pass is not a coincidence:
+    // the registry write preceded the publish, so (a) the watermark captured with
+    // the event not-yet-visible is BELOW the event seq, and (b) the connect
+    // snapshot already reproduces the device.
+    assert!(
+        watermark < event_seq,
+        "state-then-event: the watermark captured with the event not-yet-published \
+         must be below the event seq (watermark={watermark}, event_seq={event_seq})"
+    );
+    assert!(
+        in_snapshot,
+        "state-then-event: the registry write preceded the publish, so the connect \
+         snapshot must already reproduce cam-1"
+    );
+}
+
+/// True for a `device.status` event for `cam-1`.
+fn is_cam1_status(event: &Event) -> bool {
+    matches!(event, Event::DeviceStatus(s) if s.device_id == "cam-1")
 }
