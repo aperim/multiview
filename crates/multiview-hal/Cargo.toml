@@ -32,6 +32,10 @@ multiview-i915pmu = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = "1.11.0"
+# Fixture directories for the `host` probe tests (#180-A): a temp `/proc`,
+# `/sys`, and cgroup-v2 tree so the presence/absence semantics are exercised
+# without touching the real host. Dev-only — not in the shipped artifact.
+tempfile = "3"
 
 [features]
 "default" = []

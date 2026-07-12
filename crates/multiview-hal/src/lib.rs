@@ -72,6 +72,7 @@ pub mod cost;
 pub mod degradation;
 pub mod error;
 pub mod failure;
+pub mod host;
 pub mod load;
 pub mod perf;
 pub mod planner;
