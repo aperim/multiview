@@ -41,7 +41,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable # matches ci.yml + rust-toolchain.toml (channel = stable)
 
       - name: Run release-plz
-        uses: release-plz/action@v0.5.130 # v0.5.129
+        uses: release-plz/action@v0.5.131 # v0.5.129
         with:
           command: release-pr
         env:
