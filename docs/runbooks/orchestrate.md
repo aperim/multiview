@@ -74,6 +74,21 @@ Cadence — pick one, never something that keeps a session alive between cycles:
 watch -n 900 ./.claude/skills/orchestrate/tick.sh
 ```
 
+### When ticks stop happening
+
+`tick.lock` holds the owning pid and a **live** holder is respected. Two sharp edges in that
+scheme, both upstream in the supplied `tick.sh`:
+
+- **A recycled pid stalls the loop.** The lock stores a bare pid with no boot-id or start
+  time, so if that number belongs to *any* live process — trivially true for low pids after a
+  reboot — every tick logs `cycle already running (pid N)` and exits 0, forever. Symptom:
+  `tick.log` repeating that line and no cycles landing. Recovery: confirm no cycle is really
+  running, then `rm -f .claude/loop/tick.lock`.
+- **The stale-lock reclaim is not atomic** — it `rm`s the dead holder's lock and then creates
+  its own, so two ticks that both see a dead pid can both acquire, and the first to finish
+  deletes the other's lock on exit. Keep the scheduler interval comfortably above a cycle's
+  runtime, and do not run `tick.sh` by hand while cron is armed.
+
 ## Lane map — what makes a lane single-writer
 
 `orchestrate.config.json` partitions work by lane; `lib/partition.mjs` enforces it in code.
@@ -89,15 +104,24 @@ Collisions cannot surface at merge if colliding lanes are never *assigned* at on
 | `wrtc` | `multiview-webrtc/**`, `multiview-preview/src/whep*`, `control/src/routes/whip*` | `webrtc/src/transport/mod.rs`; `session.rs` (one `[::]` socket session table shared by WHIP ingest / WHEP serve / WHIP push) |
 | `input` | `multiview-input/**`, `multiview-rist-sys/**` | `input/src/lib.rs` (24 cfg-gated `pub mod`), `input/Cargo.toml` `[features]` |
 | `preview` | `multiview-preview/**` minus WHEP transport | `preview/src/tap.rs` (the refcounted lazy-start tap registry), `encode.rs` (shared encoder pool) |
-| `engine` | `multiview-engine/**` minus runtime/clock/drive, `multiview-hal/src/load.rs` | `engine/src/lib.rs`, `supervisor.rs` task registration |
-| `gpu` | `multiview-compositor/**`, `multiview-framestore/**`, `multiview-ffmpeg/**`, `multiview-hal/src/select.rs` | **scoped** — one writer per crate; no file is shared across them (framestore depends only on core; ffmpeg is the FFI leaf) |
-| `audio` | `multiview-audio/**`, `multiview-overlay/**` | **scoped** — one writer per crate; verified no shared source file (overlay depends only on core) |
+| `engine` | `multiview-engine/**` minus runtime/clock/drive | `engine/src/lib.rs` (24 `pub mod`), `supervisor.rs` task registration |
+| `gpu` | `multiview-compositor/**`, `multiview-framestore/**`, `multiview-ffmpeg/**` | `compositor/src/{lib,pipeline}.rs` (invariant #8 order), `gpu/shaders/common.wgsl`. The three crates share no file — see the scoping note below for why the lane is serial anyway |
+| `hal` | `multiview-hal/**` | `hal/src/lib.rs` declares both `load` (the engine's concern) and `select` (the gpu lane's), and both share `hal/Cargo.toml`. Splitting `hal` across two lanes put one shared file in two lanes at once, which `partition.mjs` cannot express — so `hal` is its own lane |
+| `audio` | `multiview-audio/**`, `multiview-overlay/**` | `audio/src/{lib,mixer}.rs`, `overlay/src/{lib,resolve}.rs`. The two crates share no file (overlay depends only on core) — again see the scoping note |
 | `bcast` | `control/src/{nmos,is07}*`, `multiview-output/**` | `output/src/lib.rs` (17 cfg-gated mods), `sink.rs` + `fanout.rs` (encode-once-mux-many, invariant #7) |
 | `web` | `web/**` | `web/src/app/router.tsx`, `navigation.tsx`, `src/locales/*/messages.po` (`lingui extract` rewrites all three), generated `src/api/schema.ts` |
 | `devices` | zowietek / display-kms / sync / cast / node-enroll, `deploy/**` | `control/src/devices/{mod,driver_registry,registry}.rs` — every driver registers in all three |
 | `conspect` | `multiview-licence/**`, `multiview-mesh/**` | mesh depends on licence, so a licence public-type change forces a mesh edit; both land stores in `control/src/state.rs` |
 | `telemetry` | `multiview-telemetry/**` | `telemetry/src/lib.rs` mod list |
 | `gov` | `.claude/**`, `docs/{decisions,research,runbooks}`, `docs/development/work-schedule.md`, `.github/workflows/**`, build pins | `docs/decisions/README.md` (every ADR appends a row), `.github/workflows/ci.yml`, `AGENTS.md` |
+
+**Nothing is `scoped` here, deliberately.** `gpu` and `audio` would each parallelise safely
+per crate, but `lib/partition.mjs` admits a *second* item into a scoped lane when the first
+declares no `scope`: it reserves the lane but not the scope namespace, so an unscoped item —
+which may touch any crate in the lane — and a scoped sibling can land in the same wave.
+Reproduce with `partitionWave([{number:1,lane:'gpu',blockedBy:[]},{number:2,lane:'gpu',scope:'compositor',blockedBy:[]}],
+{knownLanes:['gpu'],scopedLanes:['gpu'],maxWave:5})` → `wave:[1,2]`. Until that is fixed
+upstream, `scopedLanes` stays empty and every lane is single-writer — the documented default.
 
 Rules that ride with the map:
 
@@ -152,6 +176,20 @@ Each of these cost an incident once.
 - After merge: remove the lane's worktree, `git worktree prune`, delete the branch, then
   `git fetch origin && git pull --ff-only origin main` in the root so the next cycle bases
   on current HEAD.
+
+## Record — what a cycle must leave behind
+
+The next cycle starts with an empty context window, so anything not written down is lost.
+
+- **Flip the board.** Tick the Part-2 checklist box and set the item's Part-3 `Status:` in
+  `docs/development/work-schedule.md`, adding the red→green commit SHAs and the PR number
+  inline on the item.
+- **`qdrant-store` proactively** — every non-obvious decision, operator correction and
+  hard-won gotcha, the moment you learn it, not when asked. See [memory-mcp](memory-mcp.md)
+  and the [`memory` skill](../../.claude/skills/memory/SKILL.md).
+- **Write or refresh a resource's runbook in the same change** that provisioned or altered it.
+- An **ADR** when the decision constrains future changes — required at R3, not every cycle
+  ([`adr` skill](../../.claude/skills/adr/SKILL.md)).
 
 ## Salvage — an orphaned `locked` lane whose owning pid is dead
 

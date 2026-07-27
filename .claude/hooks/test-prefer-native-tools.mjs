@@ -45,6 +45,13 @@ const MUST_BLOCK = [
   ['head -50 Cargo.toml', 'head a file'],
   ['tail -20 CHANGELOG.md', 'tail a file'],
   ["sed -n '10,40p' AGENTS.md", 'sed line range'],
+  // -L is --follow in ripgrep (it WIDENS the search), not files-without-match
+  ['rg -L pattern src', 'rg -L must not count as bounded'],
+  // a repeated segment must be judged on its OWN separators, not the first
+  // textual occurrence's — else the unbounded tail escapes
+  ['rg foo src | head -5 && rg foo src', 'second, unbounded copy of a repeated segment'],
+  // `||` is control flow, not a pipe: nothing is feeding cat
+  ['false || cat file.txt', 'cat after a logical-or is not downstream of a pipe'],
 ];
 
 const MUST_ALLOW = [
@@ -66,6 +73,13 @@ const MUST_ALLOW = [
   ["find . -name '*.rs' | head -20", 'piped find'],
   ['grep -rn "invariant" docs/ | wc -l', 'piped into wc'],
   ['ls -R crates/ | head -n 20', 'piped recursive ls'],
+  // Read cannot feed a pipe, so a piped file read has no Read-shaped remedy
+  ['cat package.json | jq .version', 'cat feeding jq'],
+  ['head -100 build.log | grep error', 'AGENTS.md advice: redirect build output, read the tail'],
+  ['tail -f app.log | grep -m1 ready', 'streaming tail — Read cannot do this at all'],
+  // repeated segments judged on their own separators
+  ['rg foo src > /tmp/a; rg foo src | head -5', 'repeated segment: redirect then piped'],
+  ['echo "rg foo src"; rg foo src | head -5', 'a quoted look-alike must not shift the verdict'],
   // find with an action, and redirects
   ['find . -name "*.tmp" -delete', 'find with an action'],
   ['git diff origin/main...HEAD > /tmp/review.diff', 'redirect'],

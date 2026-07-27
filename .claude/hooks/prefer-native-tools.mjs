@@ -19,7 +19,9 @@
  *   find / ls -R unbounded           -> add `| head -n 50`
  *
  * A segment whose stdout is piped into something else never reaches context at
- * all, so only the last segment of a pipeline is checked for the search family.
+ * all, so only the tail of a pipeline is checked — including for file reads,
+ * because `Read` cannot feed a pipe and `head -100 build.log | grep error` has
+ * no Read-shaped remedy.
  *
  * Fails OPEN: any parse error, unknown shape, or unexpected exception allows
  * the command. A hook that blocks legitimate work is worse than one that misses.
@@ -45,11 +47,24 @@ function readStdin() {
   }
 }
 
-/** Split a command line into pipeline segments, ignoring separators inside quotes. */
+/**
+ * Split a command line into segments, ignoring separators inside quotes, and
+ * record the separator on each side of every segment.
+ *
+ * The separators are carried on the segment rather than recovered later by
+ * searching the command string: `rg foo src | head -5 && rg foo src` contains
+ * the same segment text twice, and an indexOf-style lookup resolves both to the
+ * first occurrence — under-blocking the second (unbounded) one, and
+ * over-blocking the reverse arrangement.
+ *
+ * `||` and `&&` are recorded as 'logical', never as a pipe: `foo || cat f`
+ * does not feed `cat` anything.
+ */
 function segments(cmd) {
   const out = [];
   let buf = '';
   let quote = null;
+  let sepBefore = null;
   for (let i = 0; i < cmd.length; i++) {
     const c = cmd[i];
     if (quote) {
@@ -59,39 +74,29 @@ function segments(cmd) {
     }
     if (c === '"' || c === "'") { quote = c; buf += c; continue; }
     if (c === '|' || c === ';' || c === '&') {
-      if (buf.trim()) out.push(buf.trim());
+      let sep = c;
+      // a doubled operator is control flow, not a pipe
+      while (i + 1 < cmd.length && (cmd[i + 1] === '|' || cmd[i + 1] === '&')) { i++; sep = 'logical'; }
+      if (buf.trim()) out.push({ text: buf.trim(), sepBefore, sepAfter: sep });
       buf = '';
-      // consume doubled operators
-      while (i + 1 < cmd.length && (cmd[i + 1] === '|' || cmd[i + 1] === '&')) i++;
+      sepBefore = sep;
       continue;
     }
     buf += c;
   }
-  if (buf.trim()) out.push(buf.trim());
+  if (buf.trim()) out.push({ text: buf.trim(), sepBefore, sepAfter: null });
   return out;
 }
 
 /** True when the segment reads piped stdin rather than naming files. */
-function isDownstream(cmd, seg) {
-  const idx = cmd.indexOf(seg);
-  if (idx <= 0) return false;
-  const before = cmd.slice(0, idx);
-  // last unquoted separator before this segment was a pipe
-  const m = before.match(/([|;&])[^|;&]*$/);
-  return !!m && m[1] === '|';
-}
+const isDownstream = (seg) => seg.sepBefore === '|';
 
 /**
  * True when this segment's stdout is piped onward. Its bytes are consumed by
  * the next stage and never enter the transcript, so output size is not our
  * problem — only the tail of a pipeline reaches context.
  */
-function pipesOut(cmd, seg) {
-  const idx = cmd.indexOf(seg);
-  if (idx < 0) return false;
-  const after = cmd.slice(idx + seg.length);
-  return /^\s*\|(?!\|)/.test(after);
-}
+const pipesOut = (seg) => seg.sepAfter === '|';
 
 function tokenise(seg) {
   return seg.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
@@ -106,15 +111,23 @@ const VALUE_FLAGS = new Set([
   '-type', '-maxdepth', '-mindepth', '-newer', '-size', '-perm', '-user',
 ]);
 
-/** Bounded search: -l/-L/-c/-q (incl. combined shorts) or an explicit -m/--max-count. */
-function isBoundedSearch(args) {
+/**
+ * Bounded search: -l / -c / -q (incl. combined shorts) or an explicit
+ * -m/--max-count.
+ *
+ * `-L` is bounded in grep and ag (files-WITHOUT-match) but in ripgrep it is
+ * --follow, which *widens* the search — so it counts only for the grep family.
+ */
+function isBoundedSearch(bin, args) {
+  const shorts = bin === 'rg' ? 'lcq' : 'lLcq';
+  const re = new RegExp(`[${shorts}]`);
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '-m' || a === '--max-count' || a.startsWith('-m') && /^-m\d+$/.test(a)) return true;
+    if (a === '-m' || a === '--max-count' || /^-m\d+$/.test(a)) return true;
     if (/^--max-count(=|$)/.test(a)) return true;
     if (/^--(files-with-matches|files-without-match|count|quiet|silent)$/.test(a)) return true;
-    // combined or single short flags: -l, -rl, -il, -c, -q, -L
-    if (/^-[A-Za-z]+$/.test(a) && /[lLcq]/.test(a.slice(1))) return true;
+    // combined or single short flags: -l, -rl, -il, -c, -q
+    if (/^-[A-Za-z]+$/.test(a) && re.test(a.slice(1))) return true;
   }
   return false;
 }
@@ -137,7 +150,8 @@ function check(cmd) {
   // explicit opt-out
   if (/^\s*#\s*raw:/.test(cmd)) return null;
 
-  for (const seg of segments(cmd)) {
+  for (const segment of segments(cmd)) {
+    const seg = segment.text;
     const t = tokenise(seg);
     if (!t.length) continue;
 
@@ -151,11 +165,12 @@ function check(cmd) {
     // never touch write/heredoc forms or remote execution
     if (/[><]|<<|ssh\s|docker\s|kubectl\s/.test(seg)) continue;
     // downstream of a pipe: reading stdin, which is correct usage
-    if (isDownstream(cmd, seg)) continue;
+    if (isDownstream(segment)) continue;
+    // feeding another command: these bytes never reach the transcript, and
+    // `Read` cannot feed a pipe, so blocking here would offer no remedy
+    if (pipesOut(segment)) continue;
 
     const namesFile = args.some((a) => !a.startsWith('-') && /[./]|\.\w+$/.test(a));
-    // a segment feeding another command never lands in context
-    const consumed = pipesOut(cmd, seg);
 
     const CAP = 'Cap the output: add -l (names only), -c (count), -m N (first N matches), or pipe into `| head -n 50`.';
 
@@ -174,12 +189,10 @@ function check(cmd) {
     }
 
     // ---- search family: bound it, do not redirect it (no Grep/Glob here) ----
-    if (consumed) continue;
-
     if (bin === 'grep' || bin === 'egrep' || bin === 'fgrep' || bin === 'rg' || bin === 'ag' || bin === 'ack') {
       const recursive = /(^|\s)(-[A-Za-z]*[rR][A-Za-z]*|--recursive)(\s|$)/.test(rest);
       const searchesPath = namesFile || operands(args).length >= 2 || recursive;
-      if (searchesPath && !isBoundedSearch(args)) {
+      if (searchesPath && !isBoundedSearch(bin, args)) {
         return { bin, use: null, why: `An unbounded search dumps every match into context for the rest of the session. ${CAP}` };
       }
       continue;

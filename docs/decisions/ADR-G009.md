@@ -143,7 +143,24 @@ issues; both are operator decisions recorded in the runbook, not defects in the 
   intercepts agent `Bash` calls.
 - **Every block must leave an action available.** That is the standing constraint on this hook:
   if a future harness drops `Read` too, the file-read rules must be re-adapted rather than left
-  pointing at something uncallable.
+  pointing at something uncallable. Adversarial review caught three defects in the adaptation
+  before it landed, all now fixed and pinned by tests: piped file reads were blocked while
+  telling the agent to use `Read`, which cannot feed a pipe; ripgrep's `-L` (`--follow`, which
+  *widens* a search) was counted as a bounding flag; and a repeated segment was resolved by
+  first textual occurrence, so `rg foo src | head -5 && rg foo src` let the unbounded copy pass.
+- **Four defects remain in the supplied libraries** and are worked around rather than silently
+  patched, because those files were received verbatim and other repos run the same copies —
+  they are reported upstream instead. `partition.mjs` admits a second item into a `scoped` lane
+  when the first declares no `scope` (it reserves the lane but not the scope namespace), and
+  drops a malformed candidate silently instead of deferring it; `tick.sh` stalls the loop
+  forever on a recycled pid, and its stale-lock reclaim is `rm`-then-create rather than atomic.
+  The first is neutralised by shipping `scopedLanes: []`; the `tick.sh` pair are documented with
+  their symptoms and recovery in the runbook.
+- **`multiview-hal` is its own lane.** ADR-G007 split it across two territories —
+  `hal/src/load.rs` to the engine, `hal/src/select.rs` to the GPU lane — but both are declared
+  in one `hal/src/lib.rs` and share one `Cargo.toml`, so the split put a shared file in two
+  concurrently-dispatchable lanes. The partitioner has no cross-lane conflict notion, so the
+  fix is a lane boundary that matches the crate boundary.
 - **Invariants:** none touched. This is agent policy — **R2** by the class matrix — not a
   data-plane change; invariants #1 and #10 are unaffected and their blocking status at
   R3 is unchanged.
