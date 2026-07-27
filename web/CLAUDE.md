@@ -7,8 +7,16 @@ Stack (conventions §8 — canonical):
 - **shadcn/ui** (Radix + Tailwind v4); **TanStack Query / Table**.
 - **react-konva** + **dnd-kit** for the layout editor (drag/resize tiles on the canvas).
 - **API client is GENERATED from the OpenAPI spec** (`openapi-typescript` + `openapi-fetch`) —
-  do **not** hand-write fetch calls or types. Regenerate after the spec changes
-  (`cargo xtask gen-openapi`).
+  do **not** hand-write fetch calls or types. Regeneration is two steps, in order: `cargo xtask
+  gen-openapi` writes the *spec* (`docs/api/openapi.json`), then `npm --prefix web run generate:api`
+  writes the *client* (`src/api/schema.ts`). Realtime payload types work the same way: `cargo xtask
+  gen-asyncapi` → `docs/api/asyncapi.json`, then `npm --prefix web run generate:events` →
+  `src/realtime/generated-types.ts` (the hand-authored `envelope.ts` runtime is not generated). CI
+  checks the two *specs* are fresh but never regenerates the TS — commit both halves together.
+- **User-facing strings go through Lingui** (`@lingui/*` macros). `build` is `lingui compile && tsc
+  --noEmit && vite build`, and the `i18n catalog freshness (lingui)` CI job fails on drift: run
+  `npm --prefix web run i18n:extract -- --clean` then `... run i18n:compile` and commit
+  `src/locales/**` in the same change as the strings.
 - Accessibility: **WCAG 2.1 AA**.
 
 The API it consumes (from `multiview-control`): base `/api/v1`; long-running ops → `202` + operation

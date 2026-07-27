@@ -3,10 +3,11 @@
  * PreToolUse hook (WARN-ONLY): reminds when an Edit/Write/NotebookEdit targets
  * the root checkout instead of a worktree lane.
  *
- * AGENTS.md rule 8: prefer a worktree lane for all file-changing work; the root
- * checkout is a pristine, current mirror of `main`. The operator selected
- * WARN-ONLY enforcement (not a hard block), so this hook NEVER blocks a call —
- * it emits a non-blocking `systemMessage` reminder and always exits 0 (allow).
+ * The root checkout is a pristine, current mirror of `main`: R1+ file-changing
+ * work belongs in a worktree lane (the `worktree-lane` skill), while an R0
+ * prose edit in place is fine. The operator selected WARN-ONLY enforcement
+ * (not a hard block; ADR-G006), so this hook NEVER blocks a call — it emits a
+ * non-blocking `systemMessage` reminder and always exits 0 (allow).
  *
  * Compliant (no reminder): paths under `.claude/worktrees/**` (the harness
  * EnterWorktree default) and `.worktrees/**` (manual lanes), and any path
@@ -62,10 +63,9 @@ const insideLane =
 
 if (insideRoot && !insideLane) {
   const msg =
-    `Reminder (AGENTS.md rule 8): ${resolved} is in the root checkout. ` +
-    `Prefer a worktree lane — see the worktree-lane skill ` +
-    `(git worktree add --detach .claude/worktrees/<lane> HEAD), then edit there. ` +
-    `Warn-only: proceeding with this edit.`;
+    `${resolved} is in the root checkout, not a lane. ` +
+    `R0 prose edits in place are fine; R1+ work belongs in a worktree lane ` +
+    `(worktree-lane skill) — warn-only, proceeding.`;
   // Non-blocking warning surfaced to the operator; the tool call still runs.
   process.stdout.write(JSON.stringify({ systemMessage: msg }));
 }

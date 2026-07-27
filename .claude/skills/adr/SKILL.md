@@ -1,15 +1,19 @@
 ---
 name: adr
-description: Record an architecture decision as an ADR in docs/decisions/. Use whenever a non-trivial design or tooling decision is made (technology choice, data model, protocol, security posture, dependency) — before or alongside the implementing commit.
+description: Record an architecture decision as an ADR in docs/decisions/. Use when a decision constrains future changes (technology choice, data model, protocol, security posture, dependency) — required at R3, at R2 only if it constrains, never at R0/R1. Write it before or alongside the implementing commit.
 ---
 
 # Writing an ADR
 
-Implements AGENTS.md rule 30: non-trivial decisions are recorded, not implied by
-code. ADRs are the **why**; operational **how** lives in `docs/runbooks/`.
+**Write an ADR when a decision constrains future changes — not for every change.**
+Required at R3; at R2 only when the decision genuinely binds what comes later;
+never at R0/R1. Classify with `scripts/classify.sh`; the contract is
+[engineering.md](../../../docs/standards/engineering.md) Part G. ADRs are the
+**why**; the operational **how** lives in `docs/runbooks/`.
 
 In this repo ADRs live in [`docs/decisions/`](../../../docs/decisions/) (NOT
-`docs/adr/`). [`docs/decisions/README.md`](../../../docs/decisions/README.md) is
+`docs/adr/`; [ADR-G006](../../../docs/decisions/ADR-G006.md)).
+[`docs/decisions/README.md`](../../../docs/decisions/README.md) is
 the catalog. [`docs/architecture/conventions.md`](../../../docs/architecture/conventions.md)
 remains the canonical source of truth — an ADR may not contradict it.
 
@@ -52,5 +56,5 @@ Find the next number: `ls docs/decisions/ | grep '^ADR-<PREFIX>'`.
 - Numbers and names, not vibes: versions, benchmarks, prices, URLs, ADR/brief
   cross-links.
 - An ADR that describes behaviour the repo doesn't have yet is aspirational
-  documentation (rule 27) — write `Accepted` ADRs when the decision is real, and
-  mark genuinely-future ones `Proposed`.
+  documentation, and that is a defect — write `Accepted` ADRs when the decision is
+  real, and mark genuinely-future ones `Proposed`.

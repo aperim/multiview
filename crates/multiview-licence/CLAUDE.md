@@ -17,10 +17,11 @@ code that could stop/stall output — that breaks the product promise and the cr
 gather raw serials/MACs here. Verification is **verification-only**: no key generation, no RNG in
 non-test code (the RNG lives in dev-deps for test keypairs only). Keep it that way.
 
-**Constants are EXACT (ADR-0050 §4 / brief §2).** `LEASE_FULL=35d`, `LEASE_GRACE=14d`,
-`LEASE_HARD=90d`, `ACTIVATION_WINDOW=31d`, fingerprint threshold `70`/strong `100`. A portal showing
-"35 days" and a machine enforcing 30 is a support incident — do not round or re-derive. Property
-tests pin the day boundaries; never weaken them.
+**Constants are EXACT (ADR-0050 §4 / brief §2).** The lease terms, activation window and fingerprint
+thresholds live in [`constants.rs`](src/constants.rs) — read the values there; never restate them
+here or in another doc where they can drift. A portal showing "35 days" and a machine enforcing 30 is
+a support incident — do not round or re-derive. Property tests pin the day boundaries; never weaken
+them.
 
 **Dependencies:** `core`, `events`, `serde`, `thiserror`, `tracing`, `chrono` (exact arithmetic —
 **never float**), `ed25519-dalek` (verify-only, deny-clean). No GPU, no FFmpeg, no engine.
@@ -36,9 +37,10 @@ RFC 8949 §4.2.1 canonical-CBOR pre-image), the bare-Ed25519 signed-lease verifi
 `HeartbeatClient<S: LicenceServer>` loop that drives `store::install_binding` on a positively-verified
 lease and **keeps last-good on every failure/withheld lease** (never off air). The default build stays
 network-free + `cargo deny`-clean; the **live HTTP transport is the cli's** `ConspectHttpServer` (it
-owns `reqwest`), so this leaf crate opens no socket. **Still out of scope here:** the S1/S2/S3 engine
-seams + the never-off-air chaos test (CONSPECT-2), the cli wiring (CONSPECT-10), and the control
-routes/web screens.
+owns `reqwest`), so this leaf crate opens no socket. The consumers sit **outside** the charter and
+stay there: the S1/S2/S3 engine seams + cli wiring in
+[`multiview-cli`](../multiview-cli/src/licence.rs) (with the never-off-air chaos gates in its
+`tests/`), the routes in `multiview-control`, the operator screen in `web/`.
 
 Depth: [conspect-account-architecture](../../docs/research/conspect-account-architecture.md) (§2
 constants, §6 ladder, §8 fingerprint, §12 state machines) ·
