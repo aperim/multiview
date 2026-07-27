@@ -1,8 +1,12 @@
-# `.claude/workflows/` — committed Conductor workflow scripts
+# `.claude/workflows/` — committed delivery-cycle workflow scripts
 
-Reusable workflow scripts the Conductor invokes by name (`Workflow({ name: '<file>' })`)
-or by `scriptPath`. They are the loop's fan-out tools (ADR-G007; the
-[`orchestrate`](../skills/orchestrate/SKILL.md) skill). Committed via the
+Reusable workflow scripts an orchestration cycle invokes by name (`Workflow({ name: '<file>' })`)
+or by `scriptPath`. They are the delivery cycle's fan-out tools — one cycle per session, then
+exit ([ADR-G009](../../docs/decisions/ADR-G009.md); the
+[`orchestrate`](../skills/orchestrate/SKILL.md) skill, with Multiview's local half in the
+[orchestrate runbook](../../docs/runbooks/orchestrate.md)). The disjoint territories they fan
+out across and the cross-vendor review they gate on are
+[ADR-G007](../../docs/decisions/ADR-G007.md). Committed via the
 `!/.claude/workflows/` negation in [`.gitignore`](../../.gitignore).
 
 ## Loader contract (read before "fixing" a top-level `return`)
@@ -56,7 +60,7 @@ done
 
 | Script | Purpose |
 | --- | --- |
-| `orient.js` | Read-only state-of-the-world map (lanes, branches, PRs, collisions, board) → synthesis for PLAN. |
+| `orient.js` | Read-only state-of-the-world map (lanes, branches, PRs, collisions, board) → synthesis for the cycle's Orient step. |
 | `wave-fanout.js` | Run one wave of lane implementation across disjoint territories in isolated worktrees, each lane meeting the gates its class owes, returning committed work + opened PRs. |
 | `review-wave.js` | Adversarial cross-vendor (Codex) review of diffs/PRs — the mandatory pre-merge gate for R1+; R3/high-risk → 3-lens panel; fail-closed on fallback. |
 | `cleanup-sweep.js` | Read-only triage of branch/worktree sprawl → exact prune/remove/salvage lists for the orchestrator to execute. |

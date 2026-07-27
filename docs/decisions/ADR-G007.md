@@ -1,6 +1,6 @@
 # ADR-G007: Single-orchestrator "Conductor" loop replaces N independent agent terminals
 
-- **Status:** Accepted
+- **Status:** Accepted — the **Autonomy** clause and step **⑨** are superseded by [ADR-G009](ADR-G009.md); everything else stands
 - **Area:** Guardrails
 - **Date:** 2026-06-16
 - **Source:** operator request (2026-06-16 session) — "agents working at cross purposes, on the same issue, on GPU functionality without visibility into other changes"
@@ -52,7 +52,9 @@ integrator, the sole `memory` MCP client, and owns every PR from open to merge a
 cleanup after. It fans work out **more** broadly than the separate terminals did, using
 two mechanisms, while making the repo's existing territory model actually hold.
 
-The Conductor runs a repeating loop:
+The Conductor runs one wave as these steps. **Amended by [ADR-G009](ADR-G009.md):** a wave is
+now one *cycle*, the session **ends** with it, and an external scheduler starts the next cycle
+in a fresh process. Step ⑨ is withdrawn.
 
 > **① PLAN** (read board + memory + open PRs; pick the next wave of dependency-ready
 > tasks, each mapped to a disjoint territory) → **② ASSIGN** (write lane→territory→owner
@@ -64,7 +66,7 @@ The Conductor runs a repeating loop:
 > (green deterministic CI + passing review → merge, ADR-G005) → **⑦ CLEAN** (remove the
 > lane's worktree, prune its branch, `fetch && pull --ff-only` so the next wave bases on
 > current HEAD) → **⑧ RECORD** (flip board checkboxes, `qdrant-store` decisions/gotchas,
-> write/refresh runbooks) → **⑨** reschedule the next iteration.
+> write/refresh runbooks) → **the session ends**.
 
 Concrete shape:
 
@@ -79,8 +81,9 @@ Concrete shape:
   the same territory, and **hot shared files are serial** — `pipeline.rs`,
   `engine/{runtime,clock,drive}.rs` → LANE-CORE; `control/{routes/mod,openapi,state}.rs`
   → LANE-API. Non-owner lanes file the handler **body** and hand the **wiring** to the
-  owner. The path globs live in the [`orchestrate` skill](../../.claude/skills/orchestrate/SKILL.md);
-  this partition refines `work-schedule.md` §1c.
+  owner. The path globs live in the [orchestrate runbook](../runbooks/orchestrate.md) (§ Lane
+  map), which is also what `orchestrate.config.json` encodes; this partition refines
+  `work-schedule.md` §1c.
 - **Cross-vendor review via Codex.** `codex` (codex-cli, verified present 2026-06-16) is
   the second vendor; Claude-authored diffs are reviewed by Codex in a fresh context
   seeing only diff + spec + checklist (rule 21). Gemini is not installed; if added it
@@ -90,9 +93,11 @@ Concrete shape:
 - **Substrate fix.** `.mcp.json` uses the relative path `.memory/qdrant` (no variable
   expansion); `.gitignore` guards both `.memory/` and the stray `${CLAUDE_PROJECT_DIR}/`
   dir; the runbook is corrected (see [memory-mcp runbook](../runbooks/memory-mcp.md)).
-- **Autonomy.** Per operator directive 2026-06-16 the loop runs **fully self-paced**
-  (ScheduleWakeup-driven), operator-interruptible, with the operator retaining ultimate
-  override (ADR-G005).
+- **Autonomy** *(superseded by [ADR-G009](ADR-G009.md))*. Each delivery cycle is **one
+  session**, started by an external scheduler (`.claude/skills/orchestrate/tick.sh`); the loop
+  never continues itself in-context. The 2026-06-16 directive that it be self-paced is
+  withdrawn — the pacing moved out of the session, not the autonomy. Operator-interruptible
+  throughout, with the operator retaining ultimate override (ADR-G005).
 
 ### Territory partition (refines work-schedule.md §1c)
 
@@ -141,16 +146,17 @@ Concrete shape:
 - **Easier:** no merge-time collisions on hot files; real cross-session recall; one
   accountable owner for CI-to-merge and cleanup; the branch/worktree count stays bounded;
   the rule-21 gate is always applied and recorded.
-- **Harder / committed to maintain:** the Conductor is a **single point of throughput** —
-  if it stalls, the loop stalls (mitigated: fully self-paced ScheduleWakeup, operator can
-  interrupt/resume, and waves are independent so a failed wave doesn't block others). The
+- **Harder / committed to maintain:** the orchestrator is a **single point of throughput** —
+  if it stalls, delivery stalls (mitigated by [ADR-G009](ADR-G009.md): a cycle is one session
+  under a time ceiling and its state lives in GitHub, so the next scheduled tick resumes;
+  waves are independent so a failed wave doesn't block others). The
   Conductor must **track lane authorship** to pick a different-vendor reviewer, and must
   **rebase stale lanes onto current HEAD** before integrating (every in-flight lane on
   2026-06-16 sat on a stale base). Build-cache discipline (rule 11 — clean isolated
   `target/` before trusting green) and the rule-10 `/tmp` target-dir ban bind every wave.
 - **Invariants:** the loop's INTEGRATE/REVIEW steps must keep invariant **#1
   (output-clock)** and **#10 (isolation)** as blocking gates for any engine/data-plane
-  wave (chaos/soak + mutation bars before merge); these never relax under self-pacing.
+  wave (chaos/soak + mutation bars before merge); autonomy is pace, never a lower bar.
 - **Operator authority retained** (ADR-G005): irreversible/outward-facing actions beyond
   routine merge — force-pushing `main`, deleting infrastructure, public releases, external
   comms — are surfaced to the operator, not done silently.

@@ -147,9 +147,10 @@ review attention and increases disclosure. Read a file because a specific questi
 as precaution. Delegate breadth to subagents and keep their conclusions. Keep durable state outside
 the window — issues, PRs, commits, ADRs, the memory MCP — so a compaction boundary costs nothing.
 
-Concretely: navigate with `rg` and [codebase-map](../development/codebase-map.md), not exhaustive
-reads. Read a subsystem's brief when the change needs its reasoning, not as a standing toll. Never
-open `target/`, `node_modules/`, `dist/` or `.multiview-build/`.
+Concretely: navigate with **bounded** `rg` (`-l`, `-c`, `-m N`, or `| head -n 50`) and
+[codebase-map](../development/codebase-map.md), not exhaustive reads. Read a subsystem's brief when
+the change needs its reasoning, not as a standing toll. Never open `target/`, `node_modules/`,
+`dist/` or `.multiview-build/`.
 
 ## G. Documentation proportionality
 
@@ -174,4 +175,6 @@ satisfied honestly, say so and stop — those are the only two options.
 Toolchain forensics (lint ordering, clippy traps, mutation exit codes, tool-version gotchas):
 [agent-guardrails](../development/agent-guardrails.md). Agent operations (lanes, build-dir hygiene,
 context reload behaviour): [working-in-this-monorepo](../development/working-in-this-monorepo.md).
-The live delivery loop: [ADR-G007](../decisions/ADR-G007.md) + the `orchestrate` skill.
+The live delivery loop runs one cycle per Claude Code session, started by a scheduler: the
+`orchestrate` skill plus Multiview's [orchestrate runbook](../runbooks/orchestrate.md)
+([ADR-G009](../decisions/ADR-G009.md), [ADR-G007](../decisions/ADR-G007.md)).

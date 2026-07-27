@@ -76,13 +76,25 @@ the lane — it will then misreport git state with total confidence.
 
 ## Navigation — ripgrep + the crate map
 
-```bash
-rg -n "out_pts|tick"                 # the output-clock timing logic
-rg -n "trait Source|trait Sink"      # stage trait definitions (multiview-core)
-rg --type rust -l "AVHWFramesContext" crates/multiview-ffmpeg   # FFI hwframe lifecycle
-rg -n "ADR-T003" docs/               # everywhere a decision is referenced
-fd CLAUDE.md crates web              # list all nested agent docs
+Search with `rg`, but **bound the output**. An unbounded search dumps every match into the context
+window and then re-sends it on every remaining turn of the session; the
+[`prefer-native-tools`](../../.claude/hooks/prefer-native-tools.mjs) hook blocks one. Bound it with
+`-l` (file names only), `-c` (per-file counts), `-m N` (first N matches per file), or a pipe into
+`head`.
+
+```sh
+rg -l "out_pts|tick"                                             # which files hold output-clock timing
+rg -m3 "trait Source|trait Sink"                                 # stage trait definitions (multiview-core)
+rg --type rust -l "AVHWFramesContext" crates/multiview-ffmpeg    # FFI hwframe lifecycle
+rg -c "ADR-T003" docs/                                           # how often a decision is referenced
+rg -n "ADR-T003" docs/ | head -n 30                              # those lines themselves, capped
+rg --files -g 'CLAUDE.md' | head -n 30                           # list all nested agent docs
 ```
+
+Find *where* with `-l`/`-c`, then `Read` that file at an offset — ask for match **content** only
+when you need the lines. `find` bounds the same way (`find . -name '*.rs' | head -n 50`). Anything
+whose output is consumed by a pipe is fine as-is, because those bytes never reach the transcript.
+For a genuinely unbounded search, prefix the command `# raw:` — the exception, not the habit.
 
 Crate map and dependency direction: [`codebase-map.md`](codebase-map.md) and
 [`conventions.md` §3](../architecture/conventions.md) — **`core` ← everything; no cycles.** Knowing

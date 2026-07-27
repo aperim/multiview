@@ -4,15 +4,15 @@
 // itself with `scripts/classify.sh`; the class is a floor it may raise, never lower.
 // Territories must be disjoint and hot shared files (pipeline.rs,
 // engine/{runtime,clock,drive}.rs, control/{routes/mod,openapi,state}.rs) must be
-// assigned to a single owner lane — the orchestrator guarantees this in its ASSIGN
-// step before calling. Usage:
+// assigned to a single owner lane — the orchestrator guarantees this when it partitions
+// the wave (.claude/skills/orchestrate/lib/partition.mjs) before calling. Usage:
 //   Workflow({ name: 'wave-fanout', args: { lanes: [
 //     { id: 'gpu-hwdefect', territory: 'LANE-GPU', item: 'HW-DEFECT-A', prompt: '...' , highRisk: false },
 //     ... ] } })
 export const meta = {
   name: 'wave-fanout',
   description: 'Run one wave of lane implementation across disjoint territories in parallel: each lane classifies its change (scripts/classify.sh), works in an isolated worktree, runs the gates that class owes, and opens a PR. Returns per-lane results (class, branch, commits, PR, gate status) for the orchestrator to review and merge. Disjoint-territory assignment is the orchestrator’s responsibility before calling.',
-  whenToUse: 'The FAN OUT step of a Conductor wave once territories are assigned and dependency-ready.',
+  whenToUse: 'Dispatching one wave of lane work, once territories are partitioned and dependency-ready.',
   phases: [{ title: 'Implement' }],
 }
 

@@ -82,7 +82,7 @@ const verdicts = await pipeline(items, reviewItem)
 // (1) a null item result — the whole review died/dropped — becomes an EXPLICIT blocked verdict
 //     so it can never silently vanish from the gate (the caller gets one verdict per item); and
 // (2) a fallback verdict (ranOk=false → not actually cross-vendor) can never clear the gate, so
-//     couple blocked to ranOk (codex-review runbook + orchestrate skill: never merge on fallback).
+//     couple blocked to ranOk (codex-review + orchestrate runbooks: never merge on fallback).
 const enforced = items.map((it, i) => {
   const v = verdicts[i]
   if (!v) {

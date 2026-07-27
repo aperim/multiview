@@ -3,10 +3,11 @@
 ## What it is and why
 
 Rule 21 requires that code authored by one vendor be reviewed by a **different**
-vendor in a fresh context. Under the single-orchestrator model (Claude is the
-author), the second vendor is **OpenAI Codex** via the `codex` CLI, driven by the
+vendor in a fresh context. Under the single-integrator model (Claude is the
+author — one integrator per delivery cycle, not one long-lived session), the
+second vendor is **OpenAI Codex** via the `codex` CLI, driven by the
 [`review-wave`](../../.claude/workflows/review-wave.js) workflow and the
-[`orchestrate`](../../.claude/skills/orchestrate/SKILL.md) skill (REVIEW step).
+[orchestrate runbook](orchestrate.md) ("Gates a cycle owes here").
 Decision: [ADR-G007](../decisions/ADR-G007.md); review standard:
 [agent-guardrails §C](../development/agent-guardrails.md).
 
