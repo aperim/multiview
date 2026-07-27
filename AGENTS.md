@@ -82,3 +82,20 @@ Dev automation is `cargo xtask --help`.
 | Runbooks — the operational *how* | [docs/runbooks/](docs/runbooks/) |
 | Toolchain + platform standards | [stack.md](docs/stack.md) |
 | Outside contributors, CLA, DCO | [CONTRIBUTING.md](CONTRIBUTING.md) |
+
+## Working efficiently
+
+Context is re-sent every turn, so anything you put in it you pay for repeatedly.
+
+- **Batch shell calls.** One `cmd-a && cmd-b && cmd-c` beats three turns.
+- **Never read files through Bash.** `Read` is bounded; `cat`, `head` and `tail` are
+  not. Bound every search instead of redirecting it — `rg -l`, `-c`, `-m N`, or
+  `| head -n 50`. A hook enforces both; `# raw:` is the escape hatch.
+- **Keep output small.** `git log --oneline -20`, `cargo test -q`, `npm --prefix web ci
+  --silent`. Redirect long build output to a file and read the tail.
+- **Delegate breadth to subagents.** A subagent's transcript never enters this
+  context, only its final message. Reading 40 files to answer one question is a
+  subagent's job.
+- **Do not narrate.** No preamble before a tool call, no summary of what a tool
+  returned, no recap. Report the outcome once, at the end.
+- **Finish and stop.** Past ~150 turns, checkpoint to an issue or PR and start fresh.

@@ -3,12 +3,16 @@
 [`AGENTS.md`](AGENTS.md) is canonical. This file adds only Claude-Code specifics.
 
 - **Lanes.** File-changing work at R1 and above goes in a worktree lane (`worktree-lane` skill);
-  the root checkout stays a clean mirror of `main`. The `PreToolUse` hook warns, never blocks
-  (ADR-G006). R0 prose batches may be edited in place.
+  the root checkout stays a clean mirror of `main`. The lane `PreToolUse` hook warns, never blocks
+  (ADR-G006); `prefer-native-tools.mjs` does block — read files with `Read`, not `cat`/`head`/
+  `tail`, and bound every search (`rg -l`/`-c`/`-m N`, or `| head -n 50`). Escape hatch: prefix
+  the command `# raw:`. R0 prose batches may be edited in place.
 - **Skills** — `worktree-lane` (start of a file-changing task) · `adr` (a decision that constrains
   future changes; R2/R3 only) · `memory` (`qdrant-find` before non-trivial work, `qdrant-store`
-  when you learn something a future session needs) · `orchestrate` (driving the backlog as the
-  Conductor — [ADR-G007](docs/decisions/ADR-G007.md)).
+  when you learn something a future session needs) · `orchestrate` (one delivery cycle per session,
+  then exit — a scheduler starts the next; repo-agnostic, reads `orchestrate.config.json`, with
+  Multiview specifics in [orchestrate runbook](docs/runbooks/orchestrate.md) and
+  [ADR-G009](docs/decisions/ADR-G009.md)).
 - **Workflows** in [`.claude/workflows/`](.claude/workflows/) — `review-wave` (the cross-vendor
   gate; never self-performed by the authoring vendor) · `wave-fanout` · `orient` · `cleanup-sweep`.
 - **Subagents.** Delegate wide reading and mechanical edits; they return conclusions, not

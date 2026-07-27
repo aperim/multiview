@@ -1,5 +1,5 @@
 // cleanup-sweep — read-only triage of branch/worktree sprawl into exact, verified
-// prune/remove/salvage lists for the Conductor to execute. Never deletes anything
+// prune/remove/salvage lists for the orchestrator to execute. Never deletes anything
 // itself (deletion is the orchestrator's accountable action). Usage:
 //   Workflow({ name: 'cleanup-sweep' })
 export const meta = {

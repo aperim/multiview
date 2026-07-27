@@ -1,164 +1,140 @@
 ---
 name: orchestrate
-description: Run the single-orchestrator "Conductor" loop — plan a wave of dependency-ready work, fan it out across disjoint file territories via workflows and agent teams, integrate as the sole integrator, gate each diff through cross-vendor (Codex) review, merge, clean up, record, and reschedule. Use when driving the Multiview backlog forward as one orchestrator instead of many independent terminals (ADR-G007).
+description: Run one autonomous delivery cycle — pick up what needs doing, dispatch it in parallel, merge what is ready, and record the result. Use when asked to orchestrate, run the loop, run a delivery cycle, work the backlog, or continue autonomous development. Repo-agnostic; reads orchestrate.config.json for local specifics.
 ---
 
-# The Conductor loop
+# Orchestrate
 
-One long-lived orchestrator session owns the work loop (ADR-G007). It is the **sole
-board writer, sole integrator, sole `memory` client, and owns every PR to merge +
-cleanup**. It fans out broadly but never lets two concurrent lanes touch the same file
-territory. The *why* is [ADR-G007](../../../docs/decisions/ADR-G007.md); this skill is
-the *how*. Lane mechanics are the [`worktree-lane`](../worktree-lane/SKILL.md) skill;
-recall/record is the [`memory`](../memory/SKILL.md) skill.
+One cycle. Then **stop and exit**.
 
-> **Golden rule:** collisions can't surface at merge if colliding lanes are never
-> *assigned* at once. Disjoint territory per concurrent lane; **hot shared files are
-> serial** (one owner). Everything else follows.
+## The rule everything else serves
 
-## One iteration (a "wave")
+**Continuity comes from GitHub, never from this context window.** You do one cycle and end the session. A scheduler starts the next one clean.
 
-### ① PLAN
-- Recall: `qdrant-find` the topic; read `docs/development/work-schedule.md` (Part 2
-  checklist + Part 3 items; 400 KB — **search with `rg`, never read whole**) and
-  `gh pr list --state open`.
-- Pick the next set of **dependency-ready** items (`deps:` satisfied, status `[ ]`/`[~]`),
-  each mappable to **one disjoint territory** (see table below). Cap the wave at the
-  concurrency you can integrate + review well (start ~3–5 lanes).
-- Any item touching a **serial hot file** (`pipeline.rs`, `engine/{runtime,clock,drive}.rs`,
-  `control/{routes/mod,openapi,state}.rs`) goes to that file's single owner lane; other
-  lanes in the wave file the body and hand wiring to the owner.
+You must never: loop back to the top in-context; call `ScheduleWakeup` to continue yourself; return a "block" decision from a Stop hook; or keep working because it feels unfinished. Those all keep one session alive across thousands of turns, and every turn re-sends the whole transcript. That pattern is 4% of sessions and 66% of spend.
 
-### ② ASSIGN
-- Record each lane as `territory → item(s) → owner → class` on the board (you are the
-  only writer). The class comes from `scripts/classify.sh` and decides which gates the
-  lane owes; it is a floor you may raise, never lower. Note the **authoring vendor** per
-  lane so REVIEW can pick a different one.
+If the cycle ends with work outstanding, that is the correct outcome. Say so and exit.
 
-### ③ FAN OUT — two modes
-- **Workflow mode** (`Workflow` tool; scripts in [`.claude/workflows/`](../../workflows/)):
-  for sub-steps that are themselves decompose→verify→synthesize fan-outs. Reusable named
-  workflows: `orient`, `wave-fanout`, `review-wave`, `cleanup-sweep`. Each agent that
-  mutates files runs `isolation: 'worktree'`.
-- **Team mode** (background `Agent` + shared `TaskList` + `SendMessage`): for lane-length
-  stateful implementation. Each teammate owns exactly one territory's worktree, commits
-  the failing test first (required at R2/R3, and at R1 for a behavioural change), and
-  returns its commit SHA(s).
-- **Every lane bases on current HEAD.** If a pre-existing lane is on a stale
-  base (common — every in-flight lane on 2026-06-16 was), **rebase onto current `main`
-  before integrating** or cherry-picks conflict.
+## Config
 
-### ④ INTEGRATE (sole integrator)
-- `git log origin/main..<lane-HEAD>` to find **all** of a lane's commits; cherry-pick as
-  **individual single commits**, not ranges.
-- **Rebuild from a clean, isolated `target/` before trusting green** — a shared cache can
-  link a sibling's stale artifacts and fake a pass. Never set `CARGO_TARGET_DIR` to `/tmp`
-  (operator directive: per-lane `/tmp` targets once filled the disk with terabytes).
-- **The local gate is class-scaled** (`scripts/classify.sh`;
-  [engineering.md](../../../docs/standards/engineering.md) Part A). R0/R1 lean on CI plus
-  the focused crate suite (`cargo test -p multiview-<crate>`); **R2/R3 run the full gate
-  before the PR**: `cargo fmt --all -- --check`,
-  `cargo clippy --locked --workspace --all-targets -- -D warnings`,
-  `cargo test --locked --workspace`, `cargo deny check` if deps changed (+ `web/`
-  lint/typecheck/build if `web/` changed).
+Read `orchestrate.config.json` from the repo root. If absent, stop and ask for one — do not guess lanes.
 
-### ⑤ REVIEW — adversarial, cross-vendor, fresh context
-- **Depth is the class; the gate itself is fail-closed.** R0 skips review entirely. R1
-  gets a single **diff-only** pass. R2 gets a scoped-context cross-vendor pass. R3 keeps
-  the **3-lens panel**. Above R0 the review is mandatory, is never self-performed by the
-  authoring vendor, and no lane merges without it.
-- Dispatch the lane's diff to a **different vendor** than authored it, seeing **only**
-  diff + spec/PLAN + the checklist — never the author's chat history. Default here:
-  Claude-authored → **Codex** reviews. Invocation pattern:
-
-  ```bash
-  git diff origin/main...<lane-HEAD> > /tmp/review.diff
-  codex exec --sandbox read-only \
-    "Adversarial review for correctness/security/spec/guardrail defects ONLY (see \
-     docs/development/agent-guardrails.md §C). Here is the diff and the item spec. \
-     Report concrete defects with file:line; if none, name the single highest-residual \
-     risk. Do not comment on style." < /tmp/review.diff
-  ```
-- **Codex must be authenticated** or `codex exec` fails 401 and `review-wave` records a
-  labeled `claude-fallback` (fresh-context Claude, **not** cross-vendor). **Never merge on
-  a fallback verdict** — hold the PR until Codex auth lands. Setup + verify:
-  [codex-review runbook](../../../docs/runbooks/codex-review.md).
-- Require **≥1 substantive risk statement** — unanimous bland approval is a yellow flag.
-  A finding blocks the merge when it carries a reproduction, a failing test, or a cited
-  line demonstrably violating a stated invariant; unreproducible findings are advisory
-  ([engineering.md](../../../docs/standards/engineering.md) Part D). Never argue a
-  reproduced finding away, and re-review only **the delta** after a fix.
-- **R3 diffs** (invariant #1/#10 risk, keys, trust boundaries — authn/authz/egress/TLS,
-  licence enforcement, legal or public action, release publishing) → **3-lens panel**,
-  chaos/soak, a rehearsed recovery path, and explicit operator approval.
-
-### ⑥ MERGE (ADR-G005)
-- Merge only on **green deterministic checks** + a passing cross-vendor review. Report
-  failures and skips honestly — a green summary over a skipped suite is a defect. Never
-  `--admin`/bypass branch protection; never weaken, skip, `#[ignore]` or delete a test to
-  go green — stop and ask the operator instead.
-
-### ⑦ CLEAN
-- `git worktree remove` the lane (+ `git worktree prune`), delete its branch, then
-  `git fetch origin && git pull --ff-only origin main` in the root so the **next wave
-  bases on current HEAD**. Never force-remove a `locked` worktree of a *live* session;
-  if a `locked` worktree's owning pid is dead, salvage its WIP to a `salvage/*` branch
-  first (see Salvage below).
-
-### ⑧ RECORD
-- Flip the board checkbox + set the Part-3 Status; add the red→green commit SHAs + PR
-  number inline. `qdrant-store` every non-obvious decision, operator correction, and
-  hard-won gotcha — proactively, not on request. Write/refresh the resource runbook in
-  the **same** change that provisioned or altered the infrastructure. An ADR when the
-  decision constrains future changes (required at R3), not for every wave.
-
-### ⑨ RESCHEDULE
-- `ScheduleWakeup` the next iteration (fully self-paced per operator directive
-  2026-06-16). Keep the agenda durable on the board so a fresh wake can resume it.
-  Operator can interrupt at any time and retains override (ADR-G005).
-
-## Territory map (disjoint; refines work-schedule.md §1c)
-
-Serial **one-owner-only** territories (never two concurrent lanes here):
-- **LANE-CORE** — `multiview-cli/src/{pipeline,sink,run,control}.rs`,
-  `multiview-engine/src/{runtime,drive,clock}.rs`, `multiview-events/src/event.rs`,
-  `multiview-config/src/schema.rs`.
-- **LANE-API** — `multiview-control/src/{routes/mod,openapi,openapi_schemas,asyncapi,state,lib}.rs`,
-  `docs/api/openapi.json`, auth/session/RBAC.
-
-One-owner territories (parallelizable across the wave):
-LANE-WRTC (`multiview-webrtc/**`, `preview/src/whep*`, `control/routes/{whip,whep_serve}.rs`)
-· LANE-IN (`multiview-input/**`, `multiview-rist-sys/**`) · LANE-PRV (`multiview-preview/**`
-minus WHEP transport) · LANE-ENG (`multiview-engine/**` minus runtime/clock/drive;
-`hal/src/load.rs`) · LANE-GPU (`multiview-compositor/**`, `multiview-framestore/**`,
-`multiview-ffmpeg/**`, `hal/src/select.rs`) · LANE-AUDIO (`multiview-audio/**`,
-`multiview-overlay/**`) · LANE-BCAST (`control/src/{nmos,is07}*`, `multiview-output/**`)
-· LANE-WEB (`web/**`) · LANE-DEVICES (zowietek/display-kms/sync/cast/node-enroll,
-`deploy/**`) · LANE-CONSPECT (`multiview-licence/**`, `multiview-mesh/**`) ·
-LANE-GOV (`.claude/**`, `docs/{decisions,research,runbooks}`, `.github/workflows/**`).
-
-When two items genuinely need the same territory in one wave, **serialize them under one
-owner** — do not split the territory.
-
-## Salvage (orphaned `locked` lane with a dead owning pid)
-
-```bash
-# work is preserved as a readable, recoverable branch before the worktree is removed
-git -C <lane> add -A && git -C <lane> commit -m "wip(salvage): <what> — recovered by Conductor"
-git branch salvage/<descriptive-name> $(git -C <lane> rev-parse HEAD)
-git worktree unlock <lane> && git worktree remove --force <lane>
+```json
+{
+  "readyLabel": "status: ready",
+  "blockedLabel": "status: blocked",
+  "knownLanes": ["api", "db", "web", "ui", "docs", "infra"],
+  "singleWriterLanes": ["api", "db", "infra"],
+  "scopedLanes": ["ui"],
+  "maxWave": 6,
+  "maxOpenPRs": 3,
+  "maxFilePerSweep": 10,
+  "requiredDryCycles": 2,
+  "commands": { "bootstrap": "./scripts/bootstrap", "verify": "./scripts/verify", "test": "./scripts/test" },
+  "dimensions": ["spec-parity", "defects", "tests", "docs", "as-built", "security", "observability", "ux"]
+}
 ```
-Then queue the salvage branch for rebase + completion in the owning territory's lane.
 
-## Non-negotiables (never relax under self-pacing)
+## The cycle
 
-- Invariants **#1 (output-clock)** and **#10 (isolation)** are blocking for any
-  engine/data-plane wave — a change that risks either is R3: stop, write a design note,
-  add a chaos/soak test.
-- **The class matrix binds every wave** ([engineering.md](../../../docs/standards/engineering.md)
-  Parts A–C): each lane meets the gates its class owes, and the unconditional safety
-  invariants (secrets, authorization, supply chain, injection, licensing) hold at every
-  class. Autonomy is pace, never a lower bar.
-- Confirm genuinely destructive/outward-facing actions with the operator (force-push
-  `main`, delete infra, public release, external comms) — the loop does not do these
-  silently.
+### 1. Orient — bounded, and from ground truth only
+
+Ground truth is `gh`, `git` and CI. Never a status document, never memory, never a previous cycle's say-so.
+
+```sh
+gh issue list --state open --label "<readyLabel>" --limit 100 --json number,title,labels,assignees
+gh pr list --state open --author "@me" --json number,title,statusCheckRollup,mergeable
+```
+
+Read the loop-state issue (labelled `loop-state`) for `consecutiveDryCycles` and the ledger. **Read it by number**, not by search — list endpoints lag.
+
+If a live owner holds the lease (recent `heartbeatAt`, different `ownerRunId`), **exit now**. Two orchestrators is worse than none.
+
+Keep this step small. Use `--json` with named fields, never bare `gh` output. Never `cat` a file you could `Read`.
+
+### 2. Close — serial, single Closer
+
+You are the only thing that merges. Builders never merge; that rule exists because two PRs that were green alone landed red together.
+
+For each PR reporting READY, one at a time: rebase onto fresh `main` → wait for a **fresh** CI pass on the rebased head → merge → delete branch → `git worktree prune`.
+
+`Closes #n` must be plain text, never backticked, or GitHub ignores it. Never `gh pr merge --auto` before green — it merges immediately. `cancelled` is not a passing verdict.
+
+### 3. Dispatch — parallel build, disjoint lanes
+
+Classify each candidate into `{ number, lane, scope, blockedBy: [{ number, satisfied }] }`. Verify each blocker with `gh issue view <n> --json state` and `gh pr list --search "<n>"`; do not trust the label.
+
+Then partition **in code**, not by judgement:
+
+```sh
+node .claude/skills/orchestrate/lib/partition.mjs   # via a tiny driver, or import it
+```
+
+Dispatch the returned wave with the Workflow tool: one agent per issue, `isolation: "worktree"`, a `schema` on every agent, and model per lane — cheap tier for mechanical lanes, top tier for anything on `singleWriterLanes` or `unknown`.
+
+Every agent schema must cap its output. Require `file:line` evidence and **forbid file bodies in the return value**. N parallel agents returning file dumps is how the orchestrator's own context explodes.
+
+Builders take an issue to CI-green and report READY. They do not merge.
+
+Respect `maxOpenPRs`. If the cap is reached, skip dispatch this cycle and go to step 5.
+
+### 4. Discover — only when the frontier is empty
+
+An empty backlog is a trigger to look harder, not a reason to stop. Run one sweep across `dimensions`, one agent per dimension, in parallel. Each returns findings as `{ kind, confirmed, title, evidence }`.
+
+The generic dimensions, which is what "complete" means here: does it do what was designed (`spec-parity`); is it broken (`defects`); is it tested (`tests`); is it documented (`docs`); do the docs match what was actually built (`as-built`); is it safe (`security`); can you see it running (`observability`); is it decent to use (`ux`).
+
+File at most `maxFilePerSweep`. Anything beyond the cap goes into the cycle report as deferred with its title — **never silently dropped**; the next cycle files it.
+
+Before creating an issue, append `{ key, title, status: "reserving" }` to the loop-state ledger and save. Then create. Then mark `created` with the number. `gh issue list` lags creates by around a minute, and a naive re-check duplicates epics.
+
+**Materiality floor.** A finding only resets the dry-cycle counter if it is a real defect, a security or privacy problem, data loss, a missing designed feature, a wrong document, or something a user would notice. Nits get filed as chores and **do not** reset the counter. Without this floor a thorough reviewer always finds something and the loop can never converge.
+
+### 5. Record
+
+Update the loop-state issue: `ownerRunId`, `heartbeatAt`, `consecutiveDryCycles` (via `nextDryCycles`), the ledger, and a one-paragraph cycle summary. This is what the next session reads instead of your context.
+
+### 6. Decide, report, exit
+
+```sh
+node .claude/skills/orchestrate/lib/done-gate.mjs   # via a driver: evaluateDone({...})
+```
+
+DONE is a computed fact. You may not declare it, override it, or argue `requiredDryCycles` below 2.
+
+- **DONE** → write the `DONE` sentinel into the loop state dir, comment the final summary on the loop-state issue, exit.
+- **NOT DONE** → print the cycle report and **exit**. The scheduler starts the next cycle in a fresh session.
+
+Report exactly:
+
+```
+CYCLE:     <n>  owner=<runId>
+MERGED:    <PR numbers, or none>
+DISPATCHED:<issue numbers, or none>  deferred=<numbers + one-line reasons>
+FILED:     <issue numbers, or none>  deferred=<titles>
+DRY:       <consecutiveDryCycles>/<K>
+VERDICT:   DONE | PARKED (blocked on human) | CONTINUE
+```
+
+## Never stop because
+
+The cycle felt complete. You merged something. You hit a milestone or finished an epic. CI is green. The PR list is momentarily empty. A wave finished. These are transitions, not endings — the only endings are the DONE gate, the STOP sentinel, and a stop condition below.
+
+## Never continue because
+
+There is more to do. There is always more to do. **One cycle per session** is the invariant that keeps this affordable.
+
+## Stop and escalate when
+
+Credentials or authority are missing; a destructive action has no tested recovery path; a secret or production dataset appears; CI is red on `main`; the same item has failed twice — label it `blocked`, file a tracking issue, and move on.
+
+## Operator
+
+```sh
+touch .claude/loop/ACTIVE        # arm
+touch .claude/loop/STOP          # stop after the current cycle
+rm    .claude/loop/DONE          # resume after convergence
+./.claude/skills/orchestrate/tick.sh   # run one cycle now, in a fresh session
+```
+
+`tick.sh` is the scheduler's entry point. It takes a lock, runs exactly one cycle in a new `claude` process, and exits. Point cron at it. Do not replace it with anything that keeps a session alive.

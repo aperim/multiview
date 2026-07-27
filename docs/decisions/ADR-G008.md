@@ -74,8 +74,10 @@ Ceremony scales down hard.
   Accepted decision. R3 covers the outward-facing actions G005 reserves to the operator.
 - **[ADR-G006](ADR-G006.md)'s mechanisms stand.** The worktree hook stays **warn-only** (operator
   choice); ADRs stay in `docs/decisions/`; `.claude/` stays committed.
-- **[ADR-G007](ADR-G007.md) stands.** The 9-step Conductor wave remains the live delivery loop; the
-  standard cites it rather than replacing it.
+- **[ADR-G007](ADR-G007.md) stands.** Its single-orchestrator, disjoint-territory delivery model
+  remains live; the standard cites it rather than replacing it. *(Its **pacing** was later amended
+  by [ADR-G009](ADR-G009.md): one delivery cycle per session, started by a scheduler, replacing the
+  self-paced wave. The integrator, territory and review model this ADR leans on is unchanged.)*
 - **[ADR-G002](ADR-G002.md)'s mutation-testing mandate is not withdrawn** — but it is now recorded
   honestly as *not wired* (see Consequences).
 - No safety test was modified, no CI job was renamed, removed or split, and no branch-protection

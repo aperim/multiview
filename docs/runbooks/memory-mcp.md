@@ -93,11 +93,12 @@ acceptable if the copy is awkward.
 
 - **Single-process lock:** only one process per repo clone can hold the embedded
   qdrant store; a second concurrent `memory` server fails to connect (that is the
-  lock, not corruption). Under the single-orchestrator model (ADR-G007) the
-  **Conductor is the sole `memory` client**, so this contention does not arise in
-  normal operation — but a stray second session (or a leftover process) will still
-  block. If `qdrant-find` errors with a lock/connection failure, find and stop the
-  other holder; do not delete the store.
+  lock, not corruption). Under the single-integrator model (ADR-G007) delivery
+  cycles are serialized by `.claude/loop/tick.lock` ([orchestrate](orchestrate.md)),
+  so exactly one cycle runs at a time and it releases the store when it exits —
+  but a concurrent terminal in the same clone (or a leftover process) will still
+  fail to connect. If `qdrant-find` errors with a lock/connection failure, find
+  and stop the other holder; do not delete the store.
 - `~/.local/bin` must be on the PATH the Claude Code process sees, or the `uvx`
   command in `.mcp.json` fails to launch the server.
 - The store path is **relative to the server CWD**. Claude Code launches stdio MCP

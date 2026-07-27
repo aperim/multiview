@@ -1,0 +1,57 @@
+{
+  "readyLabel": "status: ready",
+  "blockedLabel": "status: blocked",
+  "knownLanes": [
+    "core",
+    "core-types",
+    "api",
+    "wrtc",
+    "input",
+    "preview",
+    "engine",
+    "gpu",
+    "audio",
+    "bcast",
+    "web",
+    "devices",
+    "conspect",
+    "telemetry",
+    "gov"
+  ],
+  "singleWriterLanes": [
+    "core",
+    "core-types",
+    "api",
+    "wrtc",
+    "input",
+    "preview",
+    "engine",
+    "bcast",
+    "web",
+    "devices",
+    "conspect",
+    "telemetry",
+    "gov"
+  ],
+  "scopedLanes": ["gpu", "audio"],
+  "maxWave": 5,
+  "maxOpenPRs": 3,
+  "maxFilePerSweep": 10,
+  "requiredDryCycles": 2,
+  "commands": {
+    "bootstrap": "cargo fetch --locked && npm --prefix web ci",
+    "verify": "cargo fmt --all -- --check && cargo clippy --locked --workspace --all-targets -- -D warnings && cargo test --locked --workspace && cargo deny check",
+    "test": "cargo test --workspace",
+    "classify": "scripts/classify.sh"
+  },
+  "dimensions": [
+    "spec-parity",
+    "defects",
+    "tests",
+    "docs",
+    "as-built",
+    "security",
+    "observability",
+    "ux"
+  ]
+}
