@@ -16,11 +16,13 @@ these files:
   valid**, and
 - **top-level `await`** is **intended and valid**.
 
-A plain `node --check file.js` (or `--input-type=module`) will **false-positive** with
-`SyntaxError: Illegal return statement` on the top-level `return` — that does **not** mean
-the script is broken. (Empirical proof: `orient` and `review-wave` execute successfully
-with top-level `return`.) **Do not delete the `return` to silence the checker** — that
-breaks the script's contract with the orchestrator.
+Any checker that parses these as ESM — `node --input-type=module --check`, or the same file
+renamed `.mjs` — **false-positives** with `SyntaxError: Illegal return statement` on the
+top-level `return`; that does **not** mean the script is broken. (Plain `node --check
+<file>.js` parses as CommonJS on Node 22, where the top-level `return` is legal, so it
+catches real brace/token errors only. Empirical proof the `return` is intended: `orient`
+and `review-wave` execute successfully with it.) **Do not delete the `return` to silence a
+checker** — that breaks the script's contract with the orchestrator.
 
 ### Correct local syntax check
 
@@ -44,12 +46,17 @@ done
   resume) — vary agents by index, pass timestamps via `args`, stamp results after return.
 - Read-only analysis workflows must say so and must not mutate; destructive actions stay
   with the orchestrator (e.g. `cleanup-sweep` returns lists, it never deletes).
+- **Classes gate the work; the caller decides dispatch.** A lane classifies its own diff with
+  [`scripts/classify.sh`](../../scripts/classify.sh) to learn which gates it owes; the
+  orchestrator decides what to *dispatch* — an R0 prose item owes no review at all, R1/R2 one
+  cross-vendor pass, R3 the 3-lens panel plus chaos/soak and operator approval. No script
+  lowers a class. Contract: [engineering.md](../../docs/standards/engineering.md).
 
 ## Current scripts
 
 | Script | Purpose |
 | --- | --- |
 | `orient.js` | Read-only state-of-the-world map (lanes, branches, PRs, collisions, board) → synthesis for PLAN. |
-| `wave-fanout.js` | Run one wave of lane implementation across disjoint territories in isolated worktrees, TDD-first, returning committed work + opened PRs. |
-| `review-wave.js` | Rule-21 adversarial cross-vendor (Codex) review of diffs/PRs; high-risk → 3-lens panel; fail-closed on fallback. |
+| `wave-fanout.js` | Run one wave of lane implementation across disjoint territories in isolated worktrees, each lane meeting the gates its class owes, returning committed work + opened PRs. |
+| `review-wave.js` | Adversarial cross-vendor (Codex) review of diffs/PRs — the mandatory pre-merge gate for R1+; R3/high-risk → 3-lens panel; fail-closed on fallback. |
 | `cleanup-sweep.js` | Read-only triage of branch/worktree sprawl → exact prune/remove/salvage lists for the orchestrator to execute. |

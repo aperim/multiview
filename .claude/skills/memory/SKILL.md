@@ -35,10 +35,13 @@ Entry format:
 
 ## Do NOT store
 
-- Secrets, tokens, keys — ever (rule 34).
-- Anything already canonical in the repo: `AGENTS.md`/`CLAUDE.md` rules,
-  `docs/architecture/conventions.md`, ADRs, briefs, or code. Repo files are the
-  source of truth; memory is for what the repo doesn't record.
+- Secrets, tokens, keys — ever. They live in 1Password and never touch git, logs,
+  terminal history or model-visible output; this store is none of those, and is
+  still not where a credential goes.
+- Anything already canonical in the repo: `AGENTS.md`/`CLAUDE.md`,
+  `docs/standards/engineering.md`, `docs/architecture/conventions.md`, ADRs,
+  briefs, or code. Repo files are the source of truth; memory is for what the repo
+  doesn't record.
 - Conversation-local trivia with no future value.
 
 ## Relationship to the other memory systems

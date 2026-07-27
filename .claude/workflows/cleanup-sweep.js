@@ -5,7 +5,7 @@
 export const meta = {
   name: 'cleanup-sweep',
   description: 'Read-only triage of git branch + worktree sprawl: classify every ref as prune (merged / superseded), keep (open PR / real un-landed work → PR-candidate), or salvage (orphaned locked lane with a dead owning pid). Returns exact lists for the orchestrator to act on.',
-  whenToUse: 'Periodically, or after a merge wave, to keep branch/worktree count bounded (rule 9) without losing un-landed work.',
+  whenToUse: 'Periodically, or after a merge wave: lanes and build dirs are disposable, so keep branch/worktree count bounded without losing un-landed work.',
   phases: [
     { title: 'Classify', detail: 'parallel: merged-branch set, unmerged-branch triage, worktree state, large-lane delta' },
     { title: 'Consolidate', detail: 'one verified prune/keep/salvage plan' },
@@ -61,16 +61,16 @@ const PLAN_SCHEMA = obj(['rescueFirst', 'removeWorktrees', 'salvageThenRemove', 
 phase('Classify')
 const [merged, unmerged, worktrees, largeLanes] = await parallel([
   () => agent(
-    `READ-ONLY. In /workspaces/mosaic, list branches that are TRUE ancestors of origin/main and safe to delete with \`git branch -d\`: \`git branch --merged origin/main\` minus 'main' and minus any 'salvage/*'. Caveat: if the repo squash-merges, a landed branch may NOT show as merged — note that the orchestrator must verify non-ancestors with \`git cherry origin/main <br>\` or \`gh pr list --state merged --search head:<br>\` before deleting. Return the merged-ancestor list.`,
+    `READ-ONLY. In the Multiview repo (run git from the current checkout — branch refs are shared across every worktree, so never hard-code a repo path), list branches that are TRUE ancestors of origin/main and safe to delete with \`git branch -d\`: \`git branch --merged origin/main\` minus 'main' and minus any 'salvage/*'. Caveat: if the repo squash-merges, a landed branch may NOT show as merged — note that the orchestrator must verify non-ancestors with \`git cherry origin/main <br>\` or \`gh pr list --state merged --search head:<br>\` before deleting. Return the merged-ancestor list.`,
     { label: 'merged', phase: 'Classify', schema: MERGED_SCHEMA }),
   () => agent(
-    `READ-ONLY. Triage branches NOT ancestors of origin/main in /workspaces/mosaic (\`git branch --no-merged origin/main\`), EXCLUDING open-PR branches and salvage/* (keep those). For each: ahead count, whether its unique commits are real non-merge work or merge-train artifacts already equivalent in main (\`git cherry -v origin/main <br>\` — '-' lines are already applied), tip date. Recommend PRUNE (no unique un-landed work) or KEEP-PR-CANDIDATE (real work to rebase+land). Return {branch, recommendation, reason} per branch and a flat PRUNE list.`,
+    `READ-ONLY. Triage branches NOT ancestors of origin/main in the Multiview repo (\`git branch --no-merged origin/main\` from the current checkout), EXCLUDING open-PR branches and salvage/* (keep those). For each: ahead count, whether its unique commits are real non-merge work or merge-train artifacts already equivalent in main (\`git cherry -v origin/main <br>\` — '-' lines are already applied), tip date. Recommend PRUNE (no unique un-landed work) or KEEP-PR-CANDIDATE (real work to rebase+land). Return {branch, recommendation, reason} per branch and a flat PRUNE list.`,
     { label: 'unmerged', phase: 'Classify', schema: UNMERGED_SCHEMA }),
   () => agent(
-    `READ-ONLY. \`git worktree list --porcelain\` in /workspaces/mosaic. For each lane: ahead of origin/main, dirty?, locked?. A 'locked' lane whose owning session pid is dead is orphaned, not protected — report locked + dirty + ahead and let the orchestrator confirm pid liveness. Classify each: REMOVE-NOW (ahead 0, clean, ancestor of main), SALVAGE-THEN-REMOVE (locked/dirty with un-committed or un-landed work), or KEEP (large in-flight, needs delta triage). Return {path, branch, ahead, dirty, locked, classification, reason}.`,
+    `READ-ONLY. \`git worktree list --porcelain\` from the current checkout — it reports every lane of the Multiview repo whichever one you are in. For each lane: ahead of origin/main, dirty?, locked?. A 'locked' lane whose owning session pid is dead is orphaned, not protected — report locked + dirty + ahead and let the orchestrator confirm pid liveness. Classify each: REMOVE-NOW (ahead 0, clean, ancestor of main), SALVAGE-THEN-REMOVE (locked/dirty with un-committed or un-landed work), or KEEP (large in-flight, needs delta triage). Return {path, branch, ahead, dirty, locked, classification, reason}.`,
     { label: 'worktrees', phase: 'Classify', schema: WORKTREES_SCHEMA }),
   () => agent(
-    `READ-ONLY. For each worktree lane >10 commits ahead of origin/main in /workspaces/mosaic, compute the TRUE un-landed delta: \`git -C <lane> log --no-merges --cherry-pick --right-only origin/main...HEAD\` (excludes commits already patch-equivalent in main). Summarize the real un-landed work, whether the lane is a subset/superset of another (consolidation), whether it is on a stale base (rebase before PR), and which hot files it touches. Recommend PR-CANDIDATE (scope) / CONSOLIDATE-with-<lane> / PRUNE-already-landed / NEEDS-REBASE-then-PR. Flag any untracked file lost on removal (rescue first).`,
+    `READ-ONLY. For each worktree lane of the Multiview repo >10 commits ahead of origin/main, compute the TRUE un-landed delta: \`git -C <lane> log --no-merges --cherry-pick --right-only origin/main...HEAD\` (excludes commits already patch-equivalent in main). Summarize the real un-landed work, whether the lane is a subset/superset of another (consolidation), whether it is on a stale base (rebase before PR), and which hot files it touches. Recommend PR-CANDIDATE (scope) / CONSOLIDATE-with-<lane> / PRUNE-already-landed / NEEDS-REBASE-then-PR. Flag any untracked file lost on removal (rescue first).`,
     { label: 'large-lanes', phase: 'Classify', schema: LARGE_SCHEMA }),
 ])
 

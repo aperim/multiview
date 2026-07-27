@@ -136,8 +136,8 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy
-        # --locked enforces the committed Cargo.lock (cargo ignores it otherwise),
-        # so the lint build is deterministic (rule 33).
+        # --locked enforces the committed Cargo.lock — cargo ignores the lockfile
+        # without it — so the lint build is deterministic.
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   test:
@@ -159,8 +159,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Default features are pure-Rust (no FFmpeg/GPU), so CI needs no native libs.
-      # --locked enforces the committed Cargo.lock (cargo ignores it otherwise),
-      # so check + test are deterministic (rule 33).
+      # --locked enforces the committed Cargo.lock — cargo ignores the lockfile
+      # without it — so check + test are deterministic.
       - name: cargo check
         run: cargo check --locked --workspace
       - name: cargo test
@@ -342,7 +342,7 @@ jobs:
           key: feature-${{ matrix.crate }}-${{ matrix.feature }}
       - name: clippy (${{ matrix.feature }})
         # --locked: enforce the committed Cargo.lock for a deterministic build
-        # (rule 33). --all-targets: also lints integration-test binaries under
+        # (cargo ignores it otherwise). --all-targets: also lints integration-test binaries under
         # the feature. -D warnings: matches the default `lint` job gate.
         # Hardware/network live paths are gated in the tests themselves via
         # #[ignore] or cfg_attr(not(feature=...), ignore), so this never needs
@@ -356,13 +356,17 @@ jobs:
           -- -D warnings
       - name: test (${{ matrix.feature }})
         # cargo test --no-fail-fast: surface all failures, not just the first.
-        # Hardware-gated tests carry #[ignore] and are excluded from shared CI
-        # by default; they run on dedicated self-hosted runners with the real
-        # devices attached.
+        # Hardware-gated tests carry #[ignore] and are excluded from shared CI.
+        # NOT VERIFIED ANYWHERE TODAY: no self-hosted or GPU-tagged runner exists
+        # in this repository (every `runs-on:` is a GitHub-hosted ubuntu/macos
+        # image), and no nightly workflow exists. ADR-E009/ADR-0022 describe a
+        # dedicated-runner tier that has not been built, so these tests and the
+        # SSIM/PSNR parity assertions currently never execute. Do not describe
+        # them as gated.
         #
         # --skip tile_driven_meets_budget: the compositor per-tick perf BUDGET
         # test asserts a wall-clock ceiling only meaningful on consistent
-        # hardware (ADR-E009/ADR-0022 — perf gates run on dedicated runners), so
+        # hardware (ADR-E009/ADR-0022), so
         # it is flaky on shared CI. The default `test` job skips it for the same
         # reason; mirror that here for the `multiview-compositor`/`overlay` leg
         # (it lives only in that crate, so the flag is a no-op for every other
@@ -408,7 +412,7 @@ jobs:
         with:
           key: feature-multiview-overlay-libass
       - name: clippy (libass)
-        # --locked enforces the committed Cargo.lock (rule 33). --all-targets also
+        # --locked enforces the committed Cargo.lock — cargo ignores it otherwise. --all-targets also
         # lints the test binaries under the feature; -D warnings matches the
         # default `lint` gate.
         run: >
@@ -421,8 +425,8 @@ jobs:
       - name: test (libass)
         # Now that the `subtitle` capability test is cfg-gated by feature (#141),
         # the suite is green under `--features libass`, so run it for real run-time
-        # coverage of the libass-gated path. --locked mirrors CI determinism
-        # (rule 33). The crate has no compositor perf-budget test, so no
+        # coverage of the libass-gated path. --locked mirrors CI determinism —
+        # cargo ignores the lockfile without it. The crate has no perf-budget test, so no
         # `--skip tile_driven_meets_budget` is needed here.
         run: >
           cargo test
@@ -549,7 +553,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: clippy multiview-cli --features webrtc-native
         # The ffmpeg-linked target the libav-free matrix cannot build. --locked
-        # enforces the committed Cargo.lock (rule 33); -D warnings matches the
+        # enforces the committed Cargo.lock — cargo ignores it otherwise; -D warnings matches the
         # default `lint` gate; --all-targets also lints test binaries.
         run: >
           cargo clippy
@@ -567,7 +571,7 @@ jobs:
         # `SourceLocation` (the overlay-gated `resolve_incontainer_sub_route`
         # missing the webrtc-native `Webrtc` arm) slipped through (fixed in PR #202).
         # This step gates the pair going forward. --locked enforces the committed
-        # Cargo.lock (rule 33).
+        # Cargo.lock — cargo ignores it otherwise.
         run: >
           cargo clippy
           --locked
@@ -578,7 +582,7 @@ jobs:
       - name: clippy multiview-preview --features webrtc
         # The paired preview WHEP seam. Built here alongside the cli target so the
         # whole webrtc-native surface is clippy-gated in one ffmpeg-equipped leg.
-        # --locked enforces the committed Cargo.lock (rule 33).
+        # --locked enforces the committed Cargo.lock — cargo ignores it otherwise.
         run: >
           cargo clippy
           --locked
@@ -637,7 +641,7 @@ jobs:
         # compiled but never run. The FFmpeg runtime libs installed above (VAAPI +
         # opus/srt/oneVPL) let the ffmpeg-linked test binary LOAD (else exit 127),
         # and the guard step above proves that on every run. `--lib aes67` filters to
-        # the lib target's aes67-named tests; --locked enforces Cargo.lock (rule 33).
+        # the lib target's aes67-named tests; --locked enforces Cargo.lock — cargo ignores it otherwise.
         run: >
           cargo test
           --locked
@@ -713,7 +717,7 @@ jobs:
           key: spec-freshness
       - name: regenerate OpenAPI spec
         # --locked enforces the committed Cargo.lock for a deterministic build
-        # (rule 33), matching the discipline of every other cargo invocation here.
+        # (cargo ignores it otherwise), matching the discipline of every other cargo invocation here.
         run: cargo run --locked -p xtask -- gen-openapi
       - name: regenerate AsyncAPI spec
         run: cargo run --locked -p xtask -- gen-asyncapi
@@ -779,7 +783,7 @@ jobs:
         # Resolves nvidia/apple/linux-vaapi/full + the Docker CARGO_FEATURES combos
         # and fails (exit 1) if any resolves multiview-control/_test-seams (or any
         # `*test-seam*` feature). Fix: remove the feature edge that pulls the seam
-        # into a release preset. --locked pins the committed Cargo.lock (rule 33).
+        # into a release preset. --locked pins the committed Cargo.lock — cargo ignores it otherwise.
         run: cargo run --locked -p xtask -- check-release-features
 
   # ── always-run light jobs ────────────────────────────────────────────────
@@ -812,6 +816,40 @@ jobs:
         # or ADR) without pulling a Node/Ruby link-checker toolchain.
         run: ./scripts/check-markdown-links.sh
 
+  # Blast-radius classification (docs/standards/engineering.md Part B). Prints the
+  # class this PR owes gates for, so the class is visible on the PR rather than
+  # asserted in its body. Also shellchecks the classifier itself.
+  #
+  # ADDITIVE and ADVISORY: this job reports, it never fails a build on the class.
+  # It does NOT replace or gate the `changes` job above — `changes` decides which
+  # CI jobs run; this decides which human/agent gates the change owes. The two
+  # share one prose allowlist (ADR-0046) deliberately so they cannot disagree.
+  # Not gated on `changes`: it is seconds long and a docs-only PR still has a class.
+  classify:
+    name: change class
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The classifier diffs against the merge base, so it needs real history.
+          fetch-depth: 0
+      - name: shellcheck the classifier
+        # The Ubuntu runner ships shellcheck (same pattern as soak-harness below).
+        run: shellcheck scripts/classify.sh
+      - name: classify the change
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_REF}" ]; then
+            git fetch --no-tags --depth=0 origin "${GITHUB_BASE_REF}" || true
+            ./scripts/classify.sh "${BASE_REF}" | tee "${GITHUB_STEP_SUMMARY}"
+          else
+            # push to main: classify the pushed commit against its parent.
+            ./scripts/classify.sh "HEAD~1" | tee "${GITHUB_STEP_SUMMARY}"
+          fi
+
   soak-harness:
     name: soak harness self-test (DEV-C4)
     runs-on: ubuntu-latest
@@ -839,7 +877,7 @@ jobs:
   # Gates the EXISTING web/ scripts (web/package.json): `lint` (eslint
   # --max-warnings=0), an explicit `tsc --noEmit` typecheck, `test` (vitest run),
   # and `build` (lingui compile && tsc --noEmit && vite build). `npm ci` honours
-  # the committed web/package-lock.json (rule 33 — deterministic builds), and the
+  # the committed web/package-lock.json (deterministic builds), and the
   # built-in setup-node npm cache (keyed on the lockfile) keeps the install fast.
   # tsc is run as its own step (ahead of the heavier build) so a type error
   # reports as a distinct, early failure even though `build` also runs tsc.

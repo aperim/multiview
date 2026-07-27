@@ -30,8 +30,10 @@ recall/record is the [`memory`](../memory/SKILL.md) skill.
   lanes in the wave file the body and hand wiring to the owner.
 
 ### ② ASSIGN
-- Record each lane as `territory → item(s) → owner` on the board (you are the only
-  writer). Note the **authoring vendor** per lane so REVIEW can pick a different one.
+- Record each lane as `territory → item(s) → owner → class` on the board (you are the
+  only writer). The class comes from `scripts/classify.sh` and decides which gates the
+  lane owes; it is a floor you may raise, never lower. Note the **authoring vendor** per
+  lane so REVIEW can pick a different one.
 
 ### ③ FAN OUT — two modes
 - **Workflow mode** (`Workflow` tool; scripts in [`.claude/workflows/`](../../workflows/)):
@@ -39,22 +41,32 @@ recall/record is the [`memory`](../memory/SKILL.md) skill.
   workflows: `orient`, `wave-fanout`, `review-wave`, `cleanup-sweep`. Each agent that
   mutates files runs `isolation: 'worktree'`.
 - **Team mode** (background `Agent` + shared `TaskList` + `SendMessage`): for lane-length
-  stateful implementation. Each teammate owns exactly one territory's worktree, runs
-  TDD (red test committed first, rule 18), and returns its commit SHA(s).
-- **Every lane bases on current HEAD** (rule 8). If a pre-existing lane is on a stale
+  stateful implementation. Each teammate owns exactly one territory's worktree, commits
+  the failing test first (required at R2/R3, and at R1 for a behavioural change), and
+  returns its commit SHA(s).
+- **Every lane bases on current HEAD.** If a pre-existing lane is on a stale
   base (common — every in-flight lane on 2026-06-16 was), **rebase onto current `main`
   before integrating** or cherry-picks conflict.
 
 ### ④ INTEGRATE (sole integrator)
 - `git log origin/main..<lane-HEAD>` to find **all** of a lane's commits; cherry-pick as
-  **individual single commits** (rule 13), not ranges.
-- **Rebuild from a clean, isolated `target/` before trusting green** (rule 11) — a shared
-  cache can link a sibling's stale artifacts and fake a pass. Never set `CARGO_TARGET_DIR`
-  to `/tmp` (rule 10). Run the rule-15 local gate: `cargo fmt --all -- --check`,
-  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
-  `cargo deny check` if deps changed (+ `web/` lint/typecheck/build if `web/` changed).
+  **individual single commits**, not ranges.
+- **Rebuild from a clean, isolated `target/` before trusting green** — a shared cache can
+  link a sibling's stale artifacts and fake a pass. Never set `CARGO_TARGET_DIR` to `/tmp`
+  (operator directive: per-lane `/tmp` targets once filled the disk with terabytes).
+- **The local gate is class-scaled** (`scripts/classify.sh`;
+  [engineering.md](../../../docs/standards/engineering.md) Part A). R0/R1 lean on CI plus
+  the focused crate suite (`cargo test -p multiview-<crate>`); **R2/R3 run the full gate
+  before the PR**: `cargo fmt --all -- --check`,
+  `cargo clippy --locked --workspace --all-targets -- -D warnings`,
+  `cargo test --locked --workspace`, `cargo deny check` if deps changed (+ `web/`
+  lint/typecheck/build if `web/` changed).
 
-### ⑤ REVIEW — adversarial, cross-vendor, fresh context (rule 21)
+### ⑤ REVIEW — adversarial, cross-vendor, fresh context
+- **Depth is the class; the gate itself is fail-closed.** R0 skips review entirely. R1
+  gets a single **diff-only** pass. R2 gets a scoped-context cross-vendor pass. R3 keeps
+  the **3-lens panel**. Above R0 the review is mandatory, is never self-performed by the
+  authoring vendor, and no lane merges without it.
 - Dispatch the lane's diff to a **different vendor** than authored it, seeing **only**
   diff + spec/PLAN + the checklist — never the author's chat history. Default here:
   Claude-authored → **Codex** reviews. Invocation pattern:
@@ -71,17 +83,22 @@ recall/record is the [`memory`](../memory/SKILL.md) skill.
   labeled `claude-fallback` (fresh-context Claude, **not** cross-vendor). **Never merge on
   a fallback verdict** — hold the PR until Codex auth lands. Setup + verify:
   [codex-review runbook](../../../docs/runbooks/codex-review.md).
-- Require **≥1 substantive risk statement** (unanimous bland approval is a yellow flag,
-  rule 16). Fix every finding before merge (a "blocked" verdict is real, rule 16).
-- **High-risk diffs** (auth, concurrency, data migration, money, and any engine/data-plane
-  change touching invariant #1/#10) → **3-reviewer panel** + notify the operator.
+- Require **≥1 substantive risk statement** — unanimous bland approval is a yellow flag.
+  A finding blocks the merge when it carries a reproduction, a failing test, or a cited
+  line demonstrably violating a stated invariant; unreproducible findings are advisory
+  ([engineering.md](../../../docs/standards/engineering.md) Part D). Never argue a
+  reproduced finding away, and re-review only **the delta** after a fix.
+- **R3 diffs** (invariant #1/#10 risk, keys, trust boundaries — authn/authz/egress/TLS,
+  licence enforcement, legal or public action, release publishing) → **3-lens panel**,
+  chaos/soak, a rehearsed recovery path, and explicit operator approval.
 
 ### ⑥ MERGE (ADR-G005)
-- Merge only on **green required deterministic checks** + a passing cross-vendor review.
-  Never `--admin`/bypass branch protection; never weaken/skip a test to go green
-  (rule 19 — STOP and ask a human instead).
+- Merge only on **green deterministic checks** + a passing cross-vendor review. Report
+  failures and skips honestly — a green summary over a skipped suite is a defect. Never
+  `--admin`/bypass branch protection; never weaken, skip, `#[ignore]` or delete a test to
+  go green — stop and ask the operator instead.
 
-### ⑦ CLEAN (rule 9)
+### ⑦ CLEAN
 - `git worktree remove` the lane (+ `git worktree prune`), delete its branch, then
   `git fetch origin && git pull --ff-only origin main` in the root so the **next wave
   bases on current HEAD**. Never force-remove a `locked` worktree of a *live* session;
@@ -91,8 +108,9 @@ recall/record is the [`memory`](../memory/SKILL.md) skill.
 ### ⑧ RECORD
 - Flip the board checkbox + set the Part-3 Status; add the red→green commit SHAs + PR
   number inline. `qdrant-store` every non-obvious decision, operator correction, and
-  hard-won gotcha (rule: store proactively). Write/refresh the resource runbook in the
-  **same** change that touched infrastructure (rule 42).
+  hard-won gotcha — proactively, not on request. Write/refresh the resource runbook in
+  the **same** change that provisioned or altered the infrastructure. An ADR when the
+  decision constrains future changes (required at R3), not for every wave.
 
 ### ⑨ RESCHEDULE
 - `ScheduleWakeup` the next iteration (fully self-paced per operator directive
@@ -135,9 +153,12 @@ Then queue the salvage branch for rebase + completion in the owning territory's 
 ## Non-negotiables (never relax under self-pacing)
 
 - Invariants **#1 (output-clock)** and **#10 (isolation)** are blocking for any
-  engine/data-plane wave — chaos/soak + mutation bars before merge.
-- The three pillars (typing, TDD-first with real tests, adversarial cross-vendor review)
-  and all 42 rules bind every wave. Autonomy is pace, never a lower bar (rule 7).
+  engine/data-plane wave — a change that risks either is R3: stop, write a design note,
+  add a chaos/soak test.
+- **The class matrix binds every wave** ([engineering.md](../../../docs/standards/engineering.md)
+  Parts A–C): each lane meets the gates its class owes, and the unconditional safety
+  invariants (secrets, authorization, supply chain, injection, licensing) hold at every
+  class. Autonomy is pace, never a lower bar.
 - Confirm genuinely destructive/outward-facing actions with the operator (force-push
   `main`, delete infra, public release, external comms) — the loop does not do these
   silently.
