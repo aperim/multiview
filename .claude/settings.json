@@ -1,5 +1,10 @@
 {
+  "model": "sonnet",
+  "effortLevel": "medium",
   "enableAllProjectMcpServers": true,
+  "env": {
+    "OTEL_RESOURCE_ATTRIBUTES": "estate.repo=aperim/multiview"
+  },
   "permissions": {
     "deny": [
       "Read(/.env)",
@@ -41,6 +46,13 @@
             "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce-worktree.mjs\""
           }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/test-budget.sh" },
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/big-dump-guard.sh" }
         ]
       }
     ]

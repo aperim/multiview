@@ -53,6 +53,7 @@ dist/
 # `/.claude/*`.)
 /.claude/*
 !/.claude/settings.json
+!/.claude/.gitignore
 !/.claude/skills/
 !/.claude/hooks/
 !/.claude/workflows/
