@@ -70,3 +70,7 @@ dist/
 /.worktrees/
 
 demo-output/
+
+# graphify knowledge-graph build scratch — gitignored, never committable
+# (estate remediation 2026-08-17; clone-portable unlike .git/info/exclude).
+graphify-out/
