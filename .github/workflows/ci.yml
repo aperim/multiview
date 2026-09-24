@@ -487,7 +487,7 @@ jobs:
           key: feature-clippy-ffmpeg-webrtc
       - name: Log in to GHCR
         # The base image package is read via the workflow token (packages: read).
-        uses: docker/login-action@v4.4.0
+        uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -668,7 +668,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: install @asyncapi/cli
@@ -892,7 +892,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -932,7 +932,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -971,7 +971,7 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
